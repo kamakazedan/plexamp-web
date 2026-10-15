@@ -27,13 +27,30 @@ jobs:
       - name: Check scripts
         run: |
           sh -n docker/40-plexamp-web.sh
-          python3 -m py_compile dev/mock-plex.py
-      - name: Test the container config
+          sh -n docker/test-container.sh
+          sh -n tests/run-browser-tests.sh
+          python3 -m py_compile dev/mock-plex.py dev/mock-ollama.py tests/browser_test.py
+      - name: Build the image
+        run: docker build -t plexamp-web:test .
+      - name: Test the container (proxies, sign-in check, settings)
+        run: sh docker/test-container.sh plexamp-web:test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Playwright
         run: |
-          docker build -t plexamp-web:test .
-          docker run --rm plexamp-web:test sh -c '/docker-entrypoint.d/40-plexamp-web.sh && nginx -t'
-          docker run --rm -e PLEX_SERVER_URL=http://192.168.1.10:32400 plexamp-web:test \
-            sh -c '/docker-entrypoint.d/40-plexamp-web.sh && nginx -t && cat /usr/share/nginx/html/config.js'
+          pip install playwright==1.56.0
+          python -m playwright install --with-deps chromium
+      - name: Browser tests
+        run: sh tests/run-browser-tests.sh plexamp-web:test screenshots
+      - name: Keep screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots
+          if-no-files-found: ignore
+          retention-days: 14
 
   image:
     needs: check

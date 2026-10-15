@@ -4,6 +4,7 @@ import { replaceQuery, navigate } from '../router.js';
 import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, sheet, debounce, fmt } from '../ui.js';
 import { artistRow, albumRow, playlistRow, trackRow } from '../components.js';
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
+import { aiReady } from '../ai.js';
 
 const RECENT_KEY = () => `recentSearches.${app.source?.serverId || 'default'}`;
 const MAX_RECENT = 12;
@@ -126,6 +127,12 @@ function browseContent() {
       h(
         'div.rows',
         null,
+        row({
+          href: '/ai-playlist',
+          lead: h('span.tile.tile-plain', null, icon('sparkle', 26)),
+          title: 'AI playlist',
+          subtitle: aiReady() ? 'Describe a playlist and your AI model builds it' : 'Describe a playlist; needs an AI model',
+        }),
         row({ href: '/sonic-path', lead: h('span.tile.tile-plain', null, icon('path', 26)), title: 'Sonic path', subtitle: 'A smooth journey from one track to another' }),
         row({ onClick: () => shuffleLibrary(), lead: h('span.tile.tile-plain', null, icon('shuffle', 26)), title: 'Shuffle library', subtitle: `Random tracks from ${app.source.sectionTitle}`, chevron: true }),
       ),

@@ -1,7 +1,9 @@
 import { app, saveSettings, setSource, signOut, proxyUri } from '../state.js';
 import { APP_INFO, PlexServer, listServers, pickConnection, clientId, canPlayCodec, canPlayHlsNatively } from '../plex.js';
-import { navigate, clearViewCache, describeError } from '../router.js';
-import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt } from '../ui.js';
+import { navigate, clearViewCache, describeError, dropCached } from '../router.js';
+import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce } from '../ui.js';
+import { live, LIVE_MODES } from '../live.js';
+import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, chat, parseReply, describeAIError } from '../ai.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -31,6 +33,7 @@ export async function settingsView({ el }) {
       row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: badge(src?.serverName) }),
       row({ href: '/settings/appearance', lead: lead('palette'), title: 'Appearance', subtitle: 'Colours and backgrounds' }),
       row({ href: '/settings/playback', lead: lead('speaker'), title: 'Playback', subtitle: 'Quality, gapless and play history' }),
+      row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'Server address and diagnostics' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
     ),
@@ -38,7 +41,7 @@ export async function settingsView({ el }) {
 }
 
 export async function settingsPageView(ctx) {
-  const pages = { account: accountView, source: sourceView, appearance: appearanceView, playback: playbackView, debug: debugView, about: aboutView };
+  const pages = { account: accountView, source: sourceView, appearance: appearanceView, playback: playbackView, ai: aiView, debug: debugView, about: aboutView };
   const view = pages[ctx.params.page];
   if (!view) throw Object.assign(new Error('Not found'), { status: 404 });
   return view(ctx);
@@ -297,19 +300,7 @@ const QUALITIES = [
 ];
 
 function playbackView({ el }) {
-  const qualityList = h('div.rows', { role: 'radiogroup', 'aria-label': 'Streaming quality' });
-  const renderQuality = () =>
-    qualityList.replaceChildren(
-      ...QUALITIES.map(([value, label, hint]) =>
-        h(
-          'button.row.radio-row',
-          { type: 'button', role: 'radio', 'aria-checked': String(app.settings.quality === value), onclick: () => { saveSettings({ quality: value }); renderQuality(); } },
-          h('div.row-main', null, h('div.row-title', null, label), h('div.row-sub', null, hint)),
-          app.settings.quality === value ? icon('check', 24, 'radio-check') : h('span.radio-empty'),
-        ),
-      ),
-    );
-  renderQuality();
+  const qualityList = radioRows('Streaming quality', QUALITIES, app.settings.quality, (v) => saveSettings({ quality: v }));
   el.append(
     backHeader('Playback', { fallback: '/settings' }),
     h('div.section-head', null, h('h2', null, 'Streaming quality')),
@@ -334,7 +325,50 @@ function playbackView({ el }) {
   );
 }
 
+// options: [[value, title, subtitle]]
+function radioRows(label, options, current, onChange) {
+  const list = h('div.rows', { role: 'radiogroup', 'aria-label': label });
+  let value = current;
+  const render = () =>
+    list.replaceChildren(
+      ...options.map(([v, title, sub]) =>
+        h(
+          'button.row.radio-row',
+          {
+            type: 'button',
+            role: 'radio',
+            'aria-checked': String(v === value),
+            onclick: () => {
+              value = v;
+              render();
+              onChange(v);
+            },
+          },
+          h('div.row-main', null, h('div.row-title', null, title), sub ? h('div.row-sub', null, sub) : null),
+          v === value ? icon('check', 24, 'radio-check') : h('span.radio-empty'),
+        ),
+      ),
+    );
+  render();
+  return list;
+}
+
 // ---------- Connection / diagnostics ----------
+
+function liveOptions() {
+  const forced = app.config.websockets === false;
+  return [
+    [
+      'auto',
+      'Automatic',
+      forced
+        ? 'WebSockets are turned off for this app, so this uses an event stream, or checks every minute.'
+        : 'Uses a WebSocket when the network allows it, otherwise an event stream, or checks every minute.',
+    ],
+    ['nows', 'Without WebSockets', 'For networks that block WebSockets, like many work proxies. Uses an event stream, or checks every minute.'],
+    ['off', 'Off', 'Don’t watch for changes. Pages show what’s new when you open them.'],
+  ];
+}
 
 function debugView({ el }) {
   const src = app.source || {};
@@ -345,6 +379,14 @@ function debugView({ el }) {
     .concat(`HLS ${canPlayHlsNatively() ? 'built in' : 'via hls.js'}`)
     .join(', ');
   const status = h('div.kv-v', null, 'Not tested');
+  const liveStatus = h('div.kv-v', null, LIVE_MODES[live.mode] || live.mode);
+  const liveNote = h('div.kv-note', null, live.note || '');
+  const onMode = () => {
+    if (!el.isConnected) return live.removeEventListener('mode', onMode);
+    liveStatus.textContent = LIVE_MODES[live.mode] || live.mode;
+    liveNote.textContent = live.note || '';
+  };
+  live.addEventListener('mode', onMode);
   el.append(
     backHeader('Connection', { fallback: '/settings' }),
     h(
@@ -355,6 +397,7 @@ function debugView({ el }) {
       kv('Address', src.uri),
       kv('Connection', kinds[src.kind] || src.kind),
       h('div.kv', null, h('div.kv-k', null, 'Response time'), status),
+      h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
       kv('Client ID', clientId()),
       kv('App version', APP_INFO.version),
@@ -382,7 +425,206 @@ function debugView({ el }) {
       ),
       h('button.btn.btn-secondary', { type: 'button', onclick: () => navigate('/settings/source') }, icon('server', 20), h('span', null, 'Change server')),
     ),
+    h('div.section-head', null, h('h2', null, 'Live updates')),
+    h('p.lede', null, 'New music, playlist changes and ratings from other Plex apps show up here without reloading.'),
+    radioRows('Live updates', liveOptions(), app.settings.liveUpdates, (v) => saveSettings({ liveUpdates: v })),
+    h(
+      'div.pad.button-row',
+      null,
+      h(
+        'button.btn.btn-secondary',
+        {
+          type: 'button',
+          onclick: () => {
+            live.forgetWebSocketFailure();
+            live.start();
+          },
+        },
+        icon('live', 20),
+        h('span', null, 'Reconnect live updates'),
+      ),
+    ),
   );
+}
+
+// ---------- AI ----------
+
+function aiSummary() {
+  const s = aiSettings();
+  const t = aiTarget(s);
+  if (s.mode === 'off') return 'Off';
+  if (!t) return 'Not set up';
+  if (!t.model) return t.kind === 'shared' ? 'Shared model, none chosen' : 'Your Ollama, no model chosen';
+  return t.kind === 'shared' ? `Shared model: ${t.model}` : `Your Ollama: ${t.model}`;
+}
+
+function saveAI(patch) {
+  saveSettings({ ai: { ...aiSettings(), ...patch } });
+  dropCached((p) => p === '/ai-playlist' || p === '/search' || p === '/settings');
+}
+
+const gb = (bytes) => (bytes ? `${(bytes / 1e9).toFixed(1)} GB` : '');
+
+function aiView({ el }) {
+  const shared = sharedAI();
+  const settings = aiSettings();
+  const effective = settings.mode === 'auto' ? (shared ? 'shared' : '') : settings.mode;
+
+  const options = [];
+  if (shared) {
+    options.push(['shared', 'Shared model from this app', shared.model ? `Set up by whoever runs this app. Uses ${shared.model} unless you choose another below.` : 'Set up by whoever runs this app.']);
+  }
+  options.push(['custom', 'My own Ollama server', 'An Ollama server this device can reach, such as one on this computer.']);
+  options.push(['off', 'Off', 'Hide AI features on this device.']);
+
+  const customBox = h('div.ai-custom');
+  const modelBox = h('div.ai-models');
+
+  el.append(
+    backHeader('AI', { fallback: '/settings' }),
+    h('p.lede', null, 'AI playlists and the AI DJ use a model running on your own hardware through Ollama. These settings apply to this device.'),
+    h('div.section-head', null, h('h2', null, 'Where the model runs')),
+    radioRows('Where the model runs', options, effective, (v) => {
+      saveAI({ mode: v });
+      render();
+    }),
+    h('p.hint.pad', { hidden: !!shared }, 'This app has no shared model. Whoever runs it can add one with the OLLAMA_URL setting.'),
+    customBox,
+    modelBox,
+    notesSection(),
+  );
+  render();
+
+  function render() {
+    const s = aiSettings();
+    const mode = s.mode === 'auto' ? (shared ? 'shared' : '') : s.mode;
+    customBox.replaceChildren(...(mode === 'custom' ? customForm(s) : []));
+    modelBox.replaceChildren();
+    if (mode === 'shared' || (mode === 'custom' && s.url)) loadModels();
+  }
+
+  function customForm(s) {
+    const url = h('input', { type: 'url', placeholder: 'http://localhost:11434', autocomplete: 'url', value: s.url, required: true });
+    const key = h('input', { type: 'password', placeholder: 'Optional', autocomplete: 'off', value: s.apiKey });
+    const insecure = () => location.protocol === 'https:' && /^http:\/\//i.test(url.value) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url.value);
+    const warn = h('p.hint.warn', { hidden: !insecure() }, 'This page is served over https, so the browser will block an http address unless it’s on this device (localhost). Use an https address, or the shared model.');
+    url.addEventListener('input', () => (warn.hidden = !insecure()));
+    const form = h(
+      'form.form',
+      {
+        onsubmit: (e) => {
+          e.preventDefault();
+          const value = url.value.trim().replace(/\/+$/, '');
+          if (!/^https?:\/\//i.test(value)) return toast('Start the address with http:// or https://');
+          saveAI({ mode: 'custom', url: value, apiKey: key.value.trim() });
+          render();
+        },
+      },
+      h('label.field', null, h('span', null, 'Ollama address'), url),
+      h('label.field', null, h('span', null, 'API key'), key),
+      h('p.hint', null, 'Only needed if your Ollama sits behind a proxy that asks for one.'),
+      warn,
+      h('div.form-actions', null, h('button.btn.btn-primary', { type: 'submit' }, 'Connect')),
+    );
+    return [
+      h('div.section-head', null, h('h2', null, 'Your Ollama server')),
+      form,
+      h(
+        'p.hint.pad.origins',
+        null,
+        'Ollama only answers websites it trusts. On the computer running Ollama, set ',
+        h('code', null, `OLLAMA_ORIGINS=${location.origin}`),
+        ' and restart Ollama.',
+      ),
+    ];
+  }
+
+  async function loadModels() {
+    const s = aiSettings();
+    const target = aiTarget(s);
+    if (!target) return;
+    const status = h('p.hint.pad', { role: 'status' }, 'Connecting…');
+    modelBox.replaceChildren(h('div.section-head', null, h('h2', null, 'Model')), status);
+    let models;
+    try {
+      const [version, list] = await Promise.all([aiVersion(target).catch(() => ''), listModels(target)]);
+      models = list;
+      status.textContent = `Connected${version ? ` to Ollama ${version}` : ''}. ${fmt.count(models.length, 'model', 'models')} installed.`;
+    } catch (err) {
+      status.textContent = describeAIError(err, target);
+      status.classList.add('warn');
+      return;
+    }
+    if (!el.isConnected) return;
+    if (!models.length) {
+      status.textContent += ' Install one with “ollama pull”, for example ollama pull llama3.1:8b.';
+      return;
+    }
+    const key = target.kind === 'shared' ? 'sharedModel' : 'model';
+    let current = target.model;
+    if (current && !models.some((m) => m.name === current)) {
+      status.textContent += ` The model “${current}” isn’t installed, so choose another.`;
+    }
+    const opts = models.map((m) => [m.name, m.name, [m.params, m.quant, gb(m.size)].filter(Boolean).join(' · ')]);
+    const test = h('p.hint.pad', { role: 'status' });
+    modelBox.append(
+      radioRows('Model', opts, current, (v) => {
+        current = v;
+        saveAI({ [key]: v });
+        test.textContent = '';
+      }),
+      h(
+        'div.pad.button-row',
+        null,
+        h(
+          'button.btn.btn-secondary',
+          {
+            type: 'button',
+            onclick: async (e) => {
+              const btn = e.currentTarget;
+              btn.disabled = true;
+              test.classList.remove('warn');
+              test.textContent = `Asking ${aiTarget().model}… The first request can take a while as the model loads.`;
+              try {
+                const r = await chat({
+                  messages: [{ role: 'user', content: 'Reply with {"ok": true} and nothing else.' }],
+                  schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+                  temperature: 0,
+                  maxTokens: 20,
+                });
+                parseReply(r.content);
+                test.textContent = `It works. ${r.model} answered in ${r.seconds.toFixed(1)} s.`;
+              } catch (err) {
+                test.textContent = describeAIError(err);
+                test.classList.add('warn');
+              } finally {
+                btn.disabled = false;
+              }
+            },
+          },
+          icon('sparkle', 20),
+          h('span', null, 'Test the model'),
+        ),
+      ),
+      test,
+    );
+  }
+
+  function notesSection() {
+    const area = h('textarea.notes', {
+      rows: 3,
+      maxlength: 500,
+      placeholder: 'For example: I love 90s trip-hop and dub; skip live recordings and Christmas music.',
+    });
+    area.value = aiSettings().notes;
+    area.addEventListener('input', debounce(() => saveAI({ notes: area.value }), 400));
+    return h(
+      'div',
+      null,
+      h('div.section-head', null, h('h2', null, 'Notes for the AI')),
+      h('label.field.pad', null, h('span', null, 'Anything the AI should know about your taste. Used for AI playlists and the AI DJ.'), area),
+    );
+  }
 }
 
 // ---------- About ----------

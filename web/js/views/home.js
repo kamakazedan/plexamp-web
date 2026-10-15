@@ -2,13 +2,17 @@ import { app } from '../state.js';
 import { h, pageHeader, backHeader, sectionHeader, shelf, grid, wideCard, skeletonShelf, emptyState, fmt } from '../ui.js';
 import { albumCard, playlistCard } from '../components.js';
 import { openSourceSheet } from './settings.js';
+import { live } from '../live.js';
 
 const lastPlayed = (m) => m.lastViewedAt || 0;
 
 export async function homeView({ el }) {
   const s = app.server;
   const src = app.source;
-  el.append(pageHeader(src.sectionTitle, { subtitle: `on ${src.serverName}`, onSubtitle: openSourceSheet }));
+  el.append(
+    pageHeader(src.sectionTitle, { subtitle: `on ${src.serverName}`, onSubtitle: openSourceSheet }),
+    h('div.scan-status', { role: 'status' }, h('span.scan-dot'), h('span.scan-text', null, live.scanning?.title || '')),
+  );
 
   const playlistsBlock = h('section.block', null, sectionHeader('Recent playlists', '/library/playlists'), skeletonShelf(4));
   const recentBlock = h('section.block', null, sectionHeader('Recent plays', '/recent'), skeletonShelf(2, true));

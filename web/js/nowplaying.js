@@ -2,10 +2,13 @@
 // full-screen Now Playing view with its "Up next" queue.
 import { app } from './state.js';
 import { player } from './player.js';
-import { pushOverlay, popOverlay, describeError } from './router.js';
+import { pushOverlay, popOverlay, describeError, navigate } from './router.js';
 import { h, icon, iconButton, art, fmt, toast, sheet } from './ui.js';
-import { trackMenu, similarRadio } from './actions.js';
+import { trackMenu } from './actions.js';
 import { trackRow } from './components.js';
+import { guestDJ, DJS, djName } from './dj.js';
+import { aiReady } from './ai.js';
+import { live } from './live.js';
 
 const setIcon = (btn, name, size) => {
   btn.replaceChildren(icon(name, size));
@@ -400,12 +403,51 @@ function openSleepSheet() {
   });
 }
 
+function openDJSheet() {
+  const active = guestDJ.active;
+  const ai = aiReady();
+  sheet({
+    title: 'Guest DJ',
+    variant: 'dialog',
+    actions: [
+      active && {
+        icon: 'close',
+        label: 'Turn off Guest DJ',
+        description: `${active.name} is choosing tracks now.`,
+        onSelect: () => {
+          guestDJ.set(null);
+          toast('Guest DJ off');
+        },
+      },
+      ...DJS.map((d) => {
+        const needsSetup = d.needsAI && !ai;
+        return {
+          icon: 'dj',
+          label: d.name,
+          description: needsSetup ? 'Needs an AI model. Choose this to set one up in Settings › AI.' : d.description,
+          checked: active?.id === d.id,
+          muted: needsSetup,
+          onSelect: () => {
+            if (needsSetup) {
+              navigate('/settings/ai');
+              return;
+            }
+            guestDJ.set(d.id);
+            toast(`${d.name} is on`);
+          },
+        };
+      }),
+    ],
+  });
+}
+
 function buildNowPlaying() {
   const artBox = h('div.np-art');
   const wave = waveform();
   const artist = h('a.np-artist');
   const title = h('div.np-title');
   const album = h('a.np-album');
+  const djNote = h('div.np-dj', { hidden: true });
   const codec = h('span.np-codec');
   const quality = h('span.np-quality');
   const stars = ratingStars();
@@ -414,7 +456,7 @@ function buildNowPlaying() {
   const next = iconButton('next', 'Next track', () => player.next(), { size: 40, cls: 'np-skip' });
 
   const queueBtn = toolButton('queue', 'Up next', () => showQueue(!root.classList.contains('show-queue')), 'queue');
-  const radioBtn = toolButton('radio', 'Play similar tracks', () => player.current && similarRadio(player.current), 'radio');
+  const djBtn = toolButton('dj', 'Guest DJ', openDJSheet, 'dj');
   const shuffleBtn = toolButton('shuffle', 'Shuffle', () => player.setShuffle(!player.shuffle), 'shuffle');
   const moreBtn = toolButton('more', 'More options', () => player.current && trackMenu(player.current), 'more');
   const repeatBtn = toolButton('repeat', 'Repeat', () => player.cycleRepeat(), 'repeat');
@@ -431,7 +473,7 @@ function buildNowPlaying() {
   const toolbar = h(
     'div.np-toolbar',
     null,
-    h('div.np-tools-side', null, queueBtn, radioBtn, shuffleBtn),
+    h('div.np-tools-side', null, queueBtn, djBtn, shuffleBtn),
     moreBtn,
     h('div.np-tools-side.np-tools-right', null, repeatBtn, sleepBtn, vol.el),
   );
@@ -443,7 +485,7 @@ function buildNowPlaying() {
       'div.np-lower',
       null,
       wave.el,
-      h('div.np-meta', null, artist, title, album),
+      h('div.np-meta', null, artist, title, album, djNote),
       h('div.np-info', null, codec, stars.el, quality),
       h('div.np-transport', null, prev, play, next),
     ),
@@ -523,6 +565,8 @@ function buildNowPlaying() {
     album.textContent = t.year ? `${t.album} (${t.year})` : t.album;
     if (t.albumId) album.setAttribute('href', `#/album/${t.albumId}`);
     else album.removeAttribute('href');
+    djNote.hidden = !t.dj;
+    if (t.dj) djNote.replaceChildren(icon('dj', 16), h('span', null, t.djNote ? `${djName(t.dj)}: ${t.djNote}` : `Added by ${djName(t.dj)}`));
     const c = player.context;
     const href = c?.href || (t.albumId ? `/album/${t.albumId}` : null);
     queueFrom.replaceChildren('Playing from ', href ? h('a', { href: `#${href}` }, c?.title || t.album) : c?.title || t.album);
@@ -535,6 +579,9 @@ function buildNowPlaying() {
     repeatBtn.replaceChildren(icon(player.repeat === 'one' ? 'repeatOne' : 'repeat', 26));
     setToggle(repeatBtn, player.repeat !== 'off', { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat]);
     setToggle(sleepBtn, player.sleepActive, player.sleepActive ? 'Sleep timer (on)' : 'Sleep timer');
+    const dj = guestDJ.active;
+    setToggle(djBtn, !!dj, dj ? `Guest DJ: ${dj.name}` : 'Guest DJ');
+    djBtn.classList.toggle('is-busy', guestDJ.busy);
   }
 
   function renderQueue() {
@@ -543,9 +590,16 @@ function buildNowPlaying() {
     const items = player.queue.slice(from, from + 200);
     queueCount.textContent = player.upcoming.length ? fmt.count(player.upcoming.length, 'track', 'tracks') : '';
     queueList.replaceChildren(
-      ...items.map((t, i) => trackRow(t, { showArt: true, queueIndex: from + i, subtitle: t.artist, onPlay: () => player.jump(from + i) })),
+      ...items.map((t, i) =>
+        trackRow(t, {
+          showArt: true,
+          queueIndex: from + i,
+          subtitle: t.dj ? `${t.artist} · ${djName(t.dj)}` : t.artist,
+          onPlay: () => player.jump(from + i),
+        }),
+      ),
     );
-    if (items.length <= 1) queueList.append(h('p.np-queue-empty', null, 'Nothing else queued. Play similar tracks or add music from your library.'));
+    if (items.length <= 1) queueList.append(h('p.np-queue-empty', null, 'Nothing else queued. Turn on a Guest DJ or add music from your library.'));
   }
 
   const state = {
@@ -553,6 +607,7 @@ function buildNowPlaying() {
     wave,
     isOpen: false,
     showQueue,
+    reloadDetail: () => player.current && loadDetail(player.current),
     render() {
       renderTrack();
       renderQueue();
@@ -567,6 +622,15 @@ function buildNowPlaying() {
   player.addEventListener('state', () => setPlayButton(play, 38));
   player.addEventListener('mode', renderModes);
   player.addEventListener('sleep', renderModes);
+  guestDJ.addEventListener('change', renderModes);
+  guestDJ.addEventListener('busy', renderModes);
+  // A rating or other change made in another Plex app shows up here.
+  live.addEventListener('items', (e) => {
+    const t = player.current;
+    if (!t || !e.detail.ids.includes(String(t.id))) return;
+    app.server?.cache.delete(`track:${t.id}`);
+    if (state.isOpen) loadDetail(t);
+  });
   player.addEventListener('time', () => state.isOpen && wave.update());
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.isOpen && !document.querySelector('.sheet')) popOverlay();

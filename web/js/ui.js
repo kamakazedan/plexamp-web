@@ -58,6 +58,7 @@ const ICONS = {
   search: S('<circle cx="10.8" cy="10.8" r="6.3"/><path d="m15.6 15.6 4.9 4.9"/>'),
   settings: S(`<path d="${gearPath()}"/><circle cx="12" cy="12" r="3"/>`),
   chevronRight: S('<path d="M9.5 5.5 16 12l-6.5 6.5"/>'),
+  chevronLeft: S('<path d="M14.5 5.5 8 12l6.5 6.5"/>'),
   chevronDown: S('<path d="M5.5 9 12 15.5 18.5 9"/>'),
   back: S('<path d="M20 12H4.5M10.5 5.5 4 12l6.5 6.5"/>'),
   more: F('<circle cx="5.5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="18.5" cy="12" r="1.8"/>'),
@@ -94,6 +95,9 @@ const ICONS = {
   trend: S('<path d="M4 17l5-5 3.5 3.5L20 8M15 8h5v5"/>'),
   star: S('<path d="M12 3.8l2.45 5.05 5.55.75-4.05 3.85 1 5.5L12 16.3l-4.95 2.65 1-5.5L4 9.6l5.55-.75z"/>'),
   moon: S('<path d="M19.5 14.3A7.8 7.8 0 0 1 9.7 4.5a7.8 7.8 0 1 0 9.8 9.8z"/>'),
+  dj: S('<rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="10" cy="12" r="4"/><circle cx="10" cy="12" r="0.9" fill="currentColor"/><path d="M17 8.2v5.3l-2.2 2.1"/>'),
+  sparkle: S('<path d="M12 3.5l1.7 4.9 4.8 1.7-4.8 1.7L12 16.7l-1.7-4.9L5.5 10.1l4.8-1.7zM18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/>'),
+  live: S('<path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>'),
 };
 
 export function icon(name, size = 24, cls = '') {
@@ -355,14 +359,18 @@ export function toast(message, { action, onAction, timeout = 3500 } = {}) {
 
 // ---------- bottom sheets ----------
 
-// actions: [{ icon, label, onSelect, checked, danger }] or null separators
-export function sheet({ title, subtitle, image, round, actions = [], content }) {
+// actions: [{ icon, label, description, onSelect, checked, danger, muted }]
+// (falsy entries are skipped). variant 'dialog' shows a centred card with a
+// Close button instead of a bottom sheet.
+export function sheet({ title, subtitle, image, round, actions = [], content, variant = 'sheet', closeLabel = 'Close' }) {
   const root = document.getElementById('overlay-root');
   let closed = false;
+  const dialog = variant === 'dialog';
+  const list = actions.filter(Boolean);
   const panel = h(
-    'div.sheet-panel',
+    `div.sheet-panel${dialog ? '.dialog-panel' : ''}`,
     { role: 'dialog', 'aria-modal': 'true', 'aria-label': title || 'Options' },
-    h('div.sheet-grip', { 'aria-hidden': 'true' }),
+    dialog ? null : h('div.sheet-grip', { 'aria-hidden': 'true' }),
     title
       ? h(
           'div.sheet-head',
@@ -372,29 +380,31 @@ export function sheet({ title, subtitle, image, round, actions = [], content }) 
         )
       : null,
     content || null,
-    actions.length
+    list.length
       ? h(
           'div.sheet-actions',
           null,
-          actions.filter(Boolean).map((a) =>
+          list.map((a) =>
             h(
-              `button.sheet-action${a.danger ? '.danger' : ''}`,
+              `button.sheet-action${a.danger ? '.danger' : ''}${a.description ? '.has-desc' : ''}${a.muted ? '.muted' : ''}`,
               {
                 type: 'button',
+                'aria-pressed': a.checked === undefined ? null : String(!!a.checked),
                 onclick: async () => {
                   await popOverlay();
                   a.onSelect?.();
                 },
               },
-              a.icon ? icon(a.icon, 22) : h('span.sheet-spacer'),
-              h('span', null, a.label),
+              a.icon ? icon(a.icon, 24) : h('span.sheet-spacer'),
+              h('span.sheet-action-text', null, h('span.sheet-action-label', null, a.label), a.description ? h('span.sheet-action-desc', null, a.description) : null),
               a.checked ? icon('check', 22, 'sheet-check') : null,
             ),
           ),
         )
       : null,
+    dialog ? h('button.dialog-close', { type: 'button', onclick: () => popOverlay() }, closeLabel) : null,
   );
-  const scrim = h('div.sheet', { onclick: (e) => e.target === scrim && popOverlay() }, panel);
+  const scrim = h(`div.sheet${dialog ? '.dialog' : ''}`, { onclick: (e) => e.target === scrim && popOverlay() }, panel);
   const close = () => {
     if (closed) return;
     closed = true;

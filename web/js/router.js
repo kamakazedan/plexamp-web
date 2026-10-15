@@ -139,6 +139,15 @@ export function refresh() {
   render(currentKey, false);
 }
 
+// Forget cached pages (other than the one on screen) whose path matches, so
+// going back to them loads fresh data.
+export function dropCached(test) {
+  for (const [k, entry] of cache) {
+    if (k === currentKey) continue;
+    if (test(parseHash(entry.hash).path)) cache.delete(k);
+  }
+}
+
 // ---------- overlays ----------
 
 export function pushOverlay(close) {

@@ -105,7 +105,15 @@ class Player extends EventTarget {
     this.sleepEndOfTrack = false;
     this.sleepTimer = null;
 
+    this.history = []; // ids of tracks played this session, oldest first (DJ modes avoid repeats)
+
     this.decks.forEach((d, i) => this.bind(d, i));
+    this.addEventListener('track', () => {
+      const t = this.current;
+      if (!t || this.history[this.history.length - 1] === t.id) return;
+      this.history.push(t.id);
+      if (this.history.length > 300) this.history.splice(0, this.history.length - 300);
+    });
     this.applyVolume();
     this.setupMediaSession();
     window.addEventListener('pagehide', () => {

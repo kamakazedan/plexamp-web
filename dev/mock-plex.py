@@ -8,17 +8,31 @@ short test tones) on the endpoints plexamp-web uses, with CORS enabled.
     python3 -m http.server 8080 -d web  # serves the app
 
 Then open http://127.0.0.1:8080, choose "Use a server address and token
-instead", and connect to http://127.0.0.1:32400 with any token.
+instead", and connect to http://127.0.0.1:32400 with any token (except "bad",
+which is refused).
 
-Needs Pillow for artwork (pip install pillow).
+Live notifications are sent over a WebSocket (/:/websockets/notifications)
+and an event stream (/:/eventsource/notifications), like a real server. For
+testing, these endpoints need no token:
+
+    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS
+        ws=0 refuses WebSockets (as a blocking proxy would), sse=0 refuses the
+        event stream, sse=silent accepts it but never sends anything
+    /__mock/add-album?title=...   adds an album and announces it
+
+Artwork needs Pillow (pip install pillow); without it, covers are blank.
 """
 
+import base64
+import hashlib
 import io
 import json
 import math
+import queue
 import random
 import struct
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -26,9 +40,9 @@ from urllib.parse import parse_qs, urlparse
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:  # pragma: no cover
-    sys.exit('Pillow is required: pip install pillow')
+    Image = ImageDraw = ImageFont = None
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 32400
+PORT = int(next((a for a in sys.argv[1:] if a.isdigit()), 32400))
 SECTION = '1'
 NOW = int(time.time())
 TRACK_SECONDS = 20
@@ -76,6 +90,14 @@ def key():
     return str(next_key[0])
 
 
+def slug(v):
+    return str(v).lower().replace(' ', '-')
+
+
+def tag(field, value):
+    return {'tag': value, 'id': slug(value), 'filter': f'{field}={slug(value)}'}
+
+
 def lighten(hexc, f):
     r, g, b = (int(hexc[i:i + 2], 16) for i in (0, 2, 4))
     return '%02x%02x%02x' % tuple(min(255, int(c + (255 - c) * f)) if f > 0 else int(c * (1 + f)) for c in (r, g, b))
@@ -86,7 +108,7 @@ for idx, (name, genres, bio) in enumerate(ARTISTS):
     a = {
         'ratingKey': k, 'key': f'/library/metadata/{k}/children', 'type': 'artist', 'title': name,
         'titleSort': name.lower().replace('the ', ''), 'thumb': f'/library/metadata/{k}/thumb/1',
-        'art': f'/library/metadata/{k}/art/1', 'summary': bio, 'Genre': [{'tag': g} for g in genres],
+        'art': f'/library/metadata/{k}/art/1', 'summary': bio, 'Genre': [tag('genre', g) for g in genres],
         'addedAt': NOW - 86400 * (300 - idx * 20), 'viewCount': 0, 'index': 1,
     }
     items[k] = a
@@ -104,8 +126,8 @@ for ai, (artist_idx, title, year, pal, sub, fmt) in enumerate(ALBUMS):
         'summary': f'{title} is the {year} release from {artist["title"]}. Recorded over a long winter, it is '
                    'patient, detailed and best heard start to finish. ' * 2,
         'Format': [{'tag': fmt}], 'Subformat': [{'tag': sub}] if sub else [],
-        'Style': [{'tag': ['Ambient', 'Lo-fi', 'Downtempo', 'Post-rock', 'Bossa nova'][ai % 5]}],
-        'Mood': [{'tag': ['Calm', 'Warm', 'Restless', 'Bright'][ai % 4]}],
+        'Style': [tag('style', ['Ambient', 'Lo-fi', 'Downtempo', 'Post-rock', 'Bossa nova'][ai % 5])],
+        'Mood': [tag('mood', ['Calm', 'Warm', 'Restless', 'Bright'][ai % 4])],
         'UltraBlurColors': [{'topLeft': lighten(pal[0], -0.35), 'topRight': lighten(pal[1], -0.45),
                              'bottomRight': lighten(pal[0], -0.1), 'bottomLeft': lighten(pal[0], -0.6)}],
         '_palette': pal,
@@ -198,15 +220,17 @@ def tag_dir(field, typ):
 
 
 def matches(it, field, value):
+    values = value.split(',')
     if field == 'artist.id':
-        return it.get('grandparentRatingKey') == value or it.get('parentRatingKey') == value
+        return it.get('grandparentRatingKey') in values or it.get('parentRatingKey') in values
+    if field.startswith('album.') and it.get('type') == 'track':
+        return matches(items.get(it['parentRatingKey'], {}), field[6:], value)
     if field in ('subformat', 'album.subformat'):
-        tags = [t['tag'] for t in it.get('Subformat', [])]
-        return value in tags
+        return any(t['tag'] in values for t in it.get('Subformat', []))
     if field == 'decade':
-        return bool(it.get('year')) and str(it['year'] // 10 * 10) == value
+        return bool(it.get('year')) and str(it['year'] // 10 * 10) in values
     if field in ('genre', 'style', 'mood'):
-        return any(t['tag'].lower().replace(' ', '-') == value for t in it.get(field.capitalize(), []))
+        return any(slug(t['tag']) in values for t in it.get(field.capitalize(), []))
     return True
 
 
@@ -276,7 +300,12 @@ for path in ('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/System/Li
 image_cache = {}
 
 
+BLANK_PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==')
+
+
 def cover_png(thumb, size):
+    if Image is None:
+        return BLANK_PNG
     size = max(32, min(int(size or 300), 1024))
     ck = (thumb, size)
     if ck in image_cache:
@@ -350,6 +379,93 @@ def tone_wav(rk):
     return audio_cache[rk]
 
 
+# ---------------------------------------------------------------- notifications
+
+MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0}
+LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
+listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
+listeners_lock = threading.Lock()
+
+
+def ws_frame(payload, opcode=1):
+    n = len(payload)
+    head = bytes([0x80 | opcode])
+    if n < 126:
+        head += bytes([n])
+    elif n < 65536:
+        head += bytes([126]) + struct.pack('!H', n)
+    else:
+        head += bytes([127]) + struct.pack('!Q', n)
+    return head + payload
+
+
+def broadcast(ntype, key, entries):
+    """Send one notification to every listener. WebSocket clients get the
+    NotificationContainer wrapper; event stream clients get one event per entry."""
+    container = json.dumps({'NotificationContainer': {'type': ntype, 'size': len(entries), key: entries}})
+    with listeners_lock:
+        current = list(listeners)
+    for l in current:
+        try:
+            if l['kind'] == 'ws':
+                l['send'](container)
+            else:
+                for e in entries:
+                    l['send'](ntype, json.dumps({key: e}))
+        except Exception:
+            with listeners_lock:
+                if l in listeners:
+                    listeners.remove(l)
+
+
+def timeline(item_id, typ, state, section=SECTION):
+    broadcast('timeline', 'TimelineEntry', [{
+        'identifier': 'com.plexapp.plugins.library', 'sectionID': section, 'itemID': int(item_id),
+        'type': typ, 'title': items.get(str(item_id), {}).get('title', ''), 'state': state, 'updatedAt': int(time.time()),
+    }])
+
+
+def activity(event, title):
+    broadcast('activity', 'ActivityNotification', [{
+        'event': event, 'uuid': 'mock-scan',
+        'Activity': {'uuid': 'mock-scan', 'type': 'library.update.section', 'cancellable': False, 'userID': 1,
+                     'title': title, 'subtitle': '', 'progress': 0 if event == 'started' else 100,
+                     'Context': {'librarySectionID': SECTION}},
+    }])
+
+
+def add_album(title):
+    """Add an album to the library the way a scan would, with notifications."""
+    artist = artists[0]
+    k = key()
+    year = 2025
+    al = dict(albums[0], ratingKey=k, key=f'/library/metadata/{k}/children', title=title, titleSort=title.lower(),
+              thumb=f'/library/metadata/{k}/thumb/1', year=year, originallyAvailableAt=f'{year}-01-01',
+              addedAt=int(time.time()), viewCount=0, lastViewedAt=None, leafCount=4, _palette=('402060', 'e0a0ff'))
+    al.pop('lastViewedAt')
+    items[k] = al
+    albums.append(al)
+    LIBRARY_STATE['refreshing'] = True
+    activity('started', 'Scanning Music [Hi-Res]')
+    timeline(k, 9, 0)
+    for i in range(4):
+        tk = key()
+        t = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', title=f'{title} Part {i + 1}', index=i + 1,
+                 parentIndex=1, parentRatingKey=k, parentTitle=title, parentThumb=al['thumb'], parentYear=year,
+                 addedAt=al['addedAt'], viewCount=0)
+        t.pop('lastViewedAt', None)
+        t['Media'] = [{'audioCodec': 'flac', 'container': 'flac', 'bitrate': 1411, 'Part': [
+            {'key': f'/library/parts/{tk}/0/file.flac', 'duration': TRACK_SECONDS * 1000, 'container': 'flac'}]}]
+        items[tk] = t
+        tracks.append(t)
+        timeline(tk, 10, 0)
+    timeline(k, 9, 5)
+    LIBRARY_STATE['contentChangedAt'] = int(time.time())
+    LIBRARY_STATE['refreshing'] = False
+    activity('ended', 'Scanning Music [Hi-Res]')
+    return al
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
@@ -418,13 +534,114 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         self.do_GET()
 
+    def websocket(self):
+        if not MOCK['ws']:
+            return self.send_json({'error': 'WebSockets are blocked'}, 403)
+        key_ = self.headers.get('Sec-WebSocket-Key', '')
+        accept = base64.b64encode(hashlib.sha1((key_ + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+        self.protocol_version = 'HTTP/1.1'  # browsers expect an HTTP/1.1 status line here
+        self.send_response(101, 'Switching Protocols')
+        self.send_header('Upgrade', 'websocket')
+        self.send_header('Connection', 'Upgrade')
+        self.send_header('Sec-WebSocket-Accept', accept)
+        self.end_headers()
+        self.wfile.flush()
+        lock = threading.Lock()
+
+        def send(text):
+            with lock:
+                self.wfile.write(ws_frame(text.encode()))
+                self.wfile.flush()
+
+        me = {'kind': 'ws', 'send': send}
+        with listeners_lock:
+            listeners.append(me)
+        try:
+            while True:  # read client frames until it closes
+                head = self.rfile.read(2)
+                if len(head) < 2:
+                    break
+                opcode, n = head[0] & 0x0F, head[1] & 0x7F
+                if n == 126:
+                    n = struct.unpack('!H', self.rfile.read(2))[0]
+                elif n == 127:
+                    n = struct.unpack('!Q', self.rfile.read(8))[0]
+                mask = self.rfile.read(4) if head[1] & 0x80 else b''
+                data = bytearray(self.rfile.read(n))
+                for i in range(len(data)):
+                    data[i] ^= mask[i % 4]
+                if opcode == 8:
+                    with lock:
+                        self.wfile.write(ws_frame(b'', 8))
+                    break
+                if opcode == 9:
+                    with lock:
+                        self.wfile.write(ws_frame(bytes(data), 10))
+        except (OSError, ValueError):
+            pass
+        finally:
+            with listeners_lock:
+                if me in listeners:
+                    listeners.remove(me)
+        self.close_connection = True
+
+    def eventsource(self):
+        if MOCK['sse'] in ('off', '0'):
+            return self.not_found()
+        self.send_response(200)
+        self.cors()
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        self.wfile.flush()
+        if MOCK['sse'] == 'silent':  # a proxy that holds the stream back
+            time.sleep(120)
+            return
+        events = queue.Queue()
+        me = {'kind': 'sse', 'send': lambda name, data: events.put((name, data))}
+        with listeners_lock:
+            listeners.append(me)
+        try:
+            while True:
+                try:
+                    name, data = events.get(timeout=MOCK['ping'])
+                except queue.Empty:
+                    name, data = 'ping', '{}'
+                self.wfile.write(f'event: {name}\ndata: {data}\n\n'.encode())
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            with listeners_lock:
+                if me in listeners:
+                    listeners.remove(me)
+        self.close_connection = True
+
     def do_GET(self):  # noqa: C901 - a router in one place is easier to read here
         u = urlparse(self.path)
         p = u.path.rstrip('/') or '/'
         q = parse_qs(u.query)
-        if not q.get('X-Plex-Token', [''])[0] and not p.startswith('/library/parts'):
-            return self.send_json({'error': 'Unauthorized'}, 401)
         parts = p.strip('/').split('/')
+
+        if p == '/__mock/config':
+            if 'ws' in q:
+                MOCK['ws'] = q['ws'][0] not in ('0', 'off', 'false')
+            if 'sse' in q:
+                MOCK['sse'] = q['sse'][0]
+            if 'ping' in q:
+                MOCK['ping'] = float(q['ping'][0])
+            return self.send_json(dict(MOCK, listeners=len(listeners)))
+        if p == '/__mock/add-album':
+            al = add_album(q.get('title', ['Fresh Arrival'])[0])
+            return self.send_json({'size': 1, 'Metadata': [public(al)]})
+
+        token = q.get('X-Plex-Token', [''])[0] or self.headers.get('X-Plex-Token', '')
+        if (not token or token == 'bad') and not p.startswith('/library/parts'):
+            return self.send_json({'error': 'Unauthorized'}, 401)
+        if p == '/:/websockets/notifications' and self.headers.get('Upgrade', '').lower() == 'websocket':
+            return self.websocket()
+        if p == '/:/eventsource/notifications':
+            return self.eventsource()
 
         if p == '/':
             return self.send_json({'friendlyName': "Dan's Test Server", 'machineIdentifier': 'mock-server-1', 'version': '1.41.0'})
@@ -432,7 +649,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'machineIdentifier': 'mock-server-1', 'version': '1.41.0', 'claimed': True})
         if p == '/library/sections':
             return self.send_json({'size': 3, 'Directory': [
-                {'key': SECTION, 'type': 'artist', 'title': 'Music [Hi-Res]', 'uuid': 'mock-music'},
+                {'key': SECTION, 'type': 'artist', 'title': 'Music [Hi-Res]', 'uuid': 'mock-music',
+                 'contentChangedAt': LIBRARY_STATE['contentChangedAt'], 'updatedAt': NOW, 'scannedAt': NOW,
+                 'refreshing': LIBRARY_STATE['refreshing']},
                 {'key': '2', 'type': 'movie', 'title': 'Movies'},
                 {'key': '3', 'type': 'artist', 'title': 'Audiobooks'},
             ]})
@@ -496,8 +715,18 @@ class Handler(BaseHTTPRequestHandler):
                 found = [public(x) for x in pool if needle in x['title'].lower()][:lim]
                 hubs.append({'type': typ, 'hubIdentifier': typ, 'size': len(found), 'Metadata': found})
             return self.send_json({'size': len(hubs), 'Hub': hubs})
+        if p == '/playlists' and self.command == 'POST':
+            uri = q.get('uri', [''])[0]
+            ids = uri.rsplit('/', 1)[-1].split(',') if '/library/metadata/' in uri else []
+            members = [items[i] for i in ids if i in items and items[i]['type'] == 'track']
+            pl = make_playlist(q.get('title', ['Untitled'])[0], members)
+            playlists.append(pl)
+            timeline(pl['ratingKey'], 15, 5, section='-1')
+            return self.send_json({'size': 1, 'Metadata': [public(pl)]})
         if p == '/playlists':
             return self.page(playlists, {'X-Plex-Container-Size': ['500']})
+        if p == '/activities':
+            return self.send_json({'size': 0})
         if p.startswith('/playlists/'):
             pl = items.get(parts[1])
             if not pl:
@@ -526,6 +755,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     t['userRating'] = rating
             sys.stderr.write(f'  rate {q.get("key", [""])[0]} -> {rating}\n')
+            if t is not None:
+                timeline(t['ratingKey'], 10, 5)
             return self.send_json({})
         if p.startswith('/library/parts/'):
             return self.send_bytes(tone_wav(parts[2]), 'audio/wav')
@@ -537,12 +768,17 @@ class Handler(BaseHTTPRequestHandler):
                 t['lastViewedAt'] = int(time.time())
                 alb = items[t['parentRatingKey']]
                 alb['lastViewedAt'] = t['lastViewedAt']
+                timeline(t['ratingKey'], 10, 5)
             sys.stderr.write(f'  timeline {state} {q.get("ratingKey", [""])[0]} t={q.get("time", [""])[0]}\n')
             return self.send_json({})
         return self.not_found()
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True  # long-lived WebSocket and event stream threads don't block exit
+
+
 if __name__ == '__main__':
     print(f'Mock Plex server on http://127.0.0.1:{PORT} '
-          f'({len(artists)} artists, {len(albums)} albums, {len(tracks)} tracks, {len(playlists)} playlists)')
-    ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
+          f'({len(artists)} artists, {len(albums)} albums, {len(tracks)} tracks, {len(playlists)} playlists)', flush=True)
+    Server(('0.0.0.0', PORT), Handler).serve_forever()

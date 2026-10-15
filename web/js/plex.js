@@ -406,6 +406,25 @@ export class PlexServer {
     );
   }
 
+  // Album details change rarely; DJ modes look these up for every track.
+  albumMeta(id) {
+    return this.memo(`album:${id}`, () => this.metadata(id), 30 * 60000);
+  }
+
+  async machineId() {
+    if (this.id && !/^https?:/.test(this.id)) return this.id;
+    const mc = await this.identity();
+    this.id = mc.machineIdentifier;
+    return this.id;
+  }
+
+  async createPlaylist(title, ids) {
+    const uri = `server://${await this.machineId()}/com.plexapp.plugins.library/library/metadata/${ids.join(',')}`;
+    const data = await request(this.url('/playlists', { type: 'audio', title, smart: 0, uri }), { method: 'POST' });
+    this.cache.delete('playlists');
+    return asArray(data.MediaContainer?.Metadata)[0] || null;
+  }
+
   // Star rating on Plex's 0–10 scale; null clears it.
   async rate(id, rating) {
     const url = this.url('/:/rate', { key: id, identifier: 'com.plexapp.plugins.library', rating: rating ?? -1 });

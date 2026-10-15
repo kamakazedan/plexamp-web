@@ -18,6 +18,9 @@ const DEFAULT_SETTINGS = {
   gapless: true,
   reportPlays: true,
   tintBackground: true,
+  liveUpdates: 'auto', // 'auto' (WebSocket first) | 'nows' (no WebSockets) | 'off'
+  // mode: 'auto' (the app's shared model when there is one) | 'shared' | 'custom' | 'off'
+  ai: { mode: 'auto', url: '', apiKey: '', model: '', sharedModel: '', notes: '' },
 };
 
 export const app = {

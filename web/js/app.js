@@ -1,7 +1,7 @@
 // Entry point: wires the router, shell, player bar and backdrop together.
 import { app, setSource, on } from './state.js';
 import { PlexServer, listServers, pickConnection } from './plex.js';
-import { route, startRouter, navigate, goTab, parseHash, refresh } from './router.js';
+import { route, startRouter, navigate, goTab, parseHash, refresh, dropCached, overlayDepth } from './router.js';
 import { h, icon } from './ui.js';
 import { player } from './player.js';
 import { initBackdrop } from './backdrop.js';
@@ -11,6 +11,9 @@ import { homeView, recentView } from './views/home.js';
 import { libraryView, browseView, playlistsView, tagsView, itemsView } from './views/library.js';
 import { albumView, artistView, playlistView, collectionView } from './views/detail.js';
 import { searchView, topView, sonicPathView } from './views/search.js';
+import { aiPlaylistView } from './views/aiplaylist.js';
+import { live } from './live.js';
+import './dj.js';
 import { settingsView, settingsPageView, sourceView } from './views/settings.js';
 import { loginView } from './views/login.js';
 
@@ -42,6 +45,7 @@ route('/collection/:id', needsSource(collectionView));
 route('/search', needsSource(searchView), { tab: 'search' });
 route('/top/:kind', needsSource(topView), { tab: 'search' });
 route('/sonic-path', needsSource(sonicPathView), { tab: 'search' });
+route('/ai-playlist', needsSource(aiPlaylistView), { tab: 'search' });
 route('/settings', needsSource(settingsView), { tab: 'settings' });
 route('/settings/:page', needsSource(settingsPageView), { tab: 'settings' });
 route('/login', (ctx) => (app.auth?.token && app.source ? navigate('/', { replace: true }) : loginView(ctx)), { bare: true });
@@ -129,6 +133,38 @@ function hideBanner() {
   document.getElementById('banner').hidden = true;
 }
 
+// ---------- live updates ----------
+
+// Re-render the page on screen only when that won't pull it from under the
+// user: they're near the top and nothing is open over it.
+function refreshIfIdle(test) {
+  const { path } = parseHash();
+  if (!test(path) || window.scrollY > 150 || overlayDepth() || document.querySelector('.ai-progress')) return;
+  refresh();
+}
+
+function wireLiveUpdates() {
+  // Long lists keep their cached copy (and scroll position) for the back
+  // button; they load fresh the next time they're opened.
+  const summaryPages = (p) => p === '/' || p === '/recent' || p === '/library';
+  live.addEventListener('library', () => {
+    app.server?.cache.clear();
+    dropCached(summaryPages);
+    refreshIfIdle((p) => p === '/' || p === '/library');
+  });
+  live.addEventListener('playlists', (e) => {
+    app.server?.cache.delete('playlists');
+    const ids = e.detail.ids.map(String);
+    const affected = (p) => p === '/' || p === '/library/playlists' || (p.startsWith('/playlist/') && (!ids.length || ids.includes(p.split('/')[2])));
+    dropCached(affected);
+    refreshIfIdle(affected);
+  });
+  live.addEventListener('scan', (e) => {
+    document.body.classList.toggle('scanning', !!e.detail);
+    document.querySelectorAll('.scan-text').forEach((n) => (n.textContent = e.detail?.title || ''));
+  });
+}
+
 function keyboard() {
   document.addEventListener('keydown', (e) => {
     const t = e.target;
@@ -156,6 +192,7 @@ function boot() {
   initPlayerBar(document.getElementById('player-bar'));
   initBackdrop(player);
   keyboard();
+  wireLiveUpdates();
   on('signout', hideBanner);
   on('source', hideBanner);
 
@@ -164,6 +201,7 @@ function boot() {
   if (app.server) {
     player.restore();
     ensureConnection();
+    live.start();
   }
 
   window.addEventListener('online', () => app.server && ensureConnection());
