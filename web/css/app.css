@@ -515,30 +515,79 @@ a.section-head:hover .chev {
   text-align: center;
 }
 
-.card-play {
+/* Play and shuffle, centred over the artwork. Hidden (and not in the way
+   of a tap) until the card is hovered or one of them has keyboard focus. */
+.card-actions {
   position: absolute;
-  right: 8px;
-  bottom: 8px;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8%;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+
+.card-round .card-actions {
+  border-radius: 50%;
+}
+
+.card-actions button {
   display: grid;
+  flex: none;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  padding: 0 0 0 2px;
+  aspect-ratio: 1;
+  padding: 0;
   border: 0;
   border-radius: 50%;
+  cursor: pointer;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  transform: scale(0.92);
+  transition: transform 0.15s, background-color 0.15s;
+}
+
+.card-actions .card-play {
+  width: min(56px, 36%);
+  padding-left: 3px;
   background: #fff;
   color: #111;
-  opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 0.15s, transform 0.15s;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.card-actions .card-shuffle {
+  width: min(44px, 28%);
+  background: rgba(18, 18, 18, 0.74);
+  color: #fff;
+}
+
+.card-actions:has(:focus-visible) {
+  opacity: 1;
+}
+
+.card-actions:has(:focus-visible) button {
+  pointer-events: auto;
+  transform: none;
 }
 
 @media (hover: hover) {
-  .card:hover .card-play,
-  .card-play:focus-visible {
+  .card:hover .card-actions {
     opacity: 1;
+  }
+
+  .card:hover .card-actions button {
+    pointer-events: auto;
     transform: none;
+  }
+
+  .card:hover .card-actions button:hover {
+    transform: scale(1.07);
+  }
+
+  .card:hover .card-actions .card-shuffle:hover {
+    background: rgba(40, 40, 40, 0.9);
   }
 }
 
@@ -940,12 +989,16 @@ label.row:hover {
   color: var(--tint-hi);
 }
 
+/* The bars are scaled rather than resized, so the animation runs on the
+   compositor instead of laying the page out again on every frame. */
 .bars i {
   display: block;
   width: 3px;
-  height: 35%;
+  height: 100%;
   border-radius: 1px;
   background: currentColor;
+  transform: scaleY(0.35);
+  transform-origin: bottom;
 }
 
 /* On artwork the bars sit on a dark scrim over the cover. */
@@ -961,7 +1014,9 @@ label.row:hover {
 }
 
 .track-art .bars i {
-  height: 6px;
+  height: 16px;
+  transform: scaleY(0.375);
+  transform-origin: center;
 }
 
 .is-playing .bars i {
@@ -982,19 +1037,19 @@ label.row:hover {
 
 @keyframes bar {
   from {
-    height: 20%;
+    transform: scaleY(0.2);
   }
   to {
-    height: 100%;
+    transform: scaleY(1);
   }
 }
 
 @keyframes bar-art {
   from {
-    height: 4px;
+    transform: scaleY(0.25);
   }
   to {
-    height: 16px;
+    transform: scaleY(1);
   }
 }
 
@@ -1344,6 +1399,14 @@ a.hero-link:hover {
 
 .about-mark {
   border-radius: 18px;
+}
+
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
 }
 
 .kv-list {
@@ -2758,10 +2821,22 @@ body.bare #toasts {
   pointer-events: none;
 }
 
-.mix-card .card-play {
+/* On touch screens a mix's buttons stay visible: tapping the card opens the
+   artist, so they're the way to start the mix. */
+.mix-card .card-actions {
   z-index: 1;
-  opacity: 1;
-  transform: none;
+}
+
+@media (hover: none) {
+  .mix-card .card-actions {
+    opacity: 1;
+    background: none;
+  }
+
+  .mix-card .card-actions button {
+    pointer-events: auto;
+    transform: none;
+  }
 }
 
 .home-history .track {

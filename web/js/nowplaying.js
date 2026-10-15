@@ -10,6 +10,7 @@ import { guestDJ, DJS, djName } from './dj.js';
 import { aiReady } from './ai.js';
 import { live } from './live.js';
 import { together } from './together.js';
+import { levelSamples } from './transitions.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
@@ -641,7 +642,7 @@ function buildNowPlaying() {
       if (d.userRating !== undefined) stars.set(d.userRating);
       if (!t.year && d.parentYear && app.settings.showAlbumYear !== false) album.textContent = `${t.album} (${d.parentYear})`;
       if (a.id) {
-        const values = await app.server.levels(a.id);
+        const values = await app.server.levels(a.id, levelSamples(t.duration));
         if (mine === detailToken) wave.setLevels(values);
       }
     } catch {

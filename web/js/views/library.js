@@ -100,7 +100,7 @@ const TYPES = { artists: 8, albums: 9, tracks: 10 };
 const TITLES = { artists: 'Artists', albums: 'Albums', tracks: 'Tracks' };
 const RESERVED = new Set(['sort', 'title']);
 
-export async function browseView({ el, params, query }) {
+export async function browseView({ el, params, query, onDispose }) {
   const kind = params.kind;
   if (kind === 'collections') return collectionsView({ el, query });
   const type = TYPES[kind];
@@ -130,6 +130,7 @@ export async function browseView({ el, params, query }) {
     render: r.render,
     onTotal: (n) => (countEl.textContent = fmt.count(n, r.unit[0], r.unit[1])),
     empty: 'Nothing matches.',
+    onDispose,
   });
 }
 
@@ -215,7 +216,7 @@ export async function tagsView({ el, params, query }) {
 }
 
 // Generic paged listing for any server path (e.g. a genre's albums).
-export async function itemsView({ el, query }) {
+export async function itemsView({ el, query, onDispose }) {
   const title = query.title || 'Browse';
   const countEl = h('div.list-count');
   el.append(backHeader(title, { fallback: '/library' }), countEl);
@@ -227,5 +228,6 @@ export async function itemsView({ el, query }) {
     fetchPage: (start, size) => app.server.byPath(query.path, { start, size }),
     render: r.render,
     onTotal: (n) => (countEl.textContent = fmt.count(n, r.unit[0], r.unit[1])),
+    onDispose,
   });
 }

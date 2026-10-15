@@ -187,6 +187,9 @@ if [ -n "${PLEX_SERVER_URL:-}" ]; then
     proxy_ssl_name ${PMS_NAME};
     proxy_buffering off;
     proxy_request_buffering off;
+    # Caching is decided here (see Cache-Control in nginx.conf), not by Plex.
+    proxy_hide_header Cache-Control;
+    proxy_hide_header Expires;
     proxy_read_timeout 1h;
     proxy_send_timeout 1h;
     # The app only sends small requests to Plex.

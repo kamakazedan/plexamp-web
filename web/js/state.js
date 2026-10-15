@@ -16,6 +16,8 @@ export function on(name, fn) {
 export const DEFAULT_SETTINGS = {
   quality: 'original', // 'original' or a transcode bitrate in kbps, e.g. '320'
   gapless: true,
+  fades: 'smart', // crossfade between tracks: off | smart (where the music ends; not within albums) | always
+  fadeLength: 5, // seconds
   reportPlays: true, // "Sync recent plays": tell Plex what's played
   liveUpdates: 'auto', // 'auto' (WebSocket first) | 'nows' (no WebSockets) | 'off'
   // mode: 'auto' (the app's shared model when there is one) | 'shared' | 'custom' | 'off'

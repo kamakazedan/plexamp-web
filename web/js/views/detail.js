@@ -260,7 +260,7 @@ export async function artistView({ el, params }) {
 
 // ---------- Playlist ----------
 
-export async function playlistView({ el, params }) {
+export async function playlistView({ el, params, onDispose }) {
   const s = app.server;
   const pl = await s.playlist(params.id);
   if (!pl) throw Object.assign(new Error('Not found'), { status: 404 });
@@ -298,6 +298,7 @@ export async function playlistView({ el, params }) {
       return trackRow(t, { showArt: true, onPlay: () => playPlaylist(pl, { start: i }) });
     },
     empty: 'This playlist is empty.',
+    onDispose,
   });
 }
 

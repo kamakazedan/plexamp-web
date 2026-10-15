@@ -14,6 +14,7 @@ export function albumCard(m, { subtitle } = {}) {
     subtitle: subtitle !== undefined ? subtitle : m.parentTitle,
     fallback: 'disc',
     onPlay: () => playAlbum(m),
+    onShuffle: () => playAlbum(m, { shuffle: true }),
   });
 }
 
@@ -29,6 +30,7 @@ export function playlistCard(m) {
     subtitle: fmt.long(m.duration) || fmt.count(m.leafCount || 0, 'track', 'tracks'),
     fallback: 'list',
     onPlay: () => playPlaylist(m),
+    onShuffle: () => playPlaylist(m, { shuffle: true }),
   });
 }
 
@@ -43,6 +45,7 @@ export function collectionCard(m) {
     subtitle: m.childCount ? fmt.count(m.childCount, ...unit) : '',
     fallback: 'list',
     onPlay: () => playCollection(m),
+    onShuffle: () => playCollection(m, { shuffle: true }),
   });
 }
 
@@ -93,8 +96,8 @@ function tapTrack(track, onPlay, inQueue) {
 // tracks.
 export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false } = {}) {
   const lead = showArt
-    ? h('div.track-lead.track-art', null, art(track.thumb, { size: 48, fallback: 'note' }), nowBars())
-    : h('div.track-lead.track-num', null, h('span.num', null, number ?? ''), nowBars());
+    ? h('div.track-lead.track-art', null, art(track.thumb, { size: 48, fallback: 'note' }))
+    : h('div.track-lead.track-num', null, h('span.num', null, number ?? ''));
   const sub = subtitle !== undefined ? subtitle : track.artist;
   const right = plays !== undefined ? fmt.count(plays, 'play', 'plays') : track.duration ? fmt.clock(track.duration / 1000) : '';
   const inQueue = queueIndex !== undefined;
@@ -132,11 +135,18 @@ export function trackRow(track, { number, showArt = false, subtitle, onPlay, que
   return el;
 }
 
+// The playing bars are only added to the row that's playing: a list can
+// have thousands of rows.
 function markRow(el) {
   const cur = player.current;
   const isCur = !!cur && el.dataset.trackId === cur.id && (el.dataset.qid === '' || Number(el.dataset.qid) === player.index);
+  if (!isCur && !el.classList.contains('is-current')) return;
   el.classList.toggle('is-current', isCur);
   el.classList.toggle('is-playing', isCur && player.isPlaying);
+  const lead = el.querySelector('.track-lead');
+  const bars = lead?.querySelector(':scope > .bars');
+  if (isCur && !bars) lead?.append(nowBars());
+  else if (!isCur) bars?.remove();
 }
 
 export function syncCurrent(root = document) {

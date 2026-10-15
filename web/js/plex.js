@@ -4,7 +4,8 @@
 // avoids CORS preflights against the server.
 import { debugLog, safeUrl } from './debug.js';
 
-export const APP_INFO = { product: 'plexamp-web', version: '0.1.0' };
+// The version matches the newest entry in CHANGELOG.md (CI checks).
+export const APP_INFO = { product: 'plexamp-web', version: '0.5.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -272,6 +273,7 @@ export function isListingPath(path) {
 }
 
 export const TAG_FIELDS = new Set(['genre', 'style', 'mood', 'decade', 'year', 'studio', 'country']);
+const MEMO_LIMIT = 300;
 
 // ---------- Plex Media Server ----------
 
@@ -295,15 +297,24 @@ export class PlexServer {
     return data.MediaContainer || {};
   }
 
-  // Small memo for data that rarely changes during a session.
+  // Small memo for data that rarely changes during a session. It holds at
+  // most MEMO_LIMIT answers: a long session (a Guest DJ looks up every
+  // track's album) mustn't keep everything it ever looked up.
   memo(key, fn, ttl = 60000) {
     const hit = this.cache.get(key);
-    if (hit && Date.now() - hit.at < ttl) return hit.value;
-    const value = fn().catch((err) => {
+    if (hit && Date.now() - hit.at < ttl) {
+      // Most recently used last, so the least recently used go first.
       this.cache.delete(key);
+      this.cache.set(key, hit);
+      return hit.value;
+    }
+    const value = fn().catch((err) => {
+      if (this.cache.get(key)?.value === value) this.cache.delete(key);
       throw err;
     });
+    this.cache.delete(key);
     this.cache.set(key, { at: Date.now(), value });
+    while (this.cache.size > MEMO_LIMIT) this.cache.delete(this.cache.keys().next().value);
     return value;
   }
 

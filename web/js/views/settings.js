@@ -1,11 +1,12 @@
 import { app, saveSettings, setSource, signOut, proxyUri } from '../state.js';
 import { APP_INFO, PlexServer, listServers, pickConnection, clientId, canPlayCodec, canPlayHlsNatively } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached } from '../router.js';
-import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, avatar as personAvatar } from '../ui.js';
+import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, chat, parseReply, describeAIError } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { together } from '../together.js';
+import { canFade } from '../transitions.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -29,7 +30,7 @@ export async function settingsView({ el }) {
       row({ href: '/settings/account', lead: lead('user'), title: 'Account', subtitle: auth.username || 'Signed in', right: avatar(auth.thumb, auth.username) }),
       row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: badge(src?.serverName) }),
       row({ href: '/settings/experience', lead: lead('sliders'), title: 'Experience', subtitle: 'Appearance, player, Home screen and more' }),
-      row({ href: '/settings/playback', lead: lead('speaker'), title: 'Playback', subtitle: 'Streaming quality and gapless playback' }),
+      row({ href: '/settings/playback', lead: lead('speaker'), title: 'Playback', subtitle: 'Streaming quality, gapless playback and crossfade' }),
       row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'Server address and diagnostics' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
@@ -286,8 +287,28 @@ const QUALITIES = [
   ['128', 'Data saver (128 kbps)', 'Converted by your server. Uses the least data.'],
 ];
 
+const FADES = [
+  [
+    'smart',
+    'Smart',
+    'Fades into the next track where the music ends, so silence at the end of a track (or before the next one starts) doesn’t leave a gap. Tracks that follow each other on an album play gaplessly instead.',
+  ],
+  ['always', 'Always', 'Fades between every track, albums too, at the very end of each one.'],
+  ['off', 'Off', 'One track after another, as they are.'],
+];
+const FADE_LENGTHS = [2, 3, 4, 5, 6, 8, 10, 12].map((v) => [v, `${v} seconds`]);
+
 function playbackView({ el }) {
-  const qualityList = radioRows('Streaming quality', QUALITIES, app.settings.quality, (v) => saveSettings({ quality: v }));
+  const s = app.settings;
+  const qualityList = radioRows('Streaming quality', QUALITIES, s.quality, (v) => saveSettings({ quality: v }));
+  const length = choiceRow({
+    title: 'Crossfade length',
+    subtitle: 'How long one track takes to fade into the next.',
+    options: FADE_LENGTHS,
+    value: Number(s.fadeLength) || 5,
+    onChange: (v) => saveSettings({ fadeLength: v }),
+  });
+  length.hidden = s.fades === 'off' || !canFade;
   el.append(
     backHeader('Playback', { fallback: '/settings' }),
     h('div.section-head', null, h('h2', null, 'Streaming quality')),
@@ -298,10 +319,23 @@ function playbackView({ el }) {
       null,
       toggleRow({
         title: 'Gapless playback',
-        subtitle: 'Loads the next track early so albums flow without a pause.',
-        checked: app.settings.gapless,
+        subtitle: 'Starts the next track the moment this one ends, so albums flow without a pause.',
+        checked: s.gapless,
         onChange: (v) => saveSettings({ gapless: v }),
       }),
+      choiceRow({
+        title: 'Crossfade',
+        subtitle: canFade
+          ? 'Fade from one track into the next. The next track takes over once the fade is done, so its time starts part-way in.'
+          : 'This browser doesn’t let pages fade audio, so with this on, tracks change where the music ends, without a fade.',
+        options: FADES,
+        value: s.fades || 'off',
+        onChange: (v) => {
+          saveSettings({ fades: v });
+          length.hidden = v === 'off' || !canFade;
+        },
+      }),
+      length,
     ),
   );
 }
@@ -351,7 +385,7 @@ function liveOptions() {
   ];
 }
 
-function debugView({ el }) {
+function debugView({ el, onDispose }) {
   const src = app.source || {};
   const kv = (k, v) => h('div.kv', null, h('div.kv-k', null, k), h('div.kv-v', null, v ?? '—'));
   const kinds = { local: 'Local network', remote: 'Remote', relay: 'Plex relay (limited speed)', manual: 'Address you entered', proxy: 'Through this container' };
@@ -363,11 +397,11 @@ function debugView({ el }) {
   const liveStatus = h('div.kv-v', null, LIVE_MODES[live.mode] || live.mode);
   const liveNote = h('div.kv-note', null, live.note || '');
   const onMode = () => {
-    if (!el.isConnected) return live.removeEventListener('mode', onMode);
     liveStatus.textContent = LIVE_MODES[live.mode] || live.mode;
     liveNote.textContent = live.note || '';
   };
   live.addEventListener('mode', onMode);
+  onDispose(() => live.removeEventListener('mode', onMode));
   el.append(
     backHeader('Connection', { fallback: '/settings' }),
     h(
@@ -622,7 +656,12 @@ function aboutView({ el }) {
       h('div.about-name', null, APP_INFO.product),
       h('div.about-version', null, `Version ${APP_INFO.version}`),
       h('p', null, 'An unofficial web player for Plex music libraries. It is not made, endorsed or supported by Plex.'),
-      h('a.btn.btn-secondary', { href: REPO_URL, target: '_blank', rel: 'noopener' }, icon('external', 20), h('span', null, 'Project on GitHub')),
+      h(
+        'div.about-links',
+        null,
+        h('a.btn.btn-secondary', { href: `${REPO_URL}/blob/main/CHANGELOG.md`, target: '_blank', rel: 'noopener' }, icon('external', 20), h('span', null, 'What’s new')),
+        h('a.btn.btn-secondary', { href: REPO_URL, target: '_blank', rel: 'noopener' }, icon('external', 20), h('span', null, 'Project on GitHub')),
+      ),
     ),
   );
 }

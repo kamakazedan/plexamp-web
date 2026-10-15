@@ -14,7 +14,7 @@ const HOW = [
   ['queue', 'One queue for all', 'Anyone in the session can add tracks with Play next or Add to queue, and remove what’s coming up.'],
 ];
 
-export async function togetherView({ el, params }) {
+export async function togetherView({ el, params, onDispose }) {
   el.append(pageHeader('Play Together'));
   const body = h('div.together');
   el.append(body);
@@ -25,9 +25,13 @@ export async function togetherView({ el, params }) {
   }
 
   let renderToken = 0;
+  let stale = false; // something changed while the page was hidden or under a sheet
   const render = async () => {
     const mine = ++renderToken;
-    if (!el.isConnected) return cleanup();
+    if (!el.isConnected) {
+      stale = true;
+      return;
+    }
     if (together.active) {
       if (params.session && params.session !== together.session.id) navigate('/together', { replace: true });
       body.replaceChildren(sessionPage());
@@ -45,11 +49,15 @@ export async function togetherView({ el, params }) {
     body.replaceChildren(lobby(params.session));
   };
 
-  // Re-render on changes (from what's already known: no new requests),
-  // but not while a sheet is open over the page.
+  // Re-render on changes (from what's already known: no new requests). While
+  // the page is kept off screen (another tab) or a sheet is open over it, it
+  // catches up once it's back.
   const onChange = () => {
-    if (!el.isConnected) return cleanup();
-    if (document.querySelector('.sheet.open')) return;
+    if (!el.isConnected || document.querySelector('.sheet.open')) {
+      stale = true;
+      return;
+    }
+    stale = false;
     if (together.active) refreshSession(body);
     else body.replaceChildren(lobby(params.session));
   };
@@ -58,7 +66,11 @@ export async function togetherView({ el, params }) {
   together.addEventListener('invites', onChange);
   together.addEventListener('status', onStatus);
   together.addEventListener('blocked', onStatus);
-  const ticker = setInterval(() => el.isConnected && updateClock(body), 1000);
+  const ticker = setInterval(() => {
+    if (!el.isConnected) return;
+    if (stale) onChange();
+    else updateClock(body);
+  }, 1000);
   function cleanup() {
     together.removeEventListener('change', onChange);
     together.removeEventListener('invites', onChange);
@@ -66,6 +78,7 @@ export async function togetherView({ el, params }) {
     together.removeEventListener('blocked', onStatus);
     clearInterval(ticker);
   }
+  onDispose(cleanup);
   await render();
 }
 

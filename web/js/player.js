@@ -1,6 +1,7 @@
-// Playback engine: queue, shuffle/repeat, gapless hand-off between two audio
-// elements, server-side conversion fallback, lock-screen controls and play
-// reporting back to Plex.
+// Playback engine: queue, shuffle/repeat, transitions between tracks on two
+// audio elements (gapless, or crossfading where the music really ends),
+// server-side conversion fallback, lock-screen controls and play reporting
+// back to Plex.
 //
 // In a Play Together session the queue belongs to the session: transport
 // and queue changes are sent to it (this.remote), and its state comes back
@@ -9,8 +10,13 @@ import { app, on } from './state.js';
 import { store, canPlayCodec, canPlayHlsNatively } from './plex.js';
 import { shuffleArray } from './ui.js';
 import { debugLog } from './debug.js';
+import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
 
-const PRELOAD_AT = 25; // seconds before the end of a track
+const PRELOAD_AT = 25; // seconds before the next track starts
+// An element takes a moment to start sounding, so for a gapless change the
+// next track is started this much before the current one ends.
+const GAPLESS_LEAD = 0.06;
+const MAX_SKIP_IN = 20; // at most this much silence is skipped at the start of a track
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
 // Bundled into the image at a pinned version (see the Dockerfile), so no
 // code is ever loaded from another site.
@@ -48,6 +54,7 @@ export class Deck {
     this.loadingQid = null;
     this.isHls = false;
     this.onFatal = null;
+    this.gain = 1; // this element's part in a crossfade (its volume is the player's times this)
   }
 
   async load(url, isHls) {
@@ -56,7 +63,9 @@ export class Deck {
     if (isHls && !canPlayHlsNatively()) {
       const Hls = await loadHls();
       if (!Hls.isSupported()) throw new Error('This browser cannot play converted streams.');
-      this.hls = new Hls({ maxBufferLength: 30 });
+      // Keep 30 seconds behind the playhead as well as ahead: by default
+      // hls.js keeps everything already played, which for a long mix adds up.
+      this.hls = new Hls({ maxBufferLength: 30, backBufferLength: 30 });
       this.hls.on(Hls.Events.ERROR, (_, data) => data?.fatal && this.onFatal?.());
       this.hls.loadSource(url);
       this.hls.attachMedia(this.el);
@@ -82,6 +91,7 @@ export class Deck {
     this.qid = null;
     this.loadingQid = null;
     this.isHls = false;
+    this.gain = 1;
   }
 }
 
@@ -110,6 +120,8 @@ class Player extends EventTarget {
     this.loadAutoplay = false;
     this.lastReport = 0;
     this.lastPersist = 0;
+    this.persistTimer = null;
+    this.persistPending = false;
     this.lastPosState = 0;
     this.lastProgress = 0;
     this.timeQueued = false;
@@ -125,6 +137,11 @@ class Player extends EventTarget {
     this.aheadOf = null;
 
     this.history = []; // ids of tracks played this session, oldest first (DJ modes avoid repeats)
+    // The change to the next track under way: { plan, out, inn } (see nextPlan).
+    this.transition = null;
+    this.transitionTimer = null;
+    this.fadeTimer = null;
+    this.spans = new Map(); // track id -> where its music starts and ends, null if unknown
 
     this.decks.forEach((d, i) => this.bind(d, i));
     this.addEventListener('track', () => {
@@ -136,7 +153,8 @@ class Player extends EventTarget {
     this.applyVolume();
     this.setupMediaSession();
     window.addEventListener('pagehide', () => {
-      this.persist(true);
+      if (this.persistPending) this.persist(true);
+      this.savePosition();
       this.saveProgress(true);
       if (this.state === 'playing') this.report('stopped', this.current, this.time, true);
     });
@@ -192,7 +210,13 @@ class Player extends EventTarget {
   bind(deck, i) {
     const el = deck.el;
     const mine = () => i === this.active;
-    deck.onFatal = () => (mine() ? this.onError() : deck.reset());
+    // A next track that fails while it's fading in: the change is called
+    // off, and it's loaded again when it's due.
+    const spareFailed = () => {
+      if (this.transition?.inn === deck) this.cancelTransition();
+      deck.reset();
+    };
+    deck.onFatal = () => (mine() ? this.onError() : spareFailed());
     el.addEventListener('playing', () => {
       if (!mine()) return;
       this.switching = false;
@@ -200,7 +224,17 @@ class Player extends EventTarget {
       this.setState('playing');
     });
     el.addEventListener('pause', () => {
-      if (!mine() || el.ended || this.switching) return;
+      if (el.ended || this.switching) return;
+      const tr = this.transition;
+      if (tr) {
+        // During a change of track it's paused once both tracks are.
+        if (tr.out.el.paused && tr.inn.el.paused) {
+          this.setState('paused');
+          this.saveProgress(true);
+        }
+        return;
+      }
+      if (!mine()) return;
       this.setState('paused');
       this.saveProgress(true);
     });
@@ -221,7 +255,7 @@ class Player extends EventTarget {
     el.addEventListener('error', () => {
       if (!deck.hasSource()) return;
       if (mine()) this.onError();
-      else deck.reset(); // a failed preload: just load it normally later
+      else spareFailed(); // a failed preload: just load it normally later
     });
   }
 
@@ -237,13 +271,15 @@ class Player extends EventTarget {
   onTime() {
     if (this.sleepAt && Date.now() >= this.sleepAt) this.fireSleep();
     this.queueTime();
+    this.learnSpans();
     this.maybePreload();
+    this.planTransition();
     this.followClock();
     if (this.state === 'playing') this.report('playing');
     const now = Date.now();
     if (now - this.lastPersist > 5000) {
       this.lastPersist = now;
-      this.persist(true);
+      this.savePosition();
       this.saveProgress();
     }
     if (now - this.lastPosState > 1000) {
@@ -272,6 +308,7 @@ class Player extends EventTarget {
   }
 
   async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true } = {}) {
+    this.cancelTransition();
     const prev = this.current;
     if (reportPrev && prev && this.deck.hasSource() && this.state !== 'idle') this.report('stopped', prev, this.time, true);
     this.saveProgress(true);
@@ -333,12 +370,18 @@ class Player extends EventTarget {
     else this.setState('paused');
   }
 
+  get fades() {
+    return this.remote ? 'off' : app.settings.fades || 'off';
+  }
+
+  // Load the next track into the other element a little before it's due.
   maybePreload() {
-    if (!app.settings.gapless || this.repeat === 'one') return;
-    const remaining = this.duration - this.time;
-    if (!(remaining > 0 && remaining < PRELOAD_AT)) return;
+    if (this.transition || this.repeat === 'one') return;
+    if (!app.settings.gapless && this.fades === 'off') return;
     const ni = this.nextIndex();
-    if (ni === -1) return;
+    if (ni === -1 || !(this.duration > 0)) return;
+    const plan = this.nextPlan();
+    if ((plan ? plan.at : this.duration) - this.time > PRELOAD_AT) return;
     const next = this.queue[ni];
     const spare = this.spare;
     if (spare.qid === next.qid || spare.loadingQid === next.qid) return;
@@ -347,11 +390,208 @@ class Player extends EventTarget {
       .load(src.url, src.hls)
       .then(() => {
         spare.qid = next.qid;
-        spare.el.volume = this.volume;
-        spare.el.muted = this.muted;
+        this.applyVolume();
       })
       .catch(() => spare.reset());
     spare.loadingQid = next.qid;
+  }
+
+  // ---------- transitions ----------
+  // How the next track takes over, worked out afresh as the end nears:
+  //   gapless  it starts as this one ends (albums, or with Crossfade off)
+  //   fade     it fades in as this one fades out, ending where this one's
+  //            music ends ("smart" skips the silence after it, and before
+  //            the next track's music starts)
+  //   cut      straight on where the music ends, for browsers that can't
+  //            fade (Safari on iPhone and iPad)
+  // The next track becomes the current one once the change is done, so its
+  // clock then shows how much of it has played already.
+  // Returns { ni, next, kind, at, fade, startAt } or null; `at` is when the
+  // change starts (seconds into this track), `startAt` where the next track
+  // starts.
+  nextPlan() {
+    if (this.remote || this.repeat === 'one' || this.sleepEndOfTrack) return null;
+    const cur = this.current;
+    const ni = this.nextIndex();
+    const d = this.duration;
+    if (!cur || ni === -1 || !(d > 0)) return null;
+    const next = this.queue[ni];
+    const mode = this.fades;
+    // Where the browser can't play two tracks at once reliably (it can't
+    // fade either), the next one starts as the current one is stopped.
+    const gapless = app.settings.gapless ? { ni, next, kind: canFade ? 'gapless' : 'cut', at: Math.max(0, d - GAPLESS_LEAD), startAt: 0 } : null;
+    if (mode === 'off' || (mode === 'smart' && followsOnAlbum(cur, next))) return gapless;
+    let end = d;
+    let startAt = 0;
+    if (mode === 'smart') {
+      const a = this.spans.get(cur.id);
+      const b = this.spans.get(next.id);
+      if (a) end = Math.min(d, a.end);
+      if (b && b.start <= MAX_SKIP_IN) startAt = b.start;
+    }
+    if (!canFade) return end < d - 1 || startAt ? { ni, next, kind: 'cut', at: end, startAt } : gapless;
+    const nextLen = (next.duration || 0) / 1000 || Infinity;
+    const fade = Math.max(0.5, Math.min(Number(app.settings.fadeLength) || 5, end / 3, nextLen / 3));
+    return { ni, next, kind: 'fade', at: Math.max(0, end - fade), fade, startAt };
+  }
+
+  // Where the music starts and ends in the current track and the next one
+  // (for "smart" crossfades), from the server's loudness analysis.
+  learnSpans() {
+    if (this.fades !== 'smart') return;
+    this.learn(this.current);
+    if (this.duration - this.time < 60) {
+      const ni = this.nextIndex();
+      if (ni !== -1) this.learn(this.queue[ni]);
+    }
+  }
+
+  async learn(track) {
+    if (!track?.id || this.spans.has(track.id) || !app.server) return;
+    this.spans.set(track.id, null); // asked once; null until known (or for good, if it isn't analysed)
+    while (this.spans.size > 40) this.spans.delete(this.spans.keys().next().value);
+    try {
+      const values = await loudnessOf(track);
+      if (values && this.spans.has(track.id)) this.spans.set(track.id, audibleSpan(values, (track.duration || 0) / 1000));
+    } catch {
+      /* no analysis: the change happens at the end of the file */
+    }
+  }
+
+  // Called as the track plays: when the change is less than a second or so
+  // away, time it precisely (time updates only come a few times a second).
+  planTransition() {
+    if (this.transition || this.transitionTimer || this.state !== 'playing' || this.switching) return;
+    const plan = this.nextPlan();
+    if (!plan || this.spare.qid !== plan.next.qid) return;
+    const wait = (plan.at - this.audio.currentTime) / (this.audio.playbackRate || 1);
+    if (wait > 1.2) return;
+    this.transitionTimer = setTimeout(() => {
+      this.transitionTimer = null;
+      this.beginTransition();
+    }, Math.max(0, wait * 1000));
+  }
+
+  beginTransition() {
+    const plan = this.nextPlan();
+    const out = this.deck;
+    const inn = this.spare;
+    if (!plan || this.transition || this.state !== 'playing' || inn.qid !== plan.next.qid || !inn.hasSource()) return;
+    const now = out.el.currentTime;
+    if (plan.at - now > 0.25) return; // not yet (it moved): planned again on the next time update
+    if (plan.kind === 'cut' || (plan.kind === 'fade' && now >= plan.at + plan.fade)) {
+      this.switchToSpare(plan.ni, { startAt: plan.startAt });
+      return;
+    }
+    this.transition = { plan, out, inn };
+    try {
+      if (Math.abs((inn.el.currentTime || 0) - plan.startAt) > 0.3) inn.el.currentTime = plan.startAt;
+    } catch {
+      /* not seekable: it starts from the top */
+    }
+    inn.gain = plan.kind === 'fade' ? 0 : 1;
+    this.applyVolume();
+    this.applySpeed();
+    inn.el.play()?.catch(() => this.transition?.inn === inn && this.cancelTransition());
+    if (plan.kind === 'fade') {
+      this.stepFade();
+      this.fadeTimer = setInterval(() => this.stepFade(), 40);
+    } else {
+      // Gapless: the current track's end completes the change (onEnded);
+      // this is in case its end never comes.
+      const left = (this.duration - now) / (out.el.playbackRate || 1);
+      this.fadeTimer = setTimeout(() => !this.transition?.out.el.paused && this.finishTransition(), (left + 2) * 1000);
+    }
+  }
+
+  // Equal-power crossfade, driven by how far the outgoing track has played
+  // (so pausing pauses the fade, and the playback speed is allowed for).
+  stepFade() {
+    const tr = this.transition;
+    if (!tr || tr.out.el.paused) return;
+    const p = (tr.out.el.currentTime - tr.plan.at) / tr.plan.fade;
+    if (p >= 1 || tr.out.el.ended) {
+      this.finishTransition();
+      return;
+    }
+    const x = Math.max(0, Math.min(1, p));
+    tr.out.gain = Math.cos((x * Math.PI) / 2);
+    tr.inn.gain = Math.sin((x * Math.PI) / 2);
+    this.applyVolume();
+  }
+
+  finishTransition() {
+    const tr = this.transition;
+    if (!tr) return;
+    clearInterval(this.fadeTimer);
+    this.fadeTimer = null;
+    this.transition = null;
+    // Found again: the queue may have moved (a track before it removed).
+    const ni = this.queue.indexOf(tr.plan.next);
+    this.switchToSpare(ni >= 0 ? ni : tr.plan.ni);
+  }
+
+  // Call off a change under way: the next track goes back to waiting where
+  // it would start, and the current one plays on at full volume.
+  cancelTransition() {
+    clearTimeout(this.transitionTimer);
+    this.transitionTimer = null;
+    const tr = this.transition;
+    if (!tr) return;
+    clearInterval(this.fadeTimer);
+    this.fadeTimer = null;
+    this.transition = null;
+    tr.inn.el.pause();
+    try {
+      tr.inn.el.currentTime = tr.plan.startAt || 0;
+    } catch {
+      /* not seekable */
+    }
+    tr.out.gain = 1;
+    tr.inn.gain = 1;
+    this.applyVolume();
+  }
+
+  // After the queue changes: a change to a track that's no longer next is
+  // called off.
+  queueChanged() {
+    const tr = this.transition;
+    if (!tr) return;
+    const ni = this.nextIndex();
+    if (ni === -1 || this.queue[ni].qid !== tr.plan.next.qid) this.cancelTransition();
+  }
+
+  // The other element (with the next track loaded, and perhaps playing)
+  // becomes the current one.
+  switchToSpare(ni, { reported = false, startAt = null } = {}) {
+    const prev = this.current;
+    if (!reported) {
+      this.clearProgress(prev);
+      this.report('stopped', prev, this.duration, true);
+    }
+    const old = this.deck;
+    this.active ^= 1;
+    this.index = ni;
+    const deck = this.deck;
+    deck.gain = 1;
+    this.transcoding = deck.isHls;
+    this.triedTranscode = deck.isHls;
+    this.lastReport = 0;
+    if (startAt != null && deck.el.paused) {
+      try {
+        if (Math.abs(deck.el.currentTime - startAt) > 0.3) deck.el.currentTime = startAt;
+      } catch {
+        /* not seekable */
+      }
+    }
+    old.el.pause();
+    old.reset();
+    this.applyVolume();
+    this.applySpeed();
+    if (deck.el.paused) this.audio.play()?.catch((err) => this.onPlayError(err));
+    this.emit('track');
+    this.updateMediaSession();
+    this.persist();
   }
 
   // ---------- transport ----------
@@ -371,6 +611,7 @@ class Player extends EventTarget {
       this.load(this.index, { startAt: this.restoredAt || 0, reportPrev: false });
       return;
     }
+    this.transition?.inn.el.play()?.catch(() => {});
     this.audio.play()?.catch((err) => this.onPlayError(err));
   }
 
@@ -382,7 +623,15 @@ class Player extends EventTarget {
   _pause() {
     this.switching = false;
     this.loadAutoplay = false;
+    clearTimeout(this.transitionTimer);
+    this.transitionTimer = null;
     this.audio.pause();
+    if (this.transition) {
+      // Both tracks pause, and the fade carries on from here.
+      this.transition.inn.el.pause();
+      this.setState('paused');
+      this.saveProgress(true);
+    }
     if (this.state === 'loading') this.setState('paused');
   }
 
@@ -403,6 +652,7 @@ class Player extends EventTarget {
 
   _seek(sec, report = true) {
     if (!this.current) return;
+    this.cancelTransition();
     const d = this.duration;
     const t = Math.max(0, Math.min(sec, d ? d - 0.25 : sec));
     if (!this.deck.hasSource()) {
@@ -428,17 +678,23 @@ class Player extends EventTarget {
 
   next() {
     if (this.remote) return this.remote.command({ type: 'next' });
+    if (this.transition) return this.finishTransition(); // already on its way: straight there
     const ni = this.nextIndex();
     if (ni !== -1) this.load(ni);
   }
 
   prev() {
     if (this.remote) return this.remote.command({ type: 'prev' });
+    this.cancelTransition();
     if (this.time > 3 || this.index <= 0) this._seek(0);
     else this.load(this.index - 1);
   }
 
   onEnded() {
+    if (this.transition) {
+      this.finishTransition();
+      return;
+    }
     const track = this.current;
     this.clearProgress(track);
     if (this.remote) {
@@ -479,25 +735,10 @@ class Player extends EventTarget {
       this.emit('time');
       return;
     }
-    const next = this.queue[ni];
-    const spare = this.spare;
-    if (spare.qid === next.qid) {
-      // Gapless hand-off: the next track is already buffered.
-      const old = this.deck;
-      this.active ^= 1;
-      this.index = ni;
-      this.transcoding = spare.isHls;
-      this.triedTranscode = spare.isHls;
-      this.lastReport = 0;
-      this.applySpeed();
-      this.audio.play()?.catch((err) => this.onPlayError(err));
-      old.reset();
-      this.emit('track');
-      this.updateMediaSession();
-      this.persist();
-    } else {
-      this.load(ni, { reportPrev: false });
-    }
+    // The next track is usually loaded already (a change that didn't get
+    // to start, e.g. while the page was busy): straight on to it.
+    if (this.spare.qid === this.queue[ni].qid) this.switchToSpare(ni, { reported: true });
+    else this.load(ni, { reportPrev: false });
   }
 
   onPlayError(err) {
@@ -568,6 +809,7 @@ class Player extends EventTarget {
   // remote: { play, pause, toggle, seek, command, ended, expectedTime, sleep, blocked }
   setRemote(remote) {
     if (remote === this.remote) return;
+    this.cancelTransition();
     this.remote = remote;
     this.failedQid = null;
     if (remote) {
@@ -692,6 +934,7 @@ class Player extends EventTarget {
     this.sleepAt = null;
     this.sleepEndOfTrack = false;
     if (minutes === 'track') {
+      this.cancelTransition(); // stop at the end of this one, not the next
       this.sleepEndOfTrack = true;
     } else if (minutes) {
       this.sleepAt = Date.now() + minutes * 60000;
@@ -733,7 +976,7 @@ class Player extends EventTarget {
 
   applyVolume() {
     for (const d of this.decks) {
-      d.el.volume = this.volume;
+      d.el.volume = Math.max(0, Math.min(1, this.volume * d.gain));
       d.el.muted = this.muted;
     }
   }
@@ -828,6 +1071,7 @@ class Player extends EventTarget {
       const pos = this.original.indexOf(this.current);
       this.original.splice(pos + 1, 0, ...items);
     }
+    this.queueChanged();
     this.emit('queue');
     this.persist();
   }
@@ -838,6 +1082,7 @@ class Player extends EventTarget {
     const items = tracks.map(withQid);
     this.queue.push(...items);
     this.original?.push(...items);
+    this.queueChanged();
     this.emit('queue');
     this.persist();
   }
@@ -850,6 +1095,7 @@ class Player extends EventTarget {
     this.original = this.queue.slice();
     this.shuffle = false;
     if (context) this.context = context;
+    this.queueChanged();
     this.emit('queue');
     this.emit('mode');
     this.persist();
@@ -870,6 +1116,7 @@ class Player extends EventTarget {
     const [t] = this.queue.splice(i, 1);
     if (i < this.index) this.index -= 1;
     if (this.original) this.original = this.original.filter((x) => x !== t);
+    this.queueChanged();
     if (this.spare.qid === t.qid) this.spare.reset();
     this.emit('queue');
     this.persist();
@@ -879,6 +1126,7 @@ class Player extends EventTarget {
     if (this.remote) return this.remote.command({ type: 'clear' });
     this.queue = this.queue.slice(0, this.index + 1);
     this.original = this.queue.slice();
+    this.cancelTransition();
     this.spare.reset();
     this.emit('queue');
     this.persist();
@@ -901,6 +1149,7 @@ class Player extends EventTarget {
       this.queue = this.original.slice();
       this.index = Math.max(0, this.queue.indexOf(cur));
     }
+    this.cancelTransition();
     this.spare.reset();
     this.emit('queue');
     this.emit('mode');
@@ -910,6 +1159,7 @@ class Player extends EventTarget {
   cycleRepeat() {
     if (this.remote) return false;
     this.repeat = { off: 'all', all: 'one', one: 'off' }[this.repeat] || 'off';
+    if (this.repeat === 'one') this.cancelTransition();
     this.emit('mode');
     this.persist();
     return true;
@@ -982,12 +1232,18 @@ class Player extends EventTarget {
     return app.source ? `player.${app.source.serverId || app.source.uri}` : null;
   }
 
+  // The queue is saved when it changes, and where you are in the track every
+  // few seconds as a small separate value: the queue can be 1,500 tracks,
+  // too much to write over and over while playing.
   persist(now = false) {
     clearTimeout(this.persistTimer);
+    this.persistPending = false;
     if (this.remote) return; // the session keeps its own queue
     const save = () => {
+      this.persistPending = false;
       const key = this.storeKey();
       if (!key) return;
+      store.set(`${key}.at`, null);
       if (!this.queue.length) return store.set(key, null);
       const from = Math.max(0, this.index - 50);
       const slice = this.queue.slice(from, from + 1500).map(({ qid, sid, addedBy, ...t }) => t);
@@ -1001,7 +1257,17 @@ class Player extends EventTarget {
       });
     };
     if (now) save();
-    else this.persistTimer = setTimeout(save, 800);
+    else {
+      this.persistPending = true;
+      this.persistTimer = setTimeout(save, 800);
+    }
+  }
+
+  savePosition() {
+    const key = this.storeKey();
+    const t = this.current;
+    if (this.remote || !key || !t || !this.deck.hasSource()) return;
+    store.set(`${key}.at`, { id: t.id, position: Math.round(this.time * 10) / 10 });
   }
 
   // Bring back the last queue for this server, paused at the saved position.
@@ -1016,7 +1282,8 @@ class Player extends EventTarget {
     this.context = saved.context || null;
     this.shuffle = !!saved.shuffle;
     this.repeat = saved.repeat || 'off';
-    this.restoredAt = saved.position || 0;
+    const at = store.get(`${key}.at`);
+    this.restoredAt = (at && at.id === this.current?.id ? at.position : saved.position) || 0;
     this.state = 'paused';
     this.emit('queue');
     this.emit('mode');
@@ -1027,6 +1294,7 @@ class Player extends EventTarget {
   }
 
   reset() {
+    this.cancelTransition();
     this.loadToken += 1;
     this.loadingQid = null;
     for (const d of this.decks) {

@@ -218,7 +218,14 @@ export function art(path, { size = 160, round = false, cls = '', fallback = 'not
     return wrap;
   }
   const img = h('img', { alt, loading: 'lazy', decoding: 'async', draggable: 'false', src });
-  img.addEventListener('error', missing, { once: true });
+  const failed = () => {
+    // A picture let go on purpose (off screen, see pagedList and the router)
+    // isn't a broken one.
+    if (!img.getAttribute('src')) return;
+    img.removeEventListener('error', failed);
+    missing();
+  };
+  img.addEventListener('error', failed);
   img.addEventListener('load', () => wrap.classList.add('loaded'), { once: true });
   wrap.append(img);
   return wrap;
@@ -276,30 +283,40 @@ export function sectionHeader(title, href, extra) {
 
 // ---------- cards, shelves, grids ----------
 
-export function card({ href, image, title, subtitle, round = false, fallback = 'disc', onPlay, size = 200 }) {
+export function card({ href, image, title, subtitle, round = false, fallback = 'disc', onPlay, onShuffle, size = 200 }) {
   const a = h(
     `a.card${round ? '.card-round' : ''}`,
     { href: `#${href}` },
-    h('div.card-art', null, art(image, { size, round, fallback, alt: '' }), onPlay ? playOverlay(onPlay, title) : null),
+    h('div.card-art', null, art(image, { size, round, fallback, alt: '' }), onPlay ? cardActions(title, onPlay, onShuffle) : null),
     h('div.card-title', null, title),
     subtitle ? h('div.card-sub', null, subtitle) : null,
   );
   return a;
 }
 
-function playOverlay(onPlay, title) {
-  return h(
-    'button.card-play',
-    {
-      type: 'button',
-      'aria-label': `Play ${title}`,
-      onclick: (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onPlay();
+// Play (and shuffle) buttons in the middle of a card's artwork, shown on
+// hover or keyboard focus.
+function cardActions(title, onPlay, onShuffle) {
+  const button = (cls, label, name, size, fn) =>
+    h(
+      `button.${cls}`,
+      {
+        type: 'button',
+        'aria-label': label,
+        title: label,
+        onclick: (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          fn();
+        },
       },
-    },
-    icon('play', 22),
+      icon(name, size),
+    );
+  return h(
+    'div.card-actions',
+    null,
+    button('card-play', `Play ${title}`, 'play', 24, onPlay),
+    onShuffle ? button('card-shuffle', `Shuffle ${title}`, 'shuffle', 20, onShuffle) : null,
   );
 }
 
@@ -500,9 +517,34 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
 
 // ---------- infinite lists ----------
 
+// Long lists keep artwork only near the screen: a picture further away gives
+// up its image (its address is kept) and gets it back as it comes near, so
+// scrolling through thousands of albums doesn't keep thousands of pictures
+// in memory. Pages kept by the router give up theirs too (see router.js).
+const NEAR = '1500px 0px';
+
+function farAway(entries) {
+  for (const e of entries) {
+    const el = e.target;
+    if (!el.isConnected) continue; // a page put aside: the router has its pictures
+    if (e.isIntersecting) {
+      for (const img of el.querySelectorAll('img[data-far-src]')) {
+        img.setAttribute('src', img.dataset.farSrc);
+        delete img.dataset.farSrc;
+      }
+    } else {
+      for (const img of el.querySelectorAll('img[src]')) {
+        img.dataset.farSrc = img.getAttribute('src');
+        img.removeAttribute('src');
+      }
+    }
+  }
+}
+
 // Fills `container` page by page as the user scrolls. fetchPage(start, size)
-// must resolve to { items, total }.
-export function pagedList(container, { fetchPage, render, pageSize = 60, empty = 'Nothing here.', onTotal, onItems }) {
+// must resolve to { items, total }. Pass the view's onDispose so the list
+// stops watching the page once it's gone.
+export function pagedList(container, { fetchPage, render, pageSize = 60, empty = 'Nothing here.', onTotal, onItems, onDispose }) {
   let start = 0;
   let total = Infinity;
   let loading = false;
@@ -510,6 +552,8 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
   const all = [];
   const sentinel = h('div.sentinel', null, spinner());
   container.after(sentinel);
+  const hasIO = 'IntersectionObserver' in window;
+  const near = hasIO ? new IntersectionObserver(farAway, { rootMargin: NEAR }) : null;
 
   async function load() {
     if (loading || done) return;
@@ -520,7 +564,9 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
       onTotal?.(total);
       items.forEach((item, i) => {
         all.push(item);
-        container.append(render(item, start + i, all));
+        const el = render(item, start + i, all);
+        container.append(el);
+        near?.observe(el);
       });
       onItems?.(all);
       start += items.length;
@@ -534,21 +580,29 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
     } finally {
       loading = false;
     }
-    // Keep going if the sentinel is still on screen.
-    if (!done && sentinel.getBoundingClientRect().top < window.innerHeight + 600) load();
+    // Keep going while the end of the list is on screen. Not on a page that
+    // has been put aside: everything off screen measures as on screen, and
+    // the whole library would load into a page nobody is looking at.
+    if (!done && sentinel.isConnected && sentinel.getBoundingClientRect().top < window.innerHeight + 600) load();
   }
 
   function finish() {
     done = true;
-    io?.disconnect();
+    more?.disconnect();
     sentinel.remove();
     if (!all.length) container.after(emptyState(empty));
   }
 
-  const io = 'IntersectionObserver' in window ? new IntersectionObserver((es) => es[0].isIntersecting && load(), { rootMargin: '800px 0px' }) : null;
-  io?.observe(sentinel);
+  const more = hasIO ? new IntersectionObserver((es) => es[0].isIntersecting && load(), { rootMargin: '800px 0px' }) : null;
+  more?.observe(sentinel);
   load().catch(() => {});
-  return { items: all, load };
+  const dispose = () => {
+    done = true;
+    more?.disconnect();
+    near?.disconnect();
+  };
+  onDispose?.(dispose);
+  return { items: all, load, dispose };
 }
 
 // ---------- small utils ----------

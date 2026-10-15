@@ -10,6 +10,8 @@ config.js. Settings come from the environment:
     APP_URL_NOWS     app with DISABLE_WEBSOCKETS=true and no shared model
     APP_URL_DEBUG    app with DEBUG=true (the debug section is skipped
                      without it)
+    APP_URL_BIG      app on a mock Plex server started with --big 3000, and
+    MOCK_PLEX_BIG    that server (the memory section is skipped without them)
     MOCK_PLEX        mock Plex server, e.g. http://127.0.0.1:32400
     PLEX_LOGIN_URL   server address to sign in with; empty to use the
                      container's /pms proxy
@@ -22,8 +24,8 @@ and t3 (Alex, a friend without access).
 
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
-Sections: core ws ai dj nows blocked poll custom desktop together settings
-home debug (default: all).
+Sections: core ws ai dj nows blocked poll custom desktop nav fades together
+settings home debug memory (default: all).
 """
 
 import json
@@ -37,6 +39,8 @@ from playwright.sync_api import sync_playwright
 APP = os.environ.get('APP_URL', 'http://127.0.0.1:8081/')
 APP_NOWS = os.environ.get('APP_URL_NOWS', 'http://127.0.0.1:8082/')
 APP_DEBUG = os.environ.get('APP_URL_DEBUG', '')
+APP_BIG = os.environ.get('APP_URL_BIG', '')
+MOCK_BIG = os.environ.get('MOCK_PLEX_BIG', '').rstrip('/')
 MOCK = os.environ.get('MOCK_PLEX', 'http://127.0.0.1:32400').rstrip('/')
 LOGIN_URL = os.environ.get('PLEX_LOGIN_URL', '')
 OLLAMA = os.environ.get('OLLAMA_DIRECT', 'http://127.0.0.1:11434').rstrip('/')
@@ -375,6 +379,33 @@ with sync_playwright() as pw:
         attach(page, 'desktop')
         login(page, APP)
         shot(page, 'desktop-01-home')
+        # Card buttons: play and shuffle, centred on the artwork, on hover.
+        page.wait_for_selector('section[data-section=recentlyAdded] .card .card-shuffle', state='attached')
+        card = page.locator('section[data-section=recentlyAdded] .card').first
+        card.scroll_into_view_if_needed()
+        opacity = lambda: card.locator('.card-actions').evaluate('e => getComputedStyle(e).opacity')
+        hidden = opacity()
+        card.hover()
+        page.wait_for_timeout(400)
+        check('cards: play and shuffle appear on hover', hidden == '0' and opacity() == '1', f'{hidden} -> {opacity()}')
+        art = card.locator('.card-art').bounding_box()
+        play = card.locator('.card-play').bounding_box()
+        shuf = card.locator('.card-shuffle').bounding_box()
+        across = (play['x'] + shuf['x'] + shuf['width']) / 2 - (art['x'] + art['width'] / 2)
+        down = play['y'] + play['height'] / 2 - (art['y'] + art['height'] / 2)
+        check('cards: the buttons sit in the middle of the artwork',
+              abs(across) < 2 and abs(down) < 2 and shuf['x'] > play['x'] + play['width'], f'{across:.1f}, {down:.1f}')
+        shot(page, 'desktop-02-card-hover')
+        card.locator('.card-shuffle').click()
+        check('cards: Shuffle plays the album shuffled',
+              wait_for(lambda: player(page, "p.state === 'playing' && p.shuffle && p.context.href.startsWith('/album/')"), 10))
+        check('cards: … without opening it', page.evaluate('location.hash') in ('', '#/'), page.evaluate('location.hash'))
+        pl = page.locator('section[data-section=recentPlaylists] .card').first
+        pl.hover()
+        pl.locator('.card-play').click()
+        check('cards: Play plays the playlist in order',
+              wait_for(lambda: player(page, "p.state === 'playing' && !p.shuffle && p.context.href.startsWith('/playlist/')"), 10))
+        page.mouse.move(5, 5)
         page.goto(APP + '#/ai-playlist')
         page.wait_for_selector('.ai-suggestion')
         page.click('.ai-suggestion')
@@ -383,11 +414,218 @@ with sync_playwright() as pw:
         page.wait_for_timeout(1200)
         page.click('.pb-right button[aria-label="Open now playing"]')
         page.wait_for_selector('.np.open')
-        shot(page, 'desktop-02-now-playing')
+        shot(page, 'desktop-03-now-playing')
         page.click('.np-tool[data-tool=dj]')
         page.wait_for_selector('.sheet.dialog.open')
-        shot(page, 'desktop-03-guest-dj')
+        shot(page, 'desktop-04-guest-dj')
         check('desktop: Guest DJ dialog opens', True)
+        ctx.close()
+
+    # ---------- nav: Back stays within the tab you're in ----------
+    if run('nav'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'nav')
+        login(page, APP)
+        where = lambda: js(page, '() => location.hash')
+        tab = lambda: page.locator('#tabs .tab.active').get_attribute('data-tab')
+
+        def settle(selector):
+            page.wait_for_selector(selector)
+            page.wait_for_timeout(250)
+
+        def header_back():
+            page.click('.back-head button[aria-label="Back"]')
+            page.wait_for_timeout(500)
+
+        def tap_tab(name):
+            page.click(f'#tabs .tab[data-tab={name}]')
+            page.wait_for_timeout(700)
+
+        page.locator('section[data-section=recentlyAdded] .card').first.click()
+        settle('.hero-album')
+        home_album = where()
+        tap_tab('search')
+        settle('.search-box')
+        page.click('a.row:has-text("Top albums")')
+        settle('.row-ranked')
+        page.locator('.row-ranked').first.click()
+        settle('.hero-album')
+        header_back()
+        check('nav: back goes to the previous page in the tab', where() == '#/top/albums', where())
+        tap_tab('settings')
+        settle('.settings-rows')
+        tap_tab('search')
+        check('nav: a tab comes back where you left it', where() == '#/top/albums' and tab() == 'search', where())
+        header_back()
+        check('nav: back stays in the tab (not the last tab visited)', where() == '#/search' and tab() == 'search', f'{where()} in {tab()}')
+        page.go_back()
+        page.wait_for_timeout(600)
+        check('nav: the browser\'s back from a tab\'s first page goes to Home, where you left it', where() == home_album and tab() == 'home', f'{where()} in {tab()}')
+        page.go_back()
+        page.wait_for_timeout(600)
+        check('nav: ...and then back within Home', where() == '#/' and tab() == 'home', where())
+
+        tap_tab('library')
+        page.click('a.row:has-text("Albums")')
+        settle('.grid .card')
+        page.locator('.grid .card').nth(1).click()
+        settle('.hero-album')
+        tap_tab('library')
+        check('nav: tapping the tab you\'re in goes to its first page', where() == '#/library', where())
+        page.click('a.row:has-text("Albums")')
+        settle('.grid .card')
+        page.locator('.grid .card').nth(2).click()
+        settle('.hero-album')
+        deep = where()
+        page.reload()
+        settle('.hero-album')
+        header_back()
+        check('nav: after a reload, back still stays in the tab', where().startswith('#/browse/albums') and tab() == 'library', where())
+        page.go_forward()
+        page.wait_for_timeout(600)
+        check('nav: forward works too', where() == deep, where())
+        page.click('.back-head button[aria-label="More options"]')
+        page.wait_for_selector('.sheet.open')
+        page.go_back()
+        page.wait_for_timeout(500)
+        check('nav: back closes a sheet first', page.locator('.sheet.open').count() == 0 and where() == deep, where())
+
+        page.goto(APP + '#/')
+        settle('.page-sub')
+        page.click('.page-sub')  # "on <server>": the library switcher
+        page.click('.sheet.open .sheet-action:has-text("Change server")')
+        settle('.source-body')
+        check('nav: a link into another tab opens there', tab() == 'settings' and where() == '#/settings/source', f'{where()} in {tab()}')
+        header_back()
+        check('nav: ...and back goes to that tab\'s first page', where() == '#/settings', where())
+        ctx.close()
+
+    # ---------- fades: crossfades and gapless changes of track ----------
+    # Mock tracks are 20 seconds long; some end with 6 seconds of silence,
+    # some start with 3 (see dev/mock-plex.py).
+    if run('fades'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'fades')
+        login(page, APP)
+        tracks = mock('/__mock/tracks')['MediaContainer']['Metadata']
+        a = next(t for t in tracks if t['silentEnd'])
+        b = next(t for t in tracks if t['silentStart'] and t['album'] != a['album'])
+        c, d = next((x, y) for x, y in zip(tracks, tracks[1:])
+                    if x['album'] == y['album'] and y['index'] == x['index'] + 1 and not x['silentEnd'] and not y['silentStart'])
+
+        def queue(ids, at):
+            """Play these tracks (by id), starting `at` seconds into the first."""
+            js(page, "() => Promise.all([import('./js/state.js'), import('./js/plex.js'), import('./js/player.js')])"
+                     ".then(async ([{ app }, { normTrack }, { player }]) => {"
+                     f" const list = await Promise.all({json.dumps(ids)}.map(async (id) => normTrack(await app.server.metadata(id))));"
+                     " player.playTracks(list, 0, { context: { title: 'Fades', href: null } });"
+                     " for (let i = 0; i < 100 && player.state !== 'playing'; i++) await new Promise((r) => setTimeout(r, 100));"
+                     f" player.seek({at}); }})")
+
+        def watch(seconds, until_id=None):
+            """The player every 0.2 s, for `seconds` or until `until_id` has been playing a moment."""
+            out = []
+            end = time.time() + seconds
+            while time.time() < end:
+                out.append(player(page, "({ cur: p.current?.id, t: p.time, kind: p.transition?.plan.kind || null, state: p.state,"
+                                        " vols: p.decks.map((d) => d.el.volume), times: p.decks.map((d) => d.el.currentTime),"
+                                        " playing: p.decks.filter((d) => !d.el.paused).length, active: p.active })"))
+                if until_id and sum(1 for x in out if x['cur'] == until_id) > 3:
+                    break
+                page.wait_for_timeout(200)
+            return out
+
+        def switch_point(samples, from_id, to_id):
+            """(the old track's last time, the new one's first) when the new one took over."""
+            for x, y in zip(samples, samples[1:]):
+                if x['cur'] == from_id and y['cur'] == to_id:
+                    return x['t'], y['t']
+            return None, None
+
+        # Smart (the default): the next track fades in where this one's music
+        # ends, skipping the silence after it and before the next one's.
+        queue([a['ratingKey'], b['ratingKey']], 7)
+        got = watch(14, b['ratingKey'])
+        fading = [x for x in got if x['kind'] == 'fade']
+        mid = [x for x in fading if 0.15 < min(x['vols']) and max(x['vols']) < 0.97]
+        check('fades: the next track fades in as this one fades out', fading and mid and all(x['playing'] == 2 for x in mid),
+              json.dumps(fading[:2]))
+        last, first = switch_point(got, a['ratingKey'], b['ratingKey'])
+        check('fades: the silence at the end of a track is skipped', last is not None and last < 15.5, f'{last}')
+        check('fades: the next track takes over part-way in (its clock shows the fade)', first is not None and 5 <= first <= 10, f'{first}')
+        start = fading[0]['times'][fading[0]['active'] ^ 1] if fading else 0
+        check('fades: the silence before the next track\'s music is skipped', start >= 2.4, f'{start:.2f}')
+        after = got[-1]
+        check('fades: ...and then it plays on its own at full volume', after['playing'] == 1 and after['vols'][after['active']] == 1, json.dumps(after))
+
+        # Tracks that follow each other on an album: gapless, no fade.
+        queue([c['ratingKey'], d['ratingKey']], 15.5)
+        got = watch(9, d['ratingKey'])
+        last, first = switch_point(got, c['ratingKey'], d['ratingKey'])
+        check('fades: the next track on the same album follows gaplessly, without a fade',
+              not any(x['kind'] == 'fade' for x in got) and all(min(x['vols']) == 1 for x in got)
+              and last is not None and last > 19 and first < 1.5, f'{last} -> {first}')
+
+        # Pausing in the middle of a fade pauses both tracks; Next goes straight on.
+        queue([a['ratingKey'], b['ratingKey']], 10.5)
+        wait_for(lambda: player(page, "p.transition?.plan.kind === 'fade'"), 5)
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+        page.wait_for_timeout(600)
+        paused = watch(1)
+        check('fades: pausing during a fade pauses both tracks',
+              all(x['playing'] == 0 and x['state'] == 'paused' for x in paused) and paused[0]['vols'] == paused[-1]['vols'], json.dumps(paused[-1]))
+        js(page, "() => import('./js/player.js').then(({ player }) => player.play())")
+        page.wait_for_timeout(500)
+        both = watch(0.3)[-1]
+        check('fades: ...and playing carries the fade on', both['playing'] == 2 and both['kind'] == 'fade' and both['state'] == 'playing', json.dumps(both))
+        js(page, "() => import('./js/player.js').then(({ player }) => player.next())")
+        page.wait_for_timeout(400)
+        now = watch(0.3)[-1]
+        check('fades: Next during a fade goes straight to the next track',
+              now['cur'] == b['ratingKey'] and now['playing'] == 1 and now['vols'][now['active']] == 1 and not now['kind'], json.dumps(now))
+
+        # Seeking back calls the fade off.
+        queue([a['ratingKey'], b['ratingKey']], 10.5)
+        wait_for(lambda: player(page, "p.transition?.plan.kind === 'fade'"), 5)
+        js(page, "() => import('./js/player.js').then(({ player }) => player.seek(3))")
+        page.wait_for_timeout(500)
+        now = watch(0.3)[-1]
+        check('fades: seeking back calls the fade off', now['cur'] == a['ratingKey'] and now['playing'] == 1 and not now['kind']
+              and now['vols'][now['active']] == 1 and now['t'] < 6, json.dumps(now))
+
+        # Always: at the very end of each track, album or not.
+        settings(page, {'fades': 'always'})
+        queue([c['ratingKey'], d['ratingKey']], 12)
+        got = watch(12, d['ratingKey'])
+        fading = [x for x in got if x['kind'] == 'fade']
+        last, first = switch_point(got, c['ratingKey'], d['ratingKey'])
+        check('fades: "Always" fades between album tracks too, at the very end',
+              fading and fading[0]['t'] >= 14.5 and last is not None and last > 19 and 3.5 <= first <= 6.5,
+              f'{fading[0]["t"] if fading else None}, {last} -> {first}')
+
+        # Off: one after another, silence and all.
+        settings(page, {'fades': 'off'})
+        queue([a['ratingKey'], b['ratingKey']], 12)
+        got = watch(12, b['ratingKey'])
+        last, first = switch_point(got, a['ratingKey'], b['ratingKey'])
+        check('fades: with Crossfade off, tracks play as they are', not any(x['kind'] == 'fade' for x in got)
+              and last is not None and last > 19 and first < 1.5, f'{last} -> {first}')
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+
+        # The settings.
+        settings(page, {'fades': 'smart'})
+        page.goto(APP + '#/settings/playback')
+        page.wait_for_selector('.choice-row:has-text("Crossfade length")')
+        choose(page, 'Crossfade', 'Off')
+        hidden = page.locator('.choice-row:has-text("Crossfade length")').is_hidden()
+        saved = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.fades)")
+        choose(page, 'Crossfade', 'Smart')
+        choose(page, 'Crossfade length', '8 seconds')
+        length = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.fadeLength)")
+        shot(page, 'fades-01-settings')
+        check('fades: Crossfade and its length are set in Settings › Playback', hidden and saved == 'off' and length == 8, f'{hidden} {saved} {length}')
         ctx.close()
 
     # ---------- together: Play Together, Dan (host) and Sam (friend) ----------
@@ -612,6 +850,14 @@ with sync_playwright() as pw:
         page.wait_for_selector('.grid .card')
         after = page.locator('.card-title').all_text_contents()
         check('settings: playlists from this library only', 'Bedtime stories' in before and 'Bedtime stories' not in after, f'{before} / {after}')
+        # About: the version is the newest one in the changelog, with a link to it.
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'CHANGELOG.md')) as f:
+            newest = next(line.split()[1] for line in f if line.startswith('## '))
+        page.goto(APP + '#/settings/about')
+        page.wait_for_selector('.about-version')
+        shown = page.locator('.about-version').inner_text()
+        link = page.locator('.about-links a', has_text='What’s new').get_attribute('href')
+        check('settings: About shows the version, with what\'s new', shown == f'Version {newest}' and link.endswith('/CHANGELOG.md'), f'{shown} {link}')
         ctx.close()
 
     # ---------- home: Home screen sections and Collections ----------
@@ -629,6 +875,17 @@ with sync_playwright() as pw:
         subs = page.locator('section[data-section=collections] .card-sub').all_text_contents()
         check('home: collection cards say what they hold', subs and all(s.split()[-1] in ('albums', 'artists', 'tracks') for s in subs), str(subs))
         shot(page, 'home-01-home')
+        mix = page.locator('section[data-section=mixes] .mix-card').first
+        check('cards: a mix keeps its buttons on touch screens',
+              mix.locator('.card-actions').evaluate('e => getComputedStyle(e).opacity') == '1' and mix.locator('.card-shuffle').count() == 1)
+        album = page.locator('section[data-section=recentlyAdded] .card').first
+        album.scroll_into_view_if_needed()
+        album.locator('.card-art').tap()
+        page.wait_for_selector('.hero-album')
+        check('cards: tapping a card opens it (the hidden buttons don\'t catch the tap)',
+              page.evaluate('location.hash').startswith('#/album/') and player(page, 'p.state') != 'playing', page.evaluate('location.hash'))
+        page.go_back()
+        page.wait_for_selector('section[data-section=collections] .card')
         page.locator('section[data-section=collections] .card').first.click()
         page.wait_for_selector('.hero-album')
         page.click('.hero-actions button:has-text("Play")')
@@ -702,6 +959,112 @@ with sync_playwright() as pw:
         page.goto(APP_DEBUG + '#/settings/debug')
         page.wait_for_selector('.kv')
         check('debug: Connection page says debug mode is on', 'On' in page.locator('.kv', has_text='Debug mode').inner_text())
+        ctx.close()
+
+    # ---------- memory: a big library ----------
+    # Waits here poll with evaluate() rather than using locators or
+    # wait_for_selector: element handles Playwright keeps would themselves
+    # hold pages in memory.
+    if run('memory') and APP_BIG and MOCK_BIG:
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'memory')
+        login(page, APP_BIG)
+        cdp = ctx.new_cdp_session(page)
+        cdp.send('Performance.enable')
+
+        def until(expr, timeout=20):
+            return wait_for(lambda: page.evaluate(expr), timeout, 0.2)
+
+        def count(sel):
+            return page.evaluate('(s) => document.querySelectorAll(s).length', sel)
+
+        def nodes():
+            for _ in range(2):
+                cdp.send('HeapProfiler.collectGarbage')
+            return int(next(m['value'] for m in cdp.send('Performance.getMetrics')['metrics'] if m['name'] == 'Nodes'))
+
+        def scroll_until(sel, n, limit=400):
+            for _ in range(limit):
+                if count(sel) >= n:
+                    break
+                page.evaluate('window.scrollBy(0, 2500)')
+                page.wait_for_timeout(120)
+            return count(sel)
+
+        # Leaving a long list while the next part of it is on its way: it
+        # stops there rather than loading the rest of the library unseen.
+        page.click('#tabs .tab[data-tab=library]')
+        until("() => !!document.querySelector('a[href=\"#/browse/tracks\"]')")
+        mock_big = lambda path: urllib.request.urlopen(MOCK_BIG + path, timeout=20).read()
+        mock_big('/__mock/config?delay=600')
+        page.click('a[href="#/browse/tracks"]')
+        until("() => !!document.querySelector('.view .sentinel')")
+        page.click('#tabs .tab[data-tab=home]')
+        page.wait_for_timeout(5000)
+        mock_big('/__mock/config?delay=0')
+        page.click('#tabs .tab[data-tab=library]')
+        until("() => location.hash.startsWith('#/browse/tracks') && document.querySelectorAll('.tracks .track').length > 0")
+        rows = count('.tracks .track')
+        check('memory: a list you leave stops loading', 0 < rows <= 200, rows)
+
+        # Far from the screen, artwork lets go of its picture, and gets it back.
+        page.click('#tabs .tab[data-tab=library]')
+        until("() => location.hash === '#/library'")
+        page.click('a[href="#/browse/albums"]')
+        until("() => document.querySelectorAll('.grid .card').length > 0")
+        cards = scroll_until('.grid .card', 700)
+        page.wait_for_timeout(600)
+        live_imgs = count('.grid img[src]')
+        on_screen = page.evaluate("""() => [...document.querySelectorAll('.grid .card')].filter((c) => {
+            const r = c.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; })
+            .every((c) => !c.querySelector('.art img') || c.querySelector('.art img[src]'))""")
+        check('memory: far-away artwork is let go', cards >= 700 and live_imgs < 150 and on_screen, f'{cards} cards, {live_imgs} pictures')
+        page.evaluate('window.scrollTo(0, 0)')
+        back = until("() => !!document.querySelector('.grid .card .art img[src]')", 5)
+        check('memory: ...and comes back when you scroll back', back)
+
+        # A huge page (thousands of rows) isn't kept once a few others have
+        # been opened after it.
+        page.click('#tabs .tab[data-tab=library]')
+        until("() => location.hash === '#/library'")
+        page.click('a[href="#/browse/tracks"]')
+        until("() => document.querySelectorAll('.tracks .track').length > 0")
+        scroll_until('.tracks .track', 4000)
+        big = nodes()
+        page.evaluate('window.scrollTo(0, 0)')
+        ids = page.evaluate("() => import('./js/state.js').then(({ app }) => app.server.list(app.source.sectionKey, 9, { size: 5 }).then((r) => r.items.map((m) => m.ratingKey)))")
+        for album_id in ids:
+            page.evaluate('(id) => { location.hash = "#/album/" + id; }', album_id)
+            until(f"() => location.hash === '#/album/{album_id}' && !!document.querySelector('.hero-album')")
+        after = nodes()
+        check('memory: huge pages aren\'t kept for long', after < big / 2, f'{big} -> {after} nodes')
+
+        # Details looked up for many tracks are kept only up to a limit.
+        size = page.evaluate("""() => import('./js/state.js').then(async ({ app }) => {
+            const s = app.server;
+            const { items } = await s.list(app.source.sectionKey, 10, { size: 400 });
+            await Promise.all(items.map((m) => s.trackDetail(m.ratingKey).catch(() => null)));
+            return s.cache.size; })""")
+        check('memory: looked-up details are kept within a limit', 0 < size <= 300, size)
+
+        # While playing, only the position is saved every few seconds; the
+        # queue (here 1,000 tracks) only when it changes.
+        page.evaluate("""() => import('./js/state.js').then(async ({ app }) => {
+            const pls = await app.server.playlists(app.source.sectionKey);
+            const { playPlaylist } = await import('./js/actions.js');
+            await playPlaylist(pls.find((p) => p.title === 'Everything')); })""")
+        until("() => import('./js/player.js').then(({ player }) => player.state === 'playing')", 15)
+        page.wait_for_timeout(1500)
+        page.evaluate("""() => { window.__writes = []; const set = Storage.prototype.setItem;
+            Storage.prototype.setItem = function (k, v) { window.__writes.push([k, String(v).length]); return set.call(this, k, v); }; }""")
+        page.wait_for_timeout(11000)
+        writes = page.evaluate('() => window.__writes')
+        queue_writes = [w for w in writes if w[0].startswith('pw.player.') and not w[0].endswith('.at')]
+        at_writes = [w for w in writes if w[0].startswith('pw.player.') and w[0].endswith('.at')]
+        queue_len = player(page, 'p.queue.length')
+        check('memory: playing saves the position, not the whole queue', queue_len >= 1000 and not queue_writes and len(at_writes) >= 1,
+              f'{queue_len} queued, {len(queue_writes)} queue writes, {len(at_writes)} position writes')
         ctx.close()
 
     browser.close()

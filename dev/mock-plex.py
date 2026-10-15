@@ -24,14 +24,25 @@ Live notifications are sent over a WebSocket (/:/websockets/notifications)
 and an event stream (/:/eventsource/notifications), like a real server. For
 testing, these endpoints need no token:
 
-    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1
+    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS
         ws=0 refuses WebSockets (as a blocking proxy would), sse=0 refuses the
         event stream, sse=silent accepts it but never sends anything; open=1
-        accepts any token
+        accepts any token; delay=MS slows library listings down
     /__mock/add-album?title=...   adds an album and announces it
     /__mock/age?id=...&days=...   marks an album as last played that long ago
+    /__mock/tracks                every track, with whether it starts or ends
+                                  in silence (for testing transitions)
+
+Every track is a 20-second tune. Some end with 6 seconds of silence, some
+start with 3, and their loudness analysis says so, the way a real server's
+would.
 
 Artwork needs Pillow (pip install pillow); without it, covers are blank.
+
+    python3 dev/mock-plex.py 32401 --big 3000
+
+adds 3000 more albums (and artists and tracks to go with them), for trying
+the app with a large library: long grids, big playlists and memory use.
 """
 
 import base64
@@ -49,11 +60,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
 except ImportError:  # pragma: no cover
-    Image = ImageDraw = ImageFont = None
+    Image = ImageDraw = ImageFont = ImageOps = None
 
-PORT = int(next((a for a in sys.argv[1:] if a.isdigit()), 32400))
+def flag_value(name, default):
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit():
+            return int(sys.argv[i + 1])
+    return default
+
+
+BIG = flag_value('--big', 0)
+PORT = int(next((a for i, a in enumerate(sys.argv[1:], 1) if a.isdigit() and sys.argv[i - 1] != '--big'), 32400))
 SECTION = '1'
 NOW = int(time.time())
 TRACK_SECONDS = 20
@@ -90,6 +110,17 @@ ALBUMS = [
 
 WORDS = ('Harbour Lights Ember Northern Static Paper Wren Copper Tide Drift Signal Hollow Lantern Meridian Slow '
          'Glass Morning Velvet River Quiet Engine Orchard Neon Satellite Winter Salt Cinder Echo Atlas Bloom').split()
+
+if BIG:
+    big_rnd = random.Random(11)
+    first = len(ARTISTS)
+    for i in range(max(1, BIG // 5)):
+        ARTISTS.append((f'{big_rnd.choice(WORDS)} {big_rnd.choice(WORDS)} {i + 1}',
+                        [big_rnd.choice(['Electronic', 'Indie', 'Jazz', 'Rock', 'Folk', 'Hip-Hop'])], ''))
+    for i in range(BIG):
+        pal = ('%06x' % big_rnd.randrange(0x1000000), '%06x' % big_rnd.randrange(0x1000000))
+        ALBUMS.append((first + i % max(1, BIG // 5), f'{big_rnd.choice(WORDS)} {big_rnd.choice(WORDS)} {i + 1}',
+                       big_rnd.randint(1965, 2025), pal, None, 'Album'))
 
 items = {}  # ratingKey -> metadata dict
 artists, albums, tracks = [], [], []
@@ -134,7 +165,7 @@ for ai, (artist_idx, title, year, pal, sub, fmt) in enumerate(ALBUMS):
         'parentThumb': artist['thumb'], 'thumb': f'/library/metadata/{k}/thumb/1', 'year': year,
         'originallyAvailableAt': f'{year}-05-01', 'Genre': artist['Genre'][:1],
         'studio': ['Harbour Records', 'Harbour Records', 'Lantern Sound'][ai % 3],
-        'addedAt': NOW - 86400 * (len(ALBUMS) - ai) * 9, 'viewCount': 0, 'leafCount': 0,
+        'addedAt': NOW - 86400 * (len(ALBUMS) - ai) * (9 if not BIG else 1), 'viewCount': 0, 'leafCount': 0,
         'summary': f'{title} is the {year} release from {artist["title"]}. Recorded over a long winter, it is '
                    'patient, detailed and best heard start to finish. ' * 2,
         'Format': [{'tag': fmt}], 'Subformat': [{'tag': sub}] if sub else [],
@@ -305,10 +336,28 @@ def track_detail(t):
     return d
 
 
+# Tracks that end, or start, in silence (and are analysed: see the levels
+# endpoint, which leaves every third track unanalysed).
+def silent_end(rk):
+    rk = int(rk)
+    return rk % 4 == 1 and rk % 3 != 0
+
+
+def silent_start(rk):
+    rk = int(rk)
+    return rk % 5 == 2 and rk % 3 != 0 and not silent_end(rk)
+
+
+SILENT_END_AT = 0.7  # of the track: the last 6 seconds are silent
+SILENT_START_TO = 0.15  # the first 3 seconds are silent
+
+
 def loudness_levels(stream_id, n):
     # A plausible loudness curve in dB: quiet intro, a loud body with some
-    # movement, a short breakdown and a fade-out.
+    # movement, a short breakdown and a fade-out, or silence where the
+    # track's audio is silent.
     rnd = random.Random(stream_id)
+    rk = stream_id // 10
     out = []
     for i in range(n):
         f = i / max(1, n - 1)
@@ -319,6 +368,8 @@ def loudness_levels(stream_id, n):
             base = -48
         if f > 0.94:
             base -= 30 * (f - 0.94) / 0.06
+        if (silent_end(rk) and f >= SILENT_END_AT) or (silent_start(rk) and f < SILENT_START_TO):
+            base = -120
         out.append({'v': round(base, 2)})
     return out
 
@@ -357,9 +408,8 @@ def cover_png(thumb, size):
         c1, c2 = it['_palette']
         a = tuple(int(c1[i:i + 2], 16) for i in (0, 2, 4))
         b = tuple(int(c2[i:i + 2], 16) for i in (0, 2, 4))
-        for y in range(S):
-            f = y / S
-            d.line([(0, y), (S, y)], fill=tuple(int(a[i] + (b[i] - a[i]) * f) for i in range(3)))
+        img = ImageOps.colorize(Image.linear_gradient('L').resize((S, S)), a, b)
+        d = ImageDraw.Draw(img)
         rnd = random.Random(int(rk))
         for _ in range(3):
             r = rnd.randint(60, 200)
@@ -405,9 +455,11 @@ def tone_wav(rk):
     notes = [220 * 2 ** (rnd.choice([0, 3, 5, 7, 10, 12]) / 12) for _ in range(8)]
     frames = bytearray()
     seg = n // len(notes)
+    quiet_from = int(n * SILENT_END_AT) if silent_end(rk) else n
+    quiet_to = int(n * SILENT_START_TO) if silent_start(rk) else 0
     for i in range(n):
         f = notes[min(i // seg, len(notes) - 1)]
-        env = min(1, i / 2000, (n - i) / 2000)
+        env = max(0, min(1, (i - quiet_to) / 2000, (min(n, quiet_from) - i) / 2000))
         v = 0.25 * env * math.sin(2 * math.pi * f * i / rate)
         frames += struct.pack('<h', int(v * 32767))
     header = b'RIFF' + struct.pack('<I', 36 + len(frames)) + b'WAVEfmt ' + struct.pack('<IHHIIHH', 16, 1, 1, rate, rate * 2, 2, 16) + \
@@ -418,7 +470,7 @@ def tone_wav(rk):
 
 # ---------------------------------------------------------------- notifications
 
-MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False}
+MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0}
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
 listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
 listeners_lock = threading.Lock()
@@ -734,10 +786,16 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['ping'] = float(q['ping'][0])
             if 'open' in q:
                 MOCK['open'] = q['open'][0] in ('1', 'on', 'true')
+            if 'delay' in q:
+                MOCK['delay'] = max(0, int(q['delay'][0]))
             return self.send_json(dict(MOCK, listeners=len(listeners)))
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
+        if p == '/__mock/tracks':
+            return self.send_json({'size': len(tracks), 'Metadata': [
+                {'ratingKey': t['ratingKey'], 'title': t['title'], 'album': t['parentRatingKey'], 'index': t['index'],
+                 'silentEnd': silent_end(t['ratingKey']), 'silentStart': silent_start(t['ratingKey'])} for t in tracks]})
         if p == '/__mock/age':  # an album (and its tracks) last played this many days ago
             al = items.get(q.get('id', [''])[0])
             if not al or al['type'] != 'album':
@@ -791,6 +849,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({'size': 0, 'totalSize': 0, 'Metadata': []})
             typ = int(q.get('type', ['9'])[0])
             if sub == 'all':
+                if MOCK['delay']:
+                    time.sleep(MOCK['delay'] / 1000)
                 pool = {8: artists, 9: albums, 10: tracks}.get(typ, albums)
                 res = pool
                 for f, vals in q.items():

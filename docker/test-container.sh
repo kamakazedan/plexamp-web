@@ -100,6 +100,11 @@ expect "Plex proxy accepts the token as a header" 200 "$(c -H 'X-Plex-Token: t' 
 expect "converted streams' session files need no token" 200 "$(c "$W/pms/audio/:/transcode/universal/session/abc-1/base/index.m3u8")"
 expect "...but only real session paths" 401 "$(c --path-as-is "$W/pms/audio/:/transcode/universal/session/abc-1/../../../../../library/sections")"
 contains "Plex proxy keeps the query string" '"Music [Hi-Res]"' "$(cb "$W/pms/library/sections?X-Plex-Token=t")"
+headers() { docker run --rm --network "$NET" "$CURL" -sS -o /dev/null -D - --max-time 20 "$@" 2>/dev/null | tr -d '\r' || true; }
+contains "artwork can be kept by the browser for a day" "Cache-Control: private, max-age=86400" \
+    "$(headers "$W/pms/photo/:/transcode?url=/library/metadata/120/thumb/1&width=100&height=100&X-Plex-Token=t")"
+lacks "...but not other answers from Plex" "max-age" "$(headers "$W/pms/library/sections?X-Plex-Token=t")"
+contains "...which are checked every time" "Cache-Control: no-cache" "$(headers "$W/pms/library/sections?X-Plex-Token=t")"
 expect "WebSocket upgrade through /pms" 101 "$(c -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' --max-time 3 "$W/pms/:/websockets/notifications?X-Plex-Token=t")"
 c "http://pw-plex:32400/__mock/config?ping=1" >/dev/null
 contains "event stream through /pms arrives unbuffered" 'event: ping' "$(cb -N --max-time 4 "$W/pms/:/eventsource/notifications?X-Plex-Token=t")"

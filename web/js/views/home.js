@@ -2,7 +2,7 @@ import { app, playlistScope } from '../state.js';
 import { normTrack } from '../plex.js';
 import { h, icon, card, pageHeader, backHeader, sectionHeader, shelf, grid, wideCard, skeletonShelf, emptyState, fmt } from '../ui.js';
 import { albumCard, playlistCard, collectionCard, trackRow } from '../components.js';
-import { artistRadio, playList, shuffleLibrary, deepCutsRadio, timeTravelRadio, randomAlbum } from '../actions.js';
+import { artistRadio, playArtist, playList, shuffleLibrary, deepCutsRadio, timeTravelRadio, randomAlbum } from '../actions.js';
 import { openSourceSheet } from './settings.js';
 import { live } from '../live.js';
 import { homeLayout, sectionById, PERIODS, GAPS } from '../home-sections.js';
@@ -87,7 +87,15 @@ const SECTION_VIEWS = {
       const artists = items.filter((m) => lastPlayed(m) && m.title !== 'Various Artists').slice(0, 10);
       if (!artists.length) return null;
       const cards = artists.map((m) => {
-        const c = card({ href: `/artist/${m.ratingKey}`, image: m.thumb, title: `${m.title} mix`, subtitle: 'Artist radio', fallback: 'mic', onPlay: () => artistRadio(m) });
+        const c = card({
+          href: `/artist/${m.ratingKey}`,
+          image: m.thumb,
+          title: `${m.title} mix`,
+          subtitle: 'Artist radio',
+          fallback: 'mic',
+          onPlay: () => artistRadio(m),
+          onShuffle: () => playArtist(m, { shuffle: true }),
+        });
         c.classList.add('mix-card');
         return c;
       });

@@ -5,6 +5,8 @@
 
 A self-hosted web player for Plex music libraries, laid out like the Plexamp app and built for phones first. It runs as one small container and plays music straight from your Plex Media Server in the browser.
 
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
+
 > Unofficial project. Not made, endorsed or supported by Plex.
 
 ## Security report
@@ -37,7 +39,7 @@ A review of the code with one main question: **can any of it leak your data?** T
 
 ### Play Together
 
-New in this version, and built with the same aim:
+Added in 0.4.0, and built with the same aim:
 
 - Only your own Plex friends can be invited, and joining checks with plex.tv, using the joiner's own token, that they can play from the session's library. A session's link is useless to anyone who wasn't invited.
 - Everyone plays from the Plex server with their own token. Tokens are never shared between people, and the service doesn't keep them.
@@ -55,7 +57,7 @@ New in this version, and built with the same aim:
 These come with how the app works:
 
 - **Tokens live in the browser.** Like Plex's own web app, the player keeps your token in the browser's local storage. Anyone with access to the browser profile, or a script injected into the page, could read it. The page uses no third-party scripts, builds everything without HTML strings, and has a strict content security policy, which makes injection hard.
-- **Tokens appear in media addresses.** Plex needs the token in artwork and audio addresses. They go only to your Plex server and are never sent as a referrer to anyone else, but they can show up in the browser's developer tools.
+- **Tokens appear in media addresses.** Plex needs the token in artwork and audio addresses. They go only to your Plex server and are never sent as a referrer to anyone else, but they can show up in the browser's developer tools, and in the browser's own cache on the device, which keeps artwork for a day. Artwork is marked private, so proxies and other shared caches don't keep it.
 - **The container serves plain HTTP.** On your home network that's the same as Plex's own `http://` addresses. If you use the player from outside, put it behind an HTTPS reverse proxy. Without HTTPS, tokens cross the network unencrypted.
 - **The shared AI model without `PLEX_SERVER_URL`** is open to anyone signed in to Plex, and Plex accounts are free. If the player can be reached from the internet, set `PLEX_SERVER_URL` so that only people with access to your server can use the model.
 - **Wide connection rules.** The content security policy has to allow connections, images and audio from any address, because Plex servers and Ollama can be anywhere.
@@ -75,9 +77,9 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 - **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, which you can play or save to Plex.
 - **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys). The AI DJ uses your Ollama model to pick each next track and introduce it.
 - **Live updates**: new music, playlist changes and ratings from other Plex apps appear without reloading. Works with or without WebSockets (see [Behind a work proxy](#behind-a-work-proxy)).
-- **Playback**: gapless hand-off between tracks, lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
+- **Playback**: gapless playback, and crossfades like Plexamp's: **Smart** crossfade uses your server's loudness analysis to fade into the next track where the music really ends, so silence at the end of a track doesn't leave a gap, and plays tracks that follow each other on an album gaplessly. Also lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
 - **Album-colour backgrounds** from Plex's own artwork colours, or a blurred copy of the cover.
-- **Responsive**: bottom tabs and a mini player on phones; a sidebar and full transport bar on desktop. It can be added to a phone's home screen.
+- **Responsive**: bottom tabs and a mini player on phones; a sidebar and full transport bar on desktop. Each tab keeps its own history, like a phone app's, so Back stays within the tab you're in. It can be added to a phone's home screen.
 - **Reconnects** on its own, preferring a local connection, then remote, then Plex's relay.
 
 ## Run it
@@ -230,8 +232,10 @@ If the player is served over HTTPS, browsers block plain `http://` addresses oth
 
 - **Formats.** Files play as-is when the browser supports them (FLAC, MP3, AAC, Opus and WAV in current browsers; ALAC mostly in Safari). Anything else is converted by your server over HLS, played with the built-in support where the browser has it and with [hls.js](https://github.com/video-dev/hls.js) (bundled into the image) where it doesn't. The conversion path is the part most likely to need adjusting against real servers.
 - **Sonic features** (similar tracks, Sonic path, sonically similar artists, artist radio and the sound-based Guest DJs) need sonic analysis turned on for the library in Plex. Without it, DJs fall back to matching on genre.
-- **The waveform** appears once Plex has analysed a track's loudness; until then the seek bar is a plain line.
-- **Not built yet**: casting to other Plex players, lyrics, editing playlists, loudness levelling and crossfades.
+- **The waveform** appears once Plex has analysed a track's loudness; until then the seek bar is a plain line. Smart crossfades need the same analysis to find where the music ends; without it, they fade at the end of the file.
+- **Crossfades on iPhone and iPad.** Safari there doesn't let pages change the volume of audio, so it can't fade. With Crossfade on, tracks change where the music ends instead.
+- **Memory.** Long lists keep artwork only near the screen, and pages you've moved on from are let go after a while, so the player stays light however long it's open or however big the library.
+- **Not built yet**: casting to other Plex players, lyrics, editing playlists and loudness levelling.
 
 ## Develop
 
@@ -239,6 +243,7 @@ The app is plain ES modules in `web/`, with no build step and no dependencies. T
 
 ```sh
 python3 dev/mock-plex.py           # fake Plex server (and plex.tv) on :32400; artwork needs Pillow
+python3 dev/mock-plex.py 32401 --big 3000   # the same with 3,000 more albums, for trying long lists
 python3 dev/mock-ollama.py         # fake Ollama on :11434
 python3 -m http.server 8080 -d web
 ```
@@ -264,7 +269,8 @@ web/
   css/app.css            all styles (mobile first, desktop from 960px)
   js/app.js              entry point and routes
   js/plex.js             plex.tv sign-in, server discovery, Plex Media Server API
-  js/player.js           queue, gapless playback, conversion fallback, play reporting, Play Together sync
+  js/player.js           queue, gapless playback and crossfades, conversion fallback, play reporting, Play Together sync
+  js/transitions.js      where a track's music starts and ends (loudness analysis), album order, fade support
   js/nowplaying.js       mini player, desktop transport bar, Now Playing screen
   js/together.js         Play Together: sessions, long-polling, the shared clock
   js/live.js             live updates: WebSocket, event stream or polling
@@ -296,6 +302,7 @@ Start with [Debug mode](#debug-mode): most set-up problems show up in the contai
 - **AI answers are slow**: the first request loads the model, which can take a minute on modest hardware. The model then stays loaded for 15 minutes.
 - **Some tracks won't play**: check **Settings → Connection → Browser formats**. Unsupported formats need your server to convert them.
 - **Playback stops when the phone locks**: add the player to your home screen and check the browser isn't restricted by battery-saving settings.
+- **The browser uses a lot of memory**: update to 0.5.0 or later, which fixed several causes (see [CHANGELOG.md](CHANGELOG.md)). If it still climbs, open an issue saying which browser, how big your library is, and what you were doing; in Firefox, the numbers from `about:memory` (Measure) help most.
 
 ## Licence
 
