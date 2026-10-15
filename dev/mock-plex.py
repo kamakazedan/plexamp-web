@@ -237,9 +237,29 @@ def track_detail(t):
     d = public(t)
     d['Media'] = [dict(t['Media'][0])]
     d['Media'][0]['Part'] = [dict(t['Media'][0]['Part'][0], Stream=[
-        {'streamType': 2, 'codec': 'flac', 'bitDepth': 24 if int(t['ratingKey']) % 2 else 16,
-         'samplingRate': 96000 if int(t['ratingKey']) % 2 else 44100, 'channels': 2}])]
+        {'id': int(t['ratingKey']) * 10 + 1, 'streamType': 2, 'codec': 'flac',
+         'bitDepth': 24 if int(t['ratingKey']) % 2 else 16,
+         'samplingRate': 96000 if int(t['ratingKey']) % 2 else 44100, 'channels': 2,
+         'loudness': -11.5, 'peak': 0.98}])]
     return d
+
+
+def loudness_levels(stream_id, n):
+    # A plausible loudness curve in dB: quiet intro, a loud body with some
+    # movement, a short breakdown and a fade-out.
+    rnd = random.Random(stream_id)
+    out = []
+    for i in range(n):
+        f = i / max(1, n - 1)
+        base = -10 - 6 * rnd.random()
+        if f < 0.04:
+            base -= 22 * (1 - f / 0.04)
+        if 0.72 < f < 0.745:
+            base = -48
+        if f > 0.94:
+            base -= 30 * (f - 0.94) / 0.06
+        out.append({'v': round(base, 2)})
+    return out
 
 
 # ---------------------------------------------------------------- media
@@ -395,6 +415,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.do_GET()
 
+    def do_PUT(self):
+        self.do_GET()
+
     def do_GET(self):  # noqa: C901 - a router in one place is easier to read here
         u = urlparse(self.path)
         p = u.path.rstrip('/') or '/'
@@ -488,6 +511,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(cover_png(q.get('url', ['/x/x/0'])[0].split('?')[0], q.get('width', ['300'])[0]), 'image/png')
         if p == '/services/ultrablur/colors':
             return self.send_json({'size': 1, 'UltraBlurColors': [{'topLeft': '2a2440', 'topRight': '5b4a8a', 'bottomRight': '332a52', 'bottomLeft': '15121f'}]})
+        if p.startswith('/library/streams/') and p.endswith('/levels'):
+            n = max(8, min(1000, int(q.get('subsample', ['128'])[0])))
+            sid = int(parts[2])
+            if (sid // 10) % 3 == 0:  # some tracks "not analysed" to exercise the plain bar
+                return self.send_json({'size': 0})
+            return self.send_json({'size': n, 'Level': loudness_levels(sid, n)})
+        if p == '/:/rate':
+            t = items.get(q.get('key', [''])[0])
+            rating = float(q.get('rating', ['-1'])[0])
+            if t is not None:
+                if rating < 0:
+                    t.pop('userRating', None)
+                else:
+                    t['userRating'] = rating
+            sys.stderr.write(f'  rate {q.get("key", [""])[0]} -> {rating}\n')
+            return self.send_json({})
         if p.startswith('/library/parts/'):
             return self.send_bytes(tone_wav(parts[2]), 'audio/wav')
         if p == '/:/timeline':

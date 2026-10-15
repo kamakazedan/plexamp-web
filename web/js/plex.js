@@ -231,6 +231,7 @@ export function normTrack(m) {
     bitrate: media.bitrate || null,
     partKey: part.key || null,
     viewCount: m.viewCount || 0,
+    userRating: m.userRating ?? null,
   };
 }
 
@@ -393,6 +394,31 @@ export class PlexServer {
 
   trackDetail(id) {
     return this.memo(`track:${id}`, () => this.metadata(id), 10 * 60000);
+  }
+
+  // Loudness over the length of a track (dB values), used to draw the
+  // waveform seek bar. Only present once the server has analysed loudness.
+  levels(streamId, subsample = 160) {
+    return this.memo(
+      `levels:${streamId}:${subsample}`,
+      async () => asArray((await this.get(`/library/streams/${streamId}/levels`, { subsample })).Level).map((l) => Number(l.v)),
+      60 * 60000,
+    );
+  }
+
+  // Star rating on Plex's 0–10 scale; null clears it.
+  async rate(id, rating) {
+    const url = this.url('/:/rate', { key: id, identifier: 'com.plexapp.plugins.library', rating: rating ?? -1 });
+    try {
+      await request(url, { method: 'PUT' });
+    } catch (err) {
+      // If the browser's preflight for PUT is refused, the server also
+      // accepts this command as a plain GET.
+      if (!err.network) throw err;
+      await request(url);
+    }
+    const hit = this.cache.get(`track:${id}`);
+    hit?.value.then((d) => d && (d.userRating = rating ?? undefined)).catch(() => {});
   }
 
   ultraBlur(thumb) {

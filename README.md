@@ -11,7 +11,7 @@ A self-hosted web player for Plex music libraries, laid out like the Plexamp mob
 - **Search**: live results, recent searches, top artists/albums/tracks, Sonic path (a journey between two tracks) and Shuffle library.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists and artist radio.
 - **Album and playlist pages**: play, shuffle, and a menu on every track (play next, add to queue, similar tracks, go to album or artist).
-- **Now Playing**: big artwork, scrubbing, shuffle and repeat, an "Up next" queue, the file format (e.g. FLAC 24-bit 96 kHz) and similar-tracks radio.
+- **Now Playing**: big artwork, a waveform seek bar drawn from your server's loudness analysis, star ratings that save to Plex, the file format and quality (e.g. FLAC, 44.1 / 16), an "Up next" queue, similar-tracks radio, shuffle, repeat and a sleep timer.
 - **Playback**: gapless hand-off between tracks, lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
 - **Album-colour backgrounds** from Plex's own artwork colours.
 - **Responsive**: bottom tabs and a mini player on phones; a sidebar and full transport bar on desktop. It can be added to a phone's home screen.

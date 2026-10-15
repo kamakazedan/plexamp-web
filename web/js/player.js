@@ -101,6 +101,9 @@ class Player extends EventTarget {
     this.timeQueued = false;
     this.unlocked = false;
     this.switching = false; // ignore the pause event fired while changing tracks
+    this.sleepAt = null; // epoch ms when the sleep timer pauses playback
+    this.sleepEndOfTrack = false;
+    this.sleepTimer = null;
 
     this.decks.forEach((d, i) => this.bind(d, i));
     this.applyVolume();
@@ -191,6 +194,7 @@ class Player extends EventTarget {
   }
 
   onTime() {
+    if (this.sleepAt && Date.now() >= this.sleepAt) this.fireSleep();
     this.queueTime();
     this.maybePreload();
     if (this.state === 'playing') this.report('playing');
@@ -348,6 +352,16 @@ class Player extends EventTarget {
 
   onEnded() {
     const track = this.current;
+    if (this.sleepEndOfTrack) {
+      // Sleep timer set to "end of this track": stop here, ready at the next one.
+      this.report('stopped', track, this.duration, true);
+      this.sleepEndOfTrack = false;
+      const ni = this.nextIndex();
+      if (ni !== -1) this.load(ni, { autoplay: false, reportPrev: false });
+      else this.setState('paused');
+      this.emit('sleep');
+      return;
+    }
     if (this.repeat === 'one') {
       this.report('stopped', track, this.duration, true);
       this.audio.currentTime = 0;
@@ -423,6 +437,34 @@ class Player extends EventTarget {
           s.load();
         }
       });
+  }
+
+  // ---------- sleep timer ----------
+
+  // minutes: a number, 'track' for the end of the current track, or null to cancel.
+  setSleep(minutes) {
+    clearTimeout(this.sleepTimer);
+    this.sleepAt = null;
+    this.sleepEndOfTrack = false;
+    if (minutes === 'track') {
+      this.sleepEndOfTrack = true;
+    } else if (minutes) {
+      this.sleepAt = Date.now() + minutes * 60000;
+      this.sleepTimer = setTimeout(() => this.fireSleep(), minutes * 60000);
+    }
+    this.emit('sleep');
+  }
+
+  get sleepActive() {
+    return !!(this.sleepAt || this.sleepEndOfTrack);
+  }
+
+  fireSleep() {
+    clearTimeout(this.sleepTimer);
+    this.sleepAt = null;
+    this.sleepEndOfTrack = false;
+    this.pause();
+    this.emit('sleep');
   }
 
   // ---------- volume ----------

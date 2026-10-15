@@ -76,6 +76,7 @@ function apply(colors) {
   root.setProperty('--tint-hi', tint.hi);
   root.setProperty('--tint-deep', tint.deep);
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#000000');
+  document.dispatchEvent(new Event('tintchange'));
 }
 
 // Colours for a track: the album's own UltraBlur colours if the server has
