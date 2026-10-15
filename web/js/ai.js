@@ -11,6 +11,7 @@
 // Plex server, and the model then chooses and orders tracks from that list.
 import { app } from './state.js';
 import { normTrack } from './plex.js';
+import { debugLog } from './debug.js';
 
 const FIRST_TOKEN_TIMEOUT = 240000; // loading a model and reading a long prompt can take a while
 const IDLE_TIMEOUT = 120000;
@@ -58,13 +59,21 @@ export const aiReady = () => !!aiTarget()?.model;
 let skipServerToken = false;
 
 async function send(target, path, init) {
-  let res = await fetch(`${target.base}${path}`, init);
-  if (res.status === 401 && target.kind === 'shared' && init.headers['X-Plex-Server-Token']) {
-    skipServerToken = true;
-    const headers = { ...init.headers };
-    delete headers['X-Plex-Server-Token'];
-    res = await fetch(`${target.base}${path}`, { ...init, headers });
+  const where = target.kind === 'shared' ? 'the shared model' : 'your own Ollama';
+  let res;
+  try {
+    res = await fetch(`${target.base}${path}`, init);
+    if (res.status === 401 && target.kind === 'shared' && init.headers['X-Plex-Server-Token']) {
+      skipServerToken = true;
+      const headers = { ...init.headers };
+      delete headers['X-Plex-Server-Token'];
+      res = await fetch(`${target.base}${path}`, { ...init, headers });
+    }
+  } catch (err) {
+    if (!init.signal?.aborted) debugLog('ai', `${init.method} ${path} on ${where} failed: ${err.message || 'network error'}`, 'warn');
+    throw err;
   }
+  if (!res.ok) debugLog('ai', `${init.method} ${path} on ${where} answered ${res.status}`, 'warn');
   return res;
 }
 

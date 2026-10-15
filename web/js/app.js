@@ -1,4 +1,5 @@
 // Entry point: wires the router, shell, player bar and backdrop together.
+import './debug.js';
 import { app, setSource, on } from './state.js';
 import { PlexServer, listServers, pickConnection } from './plex.js';
 import { route, startRouter, navigate, goTab, parseHash, refresh, dropCached, overlayDepth } from './router.js';
@@ -16,13 +17,17 @@ import { live } from './live.js';
 import './dj.js';
 import { settingsView, settingsPageView, sourceView } from './views/settings.js';
 import { loginView } from './views/login.js';
+import { togetherView } from './views/together.js';
+import { together } from './together.js';
+import { debugLog } from './debug.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
   { id: 'library', label: 'Library', icon: 'library' },
   { id: 'search', label: 'Search', icon: 'search' },
+  app.config.together && { id: 'together', label: 'Together', icon: 'together' },
   { id: 'settings', label: 'Settings', icon: 'settings' },
-];
+].filter(Boolean);
 
 // Views that need a signed-in user and a chosen library.
 const needsSource = (view) => async (ctx) => {
@@ -46,6 +51,8 @@ route('/search', needsSource(searchView), { tab: 'search' });
 route('/top/:kind', needsSource(topView), { tab: 'search' });
 route('/sonic-path', needsSource(sonicPathView), { tab: 'search' });
 route('/ai-playlist', needsSource(aiPlaylistView), { tab: 'search' });
+route('/together', needsSource(togetherView), { tab: 'together' });
+route('/together/:session', needsSource(togetherView), { tab: 'together' });
 route('/settings', needsSource(settingsView), { tab: 'settings' });
 route('/settings/:page', needsSource(settingsPageView), { tab: 'settings' });
 route('/login', (ctx) => (app.auth?.token && app.source ? navigate('/', { replace: true }) : loginView(ctx)), { bare: true });
@@ -73,9 +80,22 @@ function buildTabs(nav) {
         },
         icon(t.icon, 28),
         h('span.tab-label', null, t.label),
+        t.id === 'together' ? h('span.tab-dot', { hidden: true, 'aria-hidden': 'true' }) : null,
       ),
     ),
   );
+}
+
+// The Together tab shows a dot for invitations, and a live dot in a session.
+function togetherBadge() {
+  const dot = document.querySelector('#tabs .tab[data-tab=together] .tab-dot');
+  const tab = dot?.parentElement;
+  document.body.classList.toggle('in-together', together.active);
+  if (!dot) return;
+  const invited = together.invites.length > 0;
+  dot.hidden = !invited && !together.active;
+  dot.classList.toggle('live', together.active && !invited);
+  tab.setAttribute('aria-label', invited ? `Together, ${together.invites.length} invitation${together.invites.length > 1 ? 's' : ''}` : together.active ? 'Together, in a session' : 'Together');
 }
 
 function onRouteChange({ route: r, tab }) {
@@ -96,8 +116,10 @@ async function ensureConnection() {
   if (!src || !app.server) return;
   try {
     await app.server.identity({ timeout: 5000 });
+    debugLog('connection', `${src.serverName} answers at ${src.kind === 'proxy' ? 'this container’s /pms/ proxy' : `a ${src.kind} address`}`);
     return;
   } catch (err) {
+    debugLog('connection', `${src.serverName} didn’t answer (${err.status || 'network error'}); looking for another address`, 'warn');
     if (err.status === 401) {
       showBanner('Plex rejected the saved sign-in.', 'Sign in again', () => navigate('/settings/account'));
       return;
@@ -109,6 +131,7 @@ async function ensureConnection() {
       const srv = servers.find((s) => s.id === src.serverId);
       const conn = srv && (await pickConnection(srv));
       if (conn) {
+        debugLog('connection', `switched ${src.serverName} to a ${conn.kind} address`);
         setSource({ ...src, uri: conn.uri, kind: conn.kind, token: srv.token, connections: srv.connections });
         refresh(); // re-render the current page against the new address
         return;
@@ -153,7 +176,7 @@ function wireLiveUpdates() {
     refreshIfIdle((p) => p === '/' || p === '/library');
   });
   live.addEventListener('playlists', (e) => {
-    app.server?.cache.delete('playlists');
+    app.server?.forgetPlaylists();
     const ids = e.detail.ids.map(String);
     const affected = (p) => p === '/' || p === '/library/playlists' || (p.startsWith('/playlist/') && (!ids.length || ids.includes(p.split('/')[2])));
     dropCached(affected);
@@ -167,6 +190,7 @@ function wireLiveUpdates() {
 
 function keyboard() {
   document.addEventListener('keydown', (e) => {
+    if (app.settings.keyboardShortcuts === false) return;
     const t = e.target;
     const typing = t.closest?.('input, textarea, select, [contenteditable="true"]');
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -184,11 +208,35 @@ function keyboard() {
   });
 }
 
+// Text and grid sizes from Settings › Experience.
+const FONT_SCALE = { small: 0.9, normal: 1, large: 1.12, larger: 1.25 };
+const GRID_SCALE = { small: 0.78, normal: 1, large: 1.3 };
+function applyLook() {
+  const root = document.documentElement.style;
+  root.setProperty('--fs', String(FONT_SCALE[app.settings.fontSize] || 1));
+  root.setProperty('--grid', String(GRID_SCALE[app.settings.gridSize] || 1));
+  document.body.dataset.grid = app.settings.gridSize || 'normal';
+  document.body.classList.toggle('np-side-off', app.settings.sideBySide === false);
+  updateTitle();
+}
+
+// What's playing in the browser tab's title.
+function updateTitle() {
+  const t = player.current;
+  document.title = app.settings.tabTitle !== false && t ? `${player.isPlaying ? '▶ ' : ''}${t.title} · ${t.artist}` : 'plexamp-web';
+}
+
 function boot() {
   if (app.source && app.auth?.token) {
     app.server = new PlexServer({ uri: app.source.uri, token: app.source.token, name: app.source.serverName, id: app.source.serverId });
   }
+  applyLook();
+  on('settings', applyLook);
+  player.addEventListener('track', updateTitle);
+  player.addEventListener('state', updateTitle);
   buildTabs(document.getElementById('tabs'));
+  together.addEventListener('invites', togetherBadge);
+  together.addEventListener('change', togetherBadge);
   initPlayerBar(document.getElementById('player-bar'));
   initBackdrop(player);
   keyboard();
@@ -202,7 +250,11 @@ function boot() {
     player.restore();
     ensureConnection();
     live.start();
+    if (app.config.together) {
+      together.resume().finally(() => together.watch());
+    }
   }
+  on('source', () => app.config.together && !together.inviteTimer && together.watch());
 
   window.addEventListener('online', () => app.server && ensureConnection());
   window.addEventListener('unhandledrejection', (e) => {

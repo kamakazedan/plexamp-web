@@ -1,6 +1,7 @@
 #!/bin/sh
 # Runs before nginx starts (official nginx image entrypoint hook). Turns the
-# container's environment into the app's runtime config and nginx proxies:
+# container's environment into the app's runtime config and nginx proxies,
+# and starts the small service behind /api/:
 #
 #   PLEX_SERVER_URL     proxy one Plex server at /pms/ (WebSockets included)
 #   DISABLE_WEBSOCKETS  "true": the app never opens a WebSocket
@@ -10,25 +11,38 @@
 #                       that asks for one
 #   OLLAMA_AUTH         "plex" (default): only people signed in to Plex can use
 #                       the shared model; "off": anyone who can open the app
+#   PLAY_TOGETHER       "false" turns off Play Together (on by default)
+#   DEBUG               "true" writes extra detail to the container log, with
+#                       tokens and keys removed
 set -eu
 
 HTML_DIR="${HTML_DIR:-/usr/share/nginx/html}"
 CONF_DIR="${CONF_DIR:-/etc/nginx/conf.d}"
 RESOLV_CONF="${RESOLV_CONF:-/etc/resolv.conf}"
 HOSTS_FILE="${HOSTS_FILE:-/etc/hosts}"
+# Where the service lives and where it puts its socket (changed by tests).
+SERVICE_DIR="${SERVICE_DIR:-/opt/plexamp-web/server}"
+RUN_DIR="${RUN_DIR:-/run/plexamp-web}"
+SERVICE_SOCKET="$RUN_DIR/service.sock"
+NGINX_LOG_PORT="${NGINX_LOG_PORT:-5140}"
 
 fail() {
     echo "plexamp-web: $*" >&2
     exit 1
 }
 
+say() { echo "plexamp-web: $*"; }
+
 lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
 
+# truthy NAME VALUE [DEFAULT]: is the setting on?
 truthy() {
-    case "$(lower "${1:-}")" in
+    v="$(lower "${2:-}")"
+    [ -n "$v" ] || v="${3:-false}"
+    case "$v" in
         1 | true | yes | on) return 0 ;;
-        '' | 0 | false | no | off) return 1 ;;
-        *) fail "expected true or false, got: $1" ;;
+        0 | false | no | off) return 1 ;;
+        *) fail "$1: expected true or false, got: $2" ;;
     esac
 }
 
@@ -52,7 +66,7 @@ prepare_upstream() {
     url="${2%/}"
     case "$url" in
         http://* | https://*) ;;
-        *) fail "$var must start with http:// or https:// (got: $url)" ;;
+        *) fail "$var must start with http:// or https:// (got: $(safe_url "$url"))" ;;
     esac
     scheme="${url%%://*}"
     rest="${url#*://}"
@@ -61,8 +75,8 @@ prepare_upstream() {
     case "$rest" in */*) UP_PATH="/${rest#*/}" ;; esac
     UP_PATH="${UP_PATH%/}"
     printf '%s\n' "$hostport" | grep -Eq '^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?$' ||
-        fail "$var has an invalid host or port (got: $url)"
-    printf '%s\n' "$UP_PATH" | grep -Eq '^[A-Za-z0-9._~/-]*$' || fail "$var has an invalid path (got: $url)"
+        fail "$var has an invalid host or port (got: $(safe_url "$url")). Addresses can't include a user name or password."
+    printf '%s\n' "$UP_PATH" | grep -Eq '^[A-Za-z0-9._~/-]*$' || fail "$var has an invalid path (got: $(safe_url "$url"))"
     case "$hostport" in
         \[*\]:*) host="${hostport%%]*}]"; port="${hostport##*]:}" ;;
         \[*) host="$hostport"; port="" ;;
@@ -87,17 +101,59 @@ prepare_upstream() {
     UP_URL="$scheme://$address${port:+:$port}"
 }
 
+# A URL with any user:password@ hidden, for the log.
+safe_url() { printf '%s' "$1" | sed -E 's#^(([A-Za-z]+://)?)[^/@]*@#\1***@#'; }
+
 PMS_CONF="$CONF_DIR/pms-proxy.inc"
 AI_CONF="$CONF_DIR/ai-proxy.inc"
+API_CONF="$CONF_DIR/api.inc"
+LOG_CONF="$CONF_DIR/log.inc"
 
 # nginx won't start if it's asked to listen on IPv6 where the kernel has it
 # turned off, so drop that listener on such hosts.
 if [ ! -f "${IPV6_CHECK:-/proc/net/if_inet6}" ] && [ -w "$CONF_DIR/default.conf" ]; then
     sed -i '/listen \[::\]:/d' "$CONF_DIR/default.conf"
-    echo "plexamp-web: IPv6 isn't available here, so listening on IPv4 only"
+    say "IPv6 isn't available here, so listening on IPv4 only"
 fi
 CONFIG=""
 add_config() { CONFIG="${CONFIG:+$CONFIG, }$1"; }
+
+# ---------- debug mode and logging ----------
+
+DEBUG_ON=false
+if truthy DEBUG "${DEBUG:-}"; then DEBUG_ON=true; fi
+
+# Plex requests carry the sign-in token in the query string, so nginx never
+# logs query strings: the access log is off, and in debug mode it shows the
+# path only.
+if [ "$DEBUG_ON" = true ]; then
+    echo 'access_log /dev/stdout pw_debug;' >"$LOG_CONF"
+    # nginx's errors for proxied Plex requests quote the request (and so the
+    # token); in debug mode they go through the service, which removes it.
+    PMS_ERROR_LOG="error_log syslog:server=127.0.0.1:${NGINX_LOG_PORT},tag=nginx,nohostname warn;"
+else
+    echo 'access_log off;' >"$LOG_CONF"
+    PMS_ERROR_LOG="error_log stderr emerg;"
+fi
+
+# ---------- Play Together ----------
+
+TOGETHER=true
+if ! truthy PLAY_TOGETHER "${PLAY_TOGETHER:-}" true; then TOGETHER=false; fi
+
+PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
+case "$PLEX_TV" in
+    http://* | https://*) ;;
+    *) fail "PLEX_TV_URL must start with http:// or https:// (got: $PLEX_TV)" ;;
+esac
+
+# ---------- the service (/api/) ----------
+
+NODE_BIN="${NODE_BIN:-node}"
+SERVICE=false
+if command -v "$NODE_BIN" >/dev/null 2>&1 && [ -f "$SERVICE_DIR/index.js" ]; then
+    SERVICE=true
+fi
 
 # ---------- Plex ----------
 
@@ -108,40 +164,85 @@ if [ -n "${PLEX_SERVER_URL:-}" ]; then
     PMS_HOST="$UP_HOST"
     PMS_NAME="$UP_NAME"
     PMS_RESOLVER="$UP_RESOLVER"
-    cat >"$PMS_CONF" <<CONF
-location /pms/ {
+    PMS_AUTH=""
+    if [ "$SERVICE" = true ]; then
+        # The service checks requests only when the Plex server lets this
+        # container in without signing in (see server/index.js).
+        PMS_AUTH="auth_request /_pms_auth;"
+    fi
+    # Shared by both locations below.
+    PMS_PROXY="${PMS_ERROR_LOG}
     ${PMS_RESOLVER}
-    proxy_pass ${PMS_URL}\$pms_path;
     proxy_http_version 1.1;
     proxy_set_header Host ${PMS_HOST};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    # Set, not appended to: a browser can't pass Plex an address of its
+    # choosing (Plex treats some addresses as trusted).
+    proxy_set_header X-Forwarded-For \$remote_addr;
+    proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Cookie \"\";
     proxy_ssl_server_name on;
     proxy_ssl_name ${PMS_NAME};
     proxy_buffering off;
     proxy_request_buffering off;
     proxy_read_timeout 1h;
     proxy_send_timeout 1h;
-    client_max_body_size 0;
+    # The app only sends small requests to Plex.
+    client_max_body_size 1m;"
+    cat >"$PMS_CONF" <<CONF
+location /pms/ {
+    # Every request to Plex carries a token; refuse the rest here.
+    if (\$pms_has_token = 0) { return 401; }
+    ${PMS_AUTH}
+    proxy_pass ${PMS_URL}\$pms_path;
+    ${PMS_PROXY}
+}
+# The playlists and segments of a stream Plex converts are fetched from
+# addresses inside the stream's session, without a token (the session's
+# own id is the key), so these pass without one. They go on as nginx
+# matched them (the normalised path), so a path that only looks like one of
+# these can't reach anything else.
+location ~ ^/pms/(audio|music)/:/transcode/universal/session/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+$ {
+    proxy_pass ${PMS_URL}\$pms_uri\$is_args\$args;
+    ${PMS_PROXY}
 }
 CONF
+    if [ "$SERVICE" = true ]; then
+        cat >>"$PMS_CONF" <<CONF
+location = /_pms_auth {
+    internal;
+    ${PMS_ERROR_LOG}
+    proxy_pass http://unix:${SERVICE_SOCKET}:/api/internal/pms-auth;
+    proxy_method GET;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header Cookie "";
+    proxy_set_header Upgrade "";
+    # \$args would be the subrequest's own (empty) query string.
+    proxy_set_header X-Original-URI \$request_uri;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 20s;
+}
+CONF
+    fi
     add_config 'serverProxy: "pms/"'
-    echo "plexamp-web: proxying /pms/ to $PLEX_SERVER_URL"
+    say "proxying /pms/ to $(safe_url "$PLEX_SERVER_URL")"
 else
     : >"$PMS_CONF"
 fi
 
 # ---------- WebSockets ----------
 
-if truthy "${DISABLE_WEBSOCKETS:-}"; then
+if truthy DISABLE_WEBSOCKETS "${DISABLE_WEBSOCKETS:-}"; then
     add_config 'websockets: false'
-    echo "plexamp-web: WebSockets turned off; live updates use an event stream or polling"
+    say "WebSockets turned off; live updates use an event stream or polling"
 fi
 
 # ---------- Ollama ----------
 
+AI_AUTH=none
 if [ -n "${OLLAMA_URL:-}" ]; then
     prepare_upstream OLLAMA_URL "$OLLAMA_URL"
     AI_URL="$UP_URL$UP_PATH"
@@ -156,35 +257,18 @@ if [ -n "${OLLAMA_URL:-}" ]; then
     if [ -n "$KEY" ]; then AUTHZ="\"Bearer $KEY\""; fi
 
     case "$(lower "${OLLAMA_AUTH:-plex}")" in
-        plex | on | true | yes | 1) AUTH=plex ;;
-        off | none | false | no | 0) AUTH=off ;;
+        plex | on | true | yes | 1) AI_AUTH=plex ;;
+        off | none | false | no | 0) AI_AUTH=off ;;
         *) fail "OLLAMA_AUTH must be plex or off (got: $OLLAMA_AUTH)" ;;
     esac
 
     AUTH_LINE=""
-    AUTH_TLS=""
-    if [ "$AUTH" = plex ]; then
+    if [ "$AI_AUTH" = plex ]; then
+        # Checked by the service; if it isn't running, nginx refuses AI
+        # requests rather than letting them through unchecked.
         AUTH_LINE="auth_request /_ai_auth;"
-        if [ -n "$PMS_URL" ]; then
-            # Allowed: anyone whose token works on the Plex server above.
-            AUTH_DESC="people with access to the Plex server"
-            AUTH_TARGET="${PMS_URL}/library/sections?X-Plex-Container-Size=0"
-            AUTH_TOKEN='$ai_server_token'
-            AUTH_HOST="$PMS_HOST"
-            AUTH_NAME="$PMS_NAME"
-            AUTH_RESOLVER="$PMS_RESOLVER"
-        else
-            # Allowed: anyone signed in to a Plex account.
-            AUTH_DESC="anyone signed in to Plex"
-            AUTH_TARGET="https://plex.tv/api/v2/user"
-            AUTH_TOKEN='$http_x_plex_token'
-            AUTH_HOST="plex.tv"
-            AUTH_NAME="plex.tv"
-            AUTH_RESOLVER="resolver $(nameserver) valid=300s ipv6=off;"
-            AUTH_TLS="proxy_ssl_verify on;
-    proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
-    proxy_ssl_verify_depth 4;"
-        fi
+        if [ -n "$PMS_URL" ]; then AUTH_DESC="people with access to the Plex server"; else AUTH_DESC="anyone signed in to Plex"; fi
+        [ "$SERVICE" = true ] || say "warning: the sign-in check for the shared AI model isn't available (no Node.js), so AI requests will be refused" >&2
     else
         AUTH_DESC="anyone who can open the app"
     fi
@@ -208,6 +292,7 @@ location = /ollama/api/$1 {
     proxy_set_header X-Plex-Token "";
     proxy_set_header X-Plex-Server-Token "";
     proxy_set_header Origin "";
+    proxy_set_header Cookie "";
     proxy_ssl_server_name on;
     proxy_ssl_name ${AI_NAME};
 $3
@@ -223,37 +308,125 @@ CONF
     proxy_read_timeout 600s;
     proxy_send_timeout 600s;'
         echo 'location ^~ /ollama/ { return 404; }'
-        if [ "$AUTH" = plex ]; then
+        if [ "$AI_AUTH" = plex ]; then
             cat <<CONF
 location = /_ai_auth {
     internal;
-    ${AUTH_RESOLVER}
-    set \$ai_auth_target "${AUTH_TARGET}";
-    proxy_pass \$ai_auth_target;
+    proxy_pass http://unix:${SERVICE_SOCKET}:/api/internal/ai-auth;
     # Subrequests inherit the original method (POST for chat); the check is a GET.
     proxy_method GET;
     proxy_pass_request_body off;
     proxy_set_header Content-Length "";
-    proxy_set_header Origin "";
     proxy_set_header Cookie "";
-    proxy_set_header Host ${AUTH_HOST};
-    proxy_set_header Accept "application/json";
-    proxy_set_header X-Plex-Token ${AUTH_TOKEN};
-    proxy_set_header X-Plex-Product "plexamp-web";
-    proxy_set_header X-Plex-Client-Identifier "plexamp-web-ai-proxy";
-    proxy_ssl_server_name on;
-    proxy_ssl_name ${AUTH_NAME};
-    ${AUTH_TLS}
-    proxy_connect_timeout 10s;
-    proxy_read_timeout 15s;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 30s;
 }
 CONF
         fi
     } >"$AI_CONF"
     add_config "ai: { proxy: \"ollama/\", model: \"$MODEL\" }"
-    echo "plexamp-web: proxying /ollama/ to $OLLAMA_URL (model: ${MODEL:-not set}; allowed: $AUTH_DESC)"
+    say "proxying /ollama/ to $(safe_url "$OLLAMA_URL") (model: ${MODEL:-not set}; allowed: $AUTH_DESC)"
 else
     echo 'location ^~ /ollama/ { return 404; }' >"$AI_CONF"
 fi
 
+# ---------- /api/ ----------
+
+if [ "$SERVICE" = true ]; then
+    cat >"$API_CONF" <<CONF
+location ^~ /api/internal/ { return 404; }
+location /api/ {
+    proxy_pass http://unix:${SERVICE_SOCKET};
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Cookie "";
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_buffering off;
+    proxy_read_timeout 60s;
+    client_max_body_size 512k;
+}
+CONF
+    if [ "$TOGETHER" = true ]; then add_config 'together: true'; fi
+    if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
+else
+    echo 'location ^~ /api/ { return 404; }' >"$API_CONF"
+    if [ "$TOGETHER" = true ]; then say "Play Together needs Node.js, which isn't installed here, so it's off"; fi
+    TOGETHER=false
+fi
+say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
+
 printf 'window.PW_CONFIG = { %s };\n' "$CONFIG" >"$HTML_DIR/config.js"
+
+# ---------- start the service ----------
+
+if [ "$SERVICE" = true ]; then
+    mkdir -p "$RUN_DIR"
+    json() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+    cat >"$RUN_DIR/service.json" <<JSON
+{
+  "socket": "$(json "$SERVICE_SOCKET")",
+  "together": $TOGETHER,
+  "debug": $DEBUG_ON,
+  "aiAuth": "$AI_AUTH",
+  "plexServerUrl": "$(json "${PLEX_SERVER_URL:-}")",
+  "plexTvUrl": "$(json "$PLEX_TV")",
+  "nginxLogPort": $NGINX_LOG_PORT,
+  "user": "${SERVICE_USER:-nginx}"
+}
+JSON
+    chmod 600 "$RUN_DIR/service.json"
+    rm -f "$SERVICE_SOCKET"
+    # Restarted if it ever stops. nginx runs as PID 1, so when the container
+    # stops this goes with it.
+    (
+        set +e
+        while :; do
+            "$NODE_BIN" "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null
+            code=$?
+            [ -f "$RUN_DIR/stop" ] && exit 0
+            echo "plexamp-web: the service stopped (exit $code); restarting it in 2 seconds" >&2
+            sleep 2
+        done
+    ) &
+    echo "$!" >"$RUN_DIR/service-loop.pid"
+    # Give it a moment so the first requests don't arrive before it's ready.
+    for _ in $(seq 1 30); do
+        [ -S "$SERVICE_SOCKET" ] && break
+        sleep 0.1
+    done
+    [ -S "$SERVICE_SOCKET" ] || say "the service is still starting"
+fi
+
+# ---------- debug mode: show the settings and check connections ----------
+
+if [ "$DEBUG_ON" = true ]; then
+    shown() { if [ -n "${1:-}" ]; then echo "set"; else echo "not set"; fi; }
+    say "debug mode is on. Settings:"
+    say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
+    say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
+    say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
+    say "  PLAY_TOGETHER=$TOGETHER  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  config.js: $(cat "$HTML_DIR/config.js")"
+    # Checked in the background so a slow or missing server doesn't hold up
+    # start-up. Only status codes are printed.
+    check() { # name url
+        code="$(wget -q -S -O /dev/null -T 8 "$2" 2>&1 | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\/[0-9.]+$/ && $(i + 1) ~ /^[0-9][0-9][0-9]$/) c = $(i + 1) } END { print c }')"
+        if [ -n "$code" ]; then
+            say "check: $1 answered with HTTP $code"
+        else
+            say "check: couldn't reach $1 ($(safe_url "$2")) from inside the container. Check the address, and that the container can reach it (network, firewall, DNS)."
+        fi
+    }
+    (
+        sleep 1
+        if [ -n "${PLEX_SERVER_URL:-}" ]; then
+            check "Plex server (PLEX_SERVER_URL)" "${PLEX_SERVER_URL%/}/identity"
+        fi
+        if [ -n "${OLLAMA_URL:-}" ]; then
+            check "Ollama (OLLAMA_URL)" "${OLLAMA_URL%/}/api/version"
+        fi
+        if [ "$TOGETHER" = true ] || [ "$AI_AUTH" = plex ]; then
+            check "plex.tv (for Play Together and sign-in checks)" "${PLEX_TV%/}/api/v2/ping"
+        fi
+    ) &
+fi

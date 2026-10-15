@@ -16,7 +16,7 @@ import {
   fmt,
 } from '../ui.js';
 import { albumCard, artistCard, trackRow, collectionCard } from '../components.js';
-import { playAlbum, playArtist, playPlaylist, artistRadio, albumMenu, playlistMenu, playList } from '../actions.js';
+import { playAlbum, playArtist, playPlaylist, playCollection, artistRadio, albumMenu, playlistMenu, playList } from '../actions.js';
 
 function actionButtons(buttons) {
   return h(
@@ -34,6 +34,41 @@ function actionButtons(buttons) {
 }
 
 const year = (m) => m.year || (m.originallyAvailableAt || '').slice(0, 4) || null;
+const kHz = (hz) => (hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
+
+// The album's best-known tracks (Plex's play counts from Last.fm), for the
+// "popular" badge: up to three, and only clear favourites.
+function popularIds(tracks) {
+  if (app.settings.popularTracks === false || tracks.length < 4) return new Set();
+  const counted = tracks.filter((t) => t.ratingCount > 0).sort((a, b) => b.ratingCount - a.ratingCount);
+  if (counted.length < 2) return new Set();
+  const top = counted[0].ratingCount;
+  return new Set(counted.slice(0, 3).filter((t) => t.ratingCount >= top * 0.3).map((t) => t.id));
+}
+
+// "FLAC 24/96" style badge; bit depth and sample rate come from a track's
+// stream details.
+function codecBadge(tracks) {
+  if (app.settings.codecBadges === false) return null;
+  const codecs = [...new Set(tracks.map((t) => t.codec).filter(Boolean))];
+  if (!codecs.length) return null;
+  const badge = h('span.codec-badge', null, codecs.length === 1 ? fmt.codec(codecs[0]) : 'Mixed formats');
+  if (codecs.length === 1) {
+    app.server
+      .trackDetail(tracks[0].id)
+      .then((d) => {
+        const a = (d?.Media?.[0]?.Part?.[0]?.Stream || []).find((x) => x.streamType === 2);
+        if (!a?.bitDepth || !a.samplingRate) return;
+        badge.textContent = `${fmt.codec(codecs[0])} ${a.bitDepth}/${kHz(a.samplingRate)}`;
+        if (a.bitDepth > 16 || a.samplingRate > 48000) {
+          badge.classList.add('hires');
+          badge.title = 'High resolution';
+        }
+      })
+      .catch(() => {});
+  }
+  return badge;
+}
 
 // ---------- Album ----------
 
@@ -46,8 +81,9 @@ export async function albumView({ el, params }) {
   const head = backHeader(album.title, { collapse: true, actions: iconButton('more', 'More options', () => albumMenu(album)) });
   const title = h('h1.hero-title', null, album.title);
   const genre = (album.Genre || [])[0]?.tag;
-  const codecs = [...new Set(tracks.map((t) => t.codec).filter(Boolean))];
-  const meta = [year(album), genre, codecs.length === 1 ? fmt.codec(codecs[0]) : null].filter(Boolean).join(', ');
+  const meta = [year(album), genre].filter(Boolean).join(', ');
+  const badge = codecBadge(tracks);
+  const popular = popularIds(tracks);
 
   el.append(
     head,
@@ -60,7 +96,7 @@ export async function albumView({ el, params }) {
         null,
         title,
         album.parentRatingKey ? h('a.hero-link', { href: `#/artist/${album.parentRatingKey}` }, album.parentTitle) : h('div.hero-link', null, album.parentTitle),
-        meta ? h('div.hero-meta', null, meta) : null,
+        meta || badge ? h('div.hero-meta', null, meta, badge) : null,
         actionButtons([
           { icon: 'play', label: 'Play', primary: true, onClick: () => playAlbum(album, { tracks }) },
           { icon: 'shuffle', label: 'Shuffle', onClick: () => playAlbum(album, { tracks, shuffle: true }) },
@@ -83,6 +119,7 @@ export async function albumView({ el, params }) {
         number: t.index ?? i + 1,
         subtitle: t.artist && t.artist !== t.albumArtist ? t.artist : '',
         onPlay: () => playAlbum(album, { tracks, start: i }),
+        popular: popular.has(t.id),
       }),
     );
   });
@@ -277,7 +314,18 @@ export async function collectionView({ el, params }) {
       'section.hero.hero-album',
       null,
       art(meta.thumb || meta.composite, { size: 480, cls: 'hero-art', fallback: 'list' }),
-      h('div.hero-info', null, title, h('div.hero-meta', null, fmt.count(items.length, 'item', 'items'))),
+      h(
+        'div.hero-info',
+        null,
+        title,
+        h('div.hero-meta', null, fmt.count(items.length, 'item', 'items')),
+        items.length
+          ? actionButtons([
+              { icon: 'play', label: 'Play', primary: true, onClick: () => playCollection(meta) },
+              { icon: 'shuffle', label: 'Shuffle', onClick: () => playCollection(meta, { shuffle: true }) },
+            ])
+          : null,
+      ),
     ),
   );
   collapseWhenHidden(head, title);

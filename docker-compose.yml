@@ -17,6 +17,11 @@ services:
       OLLAMA_URL: ""          # e.g. http://192.168.1.20:11434 or http://host.docker.internal:11434
       OLLAMA_MODEL: ""        # e.g. llama3.1:8b
       OLLAMA_AUTH: "plex"     # "off" lets anyone who can open the app use the model
+      # Play Together (listen in sync with Plex friends) is on unless this is "false".
+      PLAY_TOGETHER: "true"
+      # "true" writes extra detail to the container log for troubleshooting
+      # (tokens and keys are always removed). Turn it off again afterwards.
+      DEBUG: ""
     # Needed on Linux to reach Ollama running on this host as host.docker.internal.
     extra_hosts:
       - "host.docker.internal:host-gateway"

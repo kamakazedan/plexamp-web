@@ -2,14 +2,21 @@
 // ("UltraBlur"); we paint them as a soft gradient behind the whole app and
 // derive the player-bar tint from them.
 import { app, on } from './state.js';
-import { ultraBlurOf } from './plex.js';
+import { ultraBlurOf, cleanColors } from './plex.js';
 
 const DEFAULT = { topLeft: '1c2233', topRight: '2b3752', bottomRight: '1e2638', bottomLeft: '131722' };
 const albumColors = new Map();
 let layer = 0;
 let lastKey = null;
 
-const hex = (c) => `#${String(c || '000000').replace(/^#/, '')}`;
+// Colours are checked to be plain hex values before they reach CSS.
+const hex = (c) => {
+  const v = String(c || '').replace(/^#/, '');
+  return /^[0-9a-f]{6}$/i.test(v) ? `#${v}` : '#000000';
+};
+
+// A URL for CSS url("..."), with anything that could end the string escaped.
+const cssUrl = (u) => `url("${String(u).replace(/["\\\n\r]/g, (ch) => encodeURIComponent(ch))}")`;
 
 function toRgb(c) {
   const v = hex(c).slice(1);
@@ -56,15 +63,20 @@ function gradient(c) {
   ].join(', ');
 }
 
-function apply(colors) {
+// Background styles: "gradient" paints the album's colours, "artwork" a
+// blurred copy of the cover, "plain" nothing at all.
+function apply(colors, artPath) {
   const c = app.settings.tintBackground && colors ? colors : DEFAULT;
-  const key = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft].join();
+  const style = app.settings.backgroundStyle || 'gradient';
+  const art = style === 'artwork' && artPath && app.server ? app.server.art(artPath, 480) : '';
+  const key = [style, art, c.topLeft, c.topRight, c.bottomRight, c.bottomLeft].join();
   if (key === lastKey) return;
   lastKey = key;
   const layers = document.querySelectorAll('#backdrop .ub');
   const next = layers[layer ^ 1];
   const bg = gradient(c);
-  next.style.background = bg;
+  next.classList.toggle('ub-art', !!art);
+  next.style.background = style === 'plain' ? 'var(--bg)' : art ? `center / cover no-repeat ${cssUrl(art)}, ${hex(c.bottomLeft)}` : bg;
   next.classList.add('on');
   layers[layer].classList.remove('on');
   layer ^= 1;
@@ -100,6 +112,7 @@ async function colorsFor(track) {
       offline = !!err.network;
     }
   }
+  colors = cleanColors(colors);
   if (!colors) colors = hashColors(track.album || track.title);
   if (!offline) albumColors.set(key, colors); // try the server again next time if it was unreachable
   return colors;
@@ -128,7 +141,7 @@ export function initBackdrop(player) {
     const mine = ++token;
     if (!track || !app.server) return apply(null);
     const colors = await colorsFor(track);
-    if (mine === token) apply(colors);
+    if (mine === token) apply(colors, track.thumb);
   };
   player.addEventListener('track', () => update(player.current));
   on('settings', () => {

@@ -98,7 +98,32 @@ const ICONS = {
   dj: S('<rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="10" cy="12" r="4"/><circle cx="10" cy="12" r="0.9" fill="currentColor"/><path d="M17 8.2v5.3l-2.2 2.1"/>'),
   sparkle: S('<path d="M12 3.5l1.7 4.9 4.8 1.7-4.8 1.7L12 16.7l-1.7-4.9L5.5 10.1l4.8-1.7zM18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/>'),
   live: S('<path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>'),
+  together: S('<circle cx="9" cy="8.6" r="3.2"/><path d="M3.4 19.2a5.6 5.6 0 0 1 11.2 0"/><circle cx="16.9" cy="9.4" r="2.6"/><path d="M15.4 14.3a4.6 4.6 0 0 1 5.2 4.9"/>'),
+  thumbUp: S('<path d="M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5"/>'),
+  thumbDown: `<g transform="rotate(180 12 12)">${S('<path d="M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5"/>')}</g>`,
+  starHalf: `${F('<path d="M12 3.8 9.55 8.85 4 9.6l4.05 3.85-1 5.5L12 16.3z"/>')}${S('<path d="M12 3.8l2.45 5.05 5.55.75-4.05 3.85 1 5.5L12 16.3l-4.95 2.65 1-5.5L4 9.6l5.55-.75z"/>')}`,
+  flame: S('<path d="M12 21.2a6.2 6.2 0 0 0 6.2-6.2c0-3.6-2.6-5.7-3.7-8.7-.3 2.3-1.6 3.4-2.7 3.9.2-3-1-5.6-3.4-7 .2 3.3-2.6 5.8-2.6 9.8a6.2 6.2 0 0 0 6.2 8.2z"/>'),
+  headphones: S('<path d="M4.5 15.5v-3a7.5 7.5 0 0 1 15 0v3"/><rect x="3.5" y="14" width="4.2" height="6.2" rx="1.6"/><rect x="16.3" y="14" width="4.2" height="6.2" rx="1.6"/>'),
+  grip: F('<circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/>'),
+  speed: S('<path d="M4.6 17.6a8.6 8.6 0 1 1 14.8 0"/><path d="m12 13.4 4.2-4.6"/><circle cx="12" cy="13.4" r="1.4" fill="currentColor"/>'),
+  link: S('<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>'),
+  sliders: S('<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.1"/><circle cx="9" cy="17" r="2.1"/>'),
+  monitor: S('<rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M9 20h6M12 16.5V20"/>'),
+  plus: S('<path d="M12 5v14M5 12h14"/>'),
+  arrowUp: S('<path d="M12 19V5M6 11l6-6 6 6"/>'),
+  arrowDown: S('<path d="M12 5v14M6 13l6 6 6-6"/>'),
+  home2: S('<path d="M4 10.2 12 4l8 6.2V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M9 14h6"/>'),
+  player: S('<rect x="4.5" y="3.5" width="15" height="17" rx="2.5"/><rect x="7.5" y="6.5" width="9" height="7" rx="1"/><path d="M8 17.2h8"/>'),
 };
+
+// Skip back / forward by a number of seconds, drawn with the number inside.
+export function skipIcon(direction, seconds, size = 26) {
+  const n = Math.max(1, Math.min(999, Math.round(Number(seconds) || 0)));
+  const arc = direction < 0 ? '<path d="M5.2 9A7.8 7.8 0 1 1 4.2 12.6"/><path d="M4.6 4.6V9h4.4"/>' : '<path d="M18.8 9A7.8 7.8 0 1 0 19.8 12.6"/><path d="M19.4 4.6V9H15"/>';
+  const t = document.createElement('template');
+  t.innerHTML = `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${S(arc)}<text x="12" y="15.2" text-anchor="middle" font-size="${n > 99 ? 6 : 7.4}" font-weight="700" fill="currentColor">${n}</text></svg>`;
+  return t.content.firstChild;
+}
 
 export function icon(name, size = 24, cls = '') {
   const t = document.createElement('template');
@@ -309,6 +334,55 @@ export function row({ href, onClick, image, round, fallback, lead, title, subtit
   return h(`div.row${cls ? `.${cls}` : ''}`, null, kids);
 }
 
+// A person's picture, or the first letter of their name if there isn't one
+// (or it doesn't load).
+export function avatar(url, name, cls = '') {
+  const badge = () => h(`span.badge-circle${cls ? `.${cls}` : ''}`, { 'aria-hidden': 'true' }, (String(name || '?').trim().charAt(0) || '?').toUpperCase());
+  if (!url || !/^https:\/\//.test(url)) return badge();
+  const img = h(`img.avatar${cls ? `.${cls}` : ''}`, { src: url, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' });
+  img.addEventListener('error', () => img.replaceWith(badge()), { once: true });
+  return img;
+}
+
+// ---------- settings rows ----------
+
+// An on/off setting.
+export function toggleRow({ title, subtitle, checked, onChange }) {
+  const input = h('input.switch', { type: 'checkbox', role: 'switch', checked, onchange: (e) => onChange(e.target.checked) });
+  return h('label.row.toggle-row', null, h('div.row-main', null, h('div.row-title', null, title), subtitle ? h('div.row-sub', null, subtitle) : null), input);
+}
+
+// A setting with a few choices: shows the current one, and a sheet to pick.
+// options: [[value, label, description?]]
+export function choiceRow({ title, subtitle, options, value, onChange }) {
+  let current = value;
+  const valueEl = h('span.row-value');
+  const paint = () => (valueEl.textContent = (options.find(([v]) => v === current) || [null, ''])[1]);
+  paint();
+  const el = row({
+    title,
+    subtitle,
+    right: valueEl,
+    chevron: true,
+    onClick: () =>
+      sheet({
+        title,
+        actions: options.map(([v, label, description]) => ({
+          label,
+          description,
+          checked: v === current,
+          onSelect: () => {
+            current = v;
+            paint();
+            onChange(v);
+          },
+        })),
+      }),
+  });
+  el.classList.add('choice-row');
+  return el;
+}
+
 export function iconTile(name) {
   return h('span.tile', null, icon(name, 20));
 }
@@ -362,7 +436,7 @@ export function toast(message, { action, onAction, timeout = 3500 } = {}) {
 // actions: [{ icon, label, description, onSelect, checked, danger, muted }]
 // (falsy entries are skipped). variant 'dialog' shows a centred card with a
 // Close button instead of a bottom sheet.
-export function sheet({ title, subtitle, image, round, actions = [], content, variant = 'sheet', closeLabel = 'Close' }) {
+export function sheet({ title, subtitle, image, round, actions = [], content, variant = 'sheet', closeLabel = 'Close', onClose }) {
   const root = document.getElementById('overlay-root');
   let closed = false;
   const dialog = variant === 'dialog';
@@ -411,6 +485,7 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
     scrim.classList.remove('open');
     setTimeout(() => scrim.remove(), 250);
     document.removeEventListener('keydown', onKey);
+    onClose?.();
   };
   const onKey = (e) => e.key === 'Escape' && popOverlay();
   document.addEventListener('keydown', onKey);

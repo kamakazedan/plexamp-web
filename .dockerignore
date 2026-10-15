@@ -1,5 +1,8 @@
 .git
 .github
 dev
+tests
 *.md
 docker-compose.yml
+server/test.js
+web/vendor

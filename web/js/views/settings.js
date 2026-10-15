@@ -1,9 +1,11 @@
 import { app, saveSettings, setSource, signOut, proxyUri } from '../state.js';
 import { APP_INFO, PlexServer, listServers, pickConnection, clientId, canPlayCodec, canPlayHlsNatively } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached } from '../router.js';
-import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce } from '../ui.js';
+import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, chat, parseReply, describeAIError } from '../ai.js';
+import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
+import { together } from '../together.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -13,12 +15,7 @@ function badge(text) {
   return h('span.badge-circle', { 'aria-hidden': 'true' }, (text || '?').trim().charAt(0).toUpperCase());
 }
 
-function avatar(url, name) {
-  if (!url) return badge(name);
-  const img = h('img.avatar', { src: url, alt: '', loading: 'lazy' });
-  img.addEventListener('error', () => img.replaceWith(badge(name)), { once: true });
-  return img;
-}
+const avatar = (url, name) => personAvatar(url, name);
 
 export async function settingsView({ el }) {
   const src = app.source;
@@ -31,8 +28,8 @@ export async function settingsView({ el }) {
       null,
       row({ href: '/settings/account', lead: lead('user'), title: 'Account', subtitle: auth.username || 'Signed in', right: avatar(auth.thumb, auth.username) }),
       row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: badge(src?.serverName) }),
-      row({ href: '/settings/appearance', lead: lead('palette'), title: 'Appearance', subtitle: 'Colours and backgrounds' }),
-      row({ href: '/settings/playback', lead: lead('speaker'), title: 'Playback', subtitle: 'Quality, gapless and play history' }),
+      row({ href: '/settings/experience', lead: lead('sliders'), title: 'Experience', subtitle: 'Appearance, player, Home screen and more' }),
+      row({ href: '/settings/playback', lead: lead('speaker'), title: 'Playback', subtitle: 'Streaming quality and gapless playback' }),
       row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'Server address and diagnostics' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
@@ -41,7 +38,20 @@ export async function settingsView({ el }) {
 }
 
 export async function settingsPageView(ctx) {
-  const pages = { account: accountView, source: sourceView, appearance: appearanceView, playback: playbackView, ai: aiView, debug: debugView, about: aboutView };
+  const pages = {
+    account: accountView,
+    source: sourceView,
+    experience: experienceView,
+    appearance: appearanceView,
+    player: playerSettingsView,
+    skip: skipTimesView,
+    desktop: desktopView,
+    home: homeEditorView,
+    playback: playbackView,
+    ai: aiView,
+    debug: debugView,
+    about: aboutView,
+  };
   const view = pages[ctx.params.page];
   if (!view) throw Object.assign(new Error('Not found'), { status: 404 });
   return view(ctx);
@@ -267,29 +277,6 @@ export async function openSourceSheet() {
   });
 }
 
-// ---------- Appearance ----------
-
-function toggleRow({ title, subtitle, checked, onChange }) {
-  const input = h('input.switch', { type: 'checkbox', role: 'switch', checked, onchange: (e) => onChange(e.target.checked) });
-  return h('label.row.toggle-row', null, h('div.row-main', null, h('div.row-title', null, title), subtitle ? h('div.row-sub', null, subtitle) : null), input);
-}
-
-function appearanceView({ el }) {
-  el.append(
-    backHeader('Appearance', { fallback: '/settings' }),
-    h(
-      'div.rows',
-      null,
-      toggleRow({
-        title: 'Colour from artwork',
-        subtitle: 'Tint the background and player with colours from the album that’s playing.',
-        checked: app.settings.tintBackground,
-        onChange: (v) => saveSettings({ tintBackground: v }),
-      }),
-    ),
-  );
-}
-
 // ---------- Playback ----------
 
 const QUALITIES = [
@@ -314,12 +301,6 @@ function playbackView({ el }) {
         subtitle: 'Loads the next track early so albums flow without a pause.',
         checked: app.settings.gapless,
         onChange: (v) => saveSettings({ gapless: v }),
-      }),
-      toggleRow({
-        title: 'Report plays to Plex',
-        subtitle: 'Updates play counts, recent plays and what’s playing on your Plex dashboard.',
-        checked: app.settings.reportPlays,
-        onChange: (v) => saveSettings({ reportPlays: v }),
       }),
     ),
   );
@@ -399,6 +380,8 @@ function debugView({ el }) {
       h('div.kv', null, h('div.kv-k', null, 'Response time'), status),
       h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
+      kv('Play Together', !app.config.together ? 'Off on this player' : together.active ? `In a session (${together.status === 'live' ? 'connected' : 'reconnecting'})` : 'On'),
+      kv('Debug mode', app.config.debug ? 'On: problems are written to the container’s log (without tokens)' : 'Off'),
       kv('Client ID', clientId()),
       kv('App version', APP_INFO.version),
     ),

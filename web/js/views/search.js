@@ -1,4 +1,4 @@
-import { app } from '../state.js';
+import { app, searchScope } from '../state.js';
 import { normTrack, store } from '../plex.js';
 import { replaceQuery, navigate } from '../router.js';
 import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, sheet, debounce, fmt } from '../ui.js';
@@ -60,7 +60,7 @@ export async function searchView({ el, query }) {
     const mine = controller;
     body.replaceChildren(spinner('Searching'));
     try {
-      const res = await app.server.search(q.trim(), app.source.sectionKey, { signal: mine.signal, limit: 12 });
+      const res = await app.server.search(q.trim(), searchScope(), { signal: mine.signal, limit: 12 });
       if (mine.signal.aborted) return;
       body.replaceChildren(results(res, q));
     } catch (err) {
@@ -101,7 +101,7 @@ function results(res, q) {
     frag.append(h('section.block', null, sectionHeader('Tracks'), list));
   }
   add('Playlists', res.playlist.slice(0, 6), (m) => wrap(m, playlistRow(m)));
-  if (!frag.children.length) frag.append(emptyState(`Nothing in ${app.source.sectionTitle} matches “${q}”.`));
+  if (!frag.children.length) frag.append(emptyState(`Nothing in ${searchScope() ? app.source.sectionTitle : 'your libraries'} matches “${q}”.`));
   return frag;
 }
 
@@ -194,7 +194,8 @@ export async function topView({ el, params }) {
   const cfg = TOP[params.kind];
   if (!cfg) throw new Error('Unknown list.');
   el.append(backHeader(cfg.title, { fallback: '/search' }));
-  const { items } = await app.server.list(app.source.sectionKey, cfg.type, { sort: 'viewCount:desc', size: 100 });
+  const size = [10, 25, 50, 100].includes(Number(app.settings.topListSize)) ? Number(app.settings.topListSize) : 25;
+  const { items } = await app.server.list(app.source.sectionKey, cfg.type, { sort: 'viewCount:desc', size });
   const played = items.filter((m) => m.viewCount);
   if (!played.length) {
     el.append(emptyState('Nothing played yet. Play counts build up as you listen.'));

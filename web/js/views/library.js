@@ -1,4 +1,4 @@
-import { app } from '../state.js';
+import { app, playlistScope } from '../state.js';
 import { normTrack } from '../plex.js';
 import { navigate, parseHash } from '../router.js';
 import { h, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, emptyState, fmt } from '../ui.js';
@@ -36,7 +36,7 @@ export async function libraryView({ el }) {
       optional: true,
     },
     { title: 'Tracks', href: '/browse/tracks', count: () => s.count(sec, 10), unit: ['track', 'tracks'] },
-    { title: 'Playlists', href: '/library/playlists', count: async () => (await s.playlists()).length, unit: ['playlist', 'playlists'] },
+    { title: 'Playlists', href: '/library/playlists', count: async () => (await s.playlists(playlistScope())).length, unit: ['playlist', 'playlists'] },
     { title: 'Artist collections', href: '/browse/collections?subtype=artist&title=Artist%20collections', count: () => bySubtype('artist'), unit: ['collection', 'collections'], optional: true },
     { title: 'Album collections', href: '/browse/collections?subtype=album&title=Album%20collections', count: () => bySubtype('album'), unit: ['collection', 'collections'], optional: true },
     { title: 'Track collections', href: '/browse/collections?subtype=track&title=Track%20collections', count: () => bySubtype('track'), unit: ['collection', 'collections'], optional: true },
@@ -173,7 +173,7 @@ function renderer(type, title) {
 
 export async function playlistsView({ el }) {
   el.append(backHeader('Playlists', { fallback: '/library' }));
-  const pls = await app.server.playlists();
+  const pls = await app.server.playlists(playlistScope());
   if (!pls.length) {
     el.append(emptyState('No music playlists on this server yet. Playlists you make in Plex show up here.'));
     return;

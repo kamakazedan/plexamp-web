@@ -2,6 +2,7 @@
 // Plex accepts its X-Plex-* values as query parameters, so every request is
 // sent without custom headers. That keeps browser requests "simple" and
 // avoids CORS preflights against the server.
+import { debugLog, safeUrl } from './debug.js';
 
 export const APP_INFO = { product: 'plexamp-web', version: '0.1.0' };
 
@@ -66,6 +67,19 @@ function osName() {
   return 'Web';
 }
 
+// The name this player shows in Plex (its dashboard, "Now playing" lists).
+let deviceName = '';
+export function setDeviceName(name) {
+  deviceName = String(name || '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 60);
+}
+
+export function defaultDeviceName() {
+  return `${APP_INFO.product} (${browserName()})`;
+}
+
 function plexParams(token) {
   const browser = browserName();
   const params = {
@@ -76,7 +90,7 @@ function plexParams(token) {
     // real browser the way Plex's own web app does.
     'X-Plex-Platform': browser,
     'X-Plex-Device': osName(),
-    'X-Plex-Device-Name': `${APP_INFO.product} (${browser})`,
+    'X-Plex-Device-Name': deviceName || `${APP_INFO.product} (${browser})`,
   };
   if (token) params['X-Plex-Token'] = token;
   return params;
@@ -100,17 +114,19 @@ async function request(url, { method = 'GET', timeout = 20000, signal } = {}) {
   try {
     let res;
     try {
-      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal });
+      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal, credentials: 'omit' });
     } catch (cause) {
       const err = new Error(signal?.aborted ? 'aborted' : 'network');
       err.network = !signal?.aborted;
       err.aborted = !!signal?.aborted;
       err.cause = cause;
+      if (err.network) debugLog('plex', `${method} ${safeUrl(url)} failed: ${ctrl.signal.aborted ? `no answer within ${timeout / 1000} s` : 'network error (unreachable, blocked, or refused by CORS)'}`, 'warn');
       throw err;
     }
     if (!res.ok) {
       const err = new Error(`HTTP ${res.status}`);
       err.status = res.status;
+      debugLog('plex', `${method} ${safeUrl(url)} answered ${res.status}`, 'warn');
       throw err;
     }
     const text = await res.text();
@@ -232,13 +248,30 @@ export function normTrack(m) {
     partKey: part.key || null,
     viewCount: m.viewCount || 0,
     userRating: m.userRating ?? null,
+    ratingCount: m.ratingCount || 0,
+    lastViewedAt: m.lastViewedAt || null,
   };
 }
 
-export function ultraBlurOf(item) {
-  const c = asArray(item?.UltraBlurColors)[0];
-  return c && c.topLeft ? c : null;
+// Plex's four corner colours for artwork, checked to be hex colours (they
+// end up in CSS).
+const HEX = /^#?[0-9a-f]{6}$/i;
+export function cleanColors(c) {
+  if (!c) return null;
+  const keys = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'];
+  return keys.every((k) => HEX.test(String(c[k] || ''))) ? Object.fromEntries(keys.map((k) => [k, String(c[k]).replace('#', '')])) : null;
 }
+
+export function ultraBlurOf(item) {
+  return cleanColors(asArray(item?.UltraBlurColors)[0]);
+}
+
+// Listings that may be opened from a link (see byPath).
+export function isListingPath(path) {
+  return typeof path === 'string' && /^\/library\/sections\/\d+\/all(\?[^#]*)?$/.test(path) && !path.includes('..');
+}
+
+export const TAG_FIELDS = new Set(['genre', 'style', 'mood', 'decade', 'year', 'studio', 'country']);
 
 // ---------- Plex Media Server ----------
 
@@ -251,8 +284,10 @@ export class PlexServer {
     this.cache = new Map();
   }
 
+  // The app's own X-Plex-* values (the token above all) come last, so no
+  // parameter from elsewhere, such as a filter in a link, can replace them.
   url(path, params = {}) {
-    return withParams(this.uri + path, { ...plexParams(this.token), ...params });
+    return withParams(this.uri + path, { ...params, ...plexParams(this.token) });
   }
 
   async get(path, params, opts) {
@@ -301,8 +336,11 @@ export class PlexServer {
     return mc.totalSize ?? mc.size ?? 0;
   }
 
-  // Page through any listing path the server hands us (e.g. a genre's fastKey).
+  // Page through a library listing the server handed us (e.g. a genre's
+  // fastKey). These paths can arrive in a link, so only library listings
+  // are accepted: a crafted link can't send the server anywhere else.
   async byPath(path, { start = 0, size = 60 } = {}) {
+    if (!isListingPath(path)) throw Object.assign(new Error('That isn’t a library listing.'), { status: 400 });
     const mc = await this.get(path, { 'X-Plex-Container-Start': start, 'X-Plex-Container-Size': size });
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0 };
   }
@@ -322,6 +360,9 @@ export class PlexServer {
 
   // Secondary listings: genre, style, mood, decade... filtered by item type.
   tags(section, field, type) {
+    if (!TAG_FIELDS.has(field) || !/^\d+$/.test(String(type)) || !/^\d+$/.test(String(section))) {
+      return Promise.reject(Object.assign(new Error('Unknown list.'), { status: 400 }));
+    }
     return this.memo(`tags:${section}:${field}:${type}`, async () =>
       asArray((await this.get(`/library/sections/${section}/${field}`, { type })).Directory),
     );
@@ -341,10 +382,15 @@ export class PlexServer {
     return { meta: asArray(meta.Metadata)[0] || null, items: asArray(items.Metadata) };
   }
 
-  playlists() {
-    return this.memo('playlists', async () =>
-      asArray((await this.get('/playlists', { playlistType: 'audio' })).Metadata),
+  // Music playlists; with a section, only those with music from it.
+  playlists(section) {
+    return this.memo(`playlists:${section || 'all'}`, async () =>
+      asArray((await this.get('/playlists', { playlistType: 'audio', sectionID: section || undefined })).Metadata),
     );
+  }
+
+  forgetPlaylists() {
+    for (const k of this.cache.keys()) if (k.startsWith('playlists:')) this.cache.delete(k);
   }
 
   async playlist(id) {
@@ -359,8 +405,9 @@ export class PlexServer {
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.leafCount ?? mc.size ?? 0 };
   }
 
+  // Searches one library, or every library on the server without one.
   async search(query, section, { signal, limit = 10 } = {}) {
-    const mc = await this.get('/hubs/search', { query, sectionId: section, limit }, { signal });
+    const mc = await this.get('/hubs/search', { query, sectionId: section || undefined, limit }, { signal });
     const out = { artist: [], album: [], track: [], playlist: [] };
     for (const hub of asArray(mc.Hub)) {
       if (out[hub.type]) out[hub.type] = asArray(hub.Metadata);
@@ -421,7 +468,7 @@ export class PlexServer {
   async createPlaylist(title, ids) {
     const uri = `server://${await this.machineId()}/com.plexapp.plugins.library/library/metadata/${ids.join(',')}`;
     const data = await request(this.url('/playlists', { type: 'audio', title, smart: 0, uri }), { method: 'POST' });
-    this.cache.delete('playlists');
+    this.forgetPlaylists();
     return asArray(data.MediaContainer?.Metadata)[0] || null;
   }
 
@@ -443,7 +490,7 @@ export class PlexServer {
   ultraBlur(thumb) {
     return this.memo(
       `ub:${thumb}`,
-      async () => asArray((await this.get('/services/ultrablur/colors', { url: thumb })).UltraBlurColors)[0] || null,
+      async () => cleanColors(asArray((await this.get('/services/ultrablur/colors', { url: thumb })).UltraBlurColors)[0]),
       60 * 60000,
     );
   }
@@ -462,9 +509,11 @@ export class PlexServer {
     return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true }).catch(() => {});
   }
 
+  // Artwork, always through the server's image transcoder, including images
+  // hosted elsewhere: the browser then only ever talks to the Plex server.
   art(path, size = 300) {
-    if (!path) return '';
-    if (/^https?:/.test(path)) return path;
+    if (!path || typeof path !== 'string') return '';
+    if (!path.startsWith('/') && !/^https?:\/\//i.test(path)) return '';
     return this.url('/photo/:/transcode', { width: size, height: size, minSize: 1, upscale: 1, url: path });
   }
 

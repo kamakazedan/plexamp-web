@@ -6,9 +6,11 @@
 #   pip install playwright && python -m playwright install --with-deps chromium
 #   docker build -t plexamp-web:test . && sh tests/run-browser-tests.sh plexamp-web:test [screenshot-dir]
 #
-# Two copies of the app run: one with a shared AI model and WebSockets
+# Three copies of the app run: one with a shared AI model and WebSockets
 # allowed (port 8081), one with DISABLE_WEBSOCKETS=true and no shared model
-# (port 8082). Both reach the mock Plex server through their /pms proxy.
+# (port 8082), and one with DEBUG=true (port 8083). All reach the mock Plex
+# server through their /pms proxy, and their service uses the mock for
+# plex.tv too (its accounts are needed for Play Together).
 set -eu
 
 IMAGE="${1:-plexamp-web:test}"
@@ -18,7 +20,7 @@ NET="pw-browser-$$"
 PY="python:3.12-alpine"
 
 cleanup() {
-    docker rm -f pwb-plex pwb-ollama pwb-ollama2 pwb-web pwb-web2 >/dev/null 2>&1 || true
+    docker rm -f pwb-plex pwb-ollama pwb-ollama2 pwb-web pwb-web2 pwb-web3 >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -34,7 +36,7 @@ mock() { # name port script args...
 
 wait_for() { # url
     for _ in $(seq 1 60); do
-        curl -s -o /dev/null "$1" && return 0
+        curl -sf -o /dev/null "$1" && return 0
         sleep 0.5
     done
     echo "timed out waiting for $1"
@@ -45,22 +47,43 @@ docker network create "$NET" >/dev/null
 mock pwb-plex 32400 mock-plex.py 32400 --quiet
 mock pwb-ollama 11434 mock-ollama.py --port 11434 --quiet
 mock pwb-ollama2 11435 mock-ollama.py --port 11435 --reject-think --quiet
-docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 \
+TV=PLEX_TV_URL=http://pwb-plex:32400
+docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e OLLAMA_URL=http://pwb-ollama:11434 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
-docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 \
+docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 -e "$TV" \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
+docker run -d --name pwb-web3 --network "$NET" -p 127.0.0.1:8083:80 -e "$TV" \
+    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DEBUG=true "$IMAGE" >/dev/null
 
-for url in "http://127.0.0.1:32400/identity?X-Plex-Token=t" http://127.0.0.1:11434/api/version \
-    http://127.0.0.1:11435/api/version http://127.0.0.1:8081/ http://127.0.0.1:8082/; do
+for url in "http://127.0.0.1:32400/identity" http://127.0.0.1:11434/api/version \
+    http://127.0.0.1:11435/api/version http://127.0.0.1:8081/api/health http://127.0.0.1:8082/api/health \
+    http://127.0.0.1:8083/api/health; do
     wait_for "$url"
 done
 
 status=0
-APP_URL=http://127.0.0.1:8081/ APP_URL_NOWS=http://127.0.0.1:8082/ MOCK_PLEX=http://127.0.0.1:32400 PLEX_LOGIN_URL= \
+APP_URL=http://127.0.0.1:8081/ APP_URL_NOWS=http://127.0.0.1:8082/ APP_URL_DEBUG=http://127.0.0.1:8083/ \
+    MOCK_PLEX=http://127.0.0.1:32400 PLEX_LOGIN_URL= \
     OLLAMA_DIRECT=http://127.0.0.1:11434 OLLAMA_NOTHINK=http://127.0.0.1:11435 \
     python3 "$ROOT/tests/browser_test.py" "$OUT" || status=$?
+
+# What the debug-mode container logged while the browser used it.
+log="$(docker logs pwb-web3 2>&1)"
+case "$log" in
+    *"plexamp-web browser"*"answered 404"*) echo "PASS debug: browser problems are in the container log" ;;
+    *) echo "FAIL debug: browser problems are in the container log"; status=1 ;;
+esac
+if printf '%s' "$log" | grep -Eq 'X-Plex-Token=t2?([^A-Za-z0-9_.~-]|$)'; then
+    echo "FAIL debug: a token reached the container log"
+    status=1
+else
+    echo "PASS debug: no tokens in the container log"
+fi
+
 if [ "$status" -ne 0 ]; then
-    echo "--- pwb-web log"
-    docker logs pwb-web 2>&1 | tail -40
+    for n in pwb-web pwb-web3; do
+        echo "--- $n log"
+        docker logs "$n" 2>&1 | tail -40
+    done
 fi
 exit "$status"

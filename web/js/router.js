@@ -6,7 +6,7 @@ const routes = [];
 const cache = new Map(); // history key -> { el, hash }
 const scrolls = new Map(); // history key -> scrollY
 const overlays = []; // close callbacks, top of stack last
-const tabRoots = { home: '/', library: '/library', search: '/search', settings: '/settings' };
+const tabRoots = { home: '/', library: '/library', search: '/search', together: '/together', settings: '/settings' };
 const tabLast = {};
 const CACHE_LIMIT = 16;
 
@@ -20,12 +20,16 @@ let onChange = () => {};
 
 const newKey = () => `${Date.now().toString(36)}.${seq++}`;
 
+// Route parameters come from the address bar, so they're held to what they
+// can legitimately be: ids are numbers, everything else plain words.
+const PARAM = { id: '(\\d+)', type: '(\\d+)' };
+
 export function route(pattern, view, opts = {}) {
   const keys = [];
   const rx = new RegExp(
     `^${pattern.replace(/\//g, '\\/').replace(/:(\w+)/g, (_, k) => {
       keys.push(k);
-      return '([^/]+)';
+      return PARAM[k] || '([A-Za-z0-9_-]+)';
     })}$`,
   );
   routes.push({ rx, keys, view, ...opts });
@@ -42,7 +46,7 @@ function match(path) {
     const m = path.match(r.rx);
     if (m) {
       const params = {};
-      r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])));
+      r.keys.forEach((k, i) => (params[k] = m[i + 1]));
       return { ...r, params };
     }
   }

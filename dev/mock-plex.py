@@ -8,17 +8,28 @@ short test tones) on the endpoints plexamp-web uses, with CORS enabled.
     python3 -m http.server 8080 -d web  # serves the app
 
 Then open http://127.0.0.1:8080, choose "Use a server address and token
-instead", and connect to http://127.0.0.1:32400 with any token (except "bad",
-which is refused).
+instead", and connect to http://127.0.0.1:32400 with the token "t".
+
+It also answers the plex.tv calls the container's service makes (point the
+service at it with PLEX_TV_URL). Three made-up accounts:
+
+    t    Dan, who owns this server
+    t2   Sam, a friend of Dan's with access to the server
+    t3   Alex, a friend of Dan's without access
+
+Like a real server it refuses other tokens, unless /__mock/config?open=1
+makes it behave like a server that lets this network in without signing in.
 
 Live notifications are sent over a WebSocket (/:/websockets/notifications)
 and an event stream (/:/eventsource/notifications), like a real server. For
 testing, these endpoints need no token:
 
-    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS
+    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1
         ws=0 refuses WebSockets (as a blocking proxy would), sse=0 refuses the
-        event stream, sse=silent accepts it but never sends anything
+        event stream, sse=silent accepts it but never sends anything; open=1
+        accepts any token
     /__mock/add-album?title=...   adds an album and announces it
+    /__mock/age?id=...&days=...   marks an album as last played that long ago
 
 Artwork needs Pillow (pip install pillow); without it, covers are blank.
 """
@@ -121,7 +132,8 @@ for ai, (artist_idx, title, year, pal, sub, fmt) in enumerate(ALBUMS):
         'ratingKey': k, 'key': f'/library/metadata/{k}/children', 'type': 'album', 'title': title,
         'titleSort': title.lower(), 'parentRatingKey': artist['ratingKey'], 'parentTitle': artist['title'],
         'parentThumb': artist['thumb'], 'thumb': f'/library/metadata/{k}/thumb/1', 'year': year,
-        'originallyAvailableAt': f'{year}-05-01', 'Genre': artist['Genre'][:1], 'studio': 'Harbour Records',
+        'originallyAvailableAt': f'{year}-05-01', 'Genre': artist['Genre'][:1],
+        'studio': ['Harbour Records', 'Harbour Records', 'Lantern Sound'][ai % 3],
         'addedAt': NOW - 86400 * (len(ALBUMS) - ai) * 9, 'viewCount': 0, 'leafCount': 0,
         'summary': f'{title} is the {year} release from {artist["title"]}. Recorded over a long winter, it is '
                    'patient, detailed and best heard start to finish. ' * 2,
@@ -169,13 +181,20 @@ for i, t in enumerate(random.sample(tracks, 25)):
     art_['lastViewedAt'] = max(art_.get('lastViewedAt', 0), t['lastViewedAt'])
 
 
-def make_playlist(title, members, smart=False, viewed=None):
+# Albums last played long ago, for "Haven't played in ...".
+for al in albums[9:12]:
+    if not al.get('lastViewedAt'):
+        al['lastViewedAt'] = NOW - 86400 * 200
+        al['viewCount'] = al.get('viewCount', 0) + 3
+
+
+def make_playlist(title, members, smart=False, viewed=None, section=SECTION):
     k = key()
     p = {
         'ratingKey': k, 'key': f'/playlists/{k}/items', 'type': 'playlist', 'playlistType': 'audio',
         'title': title, 'smart': smart, 'composite': f'/playlists/{k}/composite/1',
         'leafCount': len(members), 'duration': sum(m['duration'] for m in members),
-        'addedAt': NOW - 86400 * 40, 'updatedAt': NOW - 86400 * 3, '_items': members,
+        'addedAt': NOW - 86400 * 40, 'updatedAt': NOW - 86400 * 3, '_items': members, '_section': section,
     }
     if viewed:
         p['lastViewedAt'] = viewed
@@ -189,17 +208,21 @@ playlists = [
     make_playlist('Sunday morning', random.sample(tracks, 9)),
     make_playlist('Late night', random.sample(tracks, 14), viewed=NOW - 86400 * 9),
     make_playlist('Workout', random.sample(tracks, 11)),
+    make_playlist('Bedtime stories', random.sample(tracks, 4), section='3'),
 ]
 
 collections = []
-for title, subtype, members in [
-    ('Harbour Records', 'album', [a for a in albums if a['studio']][:5]),
+for i, (title, subtype, members) in enumerate([
+    ('Harbour Records', 'album', [a for a in albums if a['studio'] == 'Harbour Records'][:5]),
     ('Rainy day albums', 'album', albums[2:6]),
     ('Best of 2022', 'track', [t for t in tracks if items[t['parentRatingKey']]['year'] == 2022]),
-]:
+    ('Road trip', 'album', albums[7:11]),
+    ('Piano and strings', 'artist', [artists[2], artists[4]]),
+]):
     k = key()
     c = {'ratingKey': k, 'type': 'collection', 'subtype': subtype, 'title': title, 'childCount': len(members),
-         'thumb': members[0].get('thumb') or members[0].get('parentThumb'), '_items': members}
+         'thumb': members[0].get('thumb') or members[0].get('parentThumb'), '_items': members,
+         'addedAt': NOW - 86400 * (60 - i * 7), 'updatedAt': NOW - 86400 * (20 - i * 3)}
     items[k] = c
     collections.append(c)
 
@@ -219,8 +242,22 @@ def tag_dir(field, typ):
             for k, v in sorted(values.items())]
 
 
+UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800, 'mon': 2592000, 'y': 31536000}
+
+
+def when(value):
+    """A filter value as epoch seconds: a number, or relative like -30d or -6mon."""
+    import re
+    m = re.fullmatch(r'-(\d+)(mon|[smhdwy])', value)
+    if m:
+        return time.time() - int(m.group(1)) * UNITS[m.group(2)]
+    return float(value)
+
+
 def matches(it, field, value):
     values = value.split(',')
+    if field == 'studio':
+        return it.get('studio') in values
     if field == 'artist.id':
         return it.get('grandparentRatingKey') in values or it.get('parentRatingKey') in values
     if field.startswith('album.') and it.get('type') == 'track':
@@ -381,7 +418,7 @@ def tone_wav(rk):
 
 # ---------------------------------------------------------------- notifications
 
-MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0}
+MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False}
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
 listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
 listeners_lock = threading.Lock()
@@ -464,6 +501,46 @@ def add_album(title):
     LIBRARY_STATE['refreshing'] = False
     activity('ended', 'Scanning Music [Hi-Res]')
     return al
+
+
+# ---------------------------------------------------------------- plex.tv
+
+ACCOUNTS = {
+    't': {'id': 1001, 'uuid': 'a1001', 'username': 'dan', 'title': 'Dan', 'friendlyName': 'Dan', 'email': 'dan@example.com'},
+    't2': {'id': 1002, 'uuid': 'a1002', 'username': 'sam', 'title': 'Sam', 'friendlyName': 'Sam', 'email': 'sam@example.com'},
+    't3': {'id': 1003, 'uuid': 'a1003', 'username': 'alex', 'title': 'Alex', 'friendlyName': 'Alex', 'email': 'alex@example.com'},
+}
+# Tokens this server accepts: its owner's and a friend's it's shared with.
+SERVER_TOKENS = {'t': 'owned', 't2': 'shared'}
+FRIENDS = {'t': ['t2', 't3'], 't2': ['t', 't3'], 't3': ['t']}
+
+
+def pms_token_ok(token):
+    if MOCK['open']:
+        return bool(token) and token != 'bad'
+    return token in SERVER_TOKENS
+
+
+def server_resource(token, base):
+    return {
+        'name': "Dan's Test Server", 'product': 'Plex Media Server', 'provides': 'server',
+        'clientIdentifier': 'mock-server-1', 'owned': SERVER_TOKENS[token] == 'owned', 'accessToken': token,
+        'sourceTitle': None if SERVER_TOKENS[token] == 'owned' else 'Dan',
+        'connections': [{'protocol': 'http', 'address': '127.0.0.1', 'port': PORT, 'uri': base, 'local': True, 'relay': False}],
+    }
+
+
+def friends_xml(token):
+    from xml.sax.saxutils import quoteattr
+    rows = []
+    for ft in FRIENDS.get(token, []):
+        a = ACCOUNTS[ft]
+        # <Server> lists the requester's own servers shared with this friend.
+        shared = SERVER_TOKENS.get(token) == 'owned' and ft in SERVER_TOKENS
+        server = '<Server id="1" machineIdentifier="mock-server-1" name="Dan&apos;s Test Server" owned="1"/>' if shared else ''
+        rows.append(f'<User id="{a["id"]}" title={quoteattr(a["title"])} username={quoteattr(a["username"])} '
+                    f'thumb="https://plex.tv/users/{a["uuid"]}/avatar?c=1" home="0" restricted="0">{server}</User>')
+    return f'<?xml version="1.0" encoding="UTF-8"?>\n<MediaContainer friendlyName="myPlex" size="{len(rows)}">{"".join(rows)}</MediaContainer>'
 
 
 # ---------------------------------------------------------------- HTTP
@@ -617,6 +694,31 @@ class Handler(BaseHTTPRequestHandler):
                     listeners.remove(me)
         self.close_connection = True
 
+    def send_text(self, text, ctype, status=200):
+        body = text.encode()
+        self.send_response(status)
+        self.cors()
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def plex_tv(self, p, token):
+        account = ACCOUNTS.get(token)
+        if p == '/api/v2/ping':
+            return self.send_text('{"pong": true}', 'application/json')
+        if not account:
+            return self.send_text('{"errors": [{"code": 1001, "message": "User could not be authenticated"}]}', 'application/json', 401)
+        if p == '/api/v2/user':
+            return self.send_text(json.dumps(dict(account, thumb=f'https://plex.tv/users/{account["uuid"]}/avatar?c=1')), 'application/json')
+        if p == '/api/v2/resources':
+            base = f'http://{self.headers.get("Host") or f"127.0.0.1:{PORT}"}'
+            res = [server_resource(token, base)] if token in SERVER_TOKENS else []
+            return self.send_text(json.dumps(res), 'application/json')
+        if p == '/api/users':
+            return self.send_text(friends_xml(token), 'application/xml')
+        return self.send_text('{}', 'application/json', 404)
+
     def do_GET(self):  # noqa: C901 - a router in one place is easier to read here
         u = urlparse(self.path)
         p = u.path.rstrip('/') or '/'
@@ -630,13 +732,40 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['sse'] = q['sse'][0]
             if 'ping' in q:
                 MOCK['ping'] = float(q['ping'][0])
+            if 'open' in q:
+                MOCK['open'] = q['open'][0] in ('1', 'on', 'true')
             return self.send_json(dict(MOCK, listeners=len(listeners)))
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
+        if p == '/__mock/age':  # an album (and its tracks) last played this many days ago
+            al = items.get(q.get('id', [''])[0])
+            if not al or al['type'] != 'album':
+                return self.not_found()
+            when_ = int(time.time()) - int(q.get('days', ['200'])[0]) * 86400
+            for it in [al] + [t for t in tracks if t['parentRatingKey'] == al['ratingKey']]:
+                it['lastViewedAt'] = when_
+                it['viewCount'] = max(1, it.get('viewCount', 0))
+            return self.send_json({'size': 1, 'Metadata': [public(al)]})
 
         token = q.get('X-Plex-Token', [''])[0] or self.headers.get('X-Plex-Token', '')
-        if (not token or token == 'bad') and not p.startswith('/library/parts'):
+        if p.startswith('/api/'):
+            return self.plex_tv(p, token)
+        if p == '/identity':  # answered without signing in, like a real server
+            return self.send_json({'machineIdentifier': 'mock-server-1', 'version': '1.41.0', 'claimed': True})
+        # A converted stream's playlists live inside its session and are
+        # fetched without a token, as on a real server. (The segments here
+        # aren't real audio; this is for testing the proxy.)
+        if p.startswith('/audio/:/transcode/universal/session/'):
+            if p.endswith('/index.m3u8'):
+                return self.send_text('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\n00000.ts\n#EXT-X-ENDLIST\n',
+                                      'application/vnd.apple.mpegurl')
+            return self.send_bytes(b'\x47' + b'\xff' * 187, 'video/mp2t')
+        if p == '/audio/:/transcode/universal/start.m3u8' and pms_token_ok(token):
+            sid = q.get('transcodeSessionId', ['mock'])[0].replace('/', '')
+            return self.send_text(f'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS="mp4a.40.2"\nsession/{sid}/base/index.m3u8\n',
+                                  'application/vnd.apple.mpegurl')
+        if not pms_token_ok(token) and not p.startswith('/library/parts'):
             return self.send_json({'error': 'Unauthorized'}, 401)
         if p == '/:/websockets/notifications' and self.headers.get('Upgrade', '').lower() == 'websocket':
             return self.websocket()
@@ -667,16 +796,19 @@ class Handler(BaseHTTPRequestHandler):
                 for f, vals in q.items():
                     if f in ('type', 'sort', 'group') or f.startswith('X-Plex'):
                         continue
-                    if f.endswith('>>'):
-                        fld = f[:-2]
-                        res = [x for x in res if (x.get(fld) or 0) > float(vals[0])]
+                    if f.endswith('>>') or f.endswith('<<'):
+                        fld, limit = f[:-2], when(vals[0])
+                        if f.endswith('>>'):
+                            res = [x for x in res if (x.get(fld) or 0) > limit]
+                        else:  # before: items never played don't match
+                            res = [x for x in res if x.get(fld) and x[fld] < limit]
                         continue
                     res = [x for x in res if matches(x, f, vals[0])]
                 return self.page(sort_items(res, q.get('sort', [None])[0]), q)
             if sub in ('genre', 'style', 'mood', 'decade'):
                 return self.send_json({'size': 0, 'Directory': tag_dir(sub, typ)})
             if sub == 'collections':
-                return self.page(collections, q)
+                return self.page(sort_items(collections, q.get('sort', [None])[0]), q)
             if sub == 'computePath':
                 a, b = q.get('startID', [''])[0], q.get('endID', [''])[0]
                 path = [items[a]] + random.sample(tracks, 8) + [items[b]]
@@ -724,7 +856,8 @@ class Handler(BaseHTTPRequestHandler):
             timeline(pl['ratingKey'], 15, 5, section='-1')
             return self.send_json({'size': 1, 'Metadata': [public(pl)]})
         if p == '/playlists':
-            return self.page(playlists, {'X-Plex-Container-Size': ['500']})
+            sec = q.get('sectionID', [None])[0]
+            return self.page([pl for pl in playlists if not sec or pl['_section'] == sec], {'X-Plex-Container-Size': ['500']})
         if p == '/activities':
             return self.send_json({'size': 0})
         if p.startswith('/playlists/'):

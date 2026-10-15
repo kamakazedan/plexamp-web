@@ -62,6 +62,22 @@ export const playPlaylist = (pl, { shuffle = false, start = 0 } = {}) =>
     playList(tracks, 0, ctx(pl.title, `/playlist/${pl.ratingKey}`), { shuffle });
   });
 
+// A collection's music: its own tracks, or the tracks of its albums or
+// artists (artist collections play shuffled, so it isn't one artist at a time).
+export const playCollection = (c, { shuffle = false } = {}) =>
+  guard(async () => {
+    const s = app.server;
+    const { items } = await s.collection(c.ratingKey);
+    const albums = items.filter((m) => m.type === 'album').slice(0, 40);
+    const artists = items.filter((m) => m.type === 'artist').slice(0, 15);
+    const [fromAlbums, fromArtists] = await Promise.all([
+      Promise.all(albums.map((a) => s.children(a.ratingKey).catch(() => []))),
+      Promise.all(artists.map((a) => s.allLeaves(a.ratingKey).catch(() => []))),
+    ]);
+    const list = [...items, ...fromAlbums.flat(), ...fromArtists.flat()].filter((m) => m.type === 'track').map(normTrack);
+    playList(list, 0, ctx(c.title, `/collection/${c.ratingKey}`), { shuffle: shuffle || artists.length > 0 });
+  });
+
 // Artist radio: the artist's popular tracks mixed with popular tracks from
 // sonically similar artists (falls back to the artist's own catalogue).
 export const artistRadio = (artist) =>
@@ -104,6 +120,36 @@ export const shuffleLibrary = () =>
   guard(async () => {
     const list = (await app.server.randomTracks(app.source.sectionKey, 150)).map(normTrack);
     playList(list, 0, ctx(app.source.sectionTitle, '/library'));
+  });
+
+// ---------- stations (Home › Stations) ----------
+
+// Tracks you've played least: what you haven't heard yet comes first.
+export const deepCutsRadio = () =>
+  guard(async () => {
+    const { items } = await app.server.list(app.source.sectionKey, 10, { sort: 'viewCount:asc', size: 400 });
+    const unplayed = items.filter((m) => !m.viewCount);
+    const pool = unplayed.length >= 20 ? unplayed : items;
+    playList(shuffleArray(pool).slice(0, 100).map(normTrack), 0, ctx('Deep cuts radio', null));
+  });
+
+// A random decade from this library, and tracks from its albums.
+export const timeTravelRadio = () =>
+  guard(async () => {
+    const s = app.server;
+    const sec = app.source.sectionKey;
+    const decades = (await s.tags(sec, 'decade', 9).catch(() => [])).filter((d) => /^\d{4}$/.test(String(d.key)));
+    if (!decades.length) return shuffleLibrary();
+    const d = decades[Math.floor(Math.random() * decades.length)];
+    const { items } = await s.list(sec, 10, { sort: 'random', size: 100, filters: { 'album.decade': d.key } });
+    playList(items.map(normTrack), 0, ctx(`Time travel: the ${String(d.key).slice(2)}s`, `/browse/albums?${new URLSearchParams({ decade: d.key, title: `The ${d.title || `${d.key}s`}` })}`));
+  });
+
+export const randomAlbum = () =>
+  guard(async () => {
+    const { items } = await app.server.list(app.source.sectionKey, 9, { sort: 'random', size: 1 });
+    if (!items.length) return toast('This library has no albums.');
+    await playAlbum(items[0]);
   });
 
 export const sonicPath = (from, to) =>

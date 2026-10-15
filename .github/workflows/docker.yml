@@ -21,14 +21,17 @@ jobs:
           node-version: 22
       - name: Check JavaScript syntax
         run: |
-          for f in web/js/*.js web/js/views/*.js; do
+          for f in web/js/*.js web/js/views/*.js server/*.js; do
             node --experimental-default-type=module --check "$f"
           done
+      - name: Test the service (sessions, sync, cleaning, redaction)
+        run: node --test server/test.js
       - name: Check scripts
         run: |
           sh -n docker/40-plexamp-web.sh
           sh -n docker/test-container.sh
           sh -n tests/run-browser-tests.sh
+          sh -n dev/fetch-hls.sh
           python3 -m py_compile dev/mock-plex.py dev/mock-ollama.py tests/browser_test.py
       - name: Build the image
         run: docker build -t plexamp-web:test .

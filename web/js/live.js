@@ -8,6 +8,7 @@
 // "Without WebSockets" in Settings > Connection, skips the WebSocket.
 import { app, on } from './state.js';
 import { store } from './plex.js';
+import { debugLog } from './debug.js';
 
 const WS_OPEN_TIMEOUT = 8000;
 const FIRST_EVENT_TIMEOUT = 25000; // Plex pings the event stream every 10 s
@@ -427,6 +428,7 @@ class LiveUpdates extends EventTarget {
   setMode(mode) {
     if (mode === this.mode) return;
     this.mode = mode;
+    if (mode !== 'connecting') debugLog('live', `live updates: ${LIVE_MODES[mode] || mode}${this.note ? ` (${this.note})` : ''}`);
     this.emit('mode', { mode, note: this.note });
   }
 

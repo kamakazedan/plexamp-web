@@ -1,14 +1,22 @@
 // The player bar (mini player on phones, full transport on desktop) and the
 // full-screen Now Playing view with its "Up next" queue.
-import { app } from './state.js';
+import { app, on } from './state.js';
 import { player } from './player.js';
 import { pushOverlay, popOverlay, describeError, navigate } from './router.js';
-import { h, icon, iconButton, art, fmt, toast, sheet } from './ui.js';
+import { h, icon, iconButton, art, avatar, skipIcon, fmt, toast, sheet } from './ui.js';
 import { trackMenu } from './actions.js';
 import { trackRow } from './components.js';
 import { guestDJ, DJS, djName } from './dj.js';
 import { aiReady } from './ai.js';
 import { live } from './live.js';
+import { together } from './together.js';
+
+const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+
+// Things that work differently in a Play Together session.
+function sessionOnly(what) {
+  toast(`${what} isn’t available while listening together.`);
+}
 
 const setIcon = (btn, name, size) => {
   btn.replaceChildren(icon(name, size));
@@ -25,11 +33,19 @@ function setPlayButton(btn, size) {
 function setModeButtons(shuffleBtn, repeatBtn, size) {
   shuffleBtn.classList.toggle('on', player.shuffle);
   shuffleBtn.setAttribute('aria-pressed', String(player.shuffle));
+  const shuffleLabel = player.remote ? 'Shuffle up next for everyone' : 'Shuffle';
+  shuffleBtn.setAttribute('aria-label', shuffleLabel);
+  shuffleBtn.title = shuffleLabel;
   setIcon(repeatBtn, player.repeat === 'one' ? 'repeatOne' : 'repeat', size);
   repeatBtn.classList.toggle('on', player.repeat !== 'off');
-  const label = { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat];
+  repeatBtn.classList.toggle('unavailable', !!player.remote);
+  const label = player.remote ? 'Repeat (not available while listening together)' : { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat];
   repeatBtn.setAttribute('aria-label', label);
   repeatBtn.title = label;
+}
+
+function cycleRepeat() {
+  if (!player.cycleRepeat()) sessionOnly('Repeat');
 }
 
 function scrubber(cls = '') {
@@ -97,7 +113,7 @@ export function initPlayerBar(root) {
   const dPrev = iconButton('prev', 'Previous track', () => player.prev(), { size: 22 });
   const dPlay = iconButton('play', 'Play', () => player.toggle(), { size: 22, cls: 'pb-dplay' });
   const dNext = iconButton('next', 'Next track', () => player.next(), { size: 22 });
-  const dRepeat = iconButton('repeat', 'Repeat', () => player.cycleRepeat(), { size: 20, cls: 'mode-btn' });
+  const dRepeat = iconButton('repeat', 'Repeat', cycleRepeat, { size: 20, cls: 'mode-btn' });
   const scrub = scrubber('.pb-scrub');
   const vol = volumeControl();
 
@@ -143,7 +159,21 @@ export function initPlayerBar(root) {
   player.addEventListener('state', onState);
   player.addEventListener('time', onTime);
   player.addEventListener('mode', onMode);
-  player.addEventListener('playerror', (e) => toast(`Can't play “${e.detail.track.title}”.${player.nextIndex() !== -1 ? ' Skipping.' : ''}`));
+  player.addEventListener('playerror', (e) => {
+    const { track, remote } = e.detail;
+    if (remote) {
+      toast(`Can’t play “${track.title}” on this device. You’ll hear the next track with everyone.`, { action: 'Try again', onAction: () => together.listen(), timeout: 7000 });
+    } else {
+      toast(`Can't play “${track.title}”.${player.nextIndex() !== -1 ? ' Skipping.' : ''}`);
+    }
+  });
+  // "Show full player": open Now Playing when something new starts.
+  player.addEventListener('started', () => app.settings.showFullPlayer && setTimeout(() => openNowPlaying(), 50));
+  const onSettings = () => {
+    vol.el.hidden = app.settings.showVolume === false;
+  };
+  on('settings', onSettings);
+  onSettings();
   onTrack();
   onState();
   onTime();
@@ -244,8 +274,22 @@ function waveform() {
     const played = getComputedStyle(document.documentElement).getPropertyValue('--tint-hi').trim() || '#a3b65a';
     const mid = ht / 2;
     const x = Math.max(0, Math.min(w, progress * w));
+    const style = app.settings.seekbarStyle || 'smooth';
 
-    if (levels) {
+    if (levels && style === 'bars') {
+      // One rounded bar per few pixels, sampled from the loudness curve.
+      const step = 4;
+      const n = Math.max(8, Math.floor(w / step));
+      const half = mid - 1;
+      for (let i = 0; i < n; i++) {
+        const v = levels[Math.min(levels.length - 1, Math.floor((i / n) * levels.length))];
+        const bh = Math.max(2, v * half * 2);
+        const bx = i * step;
+        ctx.fillStyle = bx + step / 2 <= x ? played : 'rgba(255, 255, 255, 0.28)';
+        roundedBar(ctx, bx, mid - bh / 2, step - 1.5, bh, 1);
+        ctx.fill();
+      }
+    } else if (levels && style === 'smooth') {
       const n = levels.length;
       const half = mid - 1;
       const shape = new Path2D();
@@ -331,25 +375,50 @@ function waveform() {
   };
 }
 
-// Five stars mapped onto Plex's 0–10 rating. Tapping the current rating clears it.
-function ratingStars() {
+// Ratings on Plex's 0–10 scale, shown the way Settings › Experience says:
+// five stars, five stars in halves, thumbs up/down, or not at all. Tapping
+// the current rating clears it.
+function ratingControl() {
   let value = 0;
-  const buttons = [1, 2, 3, 4, 5].map((n) =>
-    h('button.star', { type: 'button', 'aria-label': `Rate ${n} star${n > 1 ? 's' : ''}`, onclick: () => choose(n) }, icon('star', 24)),
-  );
-  const paint = () =>
-    buttons.forEach((b, i) => {
-      b.classList.toggle('on', i < value);
-      b.setAttribute('aria-pressed', String(i === value - 1));
-    });
-  async function choose(n) {
+  const el = h('div.np-stars', { role: 'group', 'aria-label': 'Rating' });
+
+  function paint() {
+    const mode = app.settings.ratingSystem || 'stars';
+    el.hidden = mode === 'off';
+    el.dataset.mode = mode;
+    if (mode === 'thumbs') {
+      const up = h('button.thumb', { type: 'button', 'aria-label': 'Thumbs up', 'aria-pressed': String(value >= 6), onclick: () => choose(value >= 6 ? 0 : 10) }, icon('thumbUp', 24));
+      const down = h('button.thumb', { type: 'button', 'aria-label': 'Thumbs down', 'aria-pressed': String(value > 0 && value <= 4), onclick: () => choose(value > 0 && value <= 4 ? 0 : 2) }, icon('thumbDown', 24));
+      up.classList.toggle('on', value >= 6);
+      down.classList.toggle('on', value > 0 && value <= 4);
+      el.replaceChildren(down, up);
+      return;
+    }
+    const halves = mode === 'half';
+    el.replaceChildren(
+      ...[1, 2, 3, 4, 5].map((n) => {
+        const full = value >= n * 2;
+        const half = !full && halves && value === n * 2 - 1;
+        const b = h(`button.star${full ? '.on' : ''}${half ? '.half' : ''}`, { type: 'button', 'aria-label': `Rate ${n} star${n > 1 ? 's' : ''}`, 'aria-pressed': String(full && value < n * 2 + (halves ? 1 : 2)) }, icon(half ? 'starHalf' : 'star', 24));
+        b.addEventListener('click', (e) => {
+          // In halves, the left half of a star is half a star.
+          const r = b.getBoundingClientRect();
+          const target = halves && e.clientX && e.clientX < r.left + r.width / 2 ? n * 2 - 1 : n * 2;
+          choose(target === value ? 0 : target);
+        });
+        return b;
+      }),
+    );
+  }
+
+  async function choose(next) {
     const t = player.current;
     if (!t || !app.server) return;
     const before = value;
-    value = n === value ? 0 : n;
+    value = next;
     paint();
     try {
-      const rating = value ? value * 2 : null;
+      const rating = value || null;
       await app.server.rate(t.id, rating);
       t.userRating = rating;
     } catch (err) {
@@ -358,13 +427,30 @@ function ratingStars() {
       toast(`Couldn't save the rating. ${describeError(err)}`);
     }
   }
+
+  on('settings', paint);
   return {
-    el: h('div.np-stars', { role: 'group', 'aria-label': 'Rating' }, buttons),
+    el,
     set(rating) {
-      value = Math.max(0, Math.min(5, Math.round((rating || 0) / 2)));
+      const mode = app.settings.ratingSystem || 'stars';
+      const v = Math.max(0, Math.min(10, Math.round(rating || 0)));
+      // Whole stars round to the nearest star; halves keep Plex's own value.
+      value = mode === 'half' || mode === 'thumbs' ? v : Math.round(v / 2) * 2;
       paint();
     },
   };
+}
+
+function openSpeedSheet() {
+  sheet({
+    title: 'Playback speed',
+    subtitle: 'For this device. Pitch stays the same.',
+    actions: SPEEDS.map((v) => ({
+      label: v === 1 ? 'Normal (1×)' : `${v}×`,
+      checked: player.speed === v,
+      onSelect: () => player.setSpeed(v),
+    })),
+  });
 }
 
 function openSleepSheet() {
@@ -404,6 +490,7 @@ function openSleepSheet() {
 }
 
 function openDJSheet() {
+  if (player.remote) return sessionOnly('Guest DJ');
   const active = guestDJ.active;
   const ai = aiReady();
   sheet({
@@ -450,18 +537,28 @@ function buildNowPlaying() {
   const djNote = h('div.np-dj', { hidden: true });
   const codec = h('span.np-codec');
   const quality = h('span.np-quality');
-  const stars = ratingStars();
+  const stars = ratingControl();
   const prev = iconButton('prev', 'Previous track', () => player.prev(), { size: 40, cls: 'np-skip' });
   const play = iconButton('play', 'Play', () => player.toggle(), { size: 38, cls: 'np-play' });
   const next = iconButton('next', 'Next track', () => player.next(), { size: 40, cls: 'np-skip' });
+  // Quick skip (and long-form) buttons, labelled with the chosen times.
+  const back = h('button.icon-btn.np-jump', { type: 'button', onclick: () => player.skipBy(-(Number(app.settings.skipBack) || 10)) });
+  const fwd = h('button.icon-btn.np-jump', { type: 'button', onclick: () => player.skipBy(Number(app.settings.skipForward) || 30) });
 
   const queueBtn = toolButton('queue', 'Up next', () => showQueue(!root.classList.contains('show-queue')), 'queue');
   const djBtn = toolButton('dj', 'Guest DJ', openDJSheet, 'dj');
   const shuffleBtn = toolButton('shuffle', 'Shuffle', () => player.setShuffle(!player.shuffle), 'shuffle');
   const moreBtn = toolButton('more', 'More options', () => player.current && trackMenu(player.current), 'more');
-  const repeatBtn = toolButton('repeat', 'Repeat', () => player.cycleRepeat(), 'repeat');
+  const repeatBtn = toolButton('repeat', 'Repeat', cycleRepeat, 'repeat');
   const sleepBtn = toolButton('moon', 'Sleep timer', openSleepSheet, 'sleep');
+  const speedBtn = toolButton('speed', 'Playback speed', openSpeedSheet, 'speed');
   const vol = volumeControl();
+  // Who's listening, in a Play Together session.
+  const listeners = h('button.np-listeners', {
+    type: 'button',
+    hidden: true,
+    onclick: () => popOverlay().then(() => navigate('/together')),
+  });
 
   const queueList = h('div.tracks.np-queue-list');
   const queueCount = h('span.np-queue-count');
@@ -475,7 +572,7 @@ function buildNowPlaying() {
     null,
     h('div.np-tools-side', null, queueBtn, djBtn, shuffleBtn),
     moreBtn,
-    h('div.np-tools-side.np-tools-right', null, repeatBtn, sleepBtn, vol.el),
+    h('div.np-tools-side.np-tools-right', null, repeatBtn, speedBtn, sleepBtn, vol.el),
   );
   const main = h(
     'div.np-main',
@@ -487,7 +584,7 @@ function buildNowPlaying() {
       wave.el,
       h('div.np-meta', null, artist, title, album, djNote),
       h('div.np-info', null, codec, stars.el, quality),
-      h('div.np-transport', null, prev, play, next),
+      h('div.np-transport', null, back, prev, play, next, fwd),
     ),
     toolbar,
   );
@@ -511,6 +608,7 @@ function buildNowPlaying() {
     h('div.np-shade'),
     grabber,
     close,
+    listeners,
     h('div.np-body', null, main, queuePanel),
   );
   document.getElementById('overlay-root').append(root);
@@ -541,7 +639,7 @@ function buildNowPlaying() {
         else if (a.samplingRate && !t.bitrate) quality.textContent = `${kHz(a.samplingRate)} kHz`;
       }
       if (d.userRating !== undefined) stars.set(d.userRating);
-      if (!t.year && d.parentYear) album.textContent = `${t.album} (${d.parentYear})`;
+      if (!t.year && d.parentYear && app.settings.showAlbumYear !== false) album.textContent = `${t.album} (${d.parentYear})`;
       if (a.id) {
         const values = await app.server.levels(a.id);
         if (mine === detailToken) wave.setLevels(values);
@@ -562,7 +660,7 @@ function buildNowPlaying() {
     if (t.artistId) artist.setAttribute('href', `#/artist/${t.artistId}`);
     else artist.removeAttribute('href');
     title.textContent = t.title;
-    album.textContent = t.year ? `${t.album} (${t.year})` : t.album;
+    album.textContent = t.year && app.settings.showAlbumYear !== false ? `${t.album} (${t.year})` : t.album;
     if (t.albumId) album.setAttribute('href', `#/album/${t.albumId}`);
     else album.removeAttribute('href');
     djNote.hidden = !t.dj;
@@ -575,13 +673,43 @@ function buildNowPlaying() {
   }
 
   function renderModes() {
-    setToggle(shuffleBtn, player.shuffle);
+    const remote = !!player.remote;
+    setToggle(shuffleBtn, player.shuffle, remote ? 'Shuffle up next for everyone' : 'Shuffle');
     repeatBtn.replaceChildren(icon(player.repeat === 'one' ? 'repeatOne' : 'repeat', 26));
-    setToggle(repeatBtn, player.repeat !== 'off', { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat]);
+    setToggle(repeatBtn, player.repeat !== 'off', remote ? 'Repeat (not available while listening together)' : { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat]);
+    repeatBtn.classList.toggle('unavailable', remote);
     setToggle(sleepBtn, player.sleepActive, player.sleepActive ? 'Sleep timer (on)' : 'Sleep timer');
     const dj = guestDJ.active;
-    setToggle(djBtn, !!dj, dj ? `Guest DJ: ${dj.name}` : 'Guest DJ');
+    setToggle(djBtn, !!dj, remote ? 'Guest DJ (not available while listening together)' : dj ? `Guest DJ: ${dj.name}` : 'Guest DJ');
+    djBtn.classList.toggle('unavailable', remote);
     djBtn.classList.toggle('is-busy', guestDJ.busy);
+    speedBtn.hidden = !app.settings.playbackSpeed || remote;
+    setToggle(speedBtn, player.speed !== 1, player.speed !== 1 ? `Playback speed (${player.speed}×)` : 'Playback speed');
+    vol.el.hidden = app.settings.showVolume === false;
+    main.querySelector('.np-info').hidden = app.settings.showCodecRating === false;
+    // Skip buttons: "quick skip" always, "long-form" for long tracks.
+    const skips = !!app.settings.quickSkip || (!!app.settings.longForm && player.isLongForm);
+    back.hidden = fwd.hidden = !skips;
+    const b = Number(app.settings.skipBack) || 10;
+    const f = Number(app.settings.skipForward) || 30;
+    back.replaceChildren(skipIcon(-1, b, 34));
+    fwd.replaceChildren(skipIcon(1, f, 34));
+    back.setAttribute('aria-label', `Back ${b} seconds`);
+    fwd.setAttribute('aria-label', `Forward ${f} seconds`);
+    back.title = back.getAttribute('aria-label');
+    fwd.title = fwd.getAttribute('aria-label');
+    renderListeners();
+  }
+
+  function renderListeners() {
+    const s = together.active ? together.session : null;
+    listeners.hidden = !s;
+    if (!s) return;
+    const others = s.members.filter((m) => m.id !== s.you);
+    const names = others.map((m) => m.title);
+    const text = !others.length ? 'Play Together: just you so far' : others.length === 1 ? `Listening with ${names[0]}` : `Listening with ${names[0]} and ${fmt.count(others.length - 1, 'other', 'others')}`;
+    listeners.replaceChildren(h('span.np-listeners-faces', null, others.slice(0, 3).map((m) => avatar(m.thumb, m.title))), h('span', null, text));
+    listeners.setAttribute('aria-label', `${text}. Open Play Together.`);
   }
 
   function renderQueue() {
@@ -589,17 +717,23 @@ function buildNowPlaying() {
     const from = player.index;
     const items = player.queue.slice(from, from + 200);
     queueCount.textContent = player.upcoming.length ? fmt.count(player.upcoming.length, 'track', 'tracks') : '';
+    const you = together.session?.you;
+    const added = (t) => (t.addedBy ? `added by ${t.addedBy.id === you ? 'you' : t.addedBy.title}` : '');
     queueList.replaceChildren(
       ...items.map((t, i) =>
         trackRow(t, {
           showArt: true,
           queueIndex: from + i,
-          subtitle: t.dj ? `${t.artist} · ${djName(t.dj)}` : t.artist,
+          subtitle: [t.artist, t.dj ? djName(t.dj) : added(t)].filter(Boolean).join(' · '),
           onPlay: () => player.jump(from + i),
         }),
       ),
     );
-    if (items.length <= 1) queueList.append(h('p.np-queue-empty', null, 'Nothing else queued. Turn on a Guest DJ or add music from your library.'));
+    if (items.length <= 1) {
+      queueList.append(
+        h('p.np-queue-empty', null, player.remote ? 'Nothing else queued. Anyone in the session can add music with Play next or Add to queue.' : 'Nothing else queued. Turn on a Guest DJ or add music from your library.'),
+      );
+    }
   }
 
   const state = {
@@ -622,8 +756,16 @@ function buildNowPlaying() {
   player.addEventListener('state', () => setPlayButton(play, 38));
   player.addEventListener('mode', renderModes);
   player.addEventListener('sleep', renderModes);
+  player.addEventListener('speed', renderModes);
+  player.addEventListener('track', renderModes);
   guestDJ.addEventListener('change', renderModes);
   guestDJ.addEventListener('busy', renderModes);
+  together.addEventListener('change', renderModes);
+  on('settings', () => {
+    renderModes();
+    wave.redraw();
+    if (state.isOpen && player.current) renderTrack();
+  });
   // A rating or other change made in another Plex app shows up here.
   live.addEventListener('items', (e) => {
     const t = player.current;

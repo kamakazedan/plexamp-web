@@ -1,5 +1,5 @@
 // Shared app state, settings and a tiny event bus.
-import { store, PlexServer } from './plex.js';
+import { store, PlexServer, setDeviceName } from './plex.js';
 
 const bus = new EventTarget();
 
@@ -13,14 +13,50 @@ export function on(name, fn) {
   return () => bus.removeEventListener(name, handler);
 }
 
-const DEFAULT_SETTINGS = {
+export const DEFAULT_SETTINGS = {
   quality: 'original', // 'original' or a transcode bitrate in kbps, e.g. '320'
   gapless: true,
-  reportPlays: true,
-  tintBackground: true,
+  reportPlays: true, // "Sync recent plays": tell Plex what's played
   liveUpdates: 'auto', // 'auto' (WebSocket first) | 'nows' (no WebSockets) | 'off'
   // mode: 'auto' (the app's shared model when there is one) | 'shared' | 'custom' | 'off'
   ai: { mode: 'auto', url: '', apiKey: '', model: '', sharedModel: '', notes: '' },
+
+  // Experience
+  gridSize: 'normal', // small | normal | large
+  fontSize: 'normal', // small | normal | large | larger
+  ratingSystem: 'stars', // stars | half | thumbs | off
+  codecBadges: true,
+  popularTracks: true,
+  topListSize: 25,
+  previewButtons: false,
+  searchAllLibraries: false,
+  playlistsAllLibraries: true,
+  oneTapPlayback: true,
+  mediaSession: true, // media keys and lock screen controls
+  tabTitle: true, // what's playing in the browser tab's title
+  keyboardShortcuts: true,
+  playerName: '', // shown in Plex's dashboard; empty: "plexamp-web (Browser)"
+
+  // Appearance
+  tintBackground: true,
+  backgroundStyle: 'gradient', // gradient (album colours) | artwork (blurred cover) | plain
+
+  // Player
+  showCodecRating: true,
+  showVolume: true,
+  seekbarStyle: 'smooth', // smooth | bars | simple
+  sideBySide: true,
+  showAlbumYear: true,
+  showFullPlayer: false,
+  playbackSpeed: false,
+  speed: 1,
+  longForm: false,
+  quickSkip: false,
+  skipBack: 10,
+  skipForward: 30,
+
+  // Home screen, per library: { [serverId:sectionKey]: { order, hidden, options } }
+  home: {},
 };
 
 export const app = {
@@ -31,10 +67,23 @@ export const app = {
   settings: { ...DEFAULT_SETTINGS, ...(store.get('settings') || {}) },
 };
 
+setDeviceName(app.settings.playerName);
+
 export function saveSettings(patch) {
   Object.assign(app.settings, patch);
   store.set('settings', app.settings);
+  if ('playerName' in patch) setDeviceName(app.settings.playerName);
   emit('settings', app.settings);
+}
+
+// Playlists from every library, or only this one; search one library or all
+// of them (Settings › Experience).
+export const playlistScope = () => (app.settings.playlistsAllLibraries === false ? app.source?.sectionKey : undefined);
+export const searchScope = () => (app.settings.searchAllLibraries ? undefined : app.source?.sectionKey);
+
+// Home screen layouts are kept per library.
+export function homeKey(src = app.source) {
+  return src ? `${src.serverId || src.uri}:${src.sectionKey}` : 'none';
 }
 
 export function setAuth(auth) {
@@ -53,6 +102,9 @@ export function setSource(source) {
 }
 
 export function signOut() {
+  // Settings stay with the device, except secrets: an AI API key belongs to
+  // whoever entered it.
+  if (app.settings.ai?.apiKey) saveSettings({ ai: { ...app.settings.ai, apiKey: '' } });
   store.clear(['clientId', 'settings']);
   app.auth = null;
   app.source = null;

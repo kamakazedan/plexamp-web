@@ -1,8 +1,10 @@
 // Media-aware building blocks: cards and rows that know how to play things
 // and highlight whatever is currently playing.
+import { app } from './state.js';
 import { player } from './player.js';
-import { playAlbum, playPlaylist, trackMenu } from './actions.js';
-import { h, art, card, row, icon, fmt, nowBars } from './ui.js';
+import { playAlbum, playPlaylist, playCollection, trackMenu } from './actions.js';
+import { h, art, card, row, icon, fmt, nowBars, sheet, toast } from './ui.js';
+import { togglePreview, isPreviewing } from './preview.js';
 
 export function albumCard(m, { subtitle } = {}) {
   return card({
@@ -30,13 +32,17 @@ export function playlistCard(m) {
   });
 }
 
+const COLLECTION_UNITS = { album: ['album', 'albums'], artist: ['artist', 'artists'], track: ['track', 'tracks'] };
+
 export function collectionCard(m) {
+  const unit = COLLECTION_UNITS[m.subtype] || ['item', 'items'];
   return card({
     href: `/collection/${m.ratingKey}`,
     image: m.thumb || m.composite,
     title: m.title,
-    subtitle: m.childCount ? fmt.count(m.childCount, 'item', 'items') : '',
+    subtitle: m.childCount ? fmt.count(m.childCount, ...unit) : '',
     fallback: 'list',
+    onPlay: () => playCollection(m),
   });
 }
 
@@ -66,24 +72,56 @@ export function playlistRow(m) {
   });
 }
 
+// With "1-tap playback" off, tapping a track while something is playing
+// asks what to do with it instead of replacing what's playing.
+function tapTrack(track, onPlay, inQueue) {
+  if (app.settings.oneTapPlayback !== false || inQueue || !player.current || !player.isPlaying) return onPlay?.();
+  sheet({
+    title: track.title,
+    subtitle: [track.artist, track.album].filter(Boolean).join(' — '),
+    image: track.thumb,
+    actions: [
+      { icon: 'play', label: 'Play now', onSelect: () => onPlay?.() },
+      { icon: 'playNext', label: 'Play next', onSelect: () => (player.playNext([track]), toast('Playing next')) },
+      { icon: 'addQueue', label: 'Add to queue', onSelect: () => (player.addToQueue([track]), toast('Added to queue')) },
+    ],
+  });
+}
+
 // A playable track row. `onPlay` decides what plays (usually the whole list
-// starting from this row).
-export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays } = {}) {
+// starting from this row). `popular` marks one of the album's best-known
+// tracks.
+export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false } = {}) {
   const lead = showArt
     ? h('div.track-lead.track-art', null, art(track.thumb, { size: 48, fallback: 'note' }), nowBars())
     : h('div.track-lead.track-num', null, h('span.num', null, number ?? ''), nowBars());
   const sub = subtitle !== undefined ? subtitle : track.artist;
   const right = plays !== undefined ? fmt.count(plays, 'play', 'plays') : track.duration ? fmt.clock(track.duration / 1000) : '';
+  const inQueue = queueIndex !== undefined;
+  const preview =
+    app.settings.previewButtons && !inQueue && track.partKey
+      ? h(
+          `button.icon-btn.track-preview${isPreviewing(track) ? '.on' : ''}`,
+          { type: 'button', 'aria-label': `Preview ${track.title}`, title: 'Preview', 'aria-pressed': 'false', onclick: (e) => togglePreview(track, e.currentTarget) },
+          icon('headphones', 20),
+        )
+      : null;
   const el = h(
     'div.track',
-    { dataset: { trackId: track.id, qid: queueIndex !== undefined ? String(queueIndex) : '' } },
+    { dataset: { trackId: track.id, qid: inQueue ? String(queueIndex) : '' } },
     h(
       'button.track-main',
-      { type: 'button', onclick: onPlay, 'aria-label': `Play ${track.title}` },
+      { type: 'button', onclick: () => tapTrack(track, onPlay, inQueue), 'aria-label': `Play ${track.title}` },
       lead,
-      h('div.track-text', null, h('div.track-title', null, track.title), sub ? h('div.track-sub', null, sub) : null),
+      h(
+        'div.track-text',
+        null,
+        h('div.track-title', null, track.title, popular ? h('span.popular-badge', { title: 'Popular', 'aria-label': 'Popular' }, icon('flame', 15)) : null),
+        sub ? h('div.track-sub', null, sub) : null,
+      ),
       h('span.track-dur', null, right),
     ),
+    preview,
     h(
       'button.icon-btn.track-more',
       { type: 'button', 'aria-label': `More options for ${track.title}`, onclick: () => trackMenu(track, { queueIndex }) },

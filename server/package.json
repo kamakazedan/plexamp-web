@@ -1,0 +1,6 @@
+{
+  "name": "plexamp-web-service",
+  "private": true,
+  "type": "module",
+  "description": "The small service behind /api/ in the plexamp-web container (Play Together, sign-in checks, debug log). No dependencies."
+}
