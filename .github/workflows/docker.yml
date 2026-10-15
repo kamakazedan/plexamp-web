@@ -1,0 +1,67 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check JavaScript syntax
+        run: |
+          for f in web/js/*.js web/js/views/*.js; do
+            node --experimental-default-type=module --check "$f"
+          done
+      - name: Check scripts
+        run: |
+          sh -n docker/40-plexamp-web.sh
+          python3 -m py_compile dev/mock-plex.py
+      - name: Test the container config
+        run: |
+          docker build -t plexamp-web:test .
+          docker run --rm plexamp-web:test sh -c '/docker-entrypoint.d/40-plexamp-web.sh && nginx -t'
+          docker run --rm -e PLEX_SERVER_URL=http://192.168.1.10:32400 plexamp-web:test \
+            sh -c '/docker-entrypoint.d/40-plexamp-web.sh && nginx -t && cat /usr/share/nginx/html/config.js'
+
+  image:
+    needs: check
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
