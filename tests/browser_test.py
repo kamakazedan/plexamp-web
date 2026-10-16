@@ -24,8 +24,8 @@ and t3 (Alex, a friend without access).
 
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
-Sections: core ws ai dj nows blocked poll custom desktop nav edit cast fades
-together settings home debug memory (default: all).
+Sections: core ws ai dj nows blocked poll custom desktop nav edit cast ratings
+fades together settings home debug memory (default: all).
 """
 
 import json
@@ -214,6 +214,16 @@ with sync_playwright() as pw:
         page.keyboard.press('Escape')
         page.wait_for_timeout(400)
         check('core: Escape closes Now Playing', not js(page, "document.querySelector('.np').classList.contains('open')"))
+        # Routes to a server: when its local address doesn't answer, this
+        # container's proxy comes before a remote address, if it leads there.
+        routes = js(page, """() => Promise.all([import('./js/plex.js'), import('./js/state.js')]).then(async ([p, s]) => {
+            const srv = { id: s.app.source.serverId, token: s.app.source.token, connections: [
+                { uri: 'http://127.0.0.1:9', local: true, relay: false, protocol: 'http' },
+                { uri: '%s', local: false, relay: false, protocol: 'http' }] };
+            const mine = await p.pickConnection(srv, { proxy: s.proxyUri() });
+            const other = await p.pickConnection({ ...srv, id: 'another-server' }, { proxy: s.proxyUri() });
+            return [mine && mine.kind, other && other.kind]; })""" % MOCK)
+        check('core: the container\'s proxy is the next best route after a local address', routes == ['proxy', 'remote'], str(routes))
 
     # ---------- ws: live updates over a WebSocket ----------
     if run('ws'):
@@ -509,14 +519,27 @@ with sync_playwright() as pw:
         page.wait_for_timeout(600)
         check('nav: ...and then back within Home', where() == '#/' and tab() == 'home', where())
 
-        tap_tab('library')
-        page.click('a.row:has-text("Albums")')
+        # The library is browsed from Search; playlists have a tab of their own.
+        check('nav: the tabs are Home, Playlists, Search, Together and Settings',
+              page.locator('#tabs .tab').evaluate_all('ts => ts.map((t) => t.dataset.tab)') == ['home', 'playlists', 'search', 'together', 'settings'])
+        tap_tab('playlists')
+        settle('.grid-playlists .card')
+        check('nav: the Playlists tab', where() == '#/playlists' and tab() == 'playlists' and page.locator('.view .page-title').inner_text() == 'Playlists')
+        tap_tab('search')
+        settle('a.browse-tile:has-text("Albums")')
+        page.wait_for_timeout(600)
+        tiles = [t.split('\n')[0] for t in page.locator('.view a.browse-tile:not([hidden])').all_inner_texts()]
+        n_albums = mock('/library/sections/1/all?type=9&X-Plex-Token=t&X-Plex-Container-Size=0')['MediaContainer']['totalSize']
+        albums_tile = page.locator('.view a.browse-tile', has_text='Albums').inner_text()
+        check('nav: Search browses the library', tiles[:3] == ['Artists', 'Albums', 'Tracks'] and 'Genres' in tiles and 'Moods' in tiles
+              and f'{n_albums} albums' in albums_tile, f'{tiles} {albums_tile}')
+        page.click('.view a.browse-tile:has-text("Albums")')
         settle('.grid .card')
         page.locator('.grid .card').nth(1).click()
         settle('.hero-album')
-        tap_tab('library')
-        check('nav: tapping the tab you\'re in goes to its first page', where() == '#/library', where())
-        page.click('a.row:has-text("Albums")')
+        tap_tab('search')
+        check('nav: tapping the tab you\'re in goes to its first page', where() == '#/search', where())
+        page.click('.view a.browse-tile:has-text("Albums")')
         settle('.grid .card')
         page.locator('.grid .card').nth(2).click()
         settle('.hero-album')
@@ -524,7 +547,7 @@ with sync_playwright() as pw:
         page.reload()
         settle('.hero-album')
         header_back()
-        check('nav: after a reload, back still stays in the tab', where().startswith('#/browse/albums') and tab() == 'library', where())
+        check('nav: after a reload, back still stays in the tab', where().startswith('#/browse/albums') and tab() == 'search', where())
         page.go_forward()
         page.wait_for_timeout(600)
         check('nav: forward works too', where() == deep, where())
@@ -533,6 +556,14 @@ with sync_playwright() as pw:
         page.go_back()
         page.wait_for_timeout(500)
         check('nav: back closes a sheet first', page.locator('.sheet.open').count() == 0 and where() == deep, where())
+
+        # Links from before (bookmarks, other pages) still work.
+        page.goto(APP + '#/library/playlists')
+        page.wait_for_timeout(800)
+        check('nav: old links to the library\'s playlists open the Playlists tab', where() == '#/playlists' and tab() == 'playlists', f'{where()} in {tab()}')
+        page.goto(APP + '#/library')
+        page.wait_for_timeout(800)
+        check('nav: ...and old links to the library open Search', where() == '#/search' and tab() == 'search', f'{where()} in {tab()}')
 
         page.goto(APP + '#/')
         settle('.page-sub')
@@ -653,11 +684,30 @@ with sync_playwright() as pw:
         # and removed (with undo), and it can be renamed and deleted.
         page.goto(APP + f'#/playlist/{made["ratingKey"]}')
         page.wait_for_selector('.view .tracks .track')
+        hinted = page.wait_for_selector('.hint-bubble.shown', timeout=5000)
+        check('edit: a locked playlist points out its lock', hinted is not None and 'Tap the lock' in page.locator('.hint-bubble').inner_text())
+        shot(page, 'edit-00-lock-hint')
+        page.locator('.view .tracks .track .track-more').first.click()
+        page.wait_for_selector('.sheet.open')
+        labels = page.locator('.sheet.open .sheet-action-label').all_text_contents()
+        check('edit: ...and a track\'s menu there offers to unlock it', 'Edit playlist' in labels and 'Remove from playlist' not in labels and page.locator('.hint-bubble').count() == 0, str(labels))
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
         locked = page.locator('.view .tracks .track .drag-handle, .tracks .track .row-remove').count()
         page.click('.lock-btn')
         page.wait_for_selector('.edit-bar:not([hidden])')
         shot(page, 'edit-01-playlist-unlocked')
         check('edit: a playlist is locked until unlocked', locked == 0 and page.locator('.view .tracks .track .drag-handle').count() == made['leafCount'])
+        # Once the lock has been used, it isn't pointed out again.
+        page.goto(APP + f'#/playlist/{q["ratingKey"]}')
+        page.wait_for_selector('.view .tracks .track')
+        page.wait_for_timeout(1600)
+        check('edit: ...and once the lock has been used, it isn\'t pointed out again', page.locator('.hint-bubble').count() == 0)
+        page.go_back()
+        page.wait_for_selector('.view .tracks .track')
+        if page.locator('.edit-bar:not([hidden])').count() == 0:
+            page.click('.lock-btn')
+            page.wait_for_selector('.edit-bar:not([hidden])')
         start = entries(made['ratingKey'])
         drag('.view .tracks .track .drag-handle', 2, 0)
         moved = entries(made['ratingKey'])
@@ -922,6 +972,119 @@ with sync_playwright() as pw:
         check('cast: when the device lets go, it plays here as before', wait_for(lambda: player(page, '!p.routed && p.nextPlan() !== null'), 5)
               and page.locator('.np-where').is_hidden())
         js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+        ctx.close()
+
+    # ---------- ratings: in track lists, and ❤️ Tracks ----------
+    # Tracks rated here are put back unrated at the end, and ❤️ Tracks goes.
+    if run('ratings'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'ratings')
+        login(page, APP)
+        mock('/__mock/config?loved=none')
+        touched = set()
+
+        def rating_of(tid):
+            return mock(f'/library/metadata/{tid}?X-Plex-Token=t')['MediaContainer']['Metadata'][0].get('userRating')
+
+        def loved():
+            pls = mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+            return next((p for p in pls if p['title'] == '❤️ Tracks'), None)
+
+        def loved_ids():
+            p = loved()
+            return [m['ratingKey'] for m in mock(f'/playlists/{p["ratingKey"]}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])] if p else None
+
+        def tap_star(row, n):
+            touched.add(row.get_attribute('data-track-id'))
+            row.evaluate("(e) => e.scrollIntoView({ block: 'center' })")
+            page.wait_for_timeout(150)
+            box = row.locator('.row-rating').bounding_box()
+            page.mouse.click(box['x'] + box['width'] * (n - 0.5) / 5, box['y'] + box['height'] / 2)
+
+        # An album with a few tracks, whatever other sections added.
+        albums = mock('/library/sections/1/all?type=9&sort=titleSort&X-Plex-Token=t')['MediaContainer']['Metadata']
+        album = next(a for a in albums if a.get('leafCount', 0) >= 6)
+        page.goto(APP + f'#/album/{album["ratingKey"]}')
+        page.wait_for_selector('.hero-album')
+        page.wait_for_selector('.view .tracks .track .row-rating')
+        rows = page.locator('.view .tracks .track')
+        n = rows.count()
+        check('ratings: every track in an album can be rated in the list', n > 4 and page.locator('.view .tracks .track .row-rating[role=slider]').count() == n, n)
+        shot(page, 'ratings-01-album')
+        first, second, third, fourth = (rows.nth(i) for i in range(4))
+        tid, tid2, tid3, tid4 = (r.get_attribute('data-track-id') for r in (first, second, third, fourth))
+        tap_star(first, 3)
+        check('ratings: tapping the third star gives three stars', wait_for(lambda: rating_of(tid) == 6, 5)
+              and first.locator('.row-rating').get_attribute('aria-valuenow') == '3', rating_of(tid))
+        tap_star(first, 3)
+        check('ratings: ...and tapping it again clears it', wait_for(lambda: rating_of(tid) is None, 5), rating_of(tid))
+        first.locator('.row-rating').focus()
+        page.keyboard.press('ArrowRight')
+        page.keyboard.press('ArrowRight')
+        check('ratings: the arrow keys rate too', wait_for(lambda: rating_of(tid) == 4, 5), rating_of(tid))
+
+        # ❤️ Tracks: there isn't one yet, so the first five-star track makes it.
+        tap_star(first, 5)
+        check('ratings: five stars puts a track in ❤️ Tracks (made when there isn\'t one)', wait_for(lambda: loved_ids() == [tid], 6)
+              and not loved()['smart'] and page.locator('.toast', has_text='❤️ Tracks').count() > 0, str(loved_ids()))
+        tap_star(second, 5)
+        check('ratings: ...the next five-star track joins it', wait_for(lambda: loved_ids() == [tid, tid2], 6), str(loved_ids()))
+        tap_star(first, 4)
+        check('ratings: ...and a track that loses its five stars leaves it', wait_for(lambda: loved_ids() == [tid2], 6) and rating_of(tid) == 8, str(loved_ids()))
+
+        # The same rating in Now Playing, both ways.
+        second.locator('.track-main').click()
+        wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        on = page.locator('.np-stars .star.on').count()
+        check('ratings: Now Playing shows the rating from the list', on == 5, on)
+        page.locator('.np-stars .star').nth(1).click()
+        page.wait_for_timeout(800)
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.np.open', state='detached')
+        check('ratings: ...and rating there changes the list (and ❤️ Tracks)', second.locator('.row-rating').get_attribute('aria-valuenow') == '2'
+              and wait_for(lambda: loved_ids() == [], 6) and rating_of(tid2) == 4, str(loved_ids()))
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+
+        # Thumbs: up is five stars (and loved), down is one star.
+        settings(page, {'ratingSystem': 'thumbs'})
+        page.wait_for_timeout(300)
+        check('ratings: with thumbs, every track has thumbs up and down', page.locator('.view .tracks .track .rr-thumb.rr-up').count() == n)
+        touched.add(tid3)
+        third.evaluate("(e) => e.scrollIntoView({ block: 'center' })")
+        third.locator('.rr-up').click()
+        check('ratings: thumbs up is five stars, and goes in ❤️ Tracks', wait_for(lambda: rating_of(tid3) == 10, 5) and wait_for(lambda: tid3 in (loved_ids() or []), 6), rating_of(tid3))
+        shot(page, 'ratings-02-thumbs')
+        third.locator('.rr-down').click()
+        check('ratings: thumbs down is one star, and leaves it', wait_for(lambda: rating_of(tid3) == 2, 5) and wait_for(lambda: tid3 not in (loved_ids() or []), 6), rating_of(tid3))
+        settings(page, {'ratingSystem': 'off'})
+        page.wait_for_timeout(300)
+        check('ratings: with ratings off, lists have none', page.locator('.view .tracks .track .row-rating:visible').count() == 0)
+        settings(page, {'ratingSystem': 'stars', 'listRatings': False})
+        page.wait_for_timeout(300)
+        check('ratings: ...and they can be left out of lists', page.locator('.view .tracks .track .row-rating:visible').count() == 0)
+        settings(page, {'listRatings': True})
+        page.wait_for_timeout(300)
+
+        # Plexamp's own ❤️ Tracks is a smart playlist: Plex fills it from ratings.
+        mock('/__mock/config?loved=smart')
+        tap_star(fourth, 5)
+        wait_for(lambda: rating_of(tid4) == 10, 5)
+        page.wait_for_timeout(1000)
+        hearts = [p for p in mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer']['Metadata'] if p['title'] == '❤️ Tracks']
+        check('ratings: a smart ❤️ Tracks (Plexamp\'s) is left to fill itself', len(hearts) == 1 and hearts[0]['smart'] and loved_ids() == [tid4], json.dumps(hearts))
+
+        # Not wanted: ratings don't touch playlists.
+        settings(page, {'lovedPlaylist': False})
+        mock('/__mock/config?loved=none')
+        tap_star(rows.nth(4), 5)
+        page.wait_for_timeout(1200)
+        check('ratings: with ❤️ Tracks turned off in settings, no playlist changes', loved() is None and rating_of(rows.nth(4).get_attribute('data-track-id')) == 10)
+        for t in touched:
+            mock(f'/:/rate?key={t}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        mock('/__mock/config?loved=none')
         ctx.close()
 
     # ---------- fades: crossfades and gapless changes of track ----------
@@ -1266,7 +1429,7 @@ with sync_playwright() as pw:
         page.wait_for_selector('.tracks .track')
         n = page.locator('.tracks .track').count()
         check('settings: top plays list size', n == 10, f'{n} rows')
-        page.goto(APP + '#/library/playlists')
+        page.goto(APP + '#/playlists')
         page.wait_for_selector('.grid .card')
         before = page.locator('.card-title').all_text_contents()
         settings(page, {'playlistsAllLibraries': False})
@@ -1418,7 +1581,7 @@ with sync_playwright() as pw:
 
         # Leaving a long list while the next part of it is on its way: it
         # stops there rather than loading the rest of the library unseen.
-        page.click('#tabs .tab[data-tab=library]')
+        page.click('#tabs .tab[data-tab=search]')
         until("() => !!document.querySelector('a[href=\"#/browse/tracks\"]')")
         mock_big = lambda path: urllib.request.urlopen(MOCK_BIG + path, timeout=20).read()
         mock_big('/__mock/config?delay=600')
@@ -1427,14 +1590,14 @@ with sync_playwright() as pw:
         page.click('#tabs .tab[data-tab=home]')
         page.wait_for_timeout(5000)
         mock_big('/__mock/config?delay=0')
-        page.click('#tabs .tab[data-tab=library]')
+        page.click('#tabs .tab[data-tab=search]')
         until("() => location.hash.startsWith('#/browse/tracks') && document.querySelectorAll('.tracks .track').length > 0")
         rows = count('.tracks .track')
         check('memory: a list you leave stops loading', 0 < rows <= 200, rows)
 
         # Far from the screen, artwork lets go of its picture, and gets it back.
-        page.click('#tabs .tab[data-tab=library]')
-        until("() => location.hash === '#/library'")
+        page.click('#tabs .tab[data-tab=search]')
+        until("() => location.hash === '#/search'")
         page.click('a[href="#/browse/albums"]')
         until("() => document.querySelectorAll('.grid .card').length > 0")
         cards = scroll_until('.grid .card', 700)
@@ -1450,8 +1613,8 @@ with sync_playwright() as pw:
 
         # A huge page (thousands of rows) isn't kept once a few others have
         # been opened after it.
-        page.click('#tabs .tab[data-tab=library]')
-        until("() => location.hash === '#/library'")
+        page.click('#tabs .tab[data-tab=search]')
+        until("() => location.hash === '#/search'")
         page.click('a[href="#/browse/tracks"]')
         until("() => document.querySelectorAll('.tracks .track').length > 0")
         scroll_until('.tracks .track', 4000)

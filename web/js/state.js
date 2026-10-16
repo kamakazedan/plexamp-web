@@ -27,6 +27,8 @@ export const DEFAULT_SETTINGS = {
   gridSize: 'normal', // small | normal | large
   fontSize: 'normal', // small | normal | large | larger
   ratingSystem: 'stars', // stars | half | thumbs | off
+  listRatings: true, // ratings in track lists too
+  lovedPlaylist: true, // five-star / thumbs-up tracks kept in ❤️ Tracks
   codecBadges: true,
   popularTracks: true,
   topListSize: 25,

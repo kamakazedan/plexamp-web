@@ -1,73 +1,63 @@
 import { app, playlistScope } from '../state.js';
 import { normTrack } from '../plex.js';
 import { navigate, parseHash } from '../router.js';
-import { h, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, emptyState, fmt } from '../ui.js';
+import { h, icon, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, emptyState, fmt } from '../ui.js';
 import { albumCard, artistRow, playlistCard, collectionCard, trackRow } from '../components.js';
 import { playList } from '../actions.js';
+import { isLovedTitle } from '../ratings.js';
 
-// ---------- Library index ----------
+// ---------- Browsing the library (in Search) ----------
 
-export async function libraryView({ el }) {
+// Tiles for the library's lists, each with its count. Lists the library
+// doesn't have (no soundtracks, no moods) leave once their count is in.
+export function libraryTiles() {
   const s = app.server;
   const sec = app.source.sectionKey;
-  el.append(pageHeader('Library'));
-  const list = h('div.rows.library-rows');
-  el.append(list);
-
   const collectionsP = s.collections(sec).catch(() => []);
-  const bySubtype = (st) => collectionsP.then((cs) => cs.filter((c) => (c.subtype || 'album') === st).length);
   const albumsP = s.count(sec, 9);
-
-  const entries = [
-    { title: 'Artists', href: '/browse/artists', count: () => s.count(sec, 8), unit: ['artist', 'artists'] },
-    { title: 'Albums', href: '/browse/albums', count: () => albumsP, unit: ['album', 'albums'] },
-    {
-      title: 'Compilations',
-      href: `/browse/albums?subformat=Compilation&title=Compilations`,
-      count: () => filteredAlbumCount({ subformat: 'Compilation' }),
-      unit: ['compilation', 'compilations'],
-      optional: true,
-    },
-    {
-      title: 'Soundtracks',
-      href: `/browse/albums?subformat=Soundtrack&title=Soundtracks`,
-      count: () => filteredAlbumCount({ subformat: 'Soundtrack' }),
-      unit: ['soundtrack', 'soundtracks'],
-      optional: true,
-    },
-    { title: 'Tracks', href: '/browse/tracks', count: () => s.count(sec, 10), unit: ['track', 'tracks'] },
-    { title: 'Playlists', href: '/library/playlists', count: async () => (await s.playlists(playlistScope())).length, unit: ['playlist', 'playlists'] },
-    { title: 'Artist collections', href: '/browse/collections?subtype=artist&title=Artist%20collections', count: () => bySubtype('artist'), unit: ['collection', 'collections'], optional: true },
-    { title: 'Album collections', href: '/browse/collections?subtype=album&title=Album%20collections', count: () => bySubtype('album'), unit: ['collection', 'collections'], optional: true },
-    { title: 'Track collections', href: '/browse/collections?subtype=track&title=Track%20collections', count: () => bySubtype('track'), unit: ['collection', 'collections'], optional: true },
-    { title: 'Artist genres', href: '/tags/genre/8?title=Artist%20genres', count: async () => (await s.tags(sec, 'genre', 8)).length, unit: ['genre', 'genres'], optional: true },
-    { title: 'Album genres', href: '/tags/genre/9?title=Album%20genres', count: async () => (await s.tags(sec, 'genre', 9)).length, unit: ['genre', 'genres'], optional: true },
-    { title: 'Styles', href: '/tags/style/9?title=Styles', count: async () => (await s.tags(sec, 'style', 9)).length, unit: ['style', 'styles'], optional: true },
-    { title: 'Moods', href: '/tags/mood/9?title=Moods', count: async () => (await s.tags(sec, 'mood', 9)).length, unit: ['mood', 'moods'], optional: true },
-    { title: 'Decades', href: '/tags/decade/9?title=Decades', count: async () => (await s.tags(sec, 'decade', 9)).length, unit: ['decade', 'decades'], optional: true },
-  ];
-
-  // If the server ignores a filter it returns every album; treat that as
-  // "not supported" rather than showing a misleading count.
-  async function filteredAlbumCount(filters) {
+  const tags = (field, type) => async () => (await s.tags(sec, field, type)).length;
+  // If the server ignores a filter it returns every album; that counts as
+  // "not supported" rather than a misleading count.
+  const filteredAlbums = (filters) => async () => {
     const [n, all] = await Promise.all([s.count(sec, 9, filters), albumsP]);
     return n === all ? 0 : n;
-  }
+  };
 
+  const entries = [
+    { title: 'Artists', icon: 'mic', href: '/browse/artists', count: () => s.count(sec, 8), unit: ['artist', 'artists'] },
+    { title: 'Albums', icon: 'disc', href: '/browse/albums', count: () => albumsP, unit: ['album', 'albums'] },
+    { title: 'Tracks', icon: 'note', href: '/browse/tracks', count: () => s.count(sec, 10), unit: ['track', 'tracks'] },
+    { title: 'Compilations', icon: 'stack', href: '/browse/albums?subformat=Compilation&title=Compilations', count: filteredAlbums({ subformat: 'Compilation' }), unit: ['compilation', 'compilations'], optional: true },
+    { title: 'Soundtracks', icon: 'film', href: '/browse/albums?subformat=Soundtrack&title=Soundtracks', count: filteredAlbums({ subformat: 'Soundtrack' }), unit: ['soundtrack', 'soundtracks'], optional: true },
+    { title: 'Collections', icon: 'collection', href: '/browse/collections?title=Collections', count: async () => (await collectionsP).length, unit: ['collection', 'collections'], optional: true },
+    { title: 'Genres', icon: 'tag', href: '/tags/genre/9?title=Genres', count: tags('genre', 9), unit: ['genre', 'genres'], optional: true },
+    { title: 'Artist genres', icon: 'tag', href: '/tags/genre/8?title=Artist%20genres', count: tags('genre', 8), unit: ['genre', 'genres'], optional: true },
+    { title: 'Styles', icon: 'palette', href: '/tags/style/9?title=Styles', count: tags('style', 9), unit: ['style', 'styles'], optional: true },
+    { title: 'Moods', icon: 'smile', href: '/tags/mood/9?title=Moods', count: tags('mood', 9), unit: ['mood', 'moods'], optional: true },
+    { title: 'Decades', icon: 'calendar', href: '/tags/decade/9?title=Decades', count: tags('decade', 9), unit: ['decade', 'decades'], optional: true },
+  ];
+
+  const tiles = h('div.browse-tiles');
   for (const e of entries) {
-    const sub = h('span.count', null, ' ');
-    const r = row({ href: e.href, title: e.title, subtitle: sub });
-    if (e.optional) r.hidden = true;
-    list.append(r);
+    const count = h('span.browse-count', null, '\u00a0');
+    const tile = h(
+      'a.browse-tile',
+      { href: `#${e.href}` },
+      h('span.browse-icon', null, icon(e.icon, 22)),
+      h('span.browse-text', null, h('span.browse-title', null, e.title), count),
+    );
+    if (e.optional) tile.hidden = true;
+    tiles.append(tile);
     e.count().then(
       (n) => {
-        if (e.optional && !n) return r.remove();
-        sub.textContent = fmt.count(n, ...e.unit);
-        r.hidden = false;
+        if (e.optional && !n) return tile.remove();
+        count.textContent = fmt.count(n, ...e.unit);
+        tile.hidden = false;
       },
-      () => (e.optional ? r.remove() : (sub.textContent = 'Unavailable')),
+      () => (e.optional ? tile.remove() : (count.textContent = 'Unavailable')),
     );
   }
+  return tiles;
 }
 
 // ---------- Browse lists ----------
@@ -113,7 +103,7 @@ export async function browseView({ el, params, query, onDispose }) {
   const countEl = h('div.list-count');
   el.append(
     backHeader(title, {
-      fallback: '/library',
+      fallback: '/search',
       actions: iconButton('sort', 'Sort', () => openSort(sorts, sort)),
     }),
     countEl,
@@ -173,19 +163,21 @@ function renderer(type, title) {
 // ---------- Playlists ----------
 
 export async function playlistsView({ el }) {
-  el.append(backHeader('Playlists', { fallback: '/library' }));
   const pls = await app.server.playlists(playlistScope());
+  el.append(pageHeader('Playlists', { subtitle: pls.length ? fmt.count(pls.length, 'playlist', 'playlists') : null }));
   if (!pls.length) {
-    el.append(emptyState('No music playlists on this server yet. Playlists you make in Plex show up here.'));
+    el.append(emptyState('No music playlists yet. To make one, choose Add to playlist… in the menu of a track, album or artist.'));
     return;
   }
-  el.append(grid(pls.map((m) => playlistCard(m)), { centered: true, cls: 'grid-playlists' }));
+  // ❤️ Tracks first, as in Plexamp.
+  const sorted = [...pls.filter((p) => isLovedTitle(p.title)), ...pls.filter((p) => !isLovedTitle(p.title))];
+  el.append(grid(sorted.map((m) => playlistCard(m)), { centered: true, cls: 'grid-playlists' }));
 }
 
 // ---------- Collections ----------
 
 async function collectionsView({ el, query }) {
-  el.append(backHeader(query.title || 'Collections', { fallback: '/library' }));
+  el.append(backHeader(query.title || 'Collections', { fallback: '/search' }));
   const all = await app.server.collections(app.source.sectionKey);
   const items = all.filter((c) => !query.subtype || (c.subtype || 'album') === query.subtype);
   if (!items.length) {
@@ -199,7 +191,7 @@ async function collectionsView({ el, query }) {
 
 export async function tagsView({ el, params, query }) {
   const { field, type } = params;
-  el.append(backHeader(query.title || 'Browse', { fallback: '/library' }));
+  el.append(backHeader(query.title || 'Browse', { fallback: '/search' }));
   const sec = app.source.sectionKey;
   const tags = await app.server.tags(sec, field, type);
   if (!tags.length) {
@@ -219,7 +211,7 @@ export async function tagsView({ el, params, query }) {
 export async function itemsView({ el, query, onDispose }) {
   const title = query.title || 'Browse';
   const countEl = h('div.list-count');
-  el.append(backHeader(title, { fallback: '/library' }), countEl);
+  el.append(backHeader(title, { fallback: '/search' }), countEl);
   const r = renderer(query.type, title);
   const container = r.wrap();
   el.append(container);

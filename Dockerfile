@@ -31,6 +31,7 @@ ENV PLEX_SERVER_URL="" \
     OLLAMA_API_KEY="" \
     OLLAMA_AUTH="plex" \
     PLAY_TOGETHER="true" \
+    CASTING="true" \
     DEBUG=""
 
 RUN rm -rf /usr/share/nginx/html/* \

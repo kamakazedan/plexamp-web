@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.6.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.7.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -199,29 +199,33 @@ export async function listServers(token) {
     }));
 }
 
-// Probe every connection at once and keep the best one that answers:
-// local beats remote, and the relay is the last resort.
-export async function pickConnection(server, timeout = 6000) {
+// How good a route to a server is: lower is better.
+export const CONNECTION_RANK = { local: 0, proxy: 1, remote: 2, relay: 3 };
+
+// Probe every connection at once and keep the best one that answers. A local
+// address is best. Next is this container's /pms/ proxy (`proxy`), when it
+// fronts this server: it reaches the server on the home network even when
+// the browser can't, such as when the router won't look up plex.direct
+// addresses that point into the home network (DNS rebinding protection).
+// Then remote addresses, and the relay is the last resort.
+export async function pickConnection(server, { proxy = null, timeout = 6000 } = {}) {
   const pageIsHttps = location.protocol === 'https:';
-  const candidates = server.connections.filter((c) => !(pageIsHttps && c.protocol === 'http'));
-  const rank = (c) => (c.relay ? 2 : c.local ? 0 : 1);
-  const alive = (
-    await Promise.all(
-      candidates.map(async (c) => {
-        try {
-          await request(withParams(`${c.uri}/identity`, plexParams(server.token)), { timeout });
-          return c;
-        } catch {
-          return null;
-        }
-      }),
-    )
-  )
-    .filter(Boolean)
-    .sort((a, b) => rank(a) - rank(b));
-  const best = alive[0];
-  if (!best) return null;
-  return { uri: best.uri, kind: best.relay ? 'relay' : best.local ? 'local' : 'remote' };
+  const candidates = server.connections
+    .filter((c) => !(pageIsHttps && c.protocol === 'http'))
+    .map((c) => ({ uri: c.uri, kind: c.relay ? 'relay' : c.local ? 'local' : 'remote' }));
+  const probe = async (c) => {
+    try {
+      const id = await request(withParams(`${c.uri}/identity`, plexParams(server.token)), { timeout });
+      // The proxy has to lead to this very server.
+      if (c.kind === 'proxy' && id?.MediaContainer?.machineIdentifier !== server.id) return null;
+      return c;
+    } catch {
+      return null;
+    }
+  };
+  if (proxy) candidates.push({ uri: proxy, kind: 'proxy' });
+  const alive = (await Promise.all(candidates.map(probe))).filter(Boolean).sort((a, b) => CONNECTION_RANK[a.kind] - CONNECTION_RANK[b.kind]);
+  return alive[0] || null;
 }
 
 // ---------- normalisers ----------

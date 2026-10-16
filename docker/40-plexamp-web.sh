@@ -419,24 +419,29 @@ if [ "$DEBUG_ON" = true ]; then
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.
-    check() { # name url
-        code="$(wget -q -S -O /dev/null -T 8 "$2" 2>&1 | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\/[0-9.]+$/ && $(i + 1) ~ /^[0-9][0-9][0-9]$/) c = $(i + 1) } END { print c }')"
+    check() { # name url [wget options]
+        name="$1"
+        url="$2"
+        shift 2
+        code="$(wget -q -S -O /dev/null -T 8 "$@" "$url" 2>&1 | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\/[0-9.]+$/ && $(i + 1) ~ /^[0-9][0-9][0-9]$/) c = $(i + 1) } END { print c }')"
         if [ -n "$code" ]; then
-            say "check: $1 answered with HTTP $code"
+            say "check: $name answered with HTTP $code"
         else
-            say "check: couldn't reach $1 ($(safe_url "$2")) from inside the container. Check the address, and that the container can reach it (network, firewall, DNS)."
+            say "check: couldn't reach $name ($(safe_url "$url")) from inside the container. Check the address, and that the container can reach it (network, firewall, DNS)."
         fi
     }
     (
         sleep 1
         if [ -n "${PLEX_SERVER_URL:-}" ]; then
-            check "Plex server (PLEX_SERVER_URL)" "${PLEX_SERVER_URL%/}/identity"
+            # As the proxy does: a Plex server's certificate is for its
+            # plex.direct name, so at a network address it can't match.
+            check "Plex server (PLEX_SERVER_URL)" "${PLEX_SERVER_URL%/}/identity" --no-check-certificate
         fi
         if [ -n "${OLLAMA_URL:-}" ]; then
             check "Ollama (OLLAMA_URL)" "${OLLAMA_URL%/}/api/version"
         fi
         if [ "$TOGETHER" = true ] || [ "$AI_AUTH" = plex ]; then
-            check "plex.tv (for Play Together and sign-in checks)" "${PLEX_TV%/}/api/v2/ping"
+            check "plex.tv (for Play Together and sign-in checks)" "${PLEX_TV%/}/api/v2/ping?X-Plex-Client-Identifier=plexamp-web-check"
         fi
     ) &
 fi

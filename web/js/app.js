@@ -1,7 +1,7 @@
 // Entry point: wires the router, shell, player bar and backdrop together.
 import './debug.js';
-import { app, setSource, on } from './state.js';
-import { PlexServer, listServers, pickConnection } from './plex.js';
+import { app, setSource, on, proxyUri } from './state.js';
+import { PlexServer, listServers, pickConnection, CONNECTION_RANK } from './plex.js';
 import { route, startRouter, navigate, goTab, parseHash, refresh, dropCached, overlayDepth } from './router.js';
 import { h, icon } from './ui.js';
 import { player } from './player.js';
@@ -9,7 +9,7 @@ import { initBackdrop } from './backdrop.js';
 import { initPlayerBar } from './nowplaying.js';
 import { syncCurrent } from './components.js';
 import { homeView, recentView } from './views/home.js';
-import { libraryView, browseView, playlistsView, tagsView, itemsView } from './views/library.js';
+import { browseView, playlistsView, tagsView, itemsView } from './views/library.js';
 import { albumView, artistView, playlistView, collectionView } from './views/detail.js';
 import { searchView, topView, sonicPathView } from './views/search.js';
 import { aiPlaylistView } from './views/aiplaylist.js';
@@ -22,10 +22,11 @@ import { together } from './together.js';
 import { debugLog } from './debug.js';
 import { isAdmin } from './editing.js';
 import { cast } from './cast.js';
+import { refreshRows } from './ratings.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
-  { id: 'library', label: 'Library', icon: 'library' },
+  { id: 'playlists', label: 'Playlists', icon: 'list' },
   { id: 'search', label: 'Search', icon: 'search' },
   app.config.together && { id: 'together', label: 'Together', icon: 'together' },
   { id: 'settings', label: 'Settings', icon: 'settings' },
@@ -40,11 +41,13 @@ const needsSource = (view) => async (ctx) => {
 
 route('/', needsSource(homeView), { tab: 'home' });
 route('/recent', needsSource(recentView), { tab: 'home' });
-route('/library', needsSource(libraryView), { tab: 'library' });
-route('/library/playlists', needsSource(playlistsView), { tab: 'library' });
-route('/browse/:kind', needsSource(browseView), { tab: 'library' });
-route('/tags/:field/:type', needsSource(tagsView), { tab: 'library' });
-route('/items', needsSource(itemsView), { tab: 'library' });
+route('/playlists', needsSource(playlistsView), { tab: 'playlists' });
+// The library is browsed from Search; these were the Library tab's.
+route('/library', () => navigate('/search', { replace: true }), { tab: 'search' });
+route('/library/playlists', () => navigate('/playlists', { replace: true }), { tab: 'playlists' });
+route('/browse/:kind', needsSource(browseView), { tab: 'search' });
+route('/tags/:field/:type', needsSource(tagsView), { tab: 'search' });
+route('/items', needsSource(itemsView), { tab: 'search' });
 route('/album/:id', needsSource(albumView));
 route('/artist/:id', needsSource(artistView));
 route('/playlist/:id', needsSource(playlistView));
@@ -108,17 +111,43 @@ function onRouteChange({ route: r, tab }) {
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  requestAnimationFrame(() => syncCurrent());
+  requestAnimationFrame(() => {
+    syncCurrent();
+    refreshRows(); // a kept page, after the rating system changed
+  });
 }
 
+const where = (kind) => (kind === 'proxy' ? 'this container’s /pms/ proxy' : `a ${kind} address`);
+
+// The best route to the saved server now (see pickConnection), or null.
+async function bestRoute(src) {
+  const servers = await listServers(app.auth.token);
+  const srv = servers.find((s) => s.id === src.serverId);
+  const conn = srv && (await pickConnection(srv, { proxy: proxyUri() }));
+  return conn ? { ...conn, srv } : null;
+}
+
+const pickable = (src) => !app.auth?.manual && src.kind in CONNECTION_RANK;
+
 // Check the saved server still answers; if not, look for another route to
-// it (e.g. we left the house and the local address stopped working).
+// it (e.g. we left the house and the local address stopped working). And
+// when it answers only remotely, whether a better route works now (back
+// home, or this container's proxy).
 async function ensureConnection() {
   const src = app.source;
   if (!src || !app.server) return;
   try {
     await app.server.identity({ timeout: 5000 });
-    debugLog('connection', `${src.serverName} answers at ${src.kind === 'proxy' ? 'this container’s /pms/ proxy' : `a ${src.kind} address`}`);
+    debugLog('connection', `${src.serverName} answers at ${where(src.kind)}`);
+    if (pickable(src) && CONNECTION_RANK[src.kind] > CONNECTION_RANK.proxy) {
+      bestRoute(src)
+        .then((conn) => {
+          if (!conn || CONNECTION_RANK[conn.kind] >= CONNECTION_RANK[src.kind] || app.source !== src) return;
+          debugLog('connection', `${src.serverName} also answers at ${where(conn.kind)}: switched to it`);
+          setSource({ ...src, uri: conn.uri, kind: conn.kind, token: conn.srv.token, connections: conn.srv.connections });
+        })
+        .catch(() => {});
+    }
     return;
   } catch (err) {
     debugLog('connection', `${src.serverName} didn’t answer (${err.status || 'network error'}); looking for another address`, 'warn');
@@ -127,14 +156,12 @@ async function ensureConnection() {
       return;
     }
   }
-  if (!app.auth?.manual && ['local', 'remote', 'relay'].includes(src.kind)) {
+  if (pickable(src)) {
     try {
-      const servers = await listServers(app.auth.token);
-      const srv = servers.find((s) => s.id === src.serverId);
-      const conn = srv && (await pickConnection(srv));
+      const conn = await bestRoute(src);
       if (conn) {
-        debugLog('connection', `switched ${src.serverName} to a ${conn.kind} address`);
-        setSource({ ...src, uri: conn.uri, kind: conn.kind, token: srv.token, connections: srv.connections });
+        debugLog('connection', `switched ${src.serverName} to ${where(conn.kind)}`);
+        setSource({ ...src, uri: conn.uri, kind: conn.kind, token: conn.srv.token, connections: conn.srv.connections });
         refresh(); // re-render the current page against the new address
         return;
       }
@@ -171,16 +198,16 @@ function refreshIfIdle(test) {
 function wireLiveUpdates() {
   // Long lists keep their cached copy (and scroll position) for the back
   // button; they load fresh the next time they're opened.
-  const summaryPages = (p) => p === '/' || p === '/recent' || p === '/library';
+  const summaryPages = (p) => p === '/' || p === '/recent' || p === '/search';
   live.addEventListener('library', () => {
     app.server?.cache.clear();
     dropCached(summaryPages);
-    refreshIfIdle((p) => p === '/' || p === '/library');
+    refreshIfIdle((p) => p === '/' || p === '/search');
   });
   live.addEventListener('playlists', (e) => {
     app.server?.forgetPlaylists();
     const ids = e.detail.ids.map(String);
-    const affected = (p) => p === '/' || p === '/library/playlists' || (p.startsWith('/playlist/') && (!ids.length || ids.includes(p.split('/')[2])));
+    const affected = (p) => p === '/' || p === '/playlists' || (p.startsWith('/playlist/') && (!ids.length || ids.includes(p.split('/')[2])));
     dropCached(affected);
     refreshIfIdle(affected);
   });

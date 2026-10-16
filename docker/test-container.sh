@@ -18,10 +18,12 @@ PY="python:3.12-alpine"
 CURL="curlimages/curl:8.10.1"
 FAILED=0
 TV="PLEX_TV_URL=http://pw-plex:32400"
+CERTS=""
 
 cleanup() {
-    docker rm -f pw-plex pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web6 pw-web7 pw-web8 pw-bad >/dev/null 2>&1 || true
+    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-bad >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
+    if [ -n "$CERTS" ]; then rm -rf "$CERTS"; fi
 }
 trap cleanup EXIT
 cleanup
@@ -251,6 +253,44 @@ wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
 expect "CASTING=false: not in config.js" "window.PW_CONFIG = { together: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
+
+# ---------- 7c. A Plex server reached over HTTPS at its address ----------
+# A Plex server's certificate is for its plex.direct name, so at an address
+# such as https://10.0.0.5:32400 the name can't match. A test authority
+# stands in for the real one (NODE_EXTRA_CA_CERTS).
+CERTS="$(mktemp -d)"
+NAME="*.0123456789abcdef0123456789abcdef.plex.direct"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERTS/ca.key" -out "$CERTS/ca.pem" -days 2 -subj "/CN=plexamp-web test CA" 2>/dev/null
+openssl req -newkey rsa:2048 -nodes -keyout "$CERTS/server.key" -out "$CERTS/server.csr" -subj "/CN=$NAME" 2>/dev/null
+printf 'subjectAltName=DNS:%s\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' "$NAME" >"$CERTS/ext.cnf"
+openssl x509 -req -in "$CERTS/server.csr" -CA "$CERTS/ca.pem" -CAkey "$CERTS/ca.key" -CAcreateserial -out "$CERTS/server.pem" -days 2 -extfile "$CERTS/ext.cnf" 2>/dev/null
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERTS/self.key" -out "$CERTS/self.pem" -days 2 -subj "/CN=plex.local" 2>/dev/null
+chmod 755 "$CERTS"
+chmod 644 "$CERTS"/*
+docker run -d --name pw-plex-tls --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" -v "$CERTS:/certs:ro" "$PY" \
+    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/server.pem /certs/server.key --quiet >/dev/null
+docker run -d --name pw-plex-self --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" -v "$CERTS:/certs:ro" "$PY" \
+    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/self.pem /certs/self.key --quiet >/dev/null
+wait_http pw-plex-tls "http://pw-plex-tls:32400/identity"
+wait_http pw-plex-self "http://pw-plex-self:32400/identity"
+ip_of() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"; }
+docker run -d --name pw-web9 --network "$NET" -v "$CERTS:/certs:ro" -e NODE_EXTRA_CA_CERTS=/certs/ca.pem -e DEBUG=true \
+    -e PLEX_TV_URL=http://pw-plex-tls:32400 -e "PLEX_SERVER_URL=https://$(ip_of pw-plex-tls):32443" "$IMAGE" >/dev/null
+docker run -d --name pw-web10 --network "$NET" \
+    -e PLEX_TV_URL=http://pw-plex-self:32400 -e "PLEX_SERVER_URL=https://$(ip_of pw-plex-self):32443" "$IMAGE" >/dev/null
+wait_http pw-web9 http://pw-web9/
+wait_service pw-web9
+wait_http pw-web10 http://pw-web10/
+wait_service pw-web10
+expect "HTTPS server: the proxy reaches it" 200 "$(c "http://pw-web9/pms/identity?X-Plex-Token=t")"
+expect "HTTPS server: the service accepts its Plex certificate" 200 "$(c -H 'X-Plex-Token: t' http://pw-web9/api/cast/players)"
+sleep 3
+LOG="$(docker logs pw-web9 2>&1)"
+contains "HTTPS server: the service knows which server it is" "Plex server at PLEX_SERVER_URL is mock-server-1" "$LOG"
+contains "HTTPS server: the debug check reaches it" "check: Plex server (PLEX_SERVER_URL) answered with HTTP 200" "$LOG"
+contains "debug: the plex.tv check is answered" "check: plex.tv (for Play Together and sign-in checks) answered with HTTP 200" "$LOG"
+expect "self-signed HTTPS server: the proxy still reaches it" 200 "$(c "http://pw-web10/pms/identity?X-Plex-Token=t")"
+contains "self-signed HTTPS server: the log says why the service can't use it" "its certificate is self-signed" "$(docker logs pw-web10 2>&1)"
 
 # ---------- 8. Bad settings stop the container with a clear message ----------
 bad() { # name expected-message docker-run-args...

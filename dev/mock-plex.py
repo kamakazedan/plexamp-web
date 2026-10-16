@@ -24,10 +24,12 @@ Live notifications are sent over a WebSocket (/:/websockets/notifications)
 and an event stream (/:/eventsource/notifications), like a real server. For
 testing, these endpoints need no token:
 
-    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS
+    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS&loved=smart|none
         ws=0 refuses WebSockets (as a blocking proxy would), sse=0 refuses the
         event stream, sse=silent accepts it but never sends anything; open=1
-        accepts any token; delay=MS slows library listings down
+        accepts any token; delay=MS slows library listings down; loved=smart
+        adds a smart ❤️ Tracks playlist (five-star tracks, like Plexamp's),
+        loved=none removes any ❤️ Tracks
     /__mock/add-album?title=...   adds an album and announces it
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
@@ -49,6 +51,12 @@ Artwork needs Pillow (pip install pillow); without it, covers are blank.
 
 adds 3000 more albums (and artists and tracks to go with them), for trying
 the app with a large library: long grids, big playlists and memory use.
+
+    python3 dev/mock-plex.py 32400 --tls 32443 cert.pem key.pem
+
+also serves HTTPS on port 32443 with that certificate (for trying the
+container with an https:// PLEX_SERVER_URL; a real server's certificate is
+for its plex.direct name).
 """
 
 import base64
@@ -80,7 +88,11 @@ def flag_value(name, default):
 
 
 BIG = flag_value('--big', 0)
-PORT = int(next((a for i, a in enumerate(sys.argv[1:], 1) if a.isdigit() and sys.argv[i - 1] != '--big'), 32400))
+PORT = int(next((a for i, a in enumerate(sys.argv[1:], 1) if a.isdigit() and sys.argv[i - 1] not in ('--big', '--tls')), 32400))
+TLS = None
+if '--tls' in sys.argv:
+    _i = sys.argv.index('--tls')
+    TLS = (int(sys.argv[_i + 1]), sys.argv[_i + 2], sys.argv[_i + 3])
 SECTION = '1'
 NOW = int(time.time())
 TRACK_SECONDS = 20
@@ -247,6 +259,30 @@ def make_playlist(title, members, smart=False, viewed=None, section=SECTION):
         p['lastViewedAt'] = viewed
     items[k] = p
     return p
+
+
+def follow_rule(pl):
+    """A smart playlist made from ratings (Plexamp's ❤️ Tracks): five-star
+    tracks, worked out when it's asked for."""
+    if pl.get('_rule') == 'loved':
+        loved = [t for t in tracks if (t.get('userRating') or 0) >= 10]
+        pl['_items'] = loved
+        pl['_pids'] = [900000 + int(t['ratingKey']) for t in loved]
+        pl['leafCount'] = len(loved)
+        pl['duration'] = sum(t['duration'] for t in loved)
+    return pl
+
+
+def set_loved(mode):
+    """/__mock/config?loved=smart adds a smart ❤️ Tracks; loved=none removes
+    every ❤️ Tracks playlist."""
+    for pl in [p for p in playlists if p['title'] == '❤️ Tracks']:
+        playlists.remove(pl)
+        items.pop(pl['ratingKey'], None)
+    if mode == 'smart':
+        pl = make_playlist('❤️ Tracks', [], smart=True)
+        pl['_rule'] = 'loved'
+        playlists.append(follow_rule(pl))
 
 
 def playlist_changed(pl):
@@ -883,6 +919,7 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def playlist_page(self, pl, q):
+        follow_rule(pl)
         start = int(q.get('X-Plex-Container-Start', ['0'])[0])
         size = int(q.get('X-Plex-Container-Size', ['50'])[0])
         rows = [dict(public(t), playlistItemID=pid) for t, pid in zip(pl['_items'], pl['_pids'])]
@@ -1096,6 +1133,8 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['open'] = q['open'][0] in ('1', 'on', 'true')
             if 'delay' in q:
                 MOCK['delay'] = max(0, int(q['delay'][0]))
+            if 'loved' in q:
+                set_loved(q['loved'][0])
             return self.send_json(dict(MOCK, listeners=len(listeners)))
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
@@ -1302,7 +1341,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'size': 1, 'Metadata': [public(pl)]})
         if p == '/playlists':
             sec = q.get('sectionID', [None])[0]
-            return self.page([pl for pl in playlists if not sec or pl['_section'] == sec], {'X-Plex-Container-Size': ['500']})
+            return self.page([follow_rule(pl) for pl in playlists if not sec or pl['_section'] == sec], {'X-Plex-Container-Size': ['500']})
         if p == '/activities':
             return self.send_json({'size': 0})
         if p.startswith('/playlists/'):
@@ -1365,4 +1404,12 @@ if __name__ == '__main__':
           f'({len(artists)} artists, {len(albums)} albums, {len(tracks)} tracks, {len(playlists)} playlists); '
           f'player "{PLAYER["name"]}" on http://{PLAYER_ADDRESS}:{PLAYER_PORT}', flush=True)
     threading.Thread(target=Server(('0.0.0.0', PLAYER_PORT), PlayerHandler).serve_forever, daemon=True).start()
+    if TLS:
+        import ssl
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(TLS[1], TLS[2])
+        secure = Server(('0.0.0.0', TLS[0]), Handler)
+        secure.socket = context.wrap_socket(secure.socket, server_side=True)
+        print(f'  and https on port {TLS[0]}', flush=True)
+        threading.Thread(target=secure.serve_forever, daemon=True).start()
     Server(('0.0.0.0', PORT), Handler).serve_forever()

@@ -50,7 +50,7 @@ export async function homeView({ el }) {
         blocks.length
           ? 'Nothing to show yet. Browse your library and start playing, and your recent music will appear here.'
           : 'Every Home section is turned off for this library. Choose what to show in Settings › Experience › Home screen.',
-        h('a.btn.btn-secondary', { href: blocks.length ? '#/library' : '#/settings/home' }, blocks.length ? 'Browse library' : 'Choose sections'),
+        h('a.btn.btn-secondary', { href: blocks.length ? '#/search' : '#/settings/home' }, blocks.length ? 'Browse library' : 'Choose sections'),
       ),
     );
   }
@@ -126,7 +126,7 @@ const SECTION_VIEWS = {
     async load({ data }) {
       const recent = (await data.playlists()).slice().sort((a, b) => recency(b) - recency(a)).slice(0, 12);
       if (!recent.length) return null;
-      return { href: '/library/playlists', content: shelf(recent.map((m) => playlistCard(m))) };
+      return { href: '/playlists', content: shelf(recent.map((m) => playlistCard(m))) };
     },
   },
 
@@ -233,6 +233,7 @@ const SECTION_VIEWS = {
         list.append(
           trackRow(t, {
             showArt: true,
+            rating: false,
             subtitle: [t.artist, fmt.ago(played[i].lastViewedAt)].filter(Boolean).join(' · '),
             onPlay: () => playList(tracks, i, { title: 'History', href: null }),
           }),

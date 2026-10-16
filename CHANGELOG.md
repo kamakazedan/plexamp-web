@@ -3,6 +3,55 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.7.0 - 2026-10-16
+
+### Added
+
+- **A Playlists tab**, in place of Library: all your music playlists, with
+  ❤️ Tracks first.
+- **Browsing the library from Search**: artists, albums, tracks,
+  compilations, soundtracks, collections, genres, styles, moods and decades,
+  as tiles with their counts, above Most played and Explore.
+- **Ratings in track lists**: with a rating system on (Settings ›
+  Experience), every track in an album, playlist, collection, artist page,
+  search result or list can be rated right there: tap a star (tap it again
+  to clear it), or thumbs up or down. They match the player's rating. On
+  narrow phones a track's time makes way for them. Settings › Experience ›
+  Ratings in track lists turns them off.
+- **❤️ Tracks**: tracks you give five stars or a thumbs up go in your
+  ❤️ Tracks playlist, and come out if they lose that rating, as in
+  Plexamp. If there isn't one, it's made. If yours is Plexamp's own (a
+  smart playlist), Plex keeps it up to date from your ratings itself.
+  Settings › Experience › Keep ❤️ Tracks up to date.
+- **A reminder about the lock**: a playlist (and, for the server's owner, a
+  collection) points out its lock until you've used it, and a track's menu
+  there has **Edit playlist**, which unlocks it.
+
+### Fixed
+
+- **Local connections.** With an `https://` `PLEX_SERVER_URL` (for a
+  server that requires secure connections), the container couldn't check
+  the server: Plex's certificate is for its `plex.direct` name, not its
+  address (`ERR_TLS_CERT_ALTNAME_INVALID` in the log). It now accepts a
+  valid Plex certificate there, so sign-in checks for the shared AI model
+  and Play on work. A self-signed certificate is still refused, and the
+  log says why.
+- When the browser can't use the server's local address (often because the
+  router won't look up `plex.direct` addresses that point into the home
+  network, or Plex runs in Docker), the app went out through the internet
+  or Plex's relay, even with `PLEX_SERVER_URL` set. It now goes through the
+  container's proxy, which reaches the server on your network, before a
+  remote address, and moves to it by itself if it was using a remote
+  address or the relay.
+- Debug mode's start-up checks no longer say an `https://` Plex server
+  can't be reached, or that plex.tv answered "HTTP 400".
+
+### Changed
+
+- Smart crossfade says, in Settings › Playback and the README, that it
+  needs Plex's loudness analysis (Settings › Library › Analyze audio tracks
+  for loudness, in Plex). Sonic analysis isn't needed for it.
+
 ## 0.6.0 - 2026-10-16
 
 ### Added

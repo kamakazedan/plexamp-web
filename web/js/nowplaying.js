@@ -12,6 +12,7 @@ import { live } from './live.js';
 import { together } from './together.js';
 import { levelSamples } from './transitions.js';
 import { cast, openCastSheet, castLabel } from './cast.js';
+import { rateTrack, ratingEvents } from './ratings.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
@@ -503,9 +504,7 @@ function ratingControl() {
     value = next;
     paint();
     try {
-      const rating = value || null;
-      await app.server.rate(t.id, rating);
-      t.userRating = rating;
+      await rateTrack(t, value || null);
     } catch (err) {
       value = before;
       paint();
@@ -514,7 +513,14 @@ function ratingControl() {
   }
 
   on('settings', paint);
-  return {
+  // Rated somewhere else in the app (a track list) while it's playing.
+  ratingEvents.addEventListener('rated', (e) => {
+    const t = player.current;
+    if (!t || t.id !== e.detail.id) return;
+    t.userRating = e.detail.rating;
+    api.set(e.detail.rating);
+  });
+  const api = {
     el,
     set(rating) {
       const mode = app.settings.ratingSystem || 'stars';
@@ -524,6 +530,7 @@ function ratingControl() {
       paint();
     },
   };
+  return api;
 }
 
 function openSpeedSheet() {

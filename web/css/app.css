@@ -2888,6 +2888,67 @@ body.bare #toasts {
   color: #111;
 }
 
+/* A reminder pointing at the lock (ui.js pointOut). Taps go through it. */
+.hint-bubble {
+  position: fixed;
+  z-index: 45;
+  max-width: min(250px, calc(100vw - 24px));
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: #f2f3f5;
+  color: #17181b;
+  font-size: calc(14px * var(--fs, 1));
+  line-height: 1.35;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 0.2s,
+    transform 0.25s var(--ease);
+}
+
+.hint-bubble.shown {
+  opacity: 1;
+  transform: none;
+}
+
+.hint-bubble::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  left: calc(var(--arrow, 50%) - 7px);
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.icon-btn.hinted {
+  animation: hint-pulse 1.5s var(--ease) 2;
+}
+
+@keyframes hint-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.55);
+  }
+  75%,
+  100% {
+    box-shadow: 0 0 0 12px rgba(255, 255, 255, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hint-bubble {
+    transition: none;
+  }
+  .icon-btn.hinted {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.7);
+  }
+}
+
 .edit-bar {
   display: flex;
   align-items: center;
@@ -3109,6 +3170,166 @@ body.bare #toasts {
 
 .np-listeners-faces > :last-child {
   margin-right: 0;
+}
+
+/* ---------- browsing the library (Search) ---------- */
+
+.browse-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 var(--gutter);
+}
+
+@media (min-width: 640px) {
+  .browse-tiles {
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  }
+}
+
+.browse-tile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 56px;
+  padding: 8px 12px 8px 10px;
+  border-radius: 12px;
+  background: var(--surface);
+  color: inherit;
+  text-decoration: none;
+}
+
+.browse-tile:hover {
+  background: var(--surface-2);
+}
+
+.browse-tile[hidden] {
+  display: none;
+}
+
+.browse-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--tint-hi) 32%, transparent);
+  color: #fff;
+}
+
+.browse-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.browse-title {
+  overflow: hidden;
+  font-size: calc(15px * var(--fs, 1));
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.browse-count {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: calc(13px * var(--fs, 1));
+  white-space: nowrap;
+}
+
+/* ---------- ratings in track lists ---------- */
+
+.row-rating {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 44px;
+  margin-left: 2px;
+  /* A star, as a mask: one element draws all five (see ratings.js). */
+  --rr-star: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2.6 2.4 18.8 18.8'%3E%3Cpath d='M12 3.8l2.45 5.05 5.55.75-4.05 3.85 1 5.5L12 16.3l-4.95 2.65 1-5.5L4 9.6l5.55-.75z'/%3E%3C/svg%3E");
+  --rr-on: rgba(255, 255, 255, 0.88);
+  --rr-off: rgba(255, 255, 255, 0.2);
+}
+
+.row-rating[hidden],
+body.no-list-ratings .row-rating {
+  display: none;
+}
+
+.row-rating[role='slider'] {
+  width: 85px;
+  padding: 0 2px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.rr-stars {
+  display: block;
+  width: 100%;
+  height: 17px;
+  background: linear-gradient(90deg, var(--rr-on) calc(var(--v, 0) * 100%), var(--rr-off) 0);
+  -webkit-mask: var(--rr-star) left center / 17px 17px repeat-x;
+  mask: var(--rr-star) left center / 17px 17px repeat-x;
+}
+
+.row-rating.hovering .rr-stars {
+  background: linear-gradient(90deg, var(--muted) calc(var(--hv, 0) * 100%), var(--rr-off) 0);
+}
+
+.rr-thumb {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.rr-thumb::before {
+  content: '';
+  width: 19px;
+  height: 19px;
+  background: currentColor;
+  -webkit-mask: var(--rr-icon) center / contain no-repeat;
+  mask: var(--rr-icon) center / contain no-repeat;
+}
+
+.rr-up {
+  --rr-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5'/%3E%3C/svg%3E");
+}
+
+.rr-down {
+  --rr-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg transform='rotate(180 12 12)'%3E%3Cpath d='M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+.rr-up.on {
+  --rr-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5z'/%3E%3C/svg%3E");
+}
+
+.rr-down.on {
+  --rr-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg transform='rotate(180 12 12)'%3E%3Cpath d='M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5z'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+.rr-thumb:hover,
+.rr-thumb.on {
+  color: var(--rr-on);
+}
+
+/* Narrow phones: the time makes way for the rating. */
+@media (max-width: 400px) {
+  .track:has(.row-rating:not([hidden])) .track-dur {
+    display: none;
+  }
+  body.no-list-ratings .track .track-dur {
+    display: block;
+  }
 }
 
 /* ---------- Play Together ---------- */

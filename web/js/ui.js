@@ -1,6 +1,7 @@
 // DOM helpers, icons, formatting and the shared building blocks every view
 // uses (headers, shelves, cards, rows, sheets, toasts, infinite lists).
 import { app } from './state.js';
+import { store } from './plex.js';
 import { pushOverlay, popOverlay, back as goBack } from './router.js';
 
 // ---------- element builder ----------
@@ -91,6 +92,12 @@ const ICONS = {
   airplay: S('<path d="M6.5 17H4.5a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2h15a2 2 0 0 1 2 2V15a2 2 0 0 1-2 2h-2"/><path d="M12 14l5 6H7z"/>'),
   lock: S('<rect x="5" y="10.5" width="14" height="10" rx="2.2"/><path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.6 0v2.7M12 14.6v2"/>'),
   unlock: S('<rect x="5" y="10.5" width="14" height="10" rx="2.2"/><path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.3-1.5M12 14.6v2"/>'),
+  // Browsing the library (Search).
+  tag: S('<path d="M3.5 12.2V4.8a1.3 1.3 0 0 1 1.3-1.3h7.4l8.3 8.3a1.3 1.3 0 0 1 0 1.8l-6.5 6.5a1.3 1.3 0 0 1-1.8 0z"/><circle cx="8" cy="8" r="1.4"/>'),
+  film: S('<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M3.5 9h4M3.5 15h4M16.5 9h4M16.5 15h4"/>'),
+  calendar: S('<rect x="3.5" y="5" width="17" height="15.5" rx="2.2"/><path d="M3.5 9.8h17M8 3v4M16 3v4"/>'),
+  smile: S('<circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.2a4.2 4.2 0 0 0 6.8 0"/><circle cx="9" cy="10" r=".9" fill="currentColor"/><circle cx="15" cy="10" r=".9" fill="currentColor"/>'),
+  stack: S('<rect x="6.5" y="6.5" width="13" height="13" rx="2"/><path d="M4 16.5V5.8A1.8 1.8 0 0 1 5.8 4h10.7"/>'),
   edit: S('<path d="M4.5 19.5l1-4.1L15.8 5.1a2 2 0 0 1 2.9 0l.2.2a2 2 0 0 1 0 2.9L8.6 18.5z"/><path d="M13.8 7.1l3.1 3.1"/>'),
   trash: S('<path d="M4.5 6.5h15M9.5 6.5V4.8a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.7M6.5 6.5l.9 12.2a1.5 1.5 0 0 0 1.5 1.3h6.2a1.5 1.5 0 0 0 1.5-1.3l.9-12.2M10.2 10.5v6M13.8 10.5v6"/>'),
   remove: S('<circle cx="12" cy="12" r="8.5"/><path d="M8 12h8"/>'),
@@ -764,6 +771,64 @@ export function debounce(fn, ms) {
     clearTimeout(t);
     t = setTimeout(() => fn(...args), ms);
   };
+}
+
+// ---------- hints ----------
+
+// A small bubble pointing at a control that's easy to miss (the lock on
+// playlists). It shows a few times at most, and not again once the control
+// has been used (learned(key)). A tap anywhere, scrolling, or the returned
+// close() puts it away.
+export function pointOut(anchor, text, { key, times = 4, delay = 700, duration = 7000 } = {}) {
+  const seen = store.get('hints', {}) || {};
+  if (seen[key] === 'done' || (Number(seen[key]) || 0) >= times) return () => {};
+  let bubble = null;
+  let timer = setTimeout(show, delay);
+  function show() {
+    const r = anchor.getBoundingClientRect();
+    // Gone already (another page), or off screen.
+    if (!anchor.isConnected || !r.width || r.bottom < 0 || r.top > innerHeight) return;
+    const counts = store.get('hints', {}) || {};
+    if (counts[key] === 'done') return;
+    counts[key] = (Number(counts[key]) || 0) + 1;
+    store.set('hints', counts);
+    bubble = h('div.hint-bubble', { role: 'status' }, text);
+    document.body.append(bubble);
+    // Under the control, with its arrow pointing at it, and on screen.
+    const w = bubble.offsetWidth;
+    const mid = r.left + r.width / 2;
+    const left = Math.max(12, Math.min(innerWidth - w - 12, mid - w + 30));
+    bubble.style.left = `${left}px`;
+    bubble.style.top = `${r.bottom + 10}px`;
+    bubble.style.setProperty('--arrow', `${Math.max(14, Math.min(w - 14, mid - left))}px`);
+    anchor.classList.add('hinted');
+    requestAnimationFrame(() => bubble?.classList.add('shown'));
+    timer = setTimeout(close, duration);
+    addEventListener('pointerdown', close, { capture: true });
+    addEventListener('scroll', close, { passive: true });
+    addEventListener('keydown', close, { capture: true });
+  }
+  function close() {
+    clearTimeout(timer);
+    removeEventListener('pointerdown', close, { capture: true });
+    removeEventListener('scroll', close);
+    removeEventListener('keydown', close, { capture: true });
+    anchor.classList.remove('hinted');
+    const b = bubble;
+    bubble = null;
+    if (!b) return;
+    b.classList.remove('shown');
+    setTimeout(() => b.remove(), 250);
+  }
+  return close;
+}
+
+// The control a hint points at has been used: no more hints for it.
+export function learned(key) {
+  const counts = store.get('hints', {}) || {};
+  if (counts[key] === 'done') return;
+  counts[key] = 'done';
+  store.set('hints', counts);
 }
 
 export function shuffleArray(arr) {

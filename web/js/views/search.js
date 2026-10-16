@@ -5,6 +5,7 @@ import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, ico
 import { artistRow, albumRow, playlistRow, trackRow } from '../components.js';
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
 import { aiReady } from '../ai.js';
+import { libraryTiles } from './library.js';
 
 const RECENT_KEY = () => `recentSearches.${app.source?.serverId || 'default'}`;
 const MAX_RECENT = 12;
@@ -108,6 +109,7 @@ function results(res, q) {
 function browseContent() {
   const frag = h('div');
   frag.append(
+    h('section.block.browse-block', null, sectionHeader('Library'), libraryTiles()),
     h(
       'section.block',
       null,

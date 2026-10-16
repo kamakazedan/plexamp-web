@@ -20,6 +20,8 @@ import {
   confirmAction,
   toast,
   fmt,
+  pointOut,
+  learned,
 } from '../ui.js';
 import { albumCard, artistCard, trackRow, collectionCard } from '../components.js';
 import {
@@ -338,10 +340,12 @@ export async function playlistView({ el, params, onDispose, onHide }) {
 
   const lock = editable ? lockButton('playlist', () => setEditing(!editing)) : null;
   lock?.set(false);
+  // Until the lock has been used, a reminder of what it's for.
+  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder or remove tracks.', { key: 'lock' }) : () => {};
   const menu = iconButton('more', 'More options', () =>
     playlistMenu(pl, { edit: editing ? { onRename: rename, onDelete: remove } : null }),
   );
-  const head = backHeader(pl.title, { collapse: true, fallback: '/library/playlists', actions: [lock?.el, menu] });
+  const head = backHeader(pl.title, { collapse: true, fallback: '/playlists', actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, pl.title);
   const countEl = h('span', null, fmt.count(total, 'track', 'tracks'));
   el.append(
@@ -376,7 +380,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     pl.leafCount = total;
     countEl.textContent = fmt.count(total, 'track', 'tracks');
   };
-  const changed = () => dropCached((p) => p === '/' || p === '/library/playlists' || p === '/library');
+  const changed = () => dropCached((p) => p === '/' || p === '/playlists' || p === '/library/playlists');
 
   function controls(r) {
     if (editing) addEditControls(r, `“${r.dataset.title}” from the playlist`, removeRow);
@@ -384,6 +388,10 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   }
 
   function editActions(r) {
+    if (!editing) {
+      // Locked: the way in, for anyone looking here to remove a track.
+      return editable ? [{ icon: 'unlock', label: 'Edit playlist', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }] : [];
+    }
     return [
       r !== rows()[0] && { icon: 'moveTop', label: 'Move to top', onSelect: () => moveTo(r, 'top') },
       r !== rows().at(-1) && { icon: 'arrowDown', label: 'Move to bottom', onSelect: () => moveTo(r, 'bottom') },
@@ -396,7 +404,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     const r = trackRow(t, {
       showArt: true,
       onPlay: () => playPlaylist(pl, { start: Math.max(0, rows().indexOf(r)) }),
-      onMenu: () => trackMenu(t, { extra: editing ? editActions(r) : [] }),
+      onMenu: () => trackMenu(t, { extra: editActions(r) }),
     });
     r.dataset.pid = m.playlistItemID ?? '';
     r.dataset.title = t.title;
@@ -411,8 +419,15 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     bar.hidden = !on;
     lock?.set(on);
     rows().forEach(controls);
+    if (on) {
+      learned('lock');
+      hint();
+    }
   }
-  onHide(() => editing && setEditing(false));
+  onHide(() => {
+    hint();
+    if (editing) setEditing(false);
+  });
 
   async function removeRow(r) {
     const next = r.nextElementSibling;
@@ -517,7 +532,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       setEditing(false);
       changed();
       toast(`Deleted “${pl.title}”`);
-      back('/library/playlists');
+      back('/playlists');
     } catch (err) {
       toast(failMessage(err, 'playlist'));
     }
@@ -548,6 +563,7 @@ export async function collectionView({ el, params, onHide }) {
 
   const lock = editable ? lockButton('collection', () => setEditing(!editing)) : null;
   lock?.set(false);
+  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder or remove what’s in it.', { key: 'lock' }) : () => {};
   const menu = iconButton('more', 'More options', () => collectionMenu(meta, { edit: editing ? { onRename: rename, onDelete: remove } : null }));
   const head = backHeader(meta.title, { collapse: true, actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, meta.title);
@@ -566,7 +582,7 @@ export async function collectionView({ el, params, onHide }) {
   );
   const body = h('div.collection-body');
   el.append(bar, body);
-  const changed = () => dropCached((p) => p === '/' || p === '/library' || p.startsWith('/browse/collections'));
+  const changed = () => dropCached((p) => p === '/' || p === '/search' || p.startsWith('/browse/collections'));
   const setCount = () => {
     countEl.textContent = fmt.count(items.length, 'item', 'items');
     buttons.hidden = !items.length;
@@ -579,7 +595,16 @@ export async function collectionView({ el, params, onHide }) {
     const kids = [];
     if (tracks.length) {
       const list = h('div.tracks');
-      tracks.forEach((t, i) => list.append(trackRow(t, { showArt: true, onPlay: () => playList(tracks, i, { title: meta.title, href: `/collection/${params.id}` }) })));
+      const unlock = [{ icon: 'unlock', label: 'Edit collection', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }];
+      tracks.forEach((t, i) =>
+        list.append(
+          trackRow(t, {
+            showArt: true,
+            onPlay: () => playList(tracks, i, { title: meta.title, href: `/collection/${params.id}` }),
+            onMenu: editable ? () => trackMenu(t, { extra: unlock }) : undefined,
+          }),
+        ),
+      );
       kids.push(list);
     }
     const others = items.filter((m) => m.type !== 'track');
@@ -612,10 +637,16 @@ export async function collectionView({ el, params, onHide }) {
     el.classList.toggle('is-editing', on);
     bar.hidden = !on;
     lock?.set(on);
-    if (on) renderEditing();
-    else renderLocked();
+    if (on) {
+      learned('lock');
+      hint();
+      renderEditing();
+    } else renderLocked();
   }
-  onHide(() => editing && setEditing(false));
+  onHide(() => {
+    hint();
+    if (editing) setEditing(false);
+  });
 
   async function removeItem(r) {
     const key = r.dataset.key;
@@ -704,7 +735,7 @@ export async function collectionView({ el, params, onHide }) {
       setEditing(false);
       changed();
       toast(`Deleted “${meta.title}”`);
-      back('/library');
+      back('/search');
     } catch (err) {
       toast(failMessage(err, 'collection'));
     }

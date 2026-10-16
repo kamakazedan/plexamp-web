@@ -2,6 +2,10 @@
 // the account behind a token, the servers it can use, and its friends.
 // Tokens are only held as SHA-256 hashes, as cache keys.
 import { createHash, randomBytes } from 'node:crypto';
+import { request as httpRequest, Agent as HttpAgent } from 'node:http';
+import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
+import { isIP } from 'node:net';
+import { checkServerIdentity } from 'node:tls';
 import { log } from './log.js';
 
 const CLIENT_ID = `plexamp-web-service-${randomBytes(6).toString('hex')}`;
@@ -16,6 +20,65 @@ export class AuthError extends Error {
 
 export const validToken = (t) => typeof t === 'string' && TOKEN_SHAPE.test(t);
 const hash = (t) => createHash('sha256').update(t).digest('hex');
+
+// ---------- the Plex server at PLEX_SERVER_URL ----------
+
+// A Plex server's certificate is for its plex.direct name
+// (*.<its id>.plex.direct), so at a network address such as
+// https://10.10.10.100:32400 the name never matches. There, a certificate
+// that's otherwise valid (from a trusted authority, in date: Node checks that
+// before this is asked) is accepted when it's a plex.direct one, which only
+// Plex servers have. Anything else is checked as usual.
+export function isPlexDirectCert(cert) {
+  const names = String(cert?.subjectaltname || '')
+    .split(/,\s*/)
+    .filter((n) => n.startsWith('DNS:'))
+    .map((n) => n.slice(4).toLowerCase());
+  return names.some((n) => /^\*\.[a-z0-9-]+\.plex\.direct$/.test(n));
+}
+
+export function plexServerIdentity(host, cert) {
+  const err = checkServerIdentity(host, cert);
+  if (err && isIP(host) && isPlexDirectCert(cert)) return undefined;
+  return err;
+}
+
+// Certificate problems, in words (for the log).
+const CERT_PROBLEMS = {
+  ERR_TLS_CERT_ALTNAME_INVALID: 'its certificate is for another name',
+  DEPTH_ZERO_SELF_SIGNED_CERT: 'its certificate is self-signed',
+  SELF_SIGNED_CERT_IN_CHAIN: 'its certificate is self-signed',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'its certificate isn’t from an authority this container trusts',
+  UNABLE_TO_GET_ISSUER_CERT_LOCALLY: 'its certificate isn’t from an authority this container trusts',
+  CERT_HAS_EXPIRED: 'its certificate has expired',
+  CERT_NOT_YET_VALID: 'its certificate isn’t valid yet',
+};
+export const certProblem = (code) => CERT_PROBLEMS[code] || null;
+
+const MAX_PMS_ANSWER = 2 * 1024 * 1024;
+const pmsAgents = { 'http:': new HttpAgent({ keepAlive: true, maxSockets: 8 }), 'https:': new HttpsAgent({ keepAlive: true, maxSockets: 8 }) };
+
+// GET from the Plex server, with its certificate checked as above.
+function pmsGet(url, headers, timeout) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const send = u.protocol === 'https:' ? httpsRequest : httpRequest;
+    const req = send(u, { method: 'GET', headers, agent: pmsAgents[u.protocol], checkServerIdentity: plexServerIdentity }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > MAX_PMS_ANSWER) req.destroy(Object.assign(new Error('answer too long'), { code: 'TOO_LONG' }));
+        else chunks.push(c);
+      });
+      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', reject);
+    });
+    req.setTimeout(timeout, () => req.destroy(Object.assign(new Error('timed out'), { code: 'TimeoutError' })));
+    req.on('error', reject);
+    req.end();
+  });
+}
 
 // A small cache with expiry and a size cap.
 class TTLCache {
@@ -74,15 +137,30 @@ export class PlexAuth {
       'X-Plex-Client-Identifier': CLIENT_ID,
     };
     if (token) headers['X-Plex-Token'] = token;
-    let res;
+    const host = new URL(url).host;
+    let status;
+    let text;
     try {
-      res = await fetch(url, { headers, signal: AbortSignal.timeout(timeout) });
+      if (this.pms && url.startsWith(`${this.pms}/`)) {
+        ({ status, text } = await pmsGet(url, headers, timeout));
+      } else {
+        const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeout) });
+        status = res.status;
+        text = await res.text();
+      }
     } catch (err) {
-      throw Object.assign(new Error(`couldn't reach ${new URL(url).host}: ${err.cause?.code || err.name || 'network error'}`), { network: true });
+      const code = err.cause?.code || err.code || err.name || 'network error';
+      const problem = certProblem(code);
+      throw Object.assign(new Error(`couldn't reach ${host}: ${problem ? `${problem} (${code})` : code}`), { network: true, cert: !!problem });
     }
-    if (res.status === 401 || res.status === 403 || res.status === 422) throw new AuthError(401, 'Plex didn’t accept this sign-in.');
-    if (!res.ok) throw Object.assign(new Error(`${new URL(url).host} answered ${res.status}`), { upstream: res.status });
-    return accept === 'application/json' ? res.json() : res.text();
+    if (status === 401 || status === 403 || status === 422) throw new AuthError(401, 'Plex didn’t accept this sign-in.');
+    if (status < 200 || status > 299) throw Object.assign(new Error(`${host} answered ${status}`), { upstream: status });
+    if (accept !== 'application/json') return text;
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw Object.assign(new Error(`${host} didn’t answer with JSON`), { upstream: status });
+    }
   }
 
   // The Plex server this container fronts (PLEX_SERVER_URL), by machine ID.
@@ -96,7 +174,16 @@ export class PlexAuth {
         this.serverId = data?.MediaContainer?.machineIdentifier || null;
         if (this.serverId) log.debug(`Plex server at PLEX_SERVER_URL is ${this.serverId}`);
       } catch (err) {
-        log.debug(`couldn't read the Plex server's identity yet: ${err.message}`);
+        if (err.cert && !this.certWarned) {
+          // Not going to fix itself: said once, whether or not debug mode is on.
+          this.certWarned = true;
+          log.warn(
+            `couldn't check the Plex server at PLEX_SERVER_URL: ${err.message}. Music still plays through /pms/, but sign-in checks for the shared AI model and Play on can't use the server. ` +
+              'Use the server\'s http:// address in PLEX_SERVER_URL, or an address its certificate is for.',
+          );
+        } else {
+          log.debug(`couldn't read the Plex server's identity yet: ${err.message}`);
+        }
       }
       if (!this.serverId) this.identityRetryAt = Date.now() + 15000;
       return this.serverId;

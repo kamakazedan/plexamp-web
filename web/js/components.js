@@ -5,6 +5,7 @@ import { player } from './player.js';
 import { playAlbum, playPlaylist, playCollection, trackMenu } from './actions.js';
 import { h, art, card, row, icon, fmt, nowBars, sheet, toast } from './ui.js';
 import { togglePreview, isPreviewing } from './preview.js';
+import { rowRating } from './ratings.js';
 
 export function albumCard(m, { subtitle } = {}) {
   return card({
@@ -94,7 +95,9 @@ function tapTrack(track, onPlay, inQueue) {
 // A playable track row. `onPlay` decides what plays (usually the whole list
 // starting from this row). `popular` marks one of the album's best-known
 // tracks. `onMenu` replaces the usual menu (pages add their own actions).
-export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false, onMenu } = {}) {
+// `rating`: the track's rating control (as Settings › Experience says), on
+// by default except in the queue.
+export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false, onMenu, rating } = {}) {
   const lead = showArt
     ? h('div.track-lead.track-art', null, art(track.thumb, { size: 48, fallback: 'note' }))
     : h('div.track-lead.track-num', null, h('span.num', null, number ?? ''));
@@ -125,6 +128,7 @@ export function trackRow(track, { number, showArt = false, subtitle, onPlay, que
       h('span.track-dur', null, right),
     ),
     preview,
+    (rating ?? !inQueue) ? rowRating(track) : null,
     h(
       'button.icon-btn.track-more',
       { type: 'button', 'aria-label': `More options for ${track.title}`, onclick: () => (onMenu ? onMenu() : trackMenu(track, { queueIndex })) },

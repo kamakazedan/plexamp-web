@@ -91,9 +91,9 @@ const ids = (list) => [...new Set(list.map((t) => String(t.id || t.ratingKey)).f
 const countOf = (n, one = 'track', many = 'tracks') => fmt.count(n, one, many);
 
 // Pages showing playlists or collections load fresh next time.
-function refreshLists(kind) {
-  if (kind === 'playlist') dropCached((p) => p === '/' || p === '/library' || p === '/library/playlists' || p.startsWith('/playlist/'));
-  else dropCached((p) => p === '/' || p === '/library' || p.startsWith('/collection/') || p.startsWith('/browse/collections'));
+export function refreshLists(kind) {
+  if (kind === 'playlist') dropCached((p) => p === '/' || p === '/playlists' || p.startsWith('/playlist/'));
+  else dropCached((p) => p === '/' || p === '/search' || p.startsWith('/collection/') || p.startsWith('/browse/collections'));
 }
 
 // ---------- playlists ----------

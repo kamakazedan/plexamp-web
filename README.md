@@ -75,6 +75,7 @@ These come with how the app works:
 - **Tokens live in the browser.** Like Plex's own web app, the player keeps your token in the browser's local storage. Anyone with access to the browser profile, or a script injected into the page, could read it. The page uses no third-party scripts, builds everything without HTML strings, and has a strict content security policy, which makes injection hard.
 - **Tokens appear in media addresses.** Plex needs the token in artwork and audio addresses. They go only to your Plex server and are never sent as a referrer to anyone else, but they can show up in the browser's developer tools, and in the browser's own cache on the device, which keeps artwork for a day. Artwork is marked private, so proxies and other shared caches don't keep it.
 - **The container serves plain HTTP.** On your home network that's the same as Plex's own `http://` addresses. If you use the player from outside, put it behind an HTTPS reverse proxy. Without HTTPS, tokens cross the network unencrypted.
+- **The proxy doesn't check an `https://` server's certificate.** With an `https://` `PLEX_SERVER_URL`, the connection from the container to Plex is encrypted, but the proxy (nginx) can't check the certificate: it's for the server's `plex.direct` name, never its address. So, as with `http://`, that hop relies on your home network. The container's own service, which checks sign-ins with the server, does check it, and only accepts a valid Plex certificate there.
 - **The shared AI model without `PLEX_SERVER_URL`** is open to anyone signed in to Plex, and Plex accounts are free. If the player can be reached from the internet, set `PLEX_SERVER_URL` so that only people with access to your server can use the model.
 - **Play on without `PLEX_SERVER_URL`** works for anyone signed in to Plex, with the players on their own account. Someone who can open the player could add a made-up "player" to their account, at an address on your network, and learn whether something there answers on the Plex player ports. The service never sends them anything back from it beyond a player's state. If the player can be reached from the internet, set `PLEX_SERVER_URL`, or `CASTING=false`.
 - **Wide connection rules.** The content security policy has to allow connections, images and audio from any address, because Plex servers and Ollama can be anywhere.
@@ -85,19 +86,20 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 ## Features
 
 - **Home**: sections you choose and order for each library (see below), including **Collections**, shown just like Recent playlists. There's a quick library switcher too.
-- **Library**: artists, albums, compilations, soundtracks, tracks, playlists, collections, genres, styles, moods and decades, with counts from your server.
-- **Search**: live results, recent searches, top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
+- **Search**: live results, and browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Also recent searches, top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
+- **Playlists tab**: all your music playlists, with ❤️ Tracks first.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
-- **Album and playlist pages**: play, shuffle, and a menu on every track (play next, add to queue, similar tracks, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
+- **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
+- **❤️ Tracks**: tracks you give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out when they lose that rating, as in Plexamp. If yours is Plexamp's own (a smart playlist), Plex keeps it up to date itself.
 - **Now Playing**: big artwork, a seek bar drawn from your server's loudness analysis, ratings that save to Plex, the file format and quality, an Up next queue (with **Move to top**), Guest DJ, shuffle, repeat and a sleep timer. A volume slider with a percentage and marks at 25, 50 and 75%. Optional playback speed and skip buttons.
-- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, remove, rename, delete. A lock keeps them safe from accidental swipes and taps until you unlock one.
+- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, remove, rename, delete. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
 - **Collections**, for the server's owner: the same editing, and adding tracks, albums or artists, including a playlist's tracks or the queue.
 - **Play on**: play on another Plex player on your network (Plexamp on a Raspberry Pi, say) with this app as the remote, or on AirPlay and Google Cast speakers where the browser supports them. See [Play on](#play-on).
 - **Play Together**: listen in sync with Plex friends. Everyone hears the same track at the same moment, and anyone in the session can play, pause, skip, seek, and change the queue.
 - **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, which you can play or save to Plex.
 - **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys). The AI DJ uses your Ollama model to pick each next track and introduce it.
 - **Live updates**: new music, playlist changes and ratings from other Plex apps appear without reloading. Works with or without WebSockets (see [Behind a work proxy](#behind-a-work-proxy)).
-- **Playback**: gapless playback, and crossfades like Plexamp's: **Smart** crossfade uses your server's loudness analysis to fade into the next track where the music really ends, so silence at the end of a track doesn't leave a gap, and plays tracks that follow each other on an album gaplessly. Also lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
+- **Playback**: gapless playback, and crossfades like Plexamp's: **Smart** crossfade uses your server's loudness analysis to fade into the next track where the music really ends, so silence at the end of a track doesn't leave a gap, and plays tracks that follow each other on an album gaplessly (see [Good to know](#good-to-know) for the Plex setting it needs). Also lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
 - **Album-colour backgrounds** from Plex's own artwork colours, or a blurred copy of the cover.
 - **Responsive**: bottom tabs and a mini player on phones; a sidebar and full transport bar on desktop. Each tab keeps its own history, like a phone app's, so Back stays within the tab you're in. It can be added to a phone's home screen.
 - **Reconnects** on its own, preferring a local connection, then remote, then Plex's relay.
@@ -124,7 +126,7 @@ All optional. Set them as environment variables on the container.
 
 | Variable | Example | What it does |
 | --- | --- | --- |
-| `PLEX_SERVER_URL` | `http://192.168.1.10:32400` | Proxies that Plex server at `/pms/` and adds "Server set up for this app" to the server list. |
+| `PLEX_SERVER_URL` | `http://192.168.1.10:32400` | Proxies that Plex server at `/pms/`, adds "Server set up for this app" to the server list, and gives the app a route to the server when its local address doesn't work in the browser. `https://` works too. |
 | `DISABLE_WEBSOCKETS` | `true` | The app never opens a WebSocket. Live updates use Plex's event stream, or check every minute. |
 | `OLLAMA_URL` | `http://192.168.1.20:11434` | Shares that Ollama server with everyone who uses the app, through `/ollama/`. |
 | `OLLAMA_MODEL` | `llama3.1:8b` | The shared model people get unless they choose another installed one. |
@@ -136,7 +138,9 @@ All optional. Set them as environment variables on the container.
 
 The container stops with a clear message in its log if a value doesn't make sense, for example an address without `http://`.
 
-**`PLEX_SERVER_URL`** helps when the browser can't reach Plex directly: when the player is served over HTTPS but Plex is plain HTTP, when your router's DNS rebinding protection blocks `*.plex.direct` addresses, or when a work network only allows ordinary web traffic to one address. You still sign in; the proxy only carries the traffic.
+**`PLEX_SERVER_URL`** helps when the browser can't reach Plex directly: when the player is served over HTTPS but Plex is plain HTTP, when your router's DNS rebinding protection blocks `*.plex.direct` addresses, or when a work network only allows ordinary web traffic to one address. You still sign in; the proxy only carries the traffic. When you pick your server by name, the app tries its local address first and then this proxy, before going out through the internet or Plex's relay.
+
+An `https://` address works too, such as `https://192.168.1.10:32400` for a server set to require secure connections. A Plex server's certificate is for its own `plex.direct` name, which an address like that can't match, so the container accepts the server's Plex certificate there (and nothing else: a self-signed certificate is refused, and the log says so). `http://` is simpler on a home network.
 
 ## Play Together
 
@@ -263,7 +267,8 @@ If the player is served over HTTPS, browsers block plain `http://` addresses oth
 
 - **Formats.** Files play as-is when the browser supports them (FLAC, MP3, AAC, Opus and WAV in current browsers; ALAC mostly in Safari). Anything else is converted by your server over HLS, played with the built-in support where the browser has it and with [hls.js](https://github.com/video-dev/hls.js) (bundled into the image) where it doesn't. The conversion path is the part most likely to need adjusting against real servers.
 - **Sonic features** (similar tracks, Sonic path, sonically similar artists, artist radio and the sound-based Guest DJs) need sonic analysis turned on for the library in Plex. Without it, DJs fall back to matching on genre.
-- **The waveform** appears once Plex has analysed a track's loudness; until then the seek bar is a plain line. Smart crossfades need the same analysis to find where the music ends; without it, they fade at the end of the file.
+- **Smart crossfade needs Plex's loudness analysis.** That's what tells it where a track's music really ends. It's a server setting in Plex: **Settings › Library › Analyze audio tracks for loudness**, and it runs during the server's maintenance period. Sonic analysis (a separate setting, which needs Plex Pass) isn't needed for this. Without loudness analysis, Smart fades at the very end of each track, like **Always**, so silence at the end of a track still leaves a gap. Gapless playback between tracks of an album doesn't need any analysis.
+- **The waveform** appears once Plex has analysed a track's loudness too; until then the seek bar is a plain line.
 - **Crossfades on iPhone and iPad.** Safari there doesn't let pages change the volume of audio, so it can't fade. With Crossfade on, tracks change where the music ends instead.
 - **Memory.** Long lists keep artwork only near the screen, and pages you've moved on from are let go after a while, so the player stays light however long it's open or however big the library.
 - **Not built yet**: lyrics and loudness levelling.
@@ -306,6 +311,7 @@ web/
   js/together.js         Play Together: sessions, long-polling, the shared clock
   js/cast.js             Play on: Plex players through the service, AirPlay and Cast
   js/editing.js          adding to playlists and collections, and who may edit collections
+  js/ratings.js          ratings in the player and in track lists, and keeping ❤️ Tracks
   js/live.js             live updates: WebSocket, event stream or polling
   js/ai.js               Ollama client, AI playlists and the AI DJ's picks
   js/dj.js               Guest DJ modes
@@ -326,6 +332,7 @@ tests/                   browser tests
 Start with [Debug mode](#debug-mode): most set-up problems show up in the container log with it on.
 
 - **"Can't reach your Plex server"**: check the server is online and Remote Access is on in Plex, or set `PLEX_SERVER_URL`. **Settings → Connection** shows which address is in use and can test it.
+- **The connection isn't local** (**Settings → Connection** says Remote or Plex relay at home): the browser can't use the server's local address. Usually the router won't look up `*.plex.direct` addresses that point into the home network (DNS rebinding protection), or Plex runs in Docker and gives out an address only Docker can reach. Set `PLEX_SERVER_URL` to the server's address on your network, and the app goes through the container instead.
 - **The log says your Plex server "lets this container in without signing in"**: the container's address is in Plex's list of networks allowed without signing in (**Settings → Network** in Plex). Until you remove it, only you (the server's owner) can use the server through the player's proxy: Plex would treat anyone else as you, so friends are refused there. Remove the container's address from that list to fix it.
 - **Live updates say they're checking every minute**: a proxy is blocking both WebSockets and the event stream. Everything still works; changes just take up to a minute to appear.
 - **Play Together shows no friends**: friends come from plex.tv, so they need to be your Plex friends, sharing your library. "Can't play from …" means they don't have access to this server.

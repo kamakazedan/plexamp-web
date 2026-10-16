@@ -29,7 +29,7 @@ const RATINGS = [
   ['stars', 'Five stars', 'Rate tracks from one to five stars.'],
   ['half', 'Half stars', 'Five stars in halves: tap the left half of a star for half.'],
   ['thumbs', 'Thumbs', 'Thumbs up or down.'],
-  ['off', 'Off', 'Don’t show ratings in the player.'],
+  ['off', 'Off', 'Don’t show ratings.'],
 ];
 const TOP_SIZES = [
   [10, '10'],
@@ -62,7 +62,14 @@ export function experienceView({ el }) {
       row({ href: '/settings/home', title: 'Home screen', subtitle: 'Choose and order the sections on Home.' }),
       choiceRow({ title: 'Grid size', subtitle: 'Size of albums and playlists in grids and shelves.', options: GRID, value: s.gridSize, onChange: set('gridSize') }),
       choiceRow({ title: 'Font size', subtitle: 'Size of text throughout the app.', options: FONT, value: s.fontSize, onChange: set('fontSize') }),
-      choiceRow({ title: 'Rating system', subtitle: 'How you rate tracks in the player.', options: RATINGS, value: s.ratingSystem, onChange: set('ratingSystem') }),
+      choiceRow({ title: 'Rating system', subtitle: 'How you rate tracks, in the player and in track lists.', options: RATINGS, value: s.ratingSystem, onChange: set('ratingSystem') }),
+      toggleRow({ title: 'Ratings in track lists', subtitle: 'Rate tracks right in album, playlist and other track lists.', checked: s.listRatings, onChange: set('listRatings') }),
+      toggleRow({
+        title: 'Keep ❤️ Tracks up to date',
+        subtitle: 'Tracks you give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out if they lose that rating.',
+        checked: s.lovedPlaylist,
+        onChange: set('lovedPlaylist'),
+      }),
       toggleRow({ title: 'Show album codec badges', subtitle: 'Show the format and resolution on album pages, like FLAC 24/96.', checked: s.codecBadges, onChange: setAndRefresh('codecBadges') }),
       toggleRow({ title: 'Show popular tracks', subtitle: 'Mark an album’s best-known tracks.', checked: s.popularTracks, onChange: setAndRefresh('popularTracks') }),
       choiceRow({ title: 'Top plays list size', subtitle: 'How many items the Most played lists in Search show.', options: TOP_SIZES, value: Number(s.topListSize) || 25, onChange: setAndRefresh('topListSize') }),

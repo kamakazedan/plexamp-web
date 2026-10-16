@@ -181,7 +181,7 @@ async function connect(entry, rowEl, subEl, body, servers) {
     let serverId = entry.id;
     let name = entry.name;
     if (entry.kind === 'discovered') {
-      conn = await pickConnection(entry);
+      conn = await pickConnection(entry, { proxy: proxyUri() });
       if (!conn) throw Object.assign(new Error('unreachable'), { unreachable: true });
     } else {
       conn = { uri: entry.uri, kind: entry.kind };
@@ -291,7 +291,7 @@ const FADES = [
   [
     'smart',
     'Smart',
-    'Fades into the next track where the music ends, so silence at the end of a track (or before the next one starts) doesn’t leave a gap. Tracks that follow each other on an album play gaplessly instead.',
+    'Fades into the next track where the music ends, so silence at the end of a track (or before the next one starts) doesn’t leave a gap. Tracks that follow each other on an album play gaplessly instead. Needs Plex’s loudness analysis; without it, fades happen at the very end.',
   ],
   ['always', 'Always', 'Fades between every track, albums too, at the very end of each one.'],
   ['off', 'Off', 'One track after another, as they are.'],

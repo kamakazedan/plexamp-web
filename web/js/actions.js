@@ -121,7 +121,7 @@ export const similarRadio = (track) =>
 export const shuffleLibrary = () =>
   guard(async () => {
     const list = (await app.server.randomTracks(app.source.sectionKey, 150)).map(normTrack);
-    playList(list, 0, ctx(app.source.sectionTitle, '/library'));
+    playList(list, 0, ctx(app.source.sectionTitle, '/search'));
   });
 
 // ---------- stations (Home › Stations) ----------

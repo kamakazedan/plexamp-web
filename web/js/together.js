@@ -6,7 +6,7 @@
 // WebSockets are blocked), sends commands from the player's controls, and
 // keeps local playback on the session's clock.
 import { app, on, setSource, proxyUri } from './state.js';
-import { store, listServers, pickConnection, PlexServer } from './plex.js';
+import { store, listServers, pickConnection } from './plex.js';
 import { player } from './player.js';
 import { guestDJ } from './dj.js';
 import { toast } from './ui.js';
@@ -336,17 +336,7 @@ class Together extends EventTarget {
     const servers = await listServers(app.auth.token);
     const srv = servers.find((x) => x.id === server.id);
     if (!srv) throw new TogetherError(`You can’t play from ${server.name}. Ask its owner to share their music library with you.`, 403);
-    let conn = null;
-    const proxy = proxyUri();
-    if (proxy) {
-      try {
-        const root = await new PlexServer({ uri: proxy, token: srv.token }).get('/', null, { timeout: 6000 });
-        if (root.machineIdentifier === server.id) conn = { uri: proxy, kind: 'proxy' };
-      } catch {
-        /* not the server this app proxies */
-      }
-    }
-    conn ||= await pickConnection(srv);
+    const conn = await pickConnection(srv, { proxy: proxyUri() });
     if (!conn) throw new TogetherError(`Can’t reach ${server.name} from this browser.`, 0);
     this.prevSource = src;
     setSource({

@@ -18,7 +18,7 @@ const routes = [];
 const cache = new Map(); // history key -> { el, hash, disposers }, least recently shown first
 const scrolls = new Map(); // history key -> scrollY
 const overlays = []; // close callbacks, top of stack last
-export const TAB_ROOTS = { home: '/', library: '/library', search: '/search', together: '/together', settings: '/settings' };
+export const TAB_ROOTS = { home: '/', playlists: '/playlists', search: '/search', together: '/together', settings: '/settings' };
 const CACHE_LIMIT = 16;
 const KEEP_RECENT = 4; // the page on screen and the three before it, whatever their size
 const KEPT_ELEMENTS = 60000; // the others, together, up to about this many elements
@@ -183,8 +183,10 @@ export function startRouter({ mainEl, changed }) {
 
   const st = history.state || {};
   const saved = loadSaved();
-  // A reload: the history and the stacks are as they were.
-  if (saved && st.k && st.t && st.t !== 'bare' && saved.stacks[st.t]?.entries?.[st.d]?.k === st.k) {
+  // A reload: the history and the stacks are as they were (unless they're
+  // from a version of the app with other tabs).
+  const knownTabs = saved && Object.keys(saved.stacks).every((t) => t in TAB_ROOTS);
+  if (saved && knownTabs && st.k && st.t in TAB_ROOTS && saved.stacks[st.t]?.entries?.[st.d]?.k === st.k) {
     stacks = saved.stacks;
     activeTab = st.t;
     stacks[st.t].top = st.d;
@@ -340,7 +342,8 @@ function onPop(e) {
   }
   const depth = st.ov || 0;
   while (overlays.length > depth) overlays.pop()();
-  if (!st.k) {
+  // An entry from a version of the app with other tabs: a page of its own.
+  if (!st.k || (st.t && st.t !== 'bare' && !(st.t in TAB_ROOTS))) {
     // A hash typed into the address bar: a new page, in the tab it belongs to.
     const hash = location.hash || hashOf('/');
     const own = tabFor(hash);

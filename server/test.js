@@ -5,6 +5,7 @@ import { Together, cleanTrack, TogetherError } from './together.js';
 import { redact, oneLine } from './log.js';
 import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
+import { isPlexDirectCert, plexServerIdentity, certProblem } from './plex.js';
 
 const dan = { id: 1, title: 'Dan', thumb: null };
 const sam = { id: 2, title: 'Sam', thumb: null };
@@ -206,6 +207,22 @@ function castSetup() {
   const cast = new Cast({ auth: { resources: async () => devices }, fetchImpl });
   return { cast, calls };
 }
+
+test('a Plex server\'s own certificate is accepted at its network address, and only there', () => {
+  const plex = { subject: { CN: '*.0123456789abcdef0123456789abcdef.plex.direct' }, subjectaltname: 'DNS:*.0123456789abcdef0123456789abcdef.plex.direct' };
+  assert.ok(isPlexDirectCert(plex));
+  assert.equal(plexServerIdentity('10.10.10.100', plex), undefined);
+  assert.equal(plexServerIdentity('fd00::12', plex), undefined);
+  // At a name, the name has to match, as usual.
+  assert.ok(plexServerIdentity('plex.example.com', plex) instanceof Error);
+  assert.equal(plexServerIdentity('10-10-10-100.0123456789abcdef0123456789abcdef.plex.direct', plex), undefined);
+  // Other certificates are checked as usual, at addresses too.
+  assert.ok(plexServerIdentity('10.10.10.100', { subject: { CN: 'nas.local' }, subjectaltname: 'DNS:nas.local' }) instanceof Error);
+  for (const name of ['DNS:*.plex.direct.example.com', 'DNS:plex.direct', 'DNS:*.a.b.plex.direct', 'DNS:x.plex.direct', 'DNS:*.plex.directory'])
+    assert.ok(!isPlexDirectCert({ subject: {}, subjectaltname: name }), name);
+  assert.equal(certProblem('DEPTH_ZERO_SELF_SIGNED_CERT'), 'its certificate is self-signed');
+  assert.equal(certProblem('ECONNREFUSED'), null);
+});
 
 test('only private addresses count as being on the home network', () => {
   for (const a of ['10.0.0.2', '172.16.5.1', '172.31.255.1', '192.168.1.5', '100.64.0.1', 'fd12:3456::1', 'fc00::5']) assert.ok(privateAddress(a), a);
