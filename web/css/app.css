@@ -2324,11 +2324,25 @@ body.np-open #toasts {
 
 /* "Playing on Living Room" under the track, while it plays somewhere else. */
 .np-where {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px auto 0;
+  max-width: 100%;
+}
+
+.np-where[hidden] {
+  display: none;
+}
+
+.np-where-label,
+.np-where-here {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   max-width: 100%;
-  margin: 12px auto 0;
+  min-width: 0;
   padding: 5px 13px 5px 10px;
   border: 0;
   border-radius: 16px;
@@ -2341,7 +2355,13 @@ body.np-open #toasts {
   cursor: pointer;
 }
 
-.np-where[hidden] {
+/* "Listen here": the way to move the music to this device. */
+.np-where-here {
+  background: rgba(255, 255, 255, 0.88);
+  color: #15161a;
+}
+
+.np-where-here[hidden] {
   display: none;
 }
 
@@ -2351,8 +2371,41 @@ body.np-open #toasts {
   white-space: nowrap;
 }
 
-.np-where .ic {
+.np-where-label .ic {
   flex: none;
+  color: var(--tint-hi);
+}
+
+/* The mini player and desktop bar, while the music plays elsewhere. */
+.pb-where {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--tint-hi);
+  font-size: calc(14px * var(--fs, 1));
+  font-weight: 600;
+}
+
+.pb-where[hidden] {
+  display: none;
+}
+
+.pb-where span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pb-where .ic {
+  flex: none;
+}
+
+.pb-actions .pb-here[hidden] {
+  display: none;
+}
+
+.volume .listen-here {
   color: var(--tint-hi);
 }
 

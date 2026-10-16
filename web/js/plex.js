@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.7.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.8.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -79,6 +79,12 @@ export function setDeviceName(name) {
 
 export function defaultDeviceName() {
   return `${APP_INFO.product} (${browserName()})`;
+}
+
+// What your other devices call this one: the player name you gave it, or
+// "Firefox on Windows".
+export function deviceLabel() {
+  return deviceName || `${browserName()} on ${osName()}`;
 }
 
 function plexParams(token) {

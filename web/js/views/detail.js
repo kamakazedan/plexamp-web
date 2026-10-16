@@ -23,7 +23,7 @@ import {
   pointOut,
   learned,
 } from '../ui.js';
-import { albumCard, artistCard, trackRow, collectionCard } from '../components.js';
+import { albumCard, artistCard, trackRow, collectionCard, playlistArt } from '../components.js';
 import {
   playAlbum,
   playArtist,
@@ -353,7 +353,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     h(
       'section.hero.hero-album',
       null,
-      art(pl.composite || pl.thumb, { size: 480, cls: 'hero-art', fallback: 'list' }),
+      art(playlistArt(pl), { size: 480, cls: 'hero-art', fallback: 'list' }),
       h(
         'div.hero-info',
         null,

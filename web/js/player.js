@@ -1213,12 +1213,40 @@ class Player extends EventTarget {
 
   cycleRepeat() {
     if (this.remote) return false;
-    this.repeat = { off: 'all', all: 'one', one: 'off' }[this.repeat] || 'off';
+    return this.setRepeat({ off: 'all', all: 'one', one: 'off' }[this.repeat] || 'off');
+  }
+
+  setRepeat(mode) {
+    if (this.remote || !['off', 'all', 'one'].includes(mode)) return false;
+    this.repeat = mode;
     this.cast?.setRepeat(this.repeat);
     if (this.repeat === 'one') this.cancelTransition();
     this.emit('mode');
     this.persist();
     return true;
+  }
+
+  // Another device's queue becomes this one's (your devices, devices.js):
+  // ready at `position` (seconds) in track `index`, or playing from there.
+  adoptQueue({ queue, index = 0, position = 0, context = null, shuffle = false, repeat = 'off', play = false }) {
+    if (!queue?.length || this.remote) return;
+    this.reset();
+    this.queue = queue.map(({ qid, pqid, sid, ...t }) => withQid(t));
+    this.original = shuffle ? null : this.queue.slice();
+    this.index = Math.max(0, Math.min(index, this.queue.length - 1));
+    this.context = context;
+    this.shuffle = !!shuffle;
+    this.repeat = ['off', 'all', 'one'].includes(repeat) ? repeat : 'off';
+    this.restoredAt = Math.max(0, position || 0);
+    this.state = 'paused';
+    this.emit('queue');
+    this.emit('mode');
+    this.emit('track');
+    this.emit('state');
+    this.queueTime();
+    this.updateMediaSession();
+    this.persist(true);
+    if (play) this.load(this.index, { startAt: this.restoredAt, autoplay: true, reportPrev: false });
   }
 
   // ---------- casting ----------

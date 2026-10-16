@@ -278,3 +278,108 @@ test('timelines are read for the music, and nothing else', async () => {
   assert.equal(parseTimeline('{"MediaContainer":{"Timeline":[{"type":"music","state":"paused","time":"5"}]}}').state, 'paused');
   assert.equal(parseTimeline('<Timeline type="music" state="evil" ratingKey="1;rm"/>').ratingKey, null);
 });
+
+// ---------- your devices ----------
+
+import { Devices, DevicesError, LIMITS as DEVICE_LIMITS, cleanCommand, cleanQueueTrack } from './devices.js';
+
+const mac = { id: 'mac-0000-aaaa', name: 'Firefox on macOS' };
+const phone = { id: 'phone-000-bbbb', name: 'Chrome on Android' };
+const qTrack = (id, qid) => ({ id: String(id), title: `T${id}`, duration: 200000, partKey: `/library/parts/${id}/1/file.flac`, thumb: `/library/metadata/${id}/thumb/1`, qid });
+
+test('your devices: one plays, and only it reports', () => {
+  let now = 1000;
+  const d = new Devices({ now: () => now });
+  const h = d.home(1001, 'mock-server-1');
+  assert.equal(d.home(1001, 'mock-server-1'), h);
+  assert.notEqual(d.home(1002, 'mock-server-1'), h); // another account
+  assert.notEqual(d.home(1001, 'another-server'), h); // another server
+  d.seen(h, phone);
+  assert.throws(() => d.report(h, phone, { qid: '1' }), (e) => e instanceof DevicesError && e.status === 409);
+  d.activate(h, mac);
+  d.report(h, mac, { queue: [qTrack(10, 1), qTrack(11, 2), { ...qTrack(12, 3), partKey: 'https://evil.example/x' }, { id: 'x' }], qid: '2', playing: true, position: 5000 });
+  const v = d.view(h, phone.id);
+  assert.equal(v.active.id, mac.id);
+  assert.deepEqual(v.queue.map((t) => t.qid), ['1', '2', '3']);
+  assert.equal(v.queue[2].partKey, null); // not Plex's shape: dropped
+  assert.equal(v.state.qid, '2');
+  now += 3000;
+  assert.equal(d.view(h, phone.id).state.position, 8000); // moved on while playing
+  assert.equal(d.view(h, phone.id, { queueVersion: v.queueVersion }).queue, undefined); // unchanged: not sent again
+  assert.ok(d.view(h, phone.id).devices.some((x) => x.id === phone.id && !x.active));
+});
+
+test('your devices: commands reach the device that plays, once', () => {
+  const d = new Devices();
+  const h = d.home(1001, 'mock-server-1');
+  assert.throws(() => d.command(h, phone, { type: 'pause' }), (e) => e.status === 409); // nothing plays
+  d.activate(h, mac);
+  d.report(h, mac, { queue: [qTrack(10, 1)], qid: '1', playing: true });
+  assert.throws(() => d.command(h, phone, { type: 'format-disk' }), (e) => e.status === 400);
+  const id = d.command(h, phone, { type: 'seek', position: 61000 });
+  d.command(h, phone, { type: 'play-tracks', tracks: [qTrack(20), { id: '21', partKey: '/library/parts/../../x/file.mp3' }], start: 9 });
+  assert.equal(d.view(h, phone.id).commands.length, 0); // only for the one playing
+  const cmds = d.view(h, mac.id).commands;
+  assert.deepEqual(cmds.map((c) => c.type), ['seek', 'play-tracks']);
+  assert.equal(cmds[1].start, 1); // within the list
+  assert.equal(cmds[1].tracks[1].partKey, null);
+  assert.equal(d.view(h, mac.id, { after: id }).commands.length, 1);
+  d.report(h, mac, { qid: '1', playing: true, ack: cmds[1].id });
+  assert.equal(d.view(h, mac.id).commands.length, 0); // done
+  d.command(h, mac, { type: 'pause' });
+  d.activate(h, phone); // the phone takes over: what waited for the Mac is dropped
+  assert.equal(d.view(h, phone.id).commands.length, 0);
+  assert.equal(d.view(h, mac.id).active.id, phone.id);
+});
+
+test('your devices: one that goes quiet stops being the one that plays', async () => {
+  let now = 0;
+  const d = new Devices({ now: () => now });
+  const h = d.home(1001, 'mock-server-1');
+  d.activate(h, mac);
+  d.report(h, mac, { queue: [qTrack(10, 1)], qid: '1', playing: true, position: 1000 });
+  d.seen(h, phone);
+  now = 30000;
+  d.seen(h, phone);
+  now = DEVICE_LIMITS.goneMs + 1000;
+  d.sweep();
+  const v = d.view(h, phone.id);
+  assert.equal(v.active, null);
+  assert.equal(v.state.playing, false); // kept, paused where it got to
+  assert.ok(v.state.position > 1000);
+  assert.deepEqual(v.devices.map((x) => x.id), [phone.id]);
+  // Releasing: the same, straight away.
+  d.activate(h, phone);
+  d.report(h, phone, { queue: [qTrack(10, 1)], qid: '1', playing: true });
+  assert.equal(d.release(h, mac.id), false); // only the one playing can
+  assert.equal(d.release(h, phone.id), true);
+  // Waiting for a change: answered when something changes.
+  const waiting = d.wait(h, h.version, 1000);
+  d.seen(h, mac);
+  assert.equal(await waiting, true);
+});
+
+test('your devices: what one device can send another is checked', () => {
+  assert.equal(cleanCommand({ type: 'jump', qid: '../x' }), null);
+  assert.deepEqual(cleanCommand({ type: 'volume', volume: 7 }), { type: 'volume', volume: 1 });
+  assert.equal(cleanCommand({ type: 'repeat', mode: 'forever' }), null);
+  assert.equal(cleanCommand({ type: 'play-tracks', tracks: [] }), null);
+  const ctx = cleanCommand({ type: 'play-tracks', tracks: [qTrack(1)], context: { title: 'Mix', href: '//evil.example' } }).context;
+  assert.deepEqual(ctx, { title: 'Mix', href: null });
+  assert.equal(cleanQueueTrack({ ...qTrack(5), qid: undefined }), null); // a queue entry needs its place
+  assert.throws(() => new Devices().home(1, 'bad server id'), (e) => e.status === 400);
+  const d = new Devices();
+  const h = d.home(1, 'srv');
+  assert.throws(() => d.seen(h, { id: 'x' }), (e) => e.status === 400);
+  for (let i = 0; i < DEVICE_LIMITS.devices + 5; i++) d.seen(h, { id: `device-${String(i).padStart(4, '0')}`, name: `D${i}` });
+  assert.equal(h.devices.size, DEVICE_LIMITS.devices);
+  // Commands the playing device hasn't carried out stay few, and small.
+  d.activate(h, { id: 'device-0000', name: 'D0' });
+  const many = Array.from({ length: DEVICE_LIMITS.tracksAtOnce }, (_, i) => qTrack(i + 1));
+  for (let i = 0; i < 10; i++) d.command(h, { id: 'device-0001', name: 'D1' }, { type: 'add', tracks: many });
+  for (let i = 0; i < DEVICE_LIMITS.commands + 10; i++) d.command(h, { id: 'device-0001', name: 'D1' }, { type: 'next' });
+  assert.equal(h.commands.length, DEVICE_LIMITS.commands);
+  assert.ok(h.commands.reduce((n, c) => n + (c.tracks?.length || 0), 0) <= DEVICE_LIMITS.commandTracks);
+  for (let i = 0; i < 5; i++) d.command(h, { id: 'device-0001', name: 'D1' }, { type: 'add', tracks: many });
+  assert.ok(h.commands.reduce((n, c) => n + (c.tracks?.length || 0), 0) <= DEVICE_LIMITS.commandTracks);
+});

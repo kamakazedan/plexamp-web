@@ -30,7 +30,12 @@ export async function settingsView({ el }) {
       row({ href: '/settings/account', lead: lead('user'), title: 'Account', subtitle: auth.username || 'Signed in', right: avatar(auth.thumb, auth.username) }),
       row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: badge(src?.serverName) }),
       row({ href: '/settings/experience', lead: lead('sliders'), title: 'Experience', subtitle: 'Appearance, player, Home screen and more' }),
-      row({ href: '/settings/playback', lead: lead('speaker'), title: 'Playback', subtitle: 'Streaming quality, gapless playback and crossfade' }),
+      row({
+        href: '/settings/playback',
+        lead: lead('speaker'),
+        title: 'Playback',
+        subtitle: app.config.devices ? 'Streaming quality, crossfade and your devices' : 'Streaming quality, gapless playback and crossfade',
+      }),
       row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'Server address and diagnostics' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
@@ -338,6 +343,22 @@ function playbackView({ el }) {
       length,
     ),
   );
+  if (app.config.devices) {
+    el.append(
+      h('div.section-head', null, h('h2', null, 'Your devices')),
+      h(
+        'div.rows',
+        null,
+        toggleRow({
+          title: 'Share playback with your devices',
+          subtitle:
+            'Your devices signed in to this Plex account show what’s playing on any of them, and control it. One plays at a time: tap the muted speaker (Listen here) on another device to move the music there, from the same spot. Off: this device plays on its own.',
+          checked: s.shareDevices !== false,
+          onChange: (v) => saveSettings({ shareDevices: v }),
+        }),
+      ),
+    );
+  }
 }
 
 // options: [[value, title, subtitle]]

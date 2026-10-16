@@ -246,7 +246,9 @@ def entry_id():
     return next_entry[0]
 
 
-def make_playlist(title, members, smart=False, viewed=None, section=SECTION):
+def make_playlist(title, members, smart=False, viewed=None, section=SECTION, poster=False):
+    """A playlist; `poster`: with a picture of its own, set in Plex (its
+    thumb), as well as the mosaic Plex makes (its composite)."""
     k = key()
     p = {
         'ratingKey': k, 'key': f'/playlists/{k}/items', 'type': 'playlist', 'playlistType': 'audio',
@@ -257,6 +259,8 @@ def make_playlist(title, members, smart=False, viewed=None, section=SECTION):
     }
     if viewed:
         p['lastViewedAt'] = viewed
+    if poster:
+        p['thumb'] = f'/library/metadata/{k}/thumb/1700000000'
     items[k] = p
     return p
 
@@ -301,7 +305,7 @@ playlists = [
     make_playlist('Favourite tracks', random.sample(tracks, 18), viewed=NOW - 3600 * 20),
     make_playlist('Everything', tracks * 3, smart=True, viewed=NOW - 86400 * 2),
     make_playlist('Sunday morning', random.sample(tracks, 9)),
-    make_playlist('Late night', random.sample(tracks, 14), viewed=NOW - 86400 * 9),
+    make_playlist('Late night', random.sample(tracks, 14), viewed=NOW - 86400 * 9, poster=True),
     make_playlist('Workout', random.sample(tracks, 11)),
     make_playlist('Bedtime stories', random.sample(tracks, 4), section='3'),
 ]
@@ -483,7 +487,7 @@ def cover_png(thumb, size):
         if FONT:
             f = ImageFont.truetype(FONT, 40)
             d.text((28, S - 70), it['title'][:22].upper(), font=f, fill=(255, 255, 255))
-    elif it.get('type') == 'playlist':
+    elif it.get('type') == 'playlist' and '/composite/' in thumb:
         members = it['_items'][:4]
         for i, m in enumerate(members):
             tile = Image.open(io.BytesIO(cover_png(m['parentThumb'], 256))).resize((S // 2, S // 2))

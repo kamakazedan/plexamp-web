@@ -246,7 +246,7 @@ export function playlistMenu(pl, { edit = null } = {}) {
   sheet({
     title: pl.title,
     subtitle: fmt.count(pl.leafCount || 0, 'track', 'tracks'),
-    image: pl.composite || pl.thumb,
+    image: pl.thumb || pl.composite,
     actions: [
       { icon: 'play', label: 'Play', onSelect: () => playPlaylist(pl) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playPlaylist(pl, { shuffle: true }) },

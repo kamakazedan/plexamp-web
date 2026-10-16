@@ -15,6 +15,7 @@ import { log, setDebug, isDebug } from './log.js';
 import { PlexAuth, AuthError, validToken } from './plex.js';
 import { Together, TogetherError } from './together.js';
 import { Cast, CastError } from './cast.js';
+import { Devices, DevicesError } from './devices.js';
 import { listenForNginx } from './syslog.js';
 
 // ---------- settings ----------
@@ -30,6 +31,7 @@ function loadConfig() {
     debug: env.PW_SERVICE_DEBUG ? env.PW_SERVICE_DEBUG === 'true' : !!cfg.debug,
     together: env.PW_SERVICE_TOGETHER ? env.PW_SERVICE_TOGETHER === 'true' : cfg.together !== false,
     cast: env.PW_SERVICE_CAST ? env.PW_SERVICE_CAST === 'true' : cfg.cast !== false,
+    devices: env.PW_SERVICE_DEVICES ? env.PW_SERVICE_DEVICES === 'true' : cfg.devices !== false,
     // Development only: players at 127.0.0.1 (the mock player).
     castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
     aiAuth: env.PW_SERVICE_AI_AUTH || cfg.aiAuth || 'plex',
@@ -51,11 +53,14 @@ const together = new Together({
 });
 setInterval(() => together.sweep(), 60000).unref();
 const cast = new Cast({ auth, loopback: config.castLoopback });
+const devices = new Devices();
+setInterval(() => devices.sweep(), 15000).unref();
 
 // ---------- rate limits ----------
 
 const buckets = new Map();
 const waiting = new Map(); // user id -> long-polls open
+const deviceWaits = new Map(); // `${user id}|${device id}` -> long-polls open
 function allow(key, perMinute) {
   const now = Date.now();
   let b = buckets.get(key);
@@ -417,6 +422,78 @@ async function castRoute(req, res, parts) {
   throw new HttpError(404, 'Not found.');
 }
 
+// Your devices: the devices signed in to one account, playing from one
+// server, share what's playing; one plays, the others follow and control it.
+//   GET  /api/devices?server=ID&device=ID&name=NAME&since=V&queue=QV&after=C&wait=25
+//   POST /api/devices/activate   { server, device: { id, name } }   this one plays now
+//   POST /api/devices/release    { server, device }                  this one stops being it
+//   POST /api/devices/report     { server, device, queue?, qid, playing, position, ... }
+//   POST /api/devices/command    { server, device, command: { type, ... } }
+async function devicesRoute(req, res, parts, url) {
+  if (!config.devices) throw new HttpError(404, 'Sharing playback between devices is turned off on this player.');
+  const { user, token } = await signedIn(req);
+  if (!allow(`d|${user.id}`, 900)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
+  const method = req.method;
+  const body = method === 'POST' ? await readBody(req, 512 * 1024) : null;
+  const q = url.searchParams;
+  const serverId = String((body ? body.server : q.get('server')) || '');
+  if (!(await auth.canUseServer(token, serverId).catch(() => false))) throw new HttpError(403, 'You can’t play from that Plex server.');
+  const device = body ? body.device : { id: q.get('device'), name: q.get('name') };
+  const deviceId = String(device?.id || '');
+  try {
+    const h = devices.home(user.id, serverId);
+    const view = () => devices.view(h, deviceId, { queueVersion: Number(q.get('queue') ?? -1), after: Number(q.get('after') || 0) });
+    if (!parts[0] && method === 'GET') {
+      devices.seen(h, device);
+      const since = Number(q.get('since') || 0);
+      const wait = Math.max(0, Math.min(Number(q.get('wait') || 0), 25)) * 1000;
+      const key = `${user.id}|${deviceId}`;
+      const mine = deviceWaits.get(key) || 0;
+      if (wait && since >= h.version && mine < 2 && (waiting.get(user.id) || 0) < 24) {
+        let gone = false;
+        res.on('close', () => !res.writableFinished && (gone = true));
+        deviceWaits.set(key, mine + 1);
+        waiting.set(user.id, (waiting.get(user.id) || 0) + 1);
+        try {
+          await devices.wait(h, since, wait);
+        } finally {
+          const n = (deviceWaits.get(key) || 1) - 1;
+          if (n > 0) deviceWaits.set(key, n);
+          else deviceWaits.delete(key);
+          const u = (waiting.get(user.id) || 1) - 1;
+          if (u > 0) waiting.set(user.id, u);
+          else waiting.delete(user.id);
+        }
+        if (gone) return undefined;
+        devices.seen(h, device);
+      }
+      return send(res, 200, view());
+    }
+    if (method !== 'POST') throw new HttpError(405, 'Not allowed.');
+    if (parts[0] === 'activate') {
+      devices.activate(h, device);
+      log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" plays now`);
+      return send(res, 200, view());
+    }
+    if (parts[0] === 'release') {
+      devices.seen(h, device);
+      devices.release(h, deviceId);
+      return send(res, 200, { ok: true });
+    }
+    if (parts[0] === 'report') {
+      devices.report(h, device, body);
+      return send(res, 200, { version: h.version, queueVersion: h.queueVersion });
+    }
+    if (parts[0] === 'command') {
+      return send(res, 200, { id: devices.command(h, device, body.command) });
+    }
+  } catch (err) {
+    if (err instanceof DevicesError) throw new HttpError(err.status, err.message);
+    throw err;
+  }
+  throw new HttpError(404, 'Not found.');
+}
+
 async function handle(req, res) {
   const started = Date.now();
   const url = new URL(req.url, 'http://service.local');
@@ -430,12 +507,13 @@ async function handle(req, res) {
   try {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
-    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast, debug: config.debug });
+    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast, devices: config.devices, debug: config.debug });
     if (area === 'internal' && rest[0] === 'ai-auth') return await aiAuth(req, res);
     if (area === 'internal' && rest[0] === 'pms-auth') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
     if (area === 'cast') return await castRoute(req, res, rest);
+    if (area === 'devices') return await devicesRoute(req, res, rest, url);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
     const known = err instanceof HttpError || err instanceof TogetherError;
@@ -489,7 +567,7 @@ function started() {
     log.error(`couldn't hand the socket to the ${config.user} user: ${err.message}`);
     process.exit(1);
   }
-  const off = [!config.together && 'Play Together', !config.cast && 'playing on other devices'].filter(Boolean);
+  const off = [!config.together && 'Play Together', !config.cast && 'playing on other devices', !config.devices && 'sharing playback between devices'].filter(Boolean);
   log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
 }

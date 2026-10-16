@@ -355,6 +355,7 @@ location /api/ {
 CONF
     if [ "$TOGETHER" = true ]; then add_config 'together: true'; fi
     if [ "$CAST" = true ]; then add_config 'cast: true'; fi
+    add_config 'devices: true'
     if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
 else
     echo 'location ^~ /api/ { return 404; }' >"$API_CONF"
@@ -376,6 +377,7 @@ if [ "$SERVICE" = true ]; then
   "socket": "$(json "$SERVICE_SOCKET")",
   "together": $TOGETHER,
   "cast": $CAST,
+  "devices": $SERVICE,
   "debug": $DEBUG_ON,
   "aiAuth": "$AI_AUTH",
   "plexServerUrl": "$(json "${PLEX_SERVER_URL:-}")",

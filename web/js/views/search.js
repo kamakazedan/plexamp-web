@@ -2,7 +2,7 @@ import { app, searchScope } from '../state.js';
 import { normTrack, store } from '../plex.js';
 import { replaceQuery, navigate } from '../router.js';
 import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, sheet, debounce, fmt } from '../ui.js';
-import { artistRow, albumRow, playlistRow, trackRow } from '../components.js';
+import { artistRow, albumRow, playlistRow, trackRow, playlistArt } from '../components.js';
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
 import { aiReady } from '../ai.js';
 import { libraryTiles } from './library.js';
@@ -20,7 +20,7 @@ function remember(item) {
     type: item.type,
     title: item.title,
     sub: item.type === 'album' ? item.parentTitle : item.type === 'track' ? item.grandparentTitle : null,
-    thumb: item.type === 'playlist' ? item.composite || item.thumb : item.type === 'track' ? item.parentThumb || item.thumb : item.thumb,
+    thumb: item.type === 'playlist' ? playlistArt(item) : item.type === 'track' ? item.parentThumb || item.thumb : item.thumb,
   };
   const list = recentList().filter((r) => !(r.id === entry.id && r.type === entry.type));
   store.set(RECENT_KEY(), [entry, ...list].slice(0, MAX_RECENT));

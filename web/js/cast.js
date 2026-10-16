@@ -14,6 +14,7 @@ import { popOverlay, describeError } from './router.js';
 import { h, icon, sheet, toast, shuffleArray } from './ui.js';
 import { together } from './together.js';
 import { debugLog } from './debug.js';
+import { devices } from './devices.js';
 
 const POLL_MS = 1000;
 // A temporary token is asked for afresh for each device (it stops working
@@ -112,13 +113,14 @@ class Cast extends EventTarget {
 
   // ---------- starting and stopping ----------
 
-  async start(device) {
+  // `play`: start playing there (default: if it's playing here).
+  async start(device, { play } = {}) {
     if (together.active) throw new CastError('Leave Play Together first: a session plays on each person’s own device.');
     if (this.target?.id === device.id) return;
     if (this.target) await this.stop({ here: false, quiet: true });
     const cur = player.current;
     const at = player.time;
-    const playing = player.isPlaying;
+    const playing = play ?? player.isPlaying;
     const before = { queue: player.queue, index: player.index, context: player.context };
     this.target = { id: device.id, name: device.name, product: device.product || '' };
     this.last = null;
@@ -582,23 +584,31 @@ export function openCastSheet() {
   // Asked for straight away, so it's ready if AirPlay or Cast is picked.
   if (app.server) cast.temporaryToken().then((t) => (player.mediaToken = t), () => {});
   const list = h('div.sheet-actions.cast-list');
-  const here = !cast.active && !player.routed;
+  const elsewhere = devices.isRemote; // another of your devices plays
+  const here = !cast.active && !player.routed && !elsewhere;
   const rows = [
     choice({
       iconName: 'speaker3',
       label: 'This device',
-      description: player.routed ? 'Stop playing on the AirPlay or Cast device in the browser’s own controls' : null,
+      description: elsewhere
+        ? `Listen here: the music moves from ${devices.playingOn}`
+        : player.routed
+          ? 'Stop playing on the AirPlay or Cast device in the browser’s own controls'
+          : null,
       checked: here,
-      onSelect: () => (cast.active ? cast.stop({ here: true }) : null),
+      onSelect: () => (elsewhere ? devices.takeOver() : cast.active ? cast.stop({ here: true }) : null),
     }),
   ];
+  if (elsewhere) {
+    rows.push(choice({ iconName: 'casting', label: devices.active?.name || devices.playingOn, description: 'One of your devices: playing now', checked: true, onSelect: () => {} }));
+  }
   const players = h('div.cast-players');
   if (cast.available) {
     if (together.active) players.append(choice({ iconName: 'cast', label: 'Plex players', description: 'Not while listening together', muted: true }));
     else players.append(choice({ iconName: 'cast', label: 'Looking for Plex players…', muted: true }));
   }
   rows.push(players);
-  if (remotePlaybackSupported()) {
+  if (remotePlaybackSupported() && !elsewhere) {
     rows.push(
       choice({
         iconName: 'airplay',
@@ -633,7 +643,13 @@ export function openCastSheet() {
               label: p.name,
               description: describe(p),
               checked: cast.target?.id === p.id,
-              onSelect: () => (cast.target?.id === p.id ? null : cast.start(p).catch((err) => toast(err.message))),
+              onSelect: async () => {
+                if (cast.target?.id === p.id) return;
+                // Playing on another of your devices: from there to this player.
+                const playing = player.isPlaying;
+                if (devices.isRemote && !(await devices.takeOver({ play: false }))) return;
+                cast.start(p, { play: playing }).catch((err) => toast(err.message));
+              },
             }),
           )
         : [choice({ iconName: 'cast', label: 'No Plex players found', description: 'Plexamp and other Plex players signed in to your account, on this network, show up here', muted: true })];

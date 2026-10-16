@@ -12,6 +12,7 @@ import { live } from './live.js';
 import { together } from './together.js';
 import { levelSamples } from './transitions.js';
 import { cast, openCastSheet, castLabel } from './cast.js';
+import { devices } from './devices.js';
 import { rateTrack, ratingEvents } from './ratings.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
@@ -49,7 +50,7 @@ function setModeButtons(shuffleBtn, repeatBtn, size) {
 
 // The cast button: lit, and saying where, while it plays somewhere else.
 function paintCast(btn, size) {
-  const where = castLabel();
+  const where = devices.playingOn || castLabel();
   btn.replaceChildren(icon(where ? 'casting' : 'cast', size));
   btn.classList.toggle('on', !!where);
   btn.setAttribute('aria-pressed', String(!!where));
@@ -108,7 +109,10 @@ const VOLUME_MARKS = [25, 50, 75];
 // a mark within 2% of it (the arrow keys still move 1% at a time), and the
 // level shows above the handle.
 function volumeControl() {
-  const btn = iconButton('speaker3', 'Mute', () => player.toggleMute(), { size: 22 });
+  // While another of your devices plays, this one is muted: its speaker
+  // moves the music here ("Listen here"), and the slider sets that
+  // device's volume.
+  const btn = iconButton('speaker3', 'Mute', () => (devices.isRemote ? devices.takeOver() : player.toggleMute()), { size: 22 });
   const input = h('input.scrub.vol', { type: 'range', min: 0, max: 100, step: 1, 'aria-label': 'Volume' });
   const tip = h('span.vol-tip', { 'aria-hidden': 'true' }, '100%');
   const marks = h(
@@ -166,14 +170,19 @@ function volumeControl() {
     const pct = Math.round(v * 100);
     input.value = String(pct);
     paint(pct);
-    const level = volumeIcon(v, player.muted);
+    const elsewhere = devices.isRemote;
+    const level = elsewhere ? 'speakerOff' : volumeIcon(v, player.muted);
     setIcon(btn, level, 22);
     btn.dataset.level = level;
-    btn.setAttribute('aria-label', player.muted ? 'Unmute' : 'Mute');
-    btn.title = player.muted ? 'Unmute' : 'Mute';
+    btn.classList.toggle('listen-here', elsewhere);
+    const label = elsewhere ? `Listen here (playing on ${devices.playingOn})` : player.muted ? 'Unmute' : 'Mute';
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+    input.setAttribute('aria-label', elsewhere ? `Volume on ${devices.playingOn}` : 'Volume');
   };
   update();
   player.addEventListener('volume', update);
+  devices.addEventListener('change', update);
   return { el, update };
 }
 
@@ -184,8 +193,17 @@ export function initPlayerBar(root) {
   const artBox = h('div.pb-art');
   const artistEl = h('div.pb-artist');
   const titleEl = h('div.pb-title');
-  const main = h('button.pb-main', { type: 'button', 'aria-label': 'Open now playing', onclick: () => openNowPlaying() }, artBox, h('div.pb-text', null, artistEl, titleEl));
+  // "Playing on Dan's Mac", in place of the artist, while it plays elsewhere.
+  const whereEl = h('div.pb-where', { hidden: true });
+  const main = h(
+    'button.pb-main',
+    { type: 'button', 'aria-label': 'Open now playing', onclick: () => openNowPlaying() },
+    artBox,
+    h('div.pb-text', null, artistEl, whereEl, titleEl),
+  );
 
+  const here = iconButton('speakerOff', 'Listen here', () => devices.takeOver(), { size: 26, cls: 'pb-here' });
+  here.hidden = true;
   const play = iconButton('play', 'Play', () => player.toggle(), { size: 32, cls: 'pb-play' });
   const next = iconButton('next', 'Next track', () => player.next(), { size: 28, cls: 'pb-next' });
 
@@ -205,7 +223,7 @@ export function initPlayerBar(root) {
       h('div.pb-progress', { 'aria-hidden': 'true' }, fill),
       main,
       h('div.pb-center', null, h('div.pb-controls', null, dShuffle, dPrev, dPlay, dNext, dRepeat), scrub.el),
-      h('div.pb-actions', null, play, next),
+      h('div.pb-actions', null, here, play, next),
       h(
         'div.pb-right',
         null,
@@ -238,6 +256,15 @@ export function initPlayerBar(root) {
   const onMode = () => {
     setModeButtons(dShuffle, dRepeat, 20);
     paintCast(dCast, 20);
+    const where = devices.playingOn || castLabel();
+    whereEl.hidden = !where;
+    artistEl.hidden = !!where;
+    if (where) whereEl.replaceChildren(icon(cast.active || devices.isRemote ? 'casting' : 'airplay', 16), h('span', null, `Playing on ${where}`));
+    here.hidden = !devices.isRemote;
+    if (devices.isRemote) {
+      here.title = `Listen here (playing on ${devices.playingOn})`;
+      here.setAttribute('aria-label', here.title);
+    }
   };
 
   player.addEventListener('track', onTrack);
@@ -245,6 +272,7 @@ export function initPlayerBar(root) {
   player.addEventListener('time', onTime);
   player.addEventListener('mode', onMode);
   cast.addEventListener('change', onMode);
+  devices.addEventListener('change', onMode);
   player.addEventListener('playerror', (e) => {
     const { track, remote } = e.detail;
     if (remote) {
@@ -653,7 +681,11 @@ function buildNowPlaying() {
   });
   const castBtn = toolButton('cast', 'Play on…', openCastSheet, 'cast');
   // Where it's playing, when that's not here.
-  const castChip = h('button.np-where', { type: 'button', hidden: true, onclick: openCastSheet });
+  // Where it's playing, when that's not here; and, for another of your
+  // devices, a way to listen here instead.
+  const castChip = h('button.np-where-label', { type: 'button', onclick: openCastSheet });
+  const hereBtn = h('button.np-where-here', { type: 'button', hidden: true, onclick: () => devices.takeOver() }, icon('speakerOff', 18), h('span', null, 'Listen here'));
+  const whereBox = h('div.np-where', { hidden: true }, castChip, hereBtn);
 
   const queueList = h('div.tracks.np-queue-list');
   const queueCount = h('span.np-queue-count');
@@ -677,7 +709,7 @@ function buildNowPlaying() {
       'div.np-lower',
       null,
       wave.el,
-      h('div.np-meta', null, artist, title, album, djNote, castChip),
+      h('div.np-meta', null, artist, title, album, djNote, whereBox),
       h('div.np-info', null, codec, stars.el, quality),
       h('div.np-transport', null, back, prev, play, next, fwd),
     ),
@@ -800,10 +832,11 @@ function buildNowPlaying() {
 
   function renderCasting() {
     paintCast(castBtn, 26);
-    const where = castLabel();
-    castChip.hidden = !where;
+    const where = devices.playingOn || castLabel();
+    whereBox.hidden = !where;
+    hereBtn.hidden = !devices.isRemote;
     if (where) {
-      castChip.replaceChildren(icon(cast.active ? 'casting' : 'airplay', 18), h('span', null, `Playing on ${where}`));
+      castChip.replaceChildren(icon(cast.active || devices.isRemote ? 'casting' : 'airplay', 18), h('span', null, `Playing on ${where}`));
       castChip.setAttribute('aria-label', `Playing on ${where}. Choose where it plays.`);
     }
   }
@@ -869,6 +902,7 @@ function buildNowPlaying() {
   guestDJ.addEventListener('busy', renderModes);
   together.addEventListener('change', renderModes);
   cast.addEventListener('change', renderModes);
+  devices.addEventListener('change', renderModes);
   on('settings', () => {
     renderModes();
     wave.redraw();

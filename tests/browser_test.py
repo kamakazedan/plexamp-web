@@ -25,13 +25,14 @@ and t3 (Alex, a friend without access).
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
 Sections: core ws ai dj nows blocked poll custom desktop nav edit cast ratings
-fades together settings home debug memory (default: all).
+devices fades together settings home debug memory (default: all).
 """
 
 import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 from playwright.sync_api import sync_playwright
@@ -191,6 +192,18 @@ def run(section):
 
 with sync_playwright() as pw:
     browser = pw.chromium.launch(args=['--autoplay-policy=no-user-gesture-required'])
+    # Every context here is the same Plex account, so sharing playback
+    # between devices is off unless a section turns it on (devices does).
+    _new_context = browser.new_context
+
+    def new_context(**kw):
+        c = _new_context(**kw)
+        c.add_init_script("""(() => { try {
+            const s = JSON.parse(localStorage.getItem('pw.settings') || '{}');
+            if (!('shareDevices' in s)) { s.shareDevices = false; localStorage.setItem('pw.settings', JSON.stringify(s)); }
+        } catch (e) {} })();""")
+        return c
+    browser.new_context = new_context
     mock('/__mock/config?ws=1&sse=on&ping=10')
 
     ctx = browser.new_context(**MOBILE)
@@ -525,6 +538,11 @@ with sync_playwright() as pw:
         tap_tab('playlists')
         settle('.grid-playlists .card')
         check('nav: the Playlists tab', where() == '#/playlists' and tab() == 'playlists' and page.locator('.view .page-title').inner_text() == 'Playlists')
+        # A picture set for a playlist in Plex shows, rather than Plex's mosaic.
+        pics = {t: urllib.parse.unquote(page.locator('.grid-playlists .card', has_text=t).first.locator('img').get_attribute('src') or '')
+                for t in ('Late night', 'Favourite tracks')}
+        check('nav: a playlist\'s own picture shows (and the mosaic for one without)', '/thumb/1700000000' in pics['Late night']
+              and '/composite/' in pics['Favourite tracks'], str(pics))
         tap_tab('search')
         settle('a.browse-tile:has-text("Albums")')
         page.wait_for_timeout(600)
@@ -1011,6 +1029,9 @@ with sync_playwright() as pw:
         rows = page.locator('.view .tracks .track')
         n = rows.count()
         check('ratings: every track in an album can be rated in the list', n > 4 and page.locator('.view .tracks .track .row-rating[role=slider]').count() == n, n)
+        check('ratings: the rating is to the left of the track\'s length', rows.first.evaluate("""(r) => {
+            const a = r.querySelector('.row-rating').getBoundingClientRect(), b = r.querySelector('.track-dur').getBoundingClientRect();
+            return a.width > 0 && b.width > 0 && a.right <= b.left + 1; }"""))
         shot(page, 'ratings-01-album')
         first, second, third, fourth = (rows.nth(i) for i in range(4))
         tid, tid2, tid3, tid4 = (r.get_attribute('data-track-id') for r in (first, second, third, fourth))
@@ -1086,6 +1107,109 @@ with sync_playwright() as pw:
             mock(f'/:/rate?key={t}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
         mock('/__mock/config?loved=none')
         ctx.close()
+
+    # ---------- devices: your devices share what's playing; one plays ----------
+    # Two "devices" signed in to the same account (Desk and Phone), with the
+    # setting on (other sections turn it off: they're all one account).
+    if run('devices'):
+        def device(name, **kw):
+            c = browser.new_context(**kw)
+            pg = c.new_page()
+            attach(pg, name.lower())
+            login(pg, APP)
+            settings(pg, {'shareDevices': True, 'playerName': name})
+            return c, pg
+
+        def D(pg, expr):
+            return js(pg, f"() => Promise.all([import('./js/player.js'), import('./js/devices.js')]).then(([{{ player: p }}, {{ devices: d }}]) => ({expr}))")
+
+        desk_ctx, desk = device('Desk', viewport={'width': 1280, 'height': 860})
+        play_first_album_track(desk, APP, album=1, track=0)
+        check('devices: the device that starts playing is the one that plays', wait_for(lambda: D(desk, 'd.role') == 'active', 6), D(desk, 'd.role'))
+        phone_ctx, phone = device('Phone', **MOBILE)
+        followed = wait_for(lambda: D(phone, "d.role === 'remote' && p.state === 'playing'"), 8)
+        check('devices: on another device, what\'s playing shows, without its sound', followed and D(phone, 'p.current.id') == D(desk, 'p.current.id')
+              and D(phone, 'p.decks.every((x) => x.el.paused)') and abs(D(phone, 'p.time') - D(desk, 'p.time')) < 2, D(phone, 'd.role'))
+        check('devices: ...and where it plays, with a way to listen here', 'Playing on Desk' in phone.locator('.pb-where').inner_text() and phone.locator('.pb-here').is_visible())
+        shot(phone, 'devices-01-phone-follows')
+
+        phone.click('.pb-play')
+        check('devices: pause on one pauses the one playing', wait_for(lambda: D(desk, 'p.state') == 'paused', 5) and wait_for(lambda: D(phone, 'p.state') == 'paused', 5))
+        phone.click('.pb-play')
+        check('devices: ...and play plays it', wait_for(lambda: D(desk, 'p.state') == 'playing', 5))
+        before = D(desk, 'p.current.id')
+        phone.click('.pb-next')
+        check('devices: next, too', wait_for(lambda: D(desk, 'p.current.id') != before, 5) and wait_for(lambda: D(phone, 'p.current.id') == D(desk, 'p.current.id'), 5))
+        D(phone, 'p.seek(9)')
+        check('devices: and seeking', wait_for(lambda: 8 < D(desk, 'p.time') < 12, 5), D(desk, 'p.time'))
+        n = D(desk, 'p.queue.length')
+        extra = mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=1&sort=titleSort')['MediaContainer']['Metadata'][0]['ratingKey']
+        js(phone, f"() => Promise.all([import('./js/state.js'), import('./js/plex.js'), import('./js/player.js')]).then(async ([{{ app }}, {{ normTrack }}, {{ player }}]) => player.addToQueue([normTrack(await app.server.metadata('{extra}'))]))")
+        check('devices: queue changes go to the one playing (and show on both)', wait_for(lambda: D(desk, 'p.queue.length') == n + 1, 5)
+              and str(D(desk, 'p.queue.at(-1).id')) == str(extra) and wait_for(lambda: D(phone, 'p.queue.length') == n + 1, 5))
+        albums = mock('/library/sections/1/all?type=9&sort=titleSort&X-Plex-Token=t')['MediaContainer']['Metadata']
+        album = next(a for a in albums if a.get('leafCount', 0) >= 5 and a['ratingKey'] != D(desk, 'p.current.albumId'))
+        phone.goto(APP + f'#/album/{album["ratingKey"]}')
+        phone.wait_for_selector('.hero-album')
+        phone.click('.hero-actions .btn-primary')
+        check('devices: playing an album on the phone plays it on the device that plays', wait_for(lambda: D(desk, 'p.current.albumId') == str(album['ratingKey']), 6)
+              and D(phone, "d.role === 'remote' && p.decks.every((x) => x.el.paused)"))
+
+        # Listen here: the music moves to the phone, and the desk goes quiet.
+        wait_for(lambda: D(phone, 'p.current.albumId') == str(album['ratingKey']), 5)
+        D(desk, 'p.seek(4)')  # the mock's tracks are 20 s long
+        wait_for(lambda: 3 < D(phone, 'p.time') < 7, 5)
+        t0 = time.time()
+        desk_at = D(desk, 'p.time')
+        phone.click('.pb-here')
+        moved = wait_for(lambda: D(phone, "d.role === 'active' && p.state === 'playing' && p.decks.some((x) => !x.el.paused)"), 8)
+        phone_at = D(phone, 'p.time')
+        check('devices: Listen here moves the music to this device, from the same spot', moved and D(phone, 'p.current.albumId') == str(album['ratingKey'])
+              and desk_at - 1 < phone_at < desk_at + (time.time() - t0) + 1, f'{desk_at} -> {phone_at}')
+        check('devices: ...and the one that played goes quiet, and follows', wait_for(lambda: D(desk, "d.role === 'remote' && p.decks.every((x) => x.el.paused)"), 8)
+              and wait_for(lambda: desk.locator('.toast', has_text='Now playing on Phone').count() > 0, 3))
+        shot(desk, 'devices-02-desk-quiet')
+        desk.click('.pb-right .volume .listen-here')
+        check('devices: on the quiet one, its muted speaker brings the music back', wait_for(lambda: D(desk, "d.role === 'active' && p.decks.some((x) => !x.el.paused)"), 8)
+              and wait_for(lambda: D(phone, "d.role === 'remote' && p.decks.every((x) => x.el.paused)"), 8))
+
+        # Closed while playing: the phone can carry on from where it was.
+        D(desk, 'p.seek(2)')
+        wait_for(lambda: D(phone, 'p.time') < 6, 5)
+        playing_id = D(desk, 'p.current.id')
+        D(desk, 'd.stop()')
+        carried = wait_for(lambda: D(phone, "d.role === 'idle' && !p.cast && p.state === 'paused'"), 8)
+        check('devices: when the one playing stops, another carries on from where it was', carried and D(phone, 'p.current.id') == playing_id, D(phone, 'd.role'))
+        D(phone, 'p.play()')
+        check('devices: ...and playing there makes it the one that plays', wait_for(lambda: D(phone, "d.role === 'active' && p.state === 'playing'"), 6))
+
+        # Off in settings: a device plays on its own.
+        settings(desk, {'shareDevices': True})
+        D(desk, 'd.update()')
+        wait_for(lambda: D(desk, "d.role === 'remote'"), 8)
+        desk.goto(APP + '#/settings/playback')
+        desk.wait_for_selector('label.toggle-row:has-text("Share playback with your devices")')
+        was_on = desk.locator('label.toggle-row', has_text='Share playback with your devices').locator('input').is_checked()
+        default = js(desk, "() => import('./js/state.js').then(({ DEFAULT_SETTINGS }) => DEFAULT_SETTINGS.shareDevices)")
+        toggle(desk, 'Share playback with your devices', False)
+        check('devices: on unless turned off in Settings › Playback; off, a device plays on its own', was_on and default is True
+              and wait_for(lambda: D(desk, "d.role === 'off' && !p.cast"), 5), f'{was_on} {default}')
+        D(desk, 'p.play()')
+        check('devices: ...so two can play at once', wait_for(lambda: D(desk, "p.state === 'playing'"), 6) and D(phone, "p.state === 'playing' && d.role === 'active'"))
+        D(desk, 'p.pause()')
+
+        # Someone else's account sees none of it.
+        sam_ctx = browser.new_context(**MOBILE)
+        sam = sam_ctx.new_page()
+        attach(sam, 'sam-devices')
+        login(sam, APP, 't2')
+        settings(sam, {'shareDevices': True})
+        sam.wait_for_timeout(1500)
+        check('devices: other accounts don\'t see your devices', D(sam, "d.role === 'idle' && !d.active && !p.cast"))
+        for pg in (phone, sam):
+            D(pg, 'd.stop(), p.pause()')  # nothing left playing for the sections after this
+        for c in (desk_ctx, phone_ctx, sam_ctx):
+            c.close()
 
     # ---------- fades: crossfades and gapless changes of track ----------
     # Mock tracks are 20 seconds long; some end with 6 seconds of silence,

@@ -15,9 +15,9 @@ A review of the code with one main question: **can any of it leak your data?** T
 
 ### What the app handles, and where it goes
 
-- **Your Plex sign-in.** After you sign in, the browser keeps your Plex token (and, for servers shared with you, that server's access token) in its local storage. The token is sent only to plex.tv, to your Plex server (directly or through the container's `/pms/` proxy), and to the container's own service (to check who you are for Play Together, Play on and the shared AI model). When you use Play on with a Plex player, the service also sends it with each command to that player, one of your own devices, as Plex's own apps do.
+- **Your Plex sign-in.** After you sign in, the browser keeps your Plex token (and, for servers shared with you, that server's access token) in its local storage. The token is sent only to plex.tv, to your Plex server (directly or through the container's `/pms/` proxy), and to the container's own service (to check who you are for Play Together, Play on, sharing playback between your devices and the shared AI model). When you use Play on with a Plex player, the service also sends it with each command to that player, one of your own devices, as Plex's own apps do.
 - **Your library and listening.** Requests go from your browser to your Plex server. Plays are reported back to Plex if **Sync recent plays** is on.
-- **The container** has no database and writes nothing to disk except its start-up configuration. Play Together sessions are held in memory only. The service never stores tokens; it keeps short-lived SHA-256 hashes of them as cache keys, so it doesn't have to ask plex.tv on every request.
+- **The container** has no database and writes nothing to disk except its start-up configuration. Play Together sessions, and what your devices are playing, are held in memory only. The service never stores tokens; it keeps short-lived SHA-256 hashes of them as cache keys, so it doesn't have to ask plex.tv on every request.
 - **No outside code or tracking.** No analytics and no third-party scripts. hls.js is bundled into the image, so nothing is loaded from a CDN. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and an Ollama server if you set one up.
 
 ### Fixed in this review
@@ -37,7 +37,7 @@ A review of the code with one main question: **can any of it leak your data?** T
 | Start-up messages | When an address such as `PLEX_SERVER_URL` had a user name and password in it (which the container refuses), the error printed it in full, password included. | Passwords are hidden in every message the container prints. |
 | Link parameters | A value in a link (a filter in `#/browse/…`) could replace the app's own Plex parameters, the token among them. | The app's own Plex parameters always win. |
 
-### Play Together
+### Safeguards in Play Together
 
 Added in 0.4.0, and built with the same aim:
 
@@ -48,7 +48,7 @@ Added in 0.4.0, and built with the same aim:
 - Sessions are held in memory and end on their own: after 30 minutes with nobody listening, or after 24 hours. A player holds at most 100 at a time, one per person.
 - Requests are limited per person, and long-polling uses plain HTTP, so it works through proxies that block WebSockets.
 
-### Play on
+### Safeguards in Play on
 
 Added in 0.6.0. Browsers can't send commands to a Plex player on your network, so the container's service passes them on. That means the service makes requests into your home network for people using the player, so it's tightly limited:
 
@@ -58,13 +58,22 @@ Added in 0.6.0. Browsers can't send commands to a Plex player on your network, s
 - **A temporary token for playback.** The player plays from your Plex server with a temporary token the server makes for it (Plex's own way of handing playback to another device), which only works on that server. Your account's token is only in the headers of commands to your own players.
 - **AirPlay and Google Cast** are the browser's own features. Before the browser hands the track to a speaker, the app switches its address to a temporary token from your Plex server, so the speaker doesn't get your account's token. If the server can't give one, the address has your own token, as all Plex media addresses do.
 
-### Editing playlists and collections
+### Safeguards in Your devices
+
+Added in 0.8.0. Your devices share what's playing through the container's service (see [Your devices](#your-devices)), so it holds a little of your listening for a while:
+
+- **What it holds**: for each Plex account and server, the devices open (a name such as "Chrome on Android", or the player name you chose, and a random id), which one plays, its queue around the current track (up to 600 tracks: titles, artists, albums, and Plex's ids and file paths), where it is in the track, and commands waiting for it. In memory only. A device that's gone quiet is forgotten after a minute, and the rest a day after your devices were last used.
+- **Only your own devices.** Each request carries the device's own Plex token, checked with plex.tv, and the server must be one that account can play from, as for Play Together. What one account's devices share is never shown to another account, even on the same server.
+- **No tokens between devices.** A device that takes over plays from the server with its own sign-in, and only Plex's ids and paths are passed along.
+- **Checked on the way in.** Tracks are reduced to the fields the app needs, ids must be numbers, and file and artwork paths must have Plex's own shape, so one device can't point another at a website or another part of the server. Commands come from a fixed list (play, pause, skip, seek, volume, shuffle, repeat, and changes to the queue), with every value checked. Requests are limited per account, and bodies to 512 KB.
+
+### Safeguards in editing playlists and collections
 
 Added in 0.6.0. Changes go to your Plex server with your own token, so Plex decides what you may change: your own playlists, and collections only if you own the server. The app only offers collection editing to the server's owner.
 
 Building this showed a gap in the `/pms/` proxy. If your Plex server lets the container in without signing in, it accepts any token from there and can treat requests as its owner's. Friends with access were let through, so they could have seen your view of the server and made changes (a new playlist, say) as you. In that situation the proxy now lets only the owner through.
 
-### Debug mode
+### What debug mode logs
 
 `DEBUG=true` writes much more to the container log: settings (secrets shown only as "set"), connection checks, request paths and status codes, the service's activity, and problems from browsers. Tokens and keys are always replaced with `[redacted]`, but the log does show server addresses, people's names and the names of tracks. Share it with care, and turn debug mode off when you're done.
 
@@ -79,7 +88,7 @@ These come with how the app works:
 - **The shared AI model without `PLEX_SERVER_URL`** is open to anyone signed in to Plex, and Plex accounts are free. If the player can be reached from the internet, set `PLEX_SERVER_URL` so that only people with access to your server can use the model.
 - **Play on without `PLEX_SERVER_URL`** works for anyone signed in to Plex, with the players on their own account. Someone who can open the player could add a made-up "player" to their account, at an address on your network, and learn whether something there answers on the Plex player ports. The service never sends them anything back from it beyond a player's state. If the player can be reached from the internet, set `PLEX_SERVER_URL`, or `CASTING=false`.
 - **Wide connection rules.** The content security policy has to allow connections, images and audio from any address, because Plex servers and Ollama can be anywhere.
-- **Whoever runs the container is trusted.** They control the code your browser runs, and the service sees your token when it checks who you are. That's also true of any web app you open.
+- **Whoever runs the container is trusted.** They control the code your browser runs, the service sees your token when it checks who you are, and, while your devices share playback, what you're playing. That's also true of any web app you open.
 
 To report a security problem, open an issue on GitHub without posting tokens or logs that contain them.
 
@@ -95,6 +104,7 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 - **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, remove, rename, delete. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
 - **Collections**, for the server's owner: the same editing, and adding tracks, albums or artists, including a playlist's tracks or the queue.
 - **Play on**: play on another Plex player on your network (Plexamp on a Raspberry Pi, say) with this app as the remote, or on AirPlay and Google Cast speakers where the browser supports them. See [Play on](#play-on).
+- **Your devices**: open the player on your phone while your computer plays, and the phone shows what's playing and controls it. **Listen here** moves the music to the device in your hand, from the same spot. See [Your devices](#your-devices).
 - **Play Together**: listen in sync with Plex friends. Everyone hears the same track at the same moment, and anyone in the session can play, pause, skip, seek, and change the queue.
 - **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, which you can play or save to Plex.
 - **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys). The AI DJ uses your Ollama model to pick each next track and introduce it.
@@ -142,6 +152,19 @@ The container stops with a clear message in its log if a value doesn't make sens
 
 An `https://` address works too, such as `https://192.168.1.10:32400` for a server set to require secure connections. A Plex server's certificate is for its own `plex.direct` name, which an address like that can't match, so the container accepts the server's Plex certificate there (and nothing else: a self-signed certificate is refused, and the log says so). `http://` is simpler on a home network.
 
+## Your devices
+
+Signed in to the same Plex account and playing from the same server, your devices share what's playing, as if they'd joined one session. Start a playlist on your computer, open the player on your phone, and the phone shows the track, where it's got to and Up next, with its own sound off.
+
+- **One device plays.** The others show where the music is ("Playing on Firefox on Windows") and a muted speaker.
+- **Control it from any of them.** Play, pause, skip, seek, volume, shuffle, repeat, changes to Up next, and playing an album or playlist all happen on the device that's playing. The rest of the app works as usual.
+- **Listen here.** Tap the muted speaker (or **Listen here** under the artwork) and the music moves to that device, from the same spot. The device that was playing goes quiet and follows along, and its own muted speaker moves the music back.
+- **Carry on later.** Close the player where it was playing, or leave it paused for 10 minutes, and the next device you open has the same queue ready at the same place.
+- **Name your devices** in Settings › Experience › Player name, so you know which is which. Until you do, they're named by browser and system, like "Chrome on Android".
+- **Play on more than one at once**: turn off Settings › Playback › Share playback with your devices on a device, and it plays on its own. On by default.
+
+Each browser tab counts as a device. While you're in a Play Together session, sharing between your devices pauses. A device that plays on a Plex player (see [Play on](#play-on)) is the one playing: the others show the player's name and control it too. Browsers only start sound after a tap on the device itself, which is why the music moves when you tap **Listen here** on the device you want it on. If the device that's playing closes without saying so (its battery runs out, say), the others wait up to a minute for it. If it doesn't answer a command, the app says so and offers **Listen here**.
+
 ## Play Together
 
 Listen with Plex friends, each on their own device. Open the **Together** tab, choose **Start a session**, and pick friends to invite (people you share your Plex library with). They open the same player, sign in with their own Plex account, and find the invitation in their Together tab. A dot on the tab shows when an invitation arrives.
@@ -174,7 +197,7 @@ Plex doesn't fully document how its players are controlled, and Play on has been
 - **Grid size, font size and rating system** (five stars, half stars, thumbs or off).
 - **Album codec badges, popular-track badges and preview buttons** (a 15-second listen without changing the queue).
 - **Search all libraries** and **playlists from all libraries**, **top plays list size**, and **1-tap playback** (when off, tapping a track while something plays asks whether to play it now, next or later).
-- **Sync recent plays**, **desktop integration** (media keys, the tab title, keyboard shortcuts) and the **player name** Plex shows on its dashboard.
+- **Sync recent plays**, **desktop integration** (media keys, the tab title, keyboard shortcuts) and the **player name** Plex shows on its dashboard (and your other devices show, see [Your devices](#your-devices)).
 
 Settings are kept per device.
 

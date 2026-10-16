@@ -1,7 +1,7 @@
 import { app, playlistScope } from '../state.js';
 import { normTrack } from '../plex.js';
 import { h, icon, card, pageHeader, backHeader, sectionHeader, shelf, grid, wideCard, skeletonShelf, emptyState, fmt } from '../ui.js';
-import { albumCard, playlistCard, collectionCard, trackRow } from '../components.js';
+import { albumCard, playlistCard, collectionCard, trackRow, playlistArt } from '../components.js';
 import { artistRadio, playArtist, playList, shuffleLibrary, deepCutsRadio, timeTravelRadio, randomAlbum } from '../actions.js';
 import { openSourceSheet } from './settings.js';
 import { live } from '../live.js';
@@ -114,7 +114,7 @@ const SECTION_VIEWS = {
         content: shelf(
           items.map((m) =>
             m.type === 'playlist'
-              ? wideCard({ href: `/playlist/${m.ratingKey}`, image: m.composite || m.thumb, title: m.title, subtitle: fmt.ago(m.lastViewedAt), fallback: 'list' })
+              ? wideCard({ href: `/playlist/${m.ratingKey}`, image: playlistArt(m), title: m.title, subtitle: fmt.ago(m.lastViewedAt), fallback: 'list' })
               : wideCard({ href: `/album/${m.ratingKey}`, image: m.thumb, title: m.title, subtitle: fmt.ago(m.lastViewedAt) }),
           ),
         ),

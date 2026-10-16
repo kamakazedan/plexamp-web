@@ -22,6 +22,7 @@ import { together } from './together.js';
 import { debugLog } from './debug.js';
 import { isAdmin } from './editing.js';
 import { cast } from './cast.js';
+import { devices } from './devices.js';
 import { refreshRows } from './ratings.js';
 
 const TABS = [
@@ -279,6 +280,8 @@ function boot() {
     player.restore();
     // Still playing on another Plex player since the page was opened last?
     cast.resume();
+    // Playing on another of your devices? Then this one follows it.
+    devices.update();
     ensureConnection();
     isAdmin().catch(() => {});
     live.start();

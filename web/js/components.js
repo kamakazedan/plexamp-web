@@ -23,10 +23,14 @@ export function artistCard(m) {
   return card({ href: `/artist/${m.ratingKey}`, image: m.thumb, title: m.title, round: true, fallback: 'mic' });
 }
 
+// A playlist's picture: the one you set for it in Plex (its thumb), or else
+// the mosaic Plex makes from its tracks (its composite).
+export const playlistArt = (m) => m?.thumb || m?.composite || null;
+
 export function playlistCard(m) {
   return card({
     href: `/playlist/${m.ratingKey}`,
-    image: m.composite || m.thumb,
+    image: playlistArt(m),
     title: m.title,
     subtitle: fmt.long(m.duration) || fmt.count(m.leafCount || 0, 'track', 'tracks'),
     fallback: 'list',
@@ -68,7 +72,7 @@ export function albumRow(m) {
 export function playlistRow(m) {
   return row({
     href: `/playlist/${m.ratingKey}`,
-    image: m.composite || m.thumb,
+    image: playlistArt(m),
     title: m.title,
     subtitle: fmt.count(m.leafCount || 0, 'track', 'tracks'),
     fallback: 'list',
@@ -125,10 +129,10 @@ export function trackRow(track, { number, showArt = false, subtitle, onPlay, que
         h('div.track-title', null, track.title, popular ? h('span.popular-badge', { title: 'Popular', 'aria-label': 'Popular' }, icon('flame', 15)) : null),
         sub ? h('div.track-sub', null, sub) : null,
       ),
-      h('span.track-dur', null, right),
     ),
-    preview,
     (rating ?? !inQueue) ? rowRating(track) : null,
+    h('span.track-dur', null, right),
+    preview,
     h(
       'button.icon-btn.track-more',
       { type: 'button', 'aria-label': `More options for ${track.title}`, onclick: () => (onMenu ? onMenu() : trackMenu(track, { queueIndex })) },

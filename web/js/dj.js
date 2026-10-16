@@ -10,6 +10,9 @@ import { aiReady, djPick, describeAIError } from './ai.js';
 import { describeError } from './router.js';
 import { toast } from './ui.js';
 
+// Another of your devices plays, and this one follows it (devices.js).
+const followingDevice = () => player.cast?.kind === 'device';
+
 const server = () => app.server;
 const section = () => app.source?.sectionKey;
 const pickOne = (list, top = list.length) => list[Math.floor(Math.random() * Math.min(top, list.length))];
@@ -178,7 +181,7 @@ class GuestDJ extends EventTarget {
     this.cancel();
     // A pick lined up by a different DJ makes way for the new one.
     const next = player.queue[player.index + 1];
-    if (next?.dj && next.dj !== this.id && !player.remote) player.remove(player.index + 1);
+    if (next?.dj && next.dj !== this.id && !player.remote && !followingDevice()) player.remove(player.index + 1);
     this.emit('change');
     if (!quiet && this.id) this.schedule(0);
   }
@@ -202,8 +205,9 @@ class GuestDJ extends EventTarget {
   async check() {
     const dj = this.active;
     const cur = player.current;
-    // No DJ in a Play Together session: the queue is everyone's.
-    if (!dj || !cur || !app.server || player.remote || player.state === 'idle' || player.repeat === 'one') return;
+    // No DJ in a Play Together session: the queue is everyone's. Nor while
+    // another of your devices plays: the queue is that one's, and so is its DJ.
+    if (!dj || !cur || !app.server || player.remote || followingDevice() || player.state === 'idle' || player.repeat === 'one') return;
     const next = player.queue[player.index + 1];
     if (next?.dj) return; // a pick is already lined up
     if (dj.kind === 'insert' && cur.dj) return; // insert DJs only follow your own tracks

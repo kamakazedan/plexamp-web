@@ -135,7 +135,7 @@ codes="$(docker run --rm --network "$NET" --entrypoint sh "$CURL" -c \
     "for i in \$(seq 1 30); do curl -s -o /dev/null -w '%{http_code} ' -H 'X-Plex-Token: ratelimit' $W/ollama/api/version; done" || true)"
 contains "AI: rate limited per user" "429" "$codes"
 
-contains "service: health" '"together":true,"cast":true' "$(cb $W/api/health)"
+contains "service: health" '"together":true,"cast":true,"devices":true' "$(cb $W/api/health)"
 expect "service: internal checks can't be called from outside" 404 "$(c -H 'X-Plex-Token: t' $W/api/internal/ai-auth)"
 expect "Play Together: needs a sign-in" 401 "$(c $W/api/together/me)"
 expect "Play Together: refuses a bad token" 401 "$(c -H 'X-Plex-Token: bad' $W/api/together/me)"
@@ -167,6 +167,13 @@ contains "Play on: reads what the player is doing" '"state":"' "$(cb -H 'X-Plex-
 expect "Play on: only players on the account" 404 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"pause"}' $W/api/cast/players/somebody-else/command)"
 expect "Play on: only commands it knows" 400 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"../../resources"}' $W/api/cast/players/mock-player-1/command)"
 expect "Play on: friends can't send commands either" 403 "$(c -H 'X-Plex-Token: t2' -H "$CMD" -X POST -d '{"command":"pause"}' $W/api/cast/players/mock-player-1/command)"
+DEV='device=chk-device-1&name=Check&server=mock-server-1'
+expect "Your devices: needs a sign-in" 401 "$(c "$W/api/devices?$DEV&wait=0")"
+expect "Your devices: only for people who can use the server" 403 "$(c -H 'X-Plex-Token: t3' "$W/api/devices?$DEV&wait=0")"
+contains "Your devices: a device sees your devices" '"you":"chk-device-1"' "$(cb -H 'X-Plex-Token: t' "$W/api/devices?$DEV&wait=0")"
+expect "Your devices: a device needs a proper id" 400 "$(c -H 'X-Plex-Token: t' "$W/api/devices?device=x&server=mock-server-1&wait=0")"
+expect "Your devices: only the one playing says what's playing" 409 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"server":"mock-server-1","device":{"id":"chk-device-1","name":"Check"},"qid":"1","playing":true}' $W/api/devices/report)"
+lacks "Your devices: one account doesn't see another's" '"chk-device-1"' "$(cb -H 'X-Plex-Token: t2' "$W/api/devices?device=chk-device-2&name=Sam&server=mock-server-1&wait=0")"
 docker logs pw-web 2>&1 | grep -q "WebSockets turned off" && pass "startup log explains settings" || fail "startup log explains settings"
 docker logs pw-web 2>&1 | grep -q "plexamp-web service: ready" && pass "the service started" || fail "the service started"
 LOG="$(docker logs pw-web 2>&1)"
@@ -177,7 +184,7 @@ lacks "no tokens in the log" "X-Plex-Token=t" "$LOG"
 docker run -d --name pw-web2 --network "$NET" "$IMAGE" >/dev/null
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
-expect "defaults: Play Together and Play on, nothing else" "window.PW_CONFIG = { together: true, cast: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together, Play on and your devices, nothing else" "window.PW_CONFIG = { together: true, cast: true, devices: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
 expect "defaults: Play Together needs a sign-in" 401 "$(c http://pw-web2/api/together/me)"
@@ -244,14 +251,14 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js" "window.PW_CONFIG = { cast: true };" "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js" "window.PW_CONFIG = { cast: true, devices: true };" "$(cb http://pw-web7/config.js | tr -d '\n')"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7b. Playing on other Plex players off ----------
 docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false: not in config.js" "window.PW_CONFIG = { together: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false: not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 
 # ---------- 7c. A Plex server reached over HTTPS at its address ----------

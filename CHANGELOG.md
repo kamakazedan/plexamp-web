@@ -3,6 +3,36 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.8.0 - 2026-10-16
+
+### Added
+
+- **Your devices share what's playing.** Signed in to the same Plex account
+  and playing from the same server, your devices act like one session. Open
+  the player on your phone while your computer plays, and the phone shows
+  what's playing, where it's got to and Up next, with its own sound off: a
+  muted speaker, and "Playing on …" where the artist was. Play, pause,
+  skip, seek, volume, shuffle, repeat, changes to Up next and playing new
+  music all happen on the device that's playing. **Listen here** (the muted
+  speaker, or the button under the artwork) moves the music to that device
+  from the same spot, and the one that was playing goes quiet and follows.
+  Close the player where it was playing, or leave it paused for 10 minutes,
+  and another device carries on from there. On by default: Settings ›
+  Playback › Share playback with your devices turns it off for a device,
+  which then plays on its own, so two devices can play at once. See
+  [Your devices](README.md#your-devices) in the README.
+
+### Fixed
+
+- **Playlist pictures.** A picture set for a playlist in Plex didn't show
+  (since 0.1.0): the app always used the mosaic Plex makes from the
+  playlist's tracks. It now shows your picture wherever the playlist
+  appears, and the mosaic for playlists without one.
+
+### Changed
+
+- In track lists, a track's rating is now to the left of its length.
+
 ## 0.7.0 - 2026-10-16
 
 ### Added
