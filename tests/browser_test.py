@@ -72,6 +72,16 @@ def annotate(title, message):
         print(f'::error title={title}::{text}', flush=True)
 
 
+def crashed(kind, value, tb):
+    """A test that stops with an error says where, as an annotation too."""
+    import traceback
+    annotate('Browser tests stopped', ''.join(traceback.format_exception(kind, value, tb))[-900:])
+    sys.__excepthook__(kind, value, tb)
+
+
+sys.excepthook = crashed
+
+
 def check(name, ok, detail=''):
     results.append((name, bool(ok)))
     print(('PASS ' if ok else 'FAIL ') + name + (f' — {detail}' if detail and not ok else ''), flush=True)

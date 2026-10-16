@@ -35,12 +35,21 @@ mock() { # name port script args...
         python "/dev-scripts/$@" >/dev/null
 }
 
+# In GitHub Actions, a problem also becomes an annotation on the run's
+# summary page (and readable through the API).
+annotate() { # message
+    echo "$1"
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        echo "::error title=Browser tests::$(printf '%s' "$1" | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c1-900)"
+    fi
+}
+
 wait_for() { # url
     for _ in $(seq 1 60); do
         curl -sf -o /dev/null "$1" && return 0
         sleep 0.5
     done
-    echo "timed out waiting for $1"
+    annotate "timed out waiting for $1"
     return 1
 }
 
@@ -76,10 +85,10 @@ APP_URL=http://127.0.0.1:8081/ APP_URL_NOWS=http://127.0.0.1:8082/ APP_URL_DEBUG
 log="$(docker logs pwb-web3 2>&1)"
 case "$log" in
     *"plexamp-web browser"*"answered 404"*) echo "PASS debug: browser problems are in the container log" ;;
-    *) echo "FAIL debug: browser problems are in the container log"; status=1 ;;
+    *) annotate "FAIL debug: browser problems are in the container log"; status=1 ;;
 esac
 if printf '%s' "$log" | grep -Eq 'X-Plex-Token=t2?([^A-Za-z0-9_.~-]|$)'; then
-    echo "FAIL debug: a token reached the container log"
+    annotate "FAIL debug: a token reached the container log"
     status=1
 else
     echo "PASS debug: no tokens in the container log"
