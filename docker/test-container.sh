@@ -29,6 +29,10 @@ cleanup
 pass() { echo "PASS $1"; }
 fail() {
     echo "FAIL $1"
+    # In GitHub Actions, also an annotation on the run's summary page.
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        echo "::error title=Container test::$(printf '%s' "$1" | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c1-900)"
+    fi
     FAILED=1
 }
 
@@ -156,7 +160,7 @@ players="$(cb -H 'X-Plex-Token: t' $W/api/cast/players)"
 contains "Play on: lists the owner's Plex players" '"id":"mock-player-1","name":"Living Room"' "$players"
 lacks "Play on: players' addresses stay in the container" '"url"' "$players"
 expect "Play on: only for the server's owner" 403 "$(c -H 'X-Plex-Token: t2' $W/api/cast/players)"
-expect "Play on: commands reach the player on the network" 200 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"pause"}' $W/api/cast/players/mock-player-1/command)"
+expect "Play on: commands reach the player on the network" 200 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"setParameters","volume":50}' $W/api/cast/players/mock-player-1/command)"
 contains "Play on: reads what the player is doing" '"state":"' "$(cb -H 'X-Plex-Token: t' $W/api/cast/players/mock-player-1/timeline)"
 expect "Play on: only players on the account" 404 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"pause"}' $W/api/cast/players/somebody-else/command)"
 expect "Play on: only commands it knows" 400 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"../../resources"}' $W/api/cast/players/mock-player-1/command)"

@@ -63,9 +63,19 @@ def mock(path):
         return json.loads(r.read() or b'{}')
 
 
+def annotate(title, message):
+    """In GitHub Actions, a failure also becomes an annotation, shown on the
+    run's summary page (and readable through the API)."""
+    if os.environ.get('GITHUB_ACTIONS'):
+        text = str(message).replace('%', '%25').replace('\r', ' ').replace('\n', ' ')[:900]
+        print(f'::error title={title}::{text}', flush=True)
+
+
 def check(name, ok, detail=''):
     results.append((name, bool(ok)))
     print(('PASS ' if ok else 'FAIL ') + name + (f' — {detail}' if detail and not ok else ''), flush=True)
+    if not ok:
+        annotate('Browser test', name + (f' — {detail}' if detail else ''))
 
 
 def attach(page, tag, expected=()):
@@ -1487,4 +1497,6 @@ failed = [name for name, ok in results if not ok]
 print(f'\n{len(results) - len(failed)}/{len(results)} checks passed')
 if errors:
     print('Unexpected browser errors:\n' + '\n'.join(errors))
+    for e in errors[:5]:
+        annotate('Browser error', e)
 sys.exit(1 if failed or errors else 0)

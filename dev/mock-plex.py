@@ -756,6 +756,10 @@ class PlayerHandler(BaseHTTPRequestHandler):
                 PLAYER['pq'] = new
                 sel = new['selected'] if by_key([(t, e) for t, e in new['items'] if e == new['selected']], q.get('key')) else by_key(new['items'], q.get('key'))
                 player_go(sel or new['items'][0][1], int(q.get('offset', '0') or 0))
+            elif cmd == 'playback/setParameters':
+                for k in ('volume', 'shuffle', 'repeat'):
+                    if k in q:
+                        PLAYER[k] = int(q[k])
             elif not pq:
                 return self.reply(500, '<Response code="500" status="Nothing to play"/>')
             elif cmd == 'playback/play':
@@ -778,10 +782,6 @@ class PlayerHandler(BaseHTTPRequestHandler):
                 e = next((e for _, e in pq['items'] if str(e) == q.get('playQueueItemID')), None) or by_key(pq['items'], q.get('key'))
                 if e:
                     player_go(e, 0, 'playing')
-            elif cmd == 'playback/setParameters':
-                for k in ('volume', 'shuffle', 'repeat'):
-                    if k in q:
-                        PLAYER[k] = int(q[k])
             elif cmd == 'playback/refreshPlayQueue':
                 pass  # the player follows its entry, wherever it is in the queue now
             else:
