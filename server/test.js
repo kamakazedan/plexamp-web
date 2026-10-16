@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { Together, cleanTrack, TogetherError } from './together.js';
 import { redact, oneLine } from './log.js';
 import { cleanSyslogLine } from './syslog.js';
+import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
 
 const dan = { id: 1, title: 'Dan', thumb: null };
 const sam = { id: 2, title: 'Sam', thumb: null };
@@ -178,4 +179,85 @@ test('redaction removes tokens and keys', () => {
   assert.ok(!line.includes('zzz'));
   assert.ok(!redact('a token abcDEF123456ghiJKL78 alone').includes('abcDEF123456ghiJKL78'));
   assert.equal(oneLine('line one\nfake: second line'), 'line one fake: second line');
+});
+
+// ---------- casting ----------
+
+const devices = [
+  { name: 'Living Room', product: 'Plexamp', provides: 'client,player,pubsub-player', clientIdentifier: 'p1', owned: true, presence: true,
+    connections: [{ protocol: 'http', address: '192.168.1.50', port: 32500, local: true }] },
+  { name: 'Router', provides: 'player', clientIdentifier: 'p2', owned: true, connections: [{ protocol: 'http', address: '192.168.1.1', port: 80 }] },
+  { name: 'Far away', provides: 'player', clientIdentifier: 'p3', owned: true, connections: [{ protocol: 'http', address: '203.0.113.9', port: 32500 }] },
+  { name: 'Not mine', provides: 'player', clientIdentifier: 'p4', owned: false, connections: [{ protocol: 'http', address: '192.168.1.60', port: 32500 }] },
+  { name: 'Phone', provides: 'player', clientIdentifier: 'p5', owned: true, connections: [{ protocol: 'https', address: '192.168.1.70', port: 32500 }] },
+  { name: 'Server', provides: 'server', clientIdentifier: 'srv-machine-1', owned: true,
+    connections: [{ protocol: 'https', address: '203.0.113.5', port: 32400, local: false }, { protocol: 'http', address: '192.168.1.10', port: 32400, local: true }] },
+];
+
+function castSetup() {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url: new URL(url), headers: opts.headers });
+    const body = new URL(url).pathname.endsWith('/timeline/poll')
+      ? '<MediaContainer commandID="3"><Timeline type="video" state="stopped"/><Timeline type="music" state="playing" time="42442" duration="235225" ratingKey="120" playQueueID="7" playQueueItemID="701" volume="80" shuffle="0" repeat="2"/></MediaContainer>'
+      : '<Response code="200" status="OK"/>';
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const cast = new Cast({ auth: { resources: async () => devices }, fetchImpl });
+  return { cast, calls };
+}
+
+test('only private addresses count as being on the home network', () => {
+  for (const a of ['10.0.0.2', '172.16.5.1', '172.31.255.1', '192.168.1.5', '100.64.0.1', 'fd12:3456::1', 'fc00::5']) assert.ok(privateAddress(a), a);
+  for (const a of ['8.8.8.8', '172.32.0.1', '127.0.0.1', '::1', '2001:db8::1', 'example.com', '192.168.1.5.nip.io', '', '169.254.169.254', 'fe80::1', '::ffff:192.168.1.5', '0.0.0.0'])
+    assert.ok(!privateAddress(a), a);
+  assert.ok(privateAddress('127.0.0.1', { loopback: true }));
+});
+
+test('players are the account\'s own, at a private address and a Plex player port', async () => {
+  const { cast } = castSetup();
+  const players = await cast.players('tok');
+  assert.deepEqual(players.map((p) => p.id), ['p1']);
+  assert.equal(players[0].url, 'http://192.168.1.50:32500');
+  await assert.rejects(cast.timeline({ id: 1 }, 'tok', 'p2'), (e) => e instanceof CastError && e.status === 404);
+  await assert.rejects(cast.timeline({ id: 1 }, 'tok', '../p1'), (e) => e.status === 404);
+});
+
+test('commands are built by the service, with the target and a command id', async () => {
+  const { cast, calls } = castSetup();
+  const me = { id: 1 };
+  await cast.command(me, 'tok', 'p1', { command: 'pause' });
+  await cast.command(me, 'tok', 'p1', { command: 'seekTo', offset: 61000 });
+  await cast.command(me, 'tok', 'p1', { command: 'setParameters', volume: 55 });
+  assert.equal(calls[0].url.pathname, '/player/playback/pause');
+  assert.equal(calls[0].headers['X-Plex-Target-Client-Identifier'], 'p1');
+  assert.equal(calls[1].url.searchParams.get('offset'), '61000');
+  assert.equal(calls[2].url.searchParams.get('volume'), '55');
+  assert.deepEqual(calls.map((c) => c.url.searchParams.get('commandID')), ['1', '2', '3']);
+  for (const bad of [{ command: 'navigation/home' }, { command: 'seekTo', offset: -5 }, { command: 'setParameters', volume: 500 }, { command: 'skipTo', key: '/system/x' }]) {
+    await assert.rejects(cast.command(me, 'tok', 'p1', bad), (e) => e.status === 400, JSON.stringify(bad));
+  }
+  assert.equal(calls.length, 3);
+});
+
+test('playing a queue sends the server\'s local address and the temporary token', async () => {
+  const { cast, calls } = castSetup();
+  await cast.play({ id: 1 }, 'tok', 'p1', { key: '/library/metadata/120', offset: 5000, playQueueID: 7, serverId: 'srv-machine-1', token: 'transient-abc123' });
+  const q = calls[0].url.searchParams;
+  assert.equal(calls[0].url.pathname, '/player/playback/playMedia');
+  assert.equal(q.get('address'), '192.168.1.10');
+  assert.equal(q.get('protocol'), 'http');
+  assert.equal(q.get('containerKey'), '/playQueues/7?own=1&window=200');
+  assert.equal(q.get('token'), 'transient-abc123');
+  await assert.rejects(cast.play({ id: 1 }, 'tok', 'p1', { key: '/library/metadata/120', playQueueID: 7, serverId: 'srv-machine-1', token: 'x y' }), (e) => e.status === 400);
+  await assert.rejects(cast.play({ id: 1 }, 'tok', 'p1', { key: '/library/metadata/120', playQueueID: 7, serverId: 'someone-elses', token: 'transient-abc123' }), (e) => e.status === 403);
+});
+
+test('timelines are read for the music, and nothing else', async () => {
+  const { cast } = castSetup();
+  const t = await cast.timeline({ id: 1 }, 'tok', 'p1');
+  assert.deepEqual(t, { state: 'playing', time: 42442, duration: 235225, ratingKey: '120', playQueueID: '7', playQueueItemID: '701', playQueueVersion: null, volume: 80, shuffle: false, repeat: 2 });
+  assert.deepEqual(parseTimeline('<html>login</html>'), { state: 'stopped' });
+  assert.equal(parseTimeline('{"MediaContainer":{"Timeline":[{"type":"music","state":"paused","time":"5"}]}}').state, 'paused');
+  assert.equal(parseTimeline('<Timeline type="music" state="evil" ratingKey="1;rm"/>').ratingKey, null);
 });

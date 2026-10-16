@@ -15,7 +15,7 @@ A review of the code with one main question: **can any of it leak your data?** T
 
 ### What the app handles, and where it goes
 
-- **Your Plex sign-in.** After you sign in, the browser keeps your Plex token (and, for servers shared with you, that server's access token) in its local storage. The token is sent only to plex.tv, to your Plex server (directly or through the container's `/pms/` proxy), and to the container's own service (to check who you are for Play Together and the shared AI model).
+- **Your Plex sign-in.** After you sign in, the browser keeps your Plex token (and, for servers shared with you, that server's access token) in its local storage. The token is sent only to plex.tv, to your Plex server (directly or through the container's `/pms/` proxy), and to the container's own service (to check who you are for Play Together, Play on and the shared AI model). When you use Play on with a Plex player, the service also sends it with each command to that player, one of your own devices, as Plex's own apps do.
 - **Your library and listening.** Requests go from your browser to your Plex server. Plays are reported back to Plex if **Sync recent plays** is on.
 - **The container** has no database and writes nothing to disk except its start-up configuration. Play Together sessions are held in memory only. The service never stores tokens; it keeps short-lived SHA-256 hashes of them as cache keys, so it doesn't have to ask plex.tv on every request.
 - **No outside code or tracking.** No analytics and no third-party scripts. hls.js is bundled into the image, so nothing is loaded from a CDN. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and an Ollama server if you set one up.
@@ -26,7 +26,7 @@ A review of the code with one main question: **can any of it leak your data?** T
 | --- | --- | --- |
 | Container log | nginx's default access log wrote every request address to the container log. Plex tokens travel in those addresses (artwork and audio), so anyone who could read the log, in Portainer for example, could read tokens. | The access log is off. In debug mode it shows paths only, never query strings. |
 | Container log | nginx's error messages for the Plex proxy quote the whole request, token included. | These are no longer logged. In debug mode they pass through a filter that removes tokens first. |
-| Plex proxy | `/pms/` forwarded requests without a token. And if your Plex server lets the container's network in without signing in (Plex's "List of IP addresses and networks that are allowed without auth"), anyone who could open the player could use your Plex server through it, with owner rights. | Requests without a token are refused, except the playlist and segment files inside a stream Plex is converting (players fetch those by the stream's session, without a token). The service checks whether Plex accepts made-up tokens from the container; if it does, every `/pms/` request must carry the token of a Plex account with access to the server (checked with plex.tv), and the log explains how to fix the Plex setting. Browsers can no longer set the `X-Forwarded-For` address Plex sees, and cookies aren't passed on. |
+| Plex proxy | `/pms/` forwarded requests without a token. And if your Plex server lets the container's network in without signing in (Plex's "List of IP addresses and networks that are allowed without auth"), anyone who could open the player could use your Plex server through it, with owner rights. | Requests without a token are refused, except the playlist and segment files inside a stream Plex is converting (players fetch those by the stream's session, without a token). The service checks whether Plex accepts made-up tokens from the container; if it does, every `/pms/` request must carry the server owner's own token (checked with plex.tv), because Plex can treat requests from there as the owner's, and the log explains how to fix the Plex setting. (Until 0.6.0, friends with access got through too.) Browsers can no longer set the `X-Forwarded-For` address Plex sees, and cookies aren't passed on. |
 | Shared AI sign-in check | Tokens were checked against your Plex server, which accepts anything from an allowed network (see above). | Tokens are checked with plex.tv first. Asking the Plex server is a fallback, used only when it refuses made-up tokens. |
 | Third-party code | hls.js was loaded from cdn.jsdelivr.net at run time, at whatever the newest 1.x version was. | It's pinned to one version and bundled into the image at build time, and the content security policy only allows scripts from the player itself. |
 | Crafted links | A link like `#/items?path=…` or `#/tags/…` could make the app send your token to any Plex endpoint, including ones that change things on a plain GET. | Links can only open library listings, tag lists are limited to known fields, and ids in links must be numbers. |
@@ -48,6 +48,22 @@ Added in 0.4.0, and built with the same aim:
 - Sessions are held in memory and end on their own: after 30 minutes with nobody listening, or after 24 hours. A player holds at most 100 at a time, one per person.
 - Requests are limited per person, and long-polling uses plain HTTP, so it works through proxies that block WebSockets.
 
+### Play on
+
+Added in 0.6.0. Browsers can't send commands to a Plex player on your network, so the container's service passes them on. That means the service makes requests into your home network for people using the player, so it's tightly limited:
+
+- **Only the owner.** With `PLEX_SERVER_URL` set, only the server's owner can use it. The players it can reach are on the server's network, and they're the owner's; friends' players are on their own networks.
+- **Only your own players, and only on your network.** The service connects only to devices on the signed-in account (from plex.tv) that say they're players, only at home-network addresses (10.x, 172.16 to 172.31, 192.168.x, 100.64 to 100.127 for Tailscale, and IPv6 unique-local addresses), and only on the ports Plex players use (32500 to 32510, 3005 and 32433). Never at internet addresses, loopback addresses (the container itself), or link-local addresses such as cloud servers' metadata service. Players' addresses stay in the container; the browser only gets their names.
+- **Only commands it builds itself**, from a fixed list (play, pause, stop, skip, seek, volume, shuffle, repeat, start a queue, reload the queue, and asking what it's playing), with every value from the browser checked first. It follows no redirects, waits at most 5 seconds, reads at most 64 KB of an answer, and passes back only the player's state: playing or paused, the position, the track, the volume.
+- **A temporary token for playback.** The player plays from your Plex server with a temporary token the server makes for it (Plex's own way of handing playback to another device), which only works on that server. Your account's token is only in the headers of commands to your own players.
+- **AirPlay and Google Cast** are the browser's own features. Before the browser hands the track to a speaker, the app switches its address to a temporary token from your Plex server, so the speaker doesn't get your account's token. If the server can't give one, the address has your own token, as all Plex media addresses do.
+
+### Editing playlists and collections
+
+Added in 0.6.0. Changes go to your Plex server with your own token, so Plex decides what you may change: your own playlists, and collections only if you own the server. The app only offers collection editing to the server's owner.
+
+Building this showed a gap in the `/pms/` proxy. If your Plex server lets the container in without signing in, it accepts any token from there and can treat requests as its owner's. Friends with access were let through, so they could have seen your view of the server and made changes (a new playlist, say) as you. In that situation the proxy now lets only the owner through.
+
 ### Debug mode
 
 `DEBUG=true` writes much more to the container log: settings (secrets shown only as "set"), connection checks, request paths and status codes, the service's activity, and problems from browsers. Tokens and keys are always replaced with `[redacted]`, but the log does show server addresses, people's names and the names of tracks. Share it with care, and turn debug mode off when you're done.
@@ -60,6 +76,7 @@ These come with how the app works:
 - **Tokens appear in media addresses.** Plex needs the token in artwork and audio addresses. They go only to your Plex server and are never sent as a referrer to anyone else, but they can show up in the browser's developer tools, and in the browser's own cache on the device, which keeps artwork for a day. Artwork is marked private, so proxies and other shared caches don't keep it.
 - **The container serves plain HTTP.** On your home network that's the same as Plex's own `http://` addresses. If you use the player from outside, put it behind an HTTPS reverse proxy. Without HTTPS, tokens cross the network unencrypted.
 - **The shared AI model without `PLEX_SERVER_URL`** is open to anyone signed in to Plex, and Plex accounts are free. If the player can be reached from the internet, set `PLEX_SERVER_URL` so that only people with access to your server can use the model.
+- **Play on without `PLEX_SERVER_URL`** works for anyone signed in to Plex, with the players on their own account. Someone who can open the player could add a made-up "player" to their account, at an address on your network, and learn whether something there answers on the Plex player ports. The service never sends them anything back from it beyond a player's state. If the player can be reached from the internet, set `PLEX_SERVER_URL`, or `CASTING=false`.
 - **Wide connection rules.** The content security policy has to allow connections, images and audio from any address, because Plex servers and Ollama can be anywhere.
 - **Whoever runs the container is trusted.** They control the code your browser runs, and the service sees your token when it checks who you are. That's also true of any web app you open.
 
@@ -72,7 +89,10 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 - **Search**: live results, recent searches, top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
 - **Album and playlist pages**: play, shuffle, and a menu on every track (play next, add to queue, similar tracks, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
-- **Now Playing**: big artwork, a seek bar drawn from your server's loudness analysis, ratings that save to Plex, the file format and quality, an Up next queue, Guest DJ, shuffle, repeat and a sleep timer. Optional playback speed and skip buttons.
+- **Now Playing**: big artwork, a seek bar drawn from your server's loudness analysis, ratings that save to Plex, the file format and quality, an Up next queue (with **Move to top**), Guest DJ, shuffle, repeat and a sleep timer. A volume slider with a percentage and marks at 25, 50 and 75%. Optional playback speed and skip buttons.
+- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, remove, rename, delete. A lock keeps them safe from accidental swipes and taps until you unlock one.
+- **Collections**, for the server's owner: the same editing, and adding tracks, albums or artists, including a playlist's tracks or the queue.
+- **Play on**: play on another Plex player on your network (Plexamp on a Raspberry Pi, say) with this app as the remote, or on AirPlay and Google Cast speakers where the browser supports them. See [Play on](#play-on).
 - **Play Together**: listen in sync with Plex friends. Everyone hears the same track at the same moment, and anyone in the session can play, pause, skip, seek, and change the queue.
 - **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, which you can play or save to Plex.
 - **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys). The AI DJ uses your Ollama model to pick each next track and introduce it.
@@ -111,6 +131,7 @@ All optional. Set them as environment variables on the container.
 | `OLLAMA_API_KEY` | | Sent as a bearer token, for an Ollama behind a proxy that asks for one. Never reaches browsers. |
 | `OLLAMA_AUTH` | `plex` (default) or `off` | Who may use the shared model: `plex` means signed-in Plex users (see below), `off` means anyone who can open the app. |
 | `PLAY_TOGETHER` | `true` (default) or `false` | Play Together and its tab. |
+| `CASTING` | `true` (default) or `false` | Playing on other Plex players from the app (see [Play on](#play-on)). AirPlay and Cast, which are the browser's own, aren't affected. |
 | `DEBUG` | `true` | Writes extra detail to the container log for troubleshooting, with tokens removed (see [Debug mode](#debug-mode)). |
 
 The container stops with a clear message in its log if a value doesn't make sense, for example an address without `http://`.
@@ -128,6 +149,16 @@ Listen with Plex friends, each on their own device. Open the **Together** tab, c
 - **Works without WebSockets**: sessions use plain HTTP requests (long-polling), so they work through work proxies too.
 
 Things to know: everyone must use the same player address, because sessions live in that container. Guest DJ and repeat are off during a session, and a sleep timer takes you out of the session instead of pausing everyone. If a browser holds back sound after a reload, the app asks for a tap to start listening again.
+
+## Play on
+
+The cast button next to Repeat (and in the desktop player bar) chooses where the music plays.
+
+- **Plex players**: Plexamp (on a Raspberry Pi or a computer, say) and other Plex apps that can be controlled remotely, signed in to your Plex account and on the same network as the container. The app becomes the remote: play, pause, skip, seek, volume and changes to Up next go to the player, and Now Playing follows what it plays, even after a reload. **This device** brings the music back, from where it got to. With `PLEX_SERVER_URL` set, this is for the server's owner.
+- **AirPlay or Cast…** opens the browser's own list of speakers and TVs, where it has one: AirPlay in Safari, Google Cast in Chrome on Android. Crossfades are off while a speaker is connected, because the browser sends it one track at a time. In Chrome on a computer, Chrome's own **Cast** menu can play the whole tab on a Google speaker.
+- **Alexa (Echo) speakers can't be played on.** Amazon only lets its approved music services play on them, so no app can, Plexamp included. Pair the speaker with your phone or computer over Bluetooth instead.
+
+Plex doesn't fully document how its players are controlled, and Play on has been tested against a simulated player rather than every real one. If a player doesn't respond, please open an issue, with the [debug log](#debug-mode) (it leaves out tokens).
 
 ## Customise it
 
@@ -235,7 +266,7 @@ If the player is served over HTTPS, browsers block plain `http://` addresses oth
 - **The waveform** appears once Plex has analysed a track's loudness; until then the seek bar is a plain line. Smart crossfades need the same analysis to find where the music ends; without it, they fade at the end of the file.
 - **Crossfades on iPhone and iPad.** Safari there doesn't let pages change the volume of audio, so it can't fade. With Crossfade on, tracks change where the music ends instead.
 - **Memory.** Long lists keep artwork only near the screen, and pages you've moved on from are let go after a while, so the player stays light however long it's open or however big the library.
-- **Not built yet**: casting to other Plex players, lyrics, editing playlists and loudness levelling.
+- **Not built yet**: lyrics and loudness levelling.
 
 ## Develop
 
@@ -248,9 +279,9 @@ python3 dev/mock-ollama.py         # fake Ollama on :11434
 python3 -m http.server 8080 -d web
 ```
 
-Open http://127.0.0.1:8080, choose **Use a server address and token instead**, and connect to `http://127.0.0.1:32400` with the token `t`. The mock serves an invented library with generated artwork and short test tones, live notifications over a WebSocket and an event stream, three made-up Plex accounts for Play Together (`t`, `t2` and `t3`), and test switches (such as refusing WebSockets the way a proxy would) described at the top of the file. For AI features, choose **Settings → AI → My own Ollama server** and enter `http://127.0.0.1:11434`.
+Open http://127.0.0.1:8080, choose **Use a server address and token instead**, and connect to `http://127.0.0.1:32400` with the token `t`. The mock serves an invented library with generated artwork and short test tones, live notifications over a WebSocket and an event stream, three made-up Plex accounts for Play Together (`t`, `t2` and `t3`), a Plex player called Living Room on port 32500 for Play on, and test switches (such as refusing WebSockets the way a proxy would) described at the top of the file. For AI features, choose **Settings → AI → My own Ollama server** and enter `http://127.0.0.1:11434`.
 
-Served like this, without the container, there's no `/api/`, so Play Together and the shared AI model are off. The full set runs in the container; for testing, `PLEX_TV_URL` points its service at the mock instead of plex.tv. To play converted tracks outside the container in browsers without built-in HLS, run `sh dev/fetch-hls.sh` once (it needs npm).
+Served like this, without the container, there's no `/api/`, so Play Together, Play on with Plex players and the shared AI model are off. The full set runs in the container; for testing, `PLEX_TV_URL` points its service at the mock instead of plex.tv. To play converted tracks outside the container in browsers without built-in HLS, run `sh dev/fetch-hls.sh` once (it needs npm).
 
 To use your own Plex server, enter its address and your [X-Plex-Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/), or sign in with Plex.
 
@@ -273,6 +304,8 @@ web/
   js/transitions.js      where a track's music starts and ends (loudness analysis), album order, fade support
   js/nowplaying.js       mini player, desktop transport bar, Now Playing screen
   js/together.js         Play Together: sessions, long-polling, the shared clock
+  js/cast.js             Play on: Plex players through the service, AirPlay and Cast
+  js/editing.js          adding to playlists and collections, and who may edit collections
   js/live.js             live updates: WebSocket, event stream or polling
   js/ai.js               Ollama client, AI playlists and the AI DJ's picks
   js/dj.js               Guest DJ modes
@@ -282,7 +315,7 @@ web/
   js/router.js           hash routing, back-button handling, view cache
   js/ui.js, components.js, actions.js, preview.js
   js/views/              home, library, detail pages, search, Play Together, AI playlist, settings, sign-in
-server/                  the service behind /api/: Play Together, sign-in checks, debug log
+server/                  the service behind /api/: Play Together, Play on, sign-in checks, debug log
 docker/                  nginx config, start-up script and container tests
 dev/                     fake Plex and Ollama servers for development
 tests/                   browser tests
@@ -293,10 +326,12 @@ tests/                   browser tests
 Start with [Debug mode](#debug-mode): most set-up problems show up in the container log with it on.
 
 - **"Can't reach your Plex server"**: check the server is online and Remote Access is on in Plex, or set `PLEX_SERVER_URL`. **Settings → Connection** shows which address is in use and can test it.
-- **The log says your Plex server "lets this container in without signing in"**: the container's address is in Plex's list of networks allowed without signing in (**Settings → Network** in Plex). The proxy keeps working for Plex accounts with access to the server; remove the container's address from that list to fix it properly.
+- **The log says your Plex server "lets this container in without signing in"**: the container's address is in Plex's list of networks allowed without signing in (**Settings → Network** in Plex). Until you remove it, only you (the server's owner) can use the server through the player's proxy: Plex would treat anyone else as you, so friends are refused there. Remove the container's address from that list to fix it.
 - **Live updates say they're checking every minute**: a proxy is blocking both WebSockets and the event stream. Everything still works; changes just take up to a minute to appear.
 - **Play Together shows no friends**: friends come from plex.tv, so they need to be your Plex friends, sharing your library. "Can't play from …" means they don't have access to this server.
 - **A friend can't join**: they must open the same player address and sign in with Plex (not with a server token), and have your music library shared with them.
+- **Play on shows no Plex players**: the player must be signed in to your Plex account, switched on, and on the same network as the container. Plex has to know its address on that network: a player that only Plex's relay can reach, or one that gives an address the container can't reach (inside another Docker network, say), doesn't show. With `PLEX_SERVER_URL` set, only the server's owner sees players.
+- **A Plex player is listed but doesn't respond**: check that it's still on the same network and allows remote control, and turn on [Debug mode](#debug-mode) to see what the player answered.
 - **"Couldn't reach Ollama"** with your own server: check it's running, that this device can reach it, and that `OLLAMA_ORIGINS` includes the player's address.
 - **"The AI service couldn't confirm your Plex sign-in"**: sign out and in again. With `PLEX_SERVER_URL` set, only people with access to that server can use the shared model.
 - **AI answers are slow**: the first request loads the model, which can take a minute on modest hardware. The model then stays loaded for 15 minutes.

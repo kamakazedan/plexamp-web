@@ -93,8 +93,8 @@ function tapTrack(track, onPlay, inQueue) {
 
 // A playable track row. `onPlay` decides what plays (usually the whole list
 // starting from this row). `popular` marks one of the album's best-known
-// tracks.
-export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false } = {}) {
+// tracks. `onMenu` replaces the usual menu (pages add their own actions).
+export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false, onMenu } = {}) {
   const lead = showArt
     ? h('div.track-lead.track-art', null, art(track.thumb, { size: 48, fallback: 'note' }))
     : h('div.track-lead.track-num', null, h('span.num', null, number ?? ''));
@@ -127,7 +127,7 @@ export function trackRow(track, { number, showArt = false, subtitle, onPlay, que
     preview,
     h(
       'button.icon-btn.track-more',
-      { type: 'button', 'aria-label': `More options for ${track.title}`, onclick: () => trackMenu(track, { queueIndex }) },
+      { type: 'button', 'aria-label': `More options for ${track.title}`, onclick: () => (onMenu ? onMenu() : trackMenu(track, { queueIndex })) },
       icon('more', 22),
     ),
   );

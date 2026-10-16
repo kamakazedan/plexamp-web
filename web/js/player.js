@@ -6,6 +6,10 @@
 // In a Play Together session the queue belongs to the session: transport
 // and queue changes are sent to it (this.remote), and its state comes back
 // through syncRemote(), which keeps local playback on the session's clock.
+//
+// Casting to another Plex player (this.cast, see cast.js), this device
+// plays nothing: transport and queue changes go to that player, and what it
+// does comes back through castUpdate().
 import { app, on } from './state.js';
 import { store, canPlayCodec, canPlayHlsNatively } from './plex.js';
 import { shuffleArray } from './ui.js';
@@ -132,6 +136,12 @@ class Player extends EventTarget {
     this.sleepTimer = null;
     // Play Together: the session's controls while in one, else null.
     this.remote = null;
+    // Casting to a Plex player: its controls (cast.js), else null.
+    this.cast = null;
+    // For AirPlay and Google Cast through the browser: a temporary token from
+    // the server, used in media addresses while they go to another device.
+    this.mediaToken = null;
+    this.useMediaToken = false;
     this.failedQid = null; // a session track this device couldn't play
     this.driftHold = 0;
     this.aheadOf = null;
@@ -186,13 +196,20 @@ class Player extends EventTarget {
     return this.queue.slice(this.index + 1);
   }
   get time() {
+    if (this.cast) return this.cast.time();
     if (!this.deck.hasSource()) return this.restoredAt || 0;
     return this.audio.currentTime || 0;
   }
   get duration() {
-    const d = this.audio.duration;
+    const d = this.cast ? this.cast.duration() : this.audio.duration;
     if (Number.isFinite(d) && d > 0) return d;
     return (this.current?.duration || 0) / 1000;
+  }
+  // Playing through AirPlay or Google Cast (the browser's own picker): the
+  // browser sends this element's sound to the device, so playback stays on
+  // this one element (no crossfades: the other element isn't connected).
+  get routed() {
+    return this.deck.el.remote?.state === 'connected';
   }
   get isPlaying() {
     return this.state === 'playing' || this.state === 'loading';
@@ -302,9 +319,10 @@ class Player extends EventTarget {
   sourceFor(track, forceTranscode) {
     const s = app.server;
     const quality = app.settings.quality;
+    const token = this.useMediaToken && this.mediaToken ? this.mediaToken : undefined;
     const direct = quality === 'original' && !forceTranscode && track.partKey && (!track.codec || canPlayCodec(track.codec));
-    if (direct) return { url: s.directUrl(track), hls: false };
-    return { url: s.transcodeUrl(track, quality === 'original' ? 320 : Number(quality) || 320), hls: true };
+    if (direct) return { url: s.directUrl(track, token), hls: false };
+    return { url: s.transcodeUrl(track, quality === 'original' ? 320 : Number(quality) || 320, token), hls: true };
   }
 
   async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true } = {}) {
@@ -333,7 +351,7 @@ class Player extends EventTarget {
     this.updateMediaSession();
 
     const spare = this.spare;
-    if (!transcode && spare.qid === track.qid && spare.isHls === src.hls) {
+    if (!transcode && !this.routed && spare.qid === track.qid && spare.isHls === src.hls) {
       // Already buffered by the preloader: switch decks. Its metadata has
       // loaded already, so a start position is applied here.
       this.deck.el.pause();
@@ -376,7 +394,7 @@ class Player extends EventTarget {
 
   // Load the next track into the other element a little before it's due.
   maybePreload() {
-    if (this.transition || this.repeat === 'one') return;
+    if (this.transition || this.repeat === 'one' || this.routed) return;
     if (!app.settings.gapless && this.fades === 'off') return;
     const ni = this.nextIndex();
     if (ni === -1 || !(this.duration > 0)) return;
@@ -410,7 +428,7 @@ class Player extends EventTarget {
   // change starts (seconds into this track), `startAt` where the next track
   // starts.
   nextPlan() {
-    if (this.remote || this.repeat === 'one' || this.sleepEndOfTrack) return null;
+    if (this.remote || this.routed || this.repeat === 'one' || this.sleepEndOfTrack) return null;
     const cur = this.current;
     const ni = this.nextIndex();
     const d = this.duration;
@@ -601,11 +619,12 @@ class Player extends EventTarget {
 
   play() {
     if (this.remote) return this.remote.play();
+    if (this.cast) return this.cast.play();
     this._play();
   }
 
   _play() {
-    if (!this.current) return;
+    if (!this.current || this.cast) return;
     this.unlock();
     if (!this.deck.hasSource()) {
       this.load(this.index, { startAt: this.restoredAt || 0, reportPrev: false });
@@ -617,10 +636,12 @@ class Player extends EventTarget {
 
   pause() {
     if (this.remote) return this.remote.pause();
+    if (this.cast) return this.cast.pause();
     this._pause();
   }
 
   _pause() {
+    if (this.cast) return;
     this.switching = false;
     this.loadAutoplay = false;
     clearTimeout(this.transitionTimer);
@@ -637,12 +658,14 @@ class Player extends EventTarget {
 
   toggle() {
     if (this.remote) return this.remote.toggle();
+    if (this.cast) return this.isPlaying ? this.cast.pause() : this.cast.play();
     if (this.isPlaying) this._pause();
     else this._play();
   }
 
   seek(sec) {
     if (this.remote) return this.remote.seek(sec);
+    if (this.cast) return this.cast.seek(sec);
     this._seek(sec);
   }
 
@@ -678,6 +701,7 @@ class Player extends EventTarget {
 
   next() {
     if (this.remote) return this.remote.command({ type: 'next' });
+    if (this.cast) return this.cast.next();
     if (this.transition) return this.finishTransition(); // already on its way: straight there
     const ni = this.nextIndex();
     if (ni !== -1) this.load(ni);
@@ -685,6 +709,7 @@ class Player extends EventTarget {
 
   prev() {
     if (this.remote) return this.remote.command({ type: 'prev' });
+    if (this.cast) return this.cast.prev();
     this.cancelTransition();
     if (this.time > 3 || this.index <= 0) this._seek(0);
     else this.load(this.index - 1);
@@ -809,6 +834,7 @@ class Player extends EventTarget {
   // remote: { play, pause, toggle, seek, command, ended, expectedTime, sleep, blocked }
   setRemote(remote) {
     if (remote === this.remote) return;
+    if (remote && this.cast) this.cast.stop({ here: false }); // a session plays here
     this.cancelTransition();
     this.remote = remote;
     this.failedQid = null;
@@ -954,6 +980,7 @@ class Player extends EventTarget {
     // In a session, stop listening on this device rather than pausing
     // everyone else.
     if (this.remote) this.remote.sleep();
+    else if (this.cast) this.cast.pause();
     else this._pause();
     this.emit('sleep');
   }
@@ -963,13 +990,15 @@ class Player extends EventTarget {
   setVolume(v) {
     this.volume = Math.max(0, Math.min(1, v));
     if (this.volume > 0) this.muted = false;
-    store.set('volume', this.volume);
+    if (this.cast) this.cast.setVolume(this.volume);
+    else store.set('volume', this.volume);
     this.applyVolume();
     this.emit('volume');
   }
 
   toggleMute() {
     this.muted = !this.muted;
+    if (this.cast) this.cast.setVolume(this.muted ? 0 : this.volume);
     this.applyVolume();
     this.emit('volume');
   }
@@ -1041,6 +1070,7 @@ class Player extends EventTarget {
 
   playTracks(tracks, start = 0, { context = null, shuffle = false } = {}) {
     if (!tracks?.length) return;
+    if (this.cast) return this.cast.playTracks(tracks, start, { context, shuffle });
     if (this.remote) {
       let list = tracks.slice(start);
       if (shuffle) list = shuffleArray(tracks);
@@ -1064,6 +1094,7 @@ class Player extends EventTarget {
 
   playNext(tracks) {
     if (this.remote) return this.remote.command({ type: 'add', where: 'next', tracks: tracks.slice(0, 500) });
+    if (this.cast) return this.cast.add(tracks, { next: true });
     if (!this.current) return this.playTracks(tracks, 0);
     const items = tracks.map(withQid);
     this.queue.splice(this.index + 1, 0, ...items);
@@ -1078,6 +1109,7 @@ class Player extends EventTarget {
 
   addToQueue(tracks) {
     if (this.remote) return this.remote.command({ type: 'add', tracks: tracks.slice(0, 500) });
+    if (this.cast) return this.cast.add(tracks, { next: false });
     if (!this.current) return this.playTracks(tracks, 0);
     const items = tracks.map(withQid);
     this.queue.push(...items);
@@ -1090,6 +1122,7 @@ class Player extends EventTarget {
   replaceUpcoming(tracks, context) {
     // A shared queue isn't wiped for one person: the tracks go next instead.
     if (this.remote) return this.playNext(tracks);
+    if (this.cast) return this.cast.replaceUpcoming(tracks, context);
     const items = tracks.map(withQid);
     this.queue = this.queue.slice(0, this.index + 1).concat(items);
     this.original = this.queue.slice();
@@ -1101,7 +1134,26 @@ class Player extends EventTarget {
     this.persist();
   }
 
+  // An upcoming track becomes the next one to play.
+  moveToTop(i) {
+    const t = this.queue[i];
+    if (!t || i <= this.index + 1) return;
+    if (this.remote) return this.remote.command({ type: 'move', sid: t.sid, to: this.index + 1 });
+    if (this.cast) return this.cast.moveToTop(i);
+    this.queue.splice(i, 1);
+    this.queue.splice(this.index + 1, 0, t);
+    // In the unshuffled order too, so turning shuffle off keeps it next.
+    if (this.original && this.original.includes(t) && this.original.includes(this.current)) {
+      this.original.splice(this.original.indexOf(t), 1);
+      this.original.splice(this.original.indexOf(this.current) + 1, 0, t);
+    }
+    this.queueChanged();
+    this.emit('queue');
+    this.persist();
+  }
+
   jump(i) {
+    if (this.cast) return this.cast.jump(i);
     if (this.remote) {
       if (i === this.index) return this.remote.play();
       return this.queue[i] && this.remote.command({ type: 'jump', sid: this.queue[i].sid });
@@ -1113,6 +1165,7 @@ class Player extends EventTarget {
   remove(i) {
     if (i === this.index || !this.queue[i]) return;
     if (this.remote) return this.remote.command({ type: 'remove', sid: this.queue[i].sid });
+    if (this.cast) return this.cast.remove(i);
     const [t] = this.queue.splice(i, 1);
     if (i < this.index) this.index -= 1;
     if (this.original) this.original = this.original.filter((x) => x !== t);
@@ -1124,6 +1177,7 @@ class Player extends EventTarget {
 
   clearUpcoming() {
     if (this.remote) return this.remote.command({ type: 'clear' });
+    if (this.cast) return this.cast.replaceUpcoming([]);
     this.queue = this.queue.slice(0, this.index + 1);
     this.original = this.queue.slice();
     this.cancelTransition();
@@ -1135,6 +1189,7 @@ class Player extends EventTarget {
   // In a session, shuffling mixes up what's next for everyone, once.
   setShuffle(on) {
     if (this.remote) return this.remote.command({ type: 'shuffle' });
+    if (this.cast) return this.cast.setShuffle(on);
     if (on === this.shuffle || !this.queue.length) {
       this.shuffle = on;
       this.emit('mode');
@@ -1159,16 +1214,88 @@ class Player extends EventTarget {
   cycleRepeat() {
     if (this.remote) return false;
     this.repeat = { off: 'all', all: 'one', one: 'off' }[this.repeat] || 'off';
+    this.cast?.setRepeat(this.repeat);
     if (this.repeat === 'one') this.cancelTransition();
     this.emit('mode');
     this.persist();
     return true;
   }
 
+  // ---------- casting ----------
+
+  // Start or stop casting to a Plex player (cast.js): this device stops
+  // playing, and keeps the queue on show.
+  setCast(c) {
+    if (c === this.cast) return;
+    this.cancelTransition();
+    if (c) {
+      this.restoredAt = this.time;
+      this.loadToken += 1;
+      this.loadingQid = null;
+      this.switching = false;
+      for (const d of this.decks) {
+        d.el.pause();
+        d.reset();
+      }
+      this.original = null;
+    }
+    this.cast = c;
+    this.emit('mode');
+    this.emit('cast');
+  }
+
+  // While casting: what the other player is doing. The queue is the play
+  // queue on the server; entries keep their qid while they're in it.
+  castUpdate({ queue, index, state, volume, context } = {}) {
+    if (!this.cast) return;
+    const before = this.current?.qid;
+    if (queue) {
+      this.queue = queue;
+      this.original = null;
+    }
+    if (index !== undefined) this.index = this.queue.length ? Math.max(0, Math.min(index, this.queue.length - 1)) : -1;
+    if (context !== undefined) this.context = context;
+    if (queue) this.emit('queue');
+    if (this.current?.qid !== before) {
+      this.emit('track');
+      this.updateMediaSession();
+    }
+    if (volume != null && Math.abs(volume - this.volume) > 0.004) {
+      this.volume = volume;
+      this.emit('volume');
+    }
+    if (state && state !== this.state) this.setState(state);
+    this.queueTime();
+    this.updatePositionState();
+  }
+
+  // Just before the browser's AirPlay or Cast picker opens: the playing
+  // track's address changes to the server's temporary token (and carries on
+  // from the same spot), so the device it's handed to never gets the
+  // account's own token. Converted streams can't be sent to a device anyway.
+  prepareRemote() {
+    if (!this.mediaToken || this.cast || this.remote) return;
+    this.useMediaToken = true;
+    const t = this.current;
+    const deck = this.deck;
+    if (!t || !deck.hasSource() || deck.hls) return;
+    const at = deck.el.currentTime || 0;
+    const playing = !deck.el.paused;
+    const src = this.sourceFor(t, this.transcoding);
+    this.cancelTransition();
+    this.spare.reset();
+    this.switching = playing;
+    deck.el.src = src.url;
+    deck.el.load();
+    this.pendingSeek = at;
+    if (playing) deck.el.play()?.catch((err) => this.onPlayError(err));
+  }
+
   // ---------- reporting ----------
 
   report(state, track = this.current, time = this.time, force = false) {
-    if (!track || !app.server || !app.settings.reportPlays) return;
+    // A player we cast to tells Plex what it plays itself.
+    if (!track || !app.server || !app.settings.reportPlays || this.cast) return;
     const now = Date.now();
     if (!force && now - this.lastReport < 10000) return;
     this.lastReport = now;

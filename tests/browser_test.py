@@ -24,8 +24,8 @@ and t3 (Alex, a friend without access).
 
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
-Sections: core ws ai dj nows blocked poll custom desktop nav fades together
-settings home debug memory (default: all).
+Sections: core ws ai dj nows blocked poll custom desktop nav edit cast fades
+together settings home debug memory (default: all).
 """
 
 import json
@@ -406,6 +406,39 @@ with sync_playwright() as pw:
         check('cards: Play plays the playlist in order',
               wait_for(lambda: player(page, "p.state === 'playing' && !p.shuffle && p.context.href.startsWith('/playlist/')"), 10))
         page.mouse.move(5, 5)
+
+        # Volume: marks at 25/50/75%, settling on a mark when dragged near
+        # it, the level shown while it changes, and a speaker with fewer
+        # waves as it goes down.
+        vol = page.locator('.pb .vol-slider input')
+        box = vol.bounding_box()
+        at = lambda frac: (box['x'] + 7 + (box['width'] - 14) * frac, box['y'] + box['height'] / 2)
+        level = lambda: page.locator('.pb .volume .icon-btn').get_attribute('data-level')
+        page.mouse.move(*at(0.9))
+        page.mouse.down()
+        page.mouse.move(*at(0.52), steps=6)
+        page.wait_for_timeout(250)
+        tip = page.locator('.pb .vol-tip')
+        dragging = dict(v=player(page, 'p.volume'), tip=tip.inner_text(), shown=tip.evaluate('e => getComputedStyle(e).opacity'), level=level())
+        page.mouse.move(*at(0.62), steps=4)
+        free = player(page, 'p.volume')
+        page.mouse.up()
+        check('volume: settles on 50% when dragged near it, and shows the level',
+              dragging['v'] == 0.5 and dragging['tip'] == '50%' and float(dragging['shown']) > 0.9, json.dumps(dragging))
+        check('volume: ...but anywhere else is fine too', abs(free - 0.62) < 0.015, free)
+        check('volume: marks at 25, 50 and 75%', page.locator('.pb .vol-marks i').count() == 3)
+        levels = []
+        for v in (0.8, 0.6, 0.3, 0.1, 0):
+            player(page, f'p.setVolume({v})')
+            levels.append(level())
+        check('volume: the speaker loses a wave under 75, 50 and 25%, and is crossed out at 0',
+              levels == ['speaker3', 'speaker2', 'speaker1', 'speaker0', 'speakerOff'], str(levels))
+        player(page, 'p.setVolume(0.5)')
+        vol.focus()
+        page.keyboard.press('ArrowLeft')
+        check('volume: the arrow keys move 1% at a time (no settling)', abs(player(page, 'p.volume') - 0.49) < 0.001, player(page, 'p.volume'))
+        player(page, 'p.setVolume(1)')
+        page.mouse.move(5, 5)
         page.goto(APP + '#/ai-playlist')
         page.wait_for_selector('.ai-suggestion')
         page.click('.ai-suggestion')
@@ -499,6 +532,386 @@ with sync_playwright() as pw:
         check('nav: a link into another tab opens there', tab() == 'settings' and where() == '#/settings/source', f'{where()} in {tab()}')
         header_back()
         check('nav: ...and back goes to that tab\'s first page', where() == '#/settings', where())
+        ctx.close()
+
+    # ---------- edit: the queue, playlists and collections ----------
+    # Everything here makes its own playlists and collections ("Edit test
+    # …"), so the mock's own ones stay as other sections expect them.
+    if run('edit'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'edit')
+        login(page, APP)
+        check('edit: the server\'s owner is its admin', js(page, "() => import('./js/editing.js').then((m) => m.isAdmin())") is True)
+
+        def playlist(title):
+            pls = mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+            return next((p for p in pls if p['title'] == title), None)
+
+        def entries(pid):
+            return [m['title'] for m in mock(f'/playlists/{pid}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])]
+
+        def collection(title):
+            cs = mock('/library/sections/1/collections?X-Plex-Token=t&X-Plex-Container-Size=200')['MediaContainer'].get('Metadata', [])
+            return next((c for c in cs if c['title'] == title), None)
+
+        def members(cid):
+            return [m['title'] for m in mock(f'/library/collections/{cid}/children?X-Plex-Token=t')['MediaContainer'].get('Metadata', [])]
+
+        def menu(opener, label):
+            page.click(opener)
+            page.wait_for_selector('.sheet.open')
+            page.locator('.sheet.open .sheet-action', has_text=label).first.click()
+            page.wait_for_timeout(350)  # this sheet closes (and the next one may open)
+
+        def pick(title, label, exact=False):
+            page.wait_for_selector(f'.sheet.open .sheet-title:has-text("{title}")')
+            if exact:
+                page.locator(f'.sheet.open .sheet-action:has(.sheet-action-label:text-is("{label}"))').click()
+            else:
+                page.locator('.sheet.open .sheet-action', has_text=label).first.click()
+            page.wait_for_timeout(350)
+
+        def answer(text):
+            page.wait_for_selector('.sheet.open .ask-form input')
+            page.wait_for_timeout(250)
+            page.fill('.sheet.open .ask-form input', text)
+            page.click('.sheet.open .ask-form button[type=submit]')
+
+        def drag(handles, src, dst):
+            page.evaluate(f"window.scrollTo(0, document.querySelector({json.dumps(handles)}).getBoundingClientRect().top + window.scrollY - 220)")
+            page.wait_for_timeout(250)
+            a, z = page.locator(handles).nth(src).bounding_box(), page.locator(handles).nth(dst).bounding_box()
+            page.mouse.move(a['x'] + a['width'] / 2, a['y'] + a['height'] / 2)
+            page.mouse.down()
+            for i in range(1, 15):
+                page.mouse.move(a['x'] + a['width'] / 2, a['y'] + (z['y'] - 20 - a['y']) * i / 14)
+                page.wait_for_timeout(30)
+            page.mouse.up()
+            page.wait_for_timeout(700)
+
+        # The queue: Move to top, and saving it as a playlist.
+        play_first_album_track(page, APP, album=0, track=0)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.click('.np-tool[data-tool=queue]')
+        page.wait_for_selector('.np-queue-list .track')
+        before = player(page, 'p.queue.map((t) => t.id)')
+        i = player(page, 'p.index')
+        page.locator('.np-queue-list .track .track-more').nth(3).click()
+        page.wait_for_selector('.sheet.open')
+        labels = page.locator('.sheet.open .sheet-action-label').all_text_contents()
+        page.locator('.sheet.open .sheet-action', has_text='Move to top').click()
+        page.wait_for_timeout(400)
+        after = player(page, 'p.queue.map((t) => t.id)')
+        check('edit: Move to top makes an upcoming track play next', 'Move to top' in labels and after[i + 1] == before[i + 3]
+              and sorted(after) == sorted(before), f'{labels} {before} -> {after}')
+        page.locator('.np-queue-list .track .track-more').nth(1).click()
+        page.wait_for_selector('.sheet.open')
+        check('edit: ...and isn\'t offered for the track that\'s already next', 'Move to top' not in page.locator('.sheet.open .sheet-action-label').all_text_contents())
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        menu('.np-queue-more', 'Save as a playlist')
+        pick('Add to playlist', 'New playlist')
+        answer('Edit test queue')
+        page.wait_for_selector('.toast:has-text("Made")')
+        q = playlist('Edit test queue')
+        check('edit: the queue can be saved as a playlist', q and q['leafCount'] == len(after) - i, json.dumps(q and q['leafCount']))
+        page.wait_for_selector('.sheet', state='detached')
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.np.open', state='detached')
+
+        # Adding to playlists: a new one from a track, then a whole album.
+        page.locator('.track .track-more').first.click()
+        page.wait_for_selector('.sheet.open')
+        page.locator('.sheet.open .sheet-action', has_text='Add to playlist').click()
+        page.wait_for_timeout(350)
+        pick('Add to playlist', 'New playlist')
+        answer('Edit test')
+        page.wait_for_selector('.toast:has-text("Made")')
+        made = playlist('Edit test')
+        check('edit: a new playlist from a track', made and made['leafCount'] == 1, json.dumps(made and made['leafCount']))
+        album_tracks = page.locator('.view .track').count()
+        menu('.back-head button[aria-label="More options"]', 'Add to playlist')
+        pick('Add to playlist', 'Edit test', exact=True)
+        page.wait_for_selector('.toast:has-text("Added")')
+        told = page.locator('.toast').inner_text()
+        made = playlist('Edit test')
+        check('edit: adding an album skips what\'s there already', made['leafCount'] == album_tracks and 'there already' in told, f'{made["leafCount"]} {told}')
+
+        # A playlist is locked until it's unlocked; then rows can be dragged
+        # and removed (with undo), and it can be renamed and deleted.
+        page.goto(APP + f'#/playlist/{made["ratingKey"]}')
+        page.wait_for_selector('.view .tracks .track')
+        locked = page.locator('.view .tracks .track .drag-handle, .tracks .track .row-remove').count()
+        page.click('.lock-btn')
+        page.wait_for_selector('.edit-bar:not([hidden])')
+        shot(page, 'edit-01-playlist-unlocked')
+        check('edit: a playlist is locked until unlocked', locked == 0 and page.locator('.view .tracks .track .drag-handle').count() == made['leafCount'])
+        start = entries(made['ratingKey'])
+        drag('.view .tracks .track .drag-handle', 2, 0)
+        moved = entries(made['ratingKey'])
+        shown = page.locator('.view .tracks .track').evaluate_all('rs => rs.map((r) => r.dataset.title)')
+        check('edit: dragging a track moves it in the playlist', moved == [start[2], start[0], start[1], *start[3:]] and shown == moved, f'{start} -> {moved}')
+        removed = page.locator('.view .tracks .track').nth(1).get_attribute('data-track-id')
+        page.locator('.view .tracks .track .row-remove').nth(1).click()
+        page.wait_for_selector('.toast:has-text("Removed")')
+        gone = entries(made['ratingKey'])
+        check('edit: removing takes it out of the playlist', gone == [moved[0], *moved[2:]], str(gone))
+        check('edit: ...and leaves the track in the library', mock(f'/library/metadata/{removed}?X-Plex-Token=t')['MediaContainer']['size'] == 1)
+        page.click('.toast-action')
+        page.wait_for_timeout(1200)
+        check('edit: ...and Undo puts it back where it was', entries(made['ratingKey']) == moved, str(entries(made['ratingKey'])))
+        menu('.back-head button[aria-label="More options"]', 'Rename')
+        answer('Edit test (renamed)')
+        page.wait_for_timeout(600)
+        check('edit: a playlist can be renamed', playlist('Edit test (renamed)') is not None and page.locator('.hero-title').inner_text() == 'Edit test (renamed)')
+        page.click('.edit-done')
+        page.wait_for_timeout(300)
+        check('edit: Done locks it again', page.locator('.edit-bar').is_hidden() and page.locator('.row-remove').count() == 0)
+        page.click('.lock-btn')
+        menu('.back-head button[aria-label="More options"]', 'Delete playlist')
+        page.wait_for_selector('.sheet.open .ask-form .btn-danger')
+        page.click('.sheet.open .ask-form .btn-danger')
+        page.wait_for_selector('.toast:has-text("Deleted")')
+        page.wait_for_timeout(500)
+        check('edit: a playlist can be deleted (after asking)', playlist('Edit test (renamed)') is None and not page.url.endswith(f'/playlist/{made["ratingKey"]}'), page.url)
+        smart = playlist('Everything')
+        page.goto(APP + f'#/playlist/{smart["ratingKey"]}')
+        page.wait_for_selector('.view .tracks .track')
+        check('edit: smart playlists can\'t be edited', page.locator('.lock-btn').count() == 0)
+
+        # Collections (the server's admin): new ones of each kind, adding a
+        # playlist's tracks, then editing one like a playlist.
+        page.goto(APP + '#/browse/albums')
+        page.wait_for_selector('.grid .card')
+        page.locator('.grid .card').first.click()
+        page.wait_for_selector('.hero-album')
+        album = page.locator('.hero-title').inner_text()
+        menu('.back-head button[aria-label="More options"]', 'Add to collection')
+        pick('Add to album collection', 'New collection')
+        answer('Edit test albums')
+        page.wait_for_selector('.toast:has-text("Made")')
+        ca = collection('Edit test albums')
+        check('edit: a new album collection from an album', ca and ca['subtype'] == 'album' and members(ca['ratingKey']) == [album], json.dumps(ca))
+        page.locator('.track .track-more').nth(1).click()
+        page.wait_for_selector('.sheet.open')
+        page.locator('.sheet.open .sheet-action', has_text='Add to collection').click()
+        page.wait_for_timeout(350)
+        pick('Add to track collection', 'New collection')
+        answer('Edit test tracks')
+        page.wait_for_selector('.toast:has-text("Made")')
+        ct = collection('Edit test tracks')
+        check('edit: a new track collection from a track', ct and ct['subtype'] == 'track' and len(members(ct['ratingKey'])) == 1, json.dumps(ct))
+        page.goto(APP + f'#/playlist/{q["ratingKey"]}')
+        page.wait_for_selector('.view .tracks .track')
+        menu('.back-head button[aria-label="More options"]', 'Add to collection')
+        pick('Add to track collection', 'Edit test tracks', exact=True)
+        page.wait_for_selector('.toast:has-text("Added")')
+        check('edit: a playlist\'s tracks go into a collection', len(members(ct['ratingKey'])) >= 4, str(members(ct['ratingKey'])))
+
+        page.goto(APP + f'#/collection/{ct["ratingKey"]}')
+        page.wait_for_selector('.hero-album')
+        page.click('.lock-btn')
+        page.wait_for_selector('.edit-rows .edit-row')
+        shot(page, 'edit-02-collection-unlocked')
+        start = members(ct['ratingKey'])
+        drag('.edit-rows .drag-handle', 2, 0)
+        moved = members(ct['ratingKey'])
+        check('edit: dragging changes a collection\'s order (it switches to custom order)',
+              moved == [start[2], start[0], start[1], *start[3:]] and collection('Edit test tracks')['collectionSort'] == 2, f'{start} -> {moved}')
+        page.locator('.edit-rows .row-remove').first.click()
+        page.wait_for_selector('.toast:has-text("Removed")')
+        gone = members(ct['ratingKey'])
+        page.click('.toast-action')
+        page.wait_for_timeout(1200)
+        check('edit: removing from a collection, and Undo', gone == moved[1:] and members(ct['ratingKey']) == moved, f'{gone} / {members(ct["ratingKey"])}')
+        menu('.back-head button[aria-label="More options"]', 'Rename')
+        answer('Edit test tracks (renamed)')
+        page.wait_for_timeout(600)
+        check('edit: a collection can be renamed', collection('Edit test tracks (renamed)') is not None)
+        menu('.back-head button[aria-label="More options"]', 'Add to playlist')
+        pick('Add to playlist', 'Edit test queue', exact=True)
+        page.wait_for_selector('.toast')
+        page.wait_for_timeout(300)
+        check('edit: a collection\'s tracks go into a playlist', page.locator('.toast').inner_text().startswith(('Added', 'They’re all')), page.locator('.toast').inner_text())
+        menu('.back-head button[aria-label="More options"]', 'Delete collection')
+        page.wait_for_selector('.sheet.open .ask-form .btn-danger')
+        page.click('.sheet.open .ask-form .btn-danger')
+        page.wait_for_selector('.toast:has-text("Deleted")')
+        check('edit: a collection can be deleted (after asking)', collection('Edit test tracks (renamed)') is None)
+        ctx.close()
+
+        # A friend with access to the server: playlists yes, collections no.
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'edit-friend')
+        login(page, APP, token='t2')
+        check('edit: a friend isn\'t the server\'s admin', js(page, "() => import('./js/editing.js').then((m) => m.isAdmin())") is False)
+        page.goto(APP + '#/browse/albums')
+        page.wait_for_selector('.grid .card')
+        page.locator('.grid .card').first.click()
+        page.wait_for_selector('.hero-album')
+        page.locator('.track .track-more').first.click()
+        page.wait_for_selector('.sheet.open')
+        labels = page.locator('.sheet.open .sheet-action-label').all_text_contents()
+        page.keyboard.press('Escape')
+        page.goto(APP + f'#/collection/{collection("Edit test albums")["ratingKey"]}')
+        page.wait_for_selector('.hero-album')
+        page.wait_for_timeout(400)
+        check('edit: collections can\'t be changed by a friend', 'Add to playlist…' in labels and 'Add to collection…' not in labels
+              and page.locator('.lock-btn').count() == 0, str(labels))
+        ctx.close()
+
+    # ---------- cast: playing on another Plex player, and AirPlay/Cast ----------
+    # The mock runs a Plex player ("Living Room", like Plexamp on a Pi) that
+    # Dan has on his account; /__mock/player shows what it's doing.
+    if run('cast'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'cast')
+        mock('/__mock/player?reset=1')
+        login(page, APP)
+        remote_player = lambda: mock('/__mock/player')['MediaContainer']
+
+        def until_player(test, timeout=8):
+            return wait_for(lambda: test(remote_player()), timeout, 0.3)
+
+        play_first_album_track(page, APP, album=1, track=0)
+        page.wait_for_timeout(1500)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.click('.np-tool[data-tool=cast]')
+        page.wait_for_selector('.sheet.open .sheet-action:has-text("Living Room")')
+        labels = page.locator('.sheet.open .sheet-action-label').all_text_contents()
+        check('cast: "Play on" lists this device and the Plex players on the account', labels[:2] == ['This device', 'Living Room']
+              and 'Plexamp · Raspberry Pi' in page.locator('.sheet.open').inner_text(), str(labels))
+        check('cast: ...and says why Alexa speakers aren\'t there', 'Bluetooth' in page.locator('.sheet.open .cast-note').inner_text())
+        shot(page, 'cast-01-sheet')
+        here = player(page, '({ id: p.current.id, t: p.time })')
+        page.locator('.sheet.open .sheet-action', has_text='Living Room').click()
+        started = until_player(lambda s: s['state'] == 'playing' and s['ratingKey'] == here['id'])
+        log = remote_player()['log']
+        first = log[0]['params'] if log else {}
+        check('cast: the player plays the queue from the same track and spot', started and log[0]['command'] == 'playback/playMedia'
+              and abs(int(first.get('offset', 0)) / 1000 - here['t']) < 4, json.dumps(first))
+        check('cast: ...with a temporary token from the server, not the account\'s', first.get('token', '').startswith('transient-')
+              and first.get('token') != 't', first.get('token'))
+        page.wait_for_timeout(1500)
+        status = player(page, '({ casting: !!p.cast, playing: p.decks.filter((d) => !d.el.paused).length, state: p.state })')
+        check('cast: this device stops playing and shows where it plays', status['casting'] and status['playing'] == 0 and status['state'] == 'playing'
+              and page.locator('.np-where').inner_text() == 'Playing on Living Room' and 'on' in page.locator('.np-tool[data-tool=cast]').get_attribute('class'), json.dumps(status))
+        shot(page, 'cast-02-playing-there')
+
+        page.click('.np-play')
+        check('cast: pause pauses the player', until_player(lambda s: s['state'] == 'paused'))
+        page.click('.np-play')
+        check('cast: ...and play plays it', until_player(lambda s: s['state'] == 'playing'))
+        nxt = player(page, 'p.queue[p.index + 1].id')
+        page.click('.np-skip[aria-label="Next track"]')
+        check('cast: next goes to the next track there, and here', until_player(lambda s: s['ratingKey'] == nxt)
+              and wait_for(lambda: player(page, 'p.current.id') == nxt, 5))
+        player(page, 'p.seek(9)')
+        check('cast: seeking moves the player', until_player(lambda s: 8 <= s['time'] / 1000 <= 12), remote_player()['time'])
+        player(page, 'p.setVolume(0.4)')
+        check('cast: the volume slider sets the player\'s volume', until_player(lambda s: s['volume'] == 40))
+        before = player(page, 'p.queue.map((t) => t.id)')
+        i = player(page, 'p.index')
+        player(page, 'p.moveToTop(p.queue.length - 1)')
+        moved = until_player(lambda s: s['queue'][i + 1] == before[-1])
+        told = until_player(lambda s: any(l['command'] == 'playback/refreshPlayQueue' for l in s['log']))
+        check('cast: Move to top changes the queue there (and the player is told)', moved and told
+              and wait_for(lambda: player(page, 'p.queue[p.index + 1].id') == before[-1], 5), str(remote_player()['queue']))
+        extra = mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=1&sort=titleSort')['MediaContainer']['Metadata'][0]['ratingKey']
+        n = len(remote_player()['queue'])
+        js(page, f"() => Promise.all([import('./js/state.js'), import('./js/plex.js'), import('./js/player.js')]).then(async ([{{ app }}, {{ normTrack }}, {{ player }}]) => player.addToQueue([normTrack(await app.server.metadata('{extra}'))]))")
+        check('cast: Add to queue adds it there', until_player(lambda s: len(s['queue']) == n + 1 and s['queue'][-1] == extra))
+        # The player moves on by itself at the end of a track (they're 20 s).
+        player(page, 'p.seek(18.5)')
+        cur = player(page, 'p.current.id')
+        check('cast: this device follows the player when it moves on by itself',
+              wait_for(lambda: player(page, 'p.current.id') != cur, 8) and player(page, 'p.current.id') == remote_player()['ratingKey'])
+        player(page, "p.setSleep('track')")
+        player(page, 'p.seek(18.5)')
+        cur = player(page, 'p.current.id')
+        slept = until_player(lambda s: s['state'] == 'paused' and s['ratingKey'] != cur and s['time'] < 2000, 10)
+        check('cast: the sleep timer\'s "end of this track" stops the player at the next one', slept and not player(page, 'p.sleepActive'),
+              json.dumps({k: remote_player()[k] for k in ('state', 'time', 'ratingKey')}))
+        page.click('.np-play')
+        until_player(lambda s: s['state'] == 'playing')
+
+        page.reload()
+        page.wait_for_selector('.wide-card:not(.skeleton), .view')
+        check('cast: after a reload it still controls the player', wait_for(lambda: player(page, '!!p.cast && p.state === "playing"'), 8))
+
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.click('.np-tool[data-tool=cast]')
+        page.wait_for_selector('.sheet.open .sheet-action:has-text("This device")')
+        there = player(page, 'p.time')
+        page.locator('.sheet.open .sheet-action', has_text='This device').click()
+        back = wait_for(lambda: player(page, '!p.cast && p.state === "playing"'), 8)
+        check('cast: back to this device, from the same spot (and the player stops)', back and until_player(lambda s: s['state'] == 'paused')
+              and abs(player(page, 'p.time') - there) < 4, f'{there} -> {player(page, "p.time")}')
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+        ctx.close()
+
+        # Sam (a friend): players on the home network are the owner's.
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'cast-friend')
+        login(page, APP, token='t2')
+        play_first_album_track(page, APP)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.click('.np-tool[data-tool=cast]')
+        page.wait_for_selector('.sheet.open .sheet-action:has-text("Only the server’s owner")')
+        text = page.locator('.sheet.open').inner_text()
+        check('cast: only the server\'s owner can play on its Plex players', 'Living Room' not in text, text[:200])
+        ctx.close()
+
+        # AirPlay or Google Cast through the browser's own picker (a stand-in
+        # for the browser's Remote Playback here: headless Chromium has no
+        # devices to show).
+        ctx = browser.new_context(**MOBILE)
+        ctx.add_init_script("""(() => {
+          const fakes = new WeakMap();
+          class FakeRemote extends EventTarget {
+            constructor(el) { super(); this.el = el; this.state = 'disconnected'; }
+            watchAvailability(cb) { setTimeout(() => cb(true), 30); return Promise.resolve(1); }
+            cancelWatchAvailability() { return Promise.resolve(); }
+            prompt() {
+              window.__remoteSrc = this.el.getAttribute('src');
+              this.state = 'connecting';
+              this.dispatchEvent(new Event('connecting'));
+              setTimeout(() => { this.state = 'connected'; this.dispatchEvent(new Event('connect')); }, 100);
+              return Promise.resolve();
+            }
+            leave() { this.state = 'disconnected'; this.dispatchEvent(new Event('disconnect')); }
+          }
+          Object.defineProperty(HTMLMediaElement.prototype, 'remote', { configurable: true, get() {
+            let f = fakes.get(this); if (!f) { f = new FakeRemote(this); fakes.set(this, f); } return f; } });
+        })();""")
+        page = ctx.new_page()
+        attach(page, 'cast-remote')
+        login(page, APP)
+        play_first_album_track(page, APP)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.click('.np-tool[data-tool=cast]')
+        page.wait_for_selector('.sheet.open .sheet-action:has-text("AirPlay or Cast")')
+        page.wait_for_timeout(600)  # the temporary token arrives
+        page.locator('.sheet.open .sheet-action', has_text='AirPlay or Cast').click()
+        routed = wait_for(lambda: player(page, 'p.routed'), 5)
+        src = js(page, '() => window.__remoteSrc') or ''
+        check('cast: AirPlay or Cast opens the browser\'s picker, and the device gets a temporary token',
+              routed and 'X-Plex-Token=transient-' in src and 'X-Plex-Token=t&' not in src, src[-80:])
+        check('cast: ...and playback stays on one element (no crossfades while it\'s connected)',
+              player(page, '!p.spare.hasSource() && p.nextPlan() === null') and page.locator('.np-where').inner_text() == 'Playing on an AirPlay or Cast device')
+        js(page, "() => import('./js/player.js').then(({ player }) => player.audio.remote.leave())")
+        check('cast: when the device lets go, it plays here as before', wait_for(lambda: player(page, '!p.routed && p.nextPlan() !== null'), 5)
+              and page.locator('.np-where').is_hidden())
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
         ctx.close()
 
     # ---------- fades: crossfades and gapless changes of track ----------
@@ -650,7 +1063,8 @@ with sync_playwright() as pw:
         dan.click('button.friend-go')
         dan.wait_for_selector('.together-session')
         check('together: session starts with what was playing',
-              tg(dan, 't.active && t.session.queue.length >= 5 && t.session.playing') and player(dan, 'p.state') == 'playing')
+              wait_for(lambda: tg(dan, 't.active && t.session.queue.length >= 5 && t.session.playing') and player(dan, 'p.state') == 'playing', 6),
+              player(dan, 'p.state'))
         status = dan.locator('.together-status').inner_text()
         check('together: status line', status.strip().startswith('Live') and 'null' not in status and 'host' in status, status)
 
@@ -873,7 +1287,7 @@ with sync_playwright() as pw:
               cards.count() >= 4 and page.locator('section[data-section=collections] .shelf .card-art .card-play').count() == cards.count()
               and page.locator('section[data-section=recentPlaylists] .shelf .card').count() > 0)
         subs = page.locator('section[data-section=collections] .card-sub').all_text_contents()
-        check('home: collection cards say what they hold', subs and all(s.split()[-1] in ('albums', 'artists', 'tracks') for s in subs), str(subs))
+        check('home: collection cards say what they hold', subs and all(s.split()[-1].rstrip('s') in ('album', 'artist', 'track') for s in subs), str(subs))
         shot(page, 'home-01-home')
         mix = page.locator('section[data-section=mixes] .mix-card').first
         check('cards: a mix keeps its buttons on touch screens',

@@ -4,13 +4,14 @@ import { app, on } from './state.js';
 import { player } from './player.js';
 import { pushOverlay, popOverlay, describeError, navigate } from './router.js';
 import { h, icon, iconButton, art, avatar, skipIcon, fmt, toast, sheet } from './ui.js';
-import { trackMenu } from './actions.js';
+import { trackMenu, queueMenu } from './actions.js';
 import { trackRow } from './components.js';
 import { guestDJ, DJS, djName } from './dj.js';
 import { aiReady } from './ai.js';
 import { live } from './live.js';
 import { together } from './together.js';
 import { levelSamples } from './transitions.js';
+import { cast, openCastSheet, castLabel } from './cast.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
@@ -43,6 +44,17 @@ function setModeButtons(shuffleBtn, repeatBtn, size) {
   const label = player.remote ? 'Repeat (not available while listening together)' : { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat];
   repeatBtn.setAttribute('aria-label', label);
   repeatBtn.title = label;
+}
+
+// The cast button: lit, and saying where, while it plays somewhere else.
+function paintCast(btn, size) {
+  const where = castLabel();
+  btn.replaceChildren(icon(where ? 'casting' : 'cast', size));
+  btn.classList.toggle('on', !!where);
+  btn.setAttribute('aria-pressed', String(!!where));
+  const label = where ? `Playing on ${where}` : 'Play on…';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
 }
 
 function cycleRepeat() {
@@ -79,23 +91,89 @@ function scrubber(cls = '') {
   };
 }
 
+// The speaker shows fewer sound waves as the volume goes down: under 75%,
+// 50% and 25%.
+function volumeIcon(v, muted) {
+  if (muted || v <= 0) return 'speakerOff';
+  if (v < 0.25) return 'speaker0';
+  if (v < 0.5) return 'speaker1';
+  if (v < 0.75) return 'speaker2';
+  return 'speaker3';
+}
+
+const VOLUME_MARKS = [25, 50, 75];
+
+// Volume slider with marks at 25, 50 and 75%. While dragging, it settles on
+// a mark within 2% of it (the arrow keys still move 1% at a time), and the
+// level shows above the handle.
 function volumeControl() {
-  const btn = iconButton('speaker', 'Mute', () => player.toggleMute(), { size: 22 });
+  const btn = iconButton('speaker3', 'Mute', () => player.toggleMute(), { size: 22 });
   const input = h('input.scrub.vol', { type: 'range', min: 0, max: 100, step: 1, 'aria-label': 'Volume' });
+  const tip = h('span.vol-tip', { 'aria-hidden': 'true' }, '100%');
+  const marks = h(
+    'span.vol-marks',
+    { 'aria-hidden': 'true' },
+    VOLUME_MARKS.map((m) => {
+      const tick = h('i');
+      tick.style.setProperty('--m', String(m / 100));
+      return tick;
+    }),
+  );
+  const slider = h('div.vol-slider', null, marks, input, tip);
+  const el = h('div.volume', null, btn, slider);
+  let dragging = false;
+  let fade = 0;
+
+  const paint = (pct) => {
+    input.style.setProperty('--p', `${pct}%`);
+    slider.style.setProperty('--pv', String(pct / 100));
+    tip.textContent = `${pct}%`;
+    input.setAttribute('aria-valuetext', `${pct}%`);
+    input.title = `Volume ${pct}%`;
+  };
+  // The level stays up a moment after a change (keys, wheel or a drag).
+  const flash = () => {
+    el.classList.add('adjusting');
+    clearTimeout(fade);
+    fade = setTimeout(() => !dragging && el.classList.remove('adjusting'), 900);
+  };
+  input.addEventListener('pointerdown', () => {
+    dragging = true;
+    el.classList.add('adjusting');
+  });
+  const release = () => {
+    if (!dragging) return;
+    dragging = false;
+    flash();
+  };
+  input.addEventListener('pointerup', release);
+  input.addEventListener('pointercancel', release);
+  input.addEventListener('lostpointercapture', release);
   input.addEventListener('input', () => {
-    player.setVolume(input.value / 100);
-    input.style.setProperty('--p', `${input.value}%`);
+    let v = Number(input.value);
+    const mark = dragging ? VOLUME_MARKS.find((m) => Math.abs(v - m) <= 2) : undefined;
+    if (mark !== undefined && v !== mark) {
+      v = mark;
+      input.value = String(mark);
+    }
+    player.setVolume(v / 100);
+    paint(v);
+    flash();
   });
   const update = () => {
     const v = player.muted ? 0 : player.volume;
-    input.value = Math.round(v * 100);
-    input.style.setProperty('--p', `${input.value}%`);
-    setIcon(btn, v === 0 ? 'speakerOff' : 'speaker', 22);
+    const pct = Math.round(v * 100);
+    input.value = String(pct);
+    paint(pct);
+    const level = volumeIcon(v, player.muted);
+    setIcon(btn, level, 22);
+    btn.dataset.level = level;
     btn.setAttribute('aria-label', player.muted ? 'Unmute' : 'Mute');
+    btn.title = player.muted ? 'Unmute' : 'Mute';
   };
   update();
   player.addEventListener('volume', update);
-  return { el: h('div.volume', null, btn, input), update };
+  return { el, update };
 }
 
 // ---------- player bar ----------
@@ -117,6 +195,7 @@ export function initPlayerBar(root) {
   const dRepeat = iconButton('repeat', 'Repeat', cycleRepeat, { size: 20, cls: 'mode-btn' });
   const scrub = scrubber('.pb-scrub');
   const vol = volumeControl();
+  const dCast = iconButton('cast', 'Play on…', openCastSheet, { size: 20, cls: 'mode-btn pb-cast' });
 
   root.replaceChildren(
     h(
@@ -130,6 +209,7 @@ export function initPlayerBar(root) {
         'div.pb-right',
         null,
         iconButton('queue', 'Up next', () => openNowPlaying({ queue: true }), { size: 22 }),
+        dCast,
         vol.el,
         iconButton('expand', 'Open now playing', () => openNowPlaying(), { size: 20 }),
       ),
@@ -154,12 +234,16 @@ export function initPlayerBar(root) {
     fill.style.transform = `scaleX(${d ? Math.min(1, player.time / d) : 0})`;
     scrub.update();
   };
-  const onMode = () => setModeButtons(dShuffle, dRepeat, 20);
+  const onMode = () => {
+    setModeButtons(dShuffle, dRepeat, 20);
+    paintCast(dCast, 20);
+  };
 
   player.addEventListener('track', onTrack);
   player.addEventListener('state', onState);
   player.addEventListener('time', onTime);
   player.addEventListener('mode', onMode);
+  cast.addEventListener('change', onMode);
   player.addEventListener('playerror', (e) => {
     const { track, remote } = e.detail;
     if (remote) {
@@ -560,6 +644,9 @@ function buildNowPlaying() {
     hidden: true,
     onclick: () => popOverlay().then(() => navigate('/together')),
   });
+  const castBtn = toolButton('cast', 'Play on…', openCastSheet, 'cast');
+  // Where it's playing, when that's not here.
+  const castChip = h('button.np-where', { type: 'button', hidden: true, onclick: openCastSheet });
 
   const queueList = h('div.tracks.np-queue-list');
   const queueCount = h('span.np-queue-count');
@@ -573,7 +660,7 @@ function buildNowPlaying() {
     null,
     h('div.np-tools-side', null, queueBtn, djBtn, shuffleBtn),
     moreBtn,
-    h('div.np-tools-side.np-tools-right', null, repeatBtn, speedBtn, sleepBtn, vol.el),
+    h('div.np-tools-side.np-tools-right', null, castBtn, repeatBtn, speedBtn, sleepBtn, vol.el),
   );
   const main = h(
     'div.np-main',
@@ -583,7 +670,7 @@ function buildNowPlaying() {
       'div.np-lower',
       null,
       wave.el,
-      h('div.np-meta', null, artist, title, album, djNote),
+      h('div.np-meta', null, artist, title, album, djNote, castChip),
       h('div.np-info', null, codec, stars.el, quality),
       h('div.np-transport', null, back, prev, play, next, fwd),
     ),
@@ -598,6 +685,7 @@ function buildNowPlaying() {
       h('h2', null, 'Up next'),
       queueCount,
       h('button.link-btn', { type: 'button', onclick: () => player.clearUpcoming() }, 'Clear'),
+      iconButton('more', 'Up next options', () => queueMenu(), { size: 24, cls: 'np-queue-more' }),
       iconButton('chevronDown', 'Hide up next', () => showQueue(false), { size: 24, cls: 'np-queue-hide' }),
     ),
     queueFrom,
@@ -700,6 +788,17 @@ function buildNowPlaying() {
     back.title = back.getAttribute('aria-label');
     fwd.title = fwd.getAttribute('aria-label');
     renderListeners();
+    renderCasting();
+  }
+
+  function renderCasting() {
+    paintCast(castBtn, 26);
+    const where = castLabel();
+    castChip.hidden = !where;
+    if (where) {
+      castChip.replaceChildren(icon(cast.active ? 'casting' : 'airplay', 18), h('span', null, `Playing on ${where}`));
+      castChip.setAttribute('aria-label', `Playing on ${where}. Choose where it plays.`);
+    }
   }
 
   function renderListeners() {
@@ -762,6 +861,7 @@ function buildNowPlaying() {
   guestDJ.addEventListener('change', renderModes);
   guestDJ.addEventListener('busy', renderModes);
   together.addEventListener('change', renderModes);
+  cast.addEventListener('change', renderModes);
   on('settings', () => {
     renderModes();
     wave.redraw();

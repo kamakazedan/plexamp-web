@@ -81,6 +81,22 @@ const ICONS = {
   palette: S('<path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.2 0 1.8-.9 1.4-2l-.3-.8c-.4-1.1.4-2.2 1.6-2.2h1.8a4 4 0 0 0 4-4c0-4.4-3.8-8-8.5-8z"/><circle cx="7.8" cy="11.5" r="1" fill="currentColor"/><circle cx="10.5" cy="7.6" r="1" fill="currentColor"/><circle cx="15" cy="8" r="1" fill="currentColor"/>'),
   speaker: S('<path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a7.8 7.8 0 0 1 0 11"/>'),
   speakerOff: S('<path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/><path d="m16 9.5 5 5M21 9.5l-5 5"/>'),
+  // Volume levels: fewer sound waves as it goes down (under 75, 50, 25%).
+  speaker0: S('<path d="M3.5 9.5h3.2l4.8-4v13l-4.8-4H3.5z"/>'),
+  speaker1: S('<path d="M3.5 9.5h3.2l4.8-4v13l-4.8-4H3.5z"/><path d="M14.6 10a2.9 2.9 0 0 1 0 4"/>'),
+  speaker2: S('<path d="M3.5 9.5h3.2l4.8-4v13l-4.8-4H3.5z"/><path d="M14.6 10a2.9 2.9 0 0 1 0 4M17 7.8a6 6 0 0 1 0 8.4"/>'),
+  speaker3: S('<path d="M3.5 9.5h3.2l4.8-4v13l-4.8-4H3.5z"/><path d="M14.6 10a2.9 2.9 0 0 1 0 4M17 7.8a6 6 0 0 1 0 8.4M19.4 5.6a9.2 9.2 0 0 1 0 12.8"/>'),
+  cast: S('<path d="M3.5 8V6.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H14"/><path d="M3.5 11.5a8 8 0 0 1 8 8M3.5 15a4.5 4.5 0 0 1 4.5 4.5"/><circle cx="3.9" cy="19.1" r=".9" fill="currentColor"/>'),
+  casting: S('<path d="M3.5 8V6.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H14"/><path d="M3.5 11.5a8 8 0 0 1 8 8M3.5 15a4.5 4.5 0 0 1 4.5 4.5"/><circle cx="3.9" cy="19.1" r=".9" fill="currentColor"/><path d="M7 8h10.5v8.5h-2.8" fill="currentColor" stroke="none" opacity=".45"/>'),
+  airplay: S('<path d="M6.5 17H4.5a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2h15a2 2 0 0 1 2 2V15a2 2 0 0 1-2 2h-2"/><path d="M12 14l5 6H7z"/>'),
+  lock: S('<rect x="5" y="10.5" width="14" height="10" rx="2.2"/><path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.6 0v2.7M12 14.6v2"/>'),
+  unlock: S('<rect x="5" y="10.5" width="14" height="10" rx="2.2"/><path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.3-1.5M12 14.6v2"/>'),
+  edit: S('<path d="M4.5 19.5l1-4.1L15.8 5.1a2 2 0 0 1 2.9 0l.2.2a2 2 0 0 1 0 2.9L8.6 18.5z"/><path d="M13.8 7.1l3.1 3.1"/>'),
+  trash: S('<path d="M4.5 6.5h15M9.5 6.5V4.8a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.7M6.5 6.5l.9 12.2a1.5 1.5 0 0 0 1.5 1.3h6.2a1.5 1.5 0 0 0 1.5-1.3l.9-12.2M10.2 10.5v6M13.8 10.5v6"/>'),
+  remove: S('<circle cx="12" cy="12" r="8.5"/><path d="M8 12h8"/>'),
+  playlistAdd: S('<path d="M4 6.5h11M4 11.5h11M4 16.5h7M17.5 13v7M14 16.5h7"/>'),
+  collection: S('<rect x="3.5" y="8" width="13" height="12" rx="2"/><path d="M7 5h11.5a2 2 0 0 1 2 2v9.5"/><path d="M8.5 13.5h3M10 12v3"/>'),
+  moveTop: S('<path d="M5 4.5h14M12 20V9.5M7 14l5-5 5 5"/>'),
   terminal: S('<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7 9.5 3 2.5-3 2.5M12.5 15H17"/>'),
   info: S('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.2"/>'),
   signOut: S('<path d="M14.5 4.5h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-3M10 16.5 5.5 12 10 7.5M5.5 12H15"/>'),
@@ -515,6 +531,134 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
   return { close: () => popOverlay(), panel };
 }
 
+// A question with a text answer, in a dialog: resolves to the trimmed text,
+// or null if it was cancelled.
+export function askText({ title, label, value = '', confirm = 'Save', maxLength = 120 }) {
+  return new Promise((resolve) => {
+    let answer = null;
+    const input = h('input', { type: 'text', value, maxLength, autocomplete: 'off', spellcheck: 'false' });
+    const ok = h('button.btn.btn-primary', { type: 'submit' }, confirm);
+    const form = h(
+      'form.ask-form',
+      {
+        onsubmit: (e) => {
+          e.preventDefault();
+          const text = input.value.trim();
+          if (!text) return input.focus();
+          answer = text;
+          popOverlay();
+        },
+      },
+      h('label.field', null, h('span', null, label), input),
+      ok,
+    );
+    sheet({ title, content: form, variant: 'dialog', closeLabel: 'Cancel', onClose: () => resolve(answer) });
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 60);
+  });
+}
+
+// "Are you sure?": resolves to true only if the confirm button was pressed.
+export function confirmAction({ title, message, confirm, danger = true }) {
+  return new Promise((resolve) => {
+    let yes = false;
+    const content = h(
+      'div.ask-form',
+      null,
+      message ? h('p.ask-message', null, message) : null,
+      h(
+        `button.btn.${danger ? 'btn-danger' : 'btn-primary'}`,
+        {
+          type: 'button',
+          onclick: () => {
+            yes = true;
+            popOverlay();
+          },
+        },
+        confirm,
+      ),
+    );
+    sheet({ title, content, variant: 'dialog', closeLabel: 'Cancel', onClose: () => resolve(yes) });
+  });
+}
+
+// ---------- drag to reorder ----------
+
+// Drag items of a list by their handle (.drag-handle) to reorder them, with
+// mouse, touch or pen. Near the top or bottom of the screen the page
+// scrolls, so an item can travel the whole list. Positions are page
+// positions, so scrolling doesn't throw the item off the pointer.
+// onDrop({ item, order }) runs when an item has moved: `order` is the
+// items, in their new order.
+export function enableDrag(list, { item: selector = '.drag-item', onDrop }) {
+  const EDGE = 90; // px from the screen's edge where scrolling starts
+  let drag = null;
+  const items = () => [...list.children].filter((el) => el.matches(selector));
+
+  function place() {
+    const { item } = drag;
+    const pageY = drag.clientY + window.scrollY;
+    const rows = items();
+    const i = rows.indexOf(item);
+    const prev = rows[i - 1];
+    const next = rows[i + 1];
+    const dy = pageY - drag.y;
+    if (prev && dy < -prev.offsetHeight / 2) {
+      list.insertBefore(item, prev);
+      drag.y -= prev.offsetHeight;
+      drag.moved = true;
+    } else if (next && dy > next.offsetHeight / 2) {
+      list.insertBefore(next, item);
+      drag.y += next.offsetHeight;
+      drag.moved = true;
+    }
+    item.style.transform = `translateY(${pageY - drag.y}px)`;
+  }
+
+  function autoScroll() {
+    if (!drag) return;
+    const bottomEdge = window.innerHeight - (document.getElementById('tabs')?.offsetHeight || 0) - (document.getElementById('player-bar')?.offsetHeight || 0);
+    const y = drag.clientY;
+    const speed = y < EDGE ? -Math.ceil((EDGE - y) / 6) : y > bottomEdge - EDGE ? Math.ceil((y - (bottomEdge - EDGE)) / 6) : 0;
+    if (speed) {
+      const before = window.scrollY;
+      window.scrollBy(0, Math.max(-24, Math.min(24, speed)));
+      if (window.scrollY !== before) place();
+    }
+    drag.frame = requestAnimationFrame(autoScroll);
+  }
+
+  list.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle || e.button > 0 || !list.contains(handle)) return;
+    const item = handle.closest(selector);
+    if (!item || item.parentElement !== list) return;
+    e.preventDefault();
+    handle.setPointerCapture?.(e.pointerId);
+    drag = { item, y: e.clientY + window.scrollY, clientY: e.clientY, moved: false, frame: 0 };
+    item.classList.add('dragging');
+    drag.frame = requestAnimationFrame(autoScroll);
+  });
+  list.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    drag.clientY = e.clientY;
+    place();
+  });
+  const end = () => {
+    if (!drag) return;
+    const { item, moved, frame } = drag;
+    cancelAnimationFrame(frame);
+    drag = null;
+    item.style.transform = '';
+    item.classList.remove('dragging');
+    if (moved) onDrop({ item, order: items() });
+  };
+  list.addEventListener('pointerup', end);
+  list.addEventListener('pointercancel', end);
+}
+
 // ---------- infinite lists ----------
 
 // Long lists keep artwork only near the screen: a picture further away gives
@@ -602,7 +746,14 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
     near?.disconnect();
   };
   onDispose?.(dispose);
-  return { items: all, load, dispose };
+  return {
+    items: all,
+    load,
+    dispose,
+    get done() {
+      return done;
+    },
+  };
 }
 
 // ---------- small utils ----------

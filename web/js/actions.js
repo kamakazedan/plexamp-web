@@ -1,10 +1,12 @@
 // Play helpers ("play this album", "radio from this artist") and the
-// long-press style menus for tracks, albums and playlists.
+// long-press style menus for tracks, albums, artists, playlists and
+// collections.
 import { app } from './state.js';
 import { player } from './player.js';
 import { normTrack } from './plex.js';
 import { navigate, describeError } from './router.js';
 import { sheet, toast, shuffleArray, fmt } from './ui.js';
+import { addToPlaylist, addToCollection, isAdminNow, tracksOf } from './editing.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 
@@ -164,17 +166,34 @@ export const sonicPath = (from, to) =>
 
 // ---------- menus ----------
 
-export function trackMenu(track, { queueIndex } = {}) {
+// `extra`: actions for where the menu was opened (an unlocked playlist's
+// "Remove from playlist", say), shown first.
+export function trackMenu(track, { queueIndex, extra = [] } = {}) {
   const inQueue = queueIndex !== undefined;
   sheet({
     title: track.title,
     subtitle: [track.artist, track.album].filter(Boolean).join(' — '),
     image: track.thumb,
     actions: [
+      ...extra,
       !inQueue && { icon: 'playNext', label: 'Play next', onSelect: () => { player.playNext([track]); toast('Playing next'); } },
       !inQueue && { icon: 'addQueue', label: 'Add to queue', onSelect: () => { player.addToQueue([track]); toast('Added to queue'); } },
+      inQueue && queueIndex > player.index + 1 && {
+        icon: 'moveTop',
+        label: 'Move to top',
+        onSelect: () => {
+          player.moveToTop(queueIndex);
+          toast('Playing next');
+        },
+      },
       { icon: 'radio', label: 'Play similar tracks', onSelect: () => similarRadio(track) },
       inQueue && queueIndex !== player.index && { icon: 'close', label: 'Remove from queue', onSelect: () => player.remove(queueIndex) },
+      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: track.title, load: async () => [track] }) },
+      isAdminNow() && {
+        icon: 'collection',
+        label: 'Add to collection…',
+        onSelect: () => addToCollection({ kind: 'track', what: track.title, load: async () => [track] }),
+      },
       track.albumId && { icon: 'disc', label: 'Go to album', onSelect: () => navigate(`/album/${track.albumId}`) },
       track.artistId && { icon: 'mic', label: 'Go to artist', onSelect: () => navigate(`/artist/${track.artistId}`) },
     ],
@@ -191,12 +210,39 @@ export function albumMenu(album) {
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playAlbum(album, { shuffle: true }) },
       { icon: 'playNext', label: 'Play next', onSelect: () => queueAlbum(album, 'next') },
       { icon: 'addQueue', label: 'Add to queue', onSelect: () => queueAlbum(album, 'end') },
+      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: album.title, load: () => tracksOf([album]), suggest: album.title }) },
+      isAdminNow() && {
+        icon: 'collection',
+        label: 'Add to collection…',
+        onSelect: () => addToCollection({ kind: 'album', what: album.title, load: async () => [album] }),
+      },
       album.parentRatingKey && { icon: 'mic', label: 'Go to artist', onSelect: () => navigate(`/artist/${album.parentRatingKey}`) },
     ],
   });
 }
 
-export function playlistMenu(pl) {
+export function artistMenu(artist) {
+  sheet({
+    title: artist.title,
+    image: artist.thumb,
+    round: true,
+    actions: [
+      { icon: 'play', label: 'Play', onSelect: () => playArtist(artist) },
+      { icon: 'shuffle', label: 'Shuffle', onSelect: () => playArtist(artist, { shuffle: true }) },
+      { icon: 'radio', label: 'Artist radio', onSelect: () => artistRadio(artist) },
+      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: artist.title, load: () => tracksOf([artist]), suggest: artist.title }) },
+      isAdminNow() && {
+        icon: 'collection',
+        label: 'Add to collection…',
+        onSelect: () => addToCollection({ kind: 'artist', what: artist.title, load: async () => [artist] }),
+      },
+    ],
+  });
+}
+
+// `edit`: { onRename, onDelete } when the playlist is unlocked for editing.
+export function playlistMenu(pl, { edit = null } = {}) {
+  const tracks = () => tracksOf([pl]);
   sheet({
     title: pl.title,
     subtitle: fmt.count(pl.leafCount || 0, 'track', 'tracks'),
@@ -204,6 +250,50 @@ export function playlistMenu(pl) {
     actions: [
       { icon: 'play', label: 'Play', onSelect: () => playPlaylist(pl) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playPlaylist(pl, { shuffle: true }) },
+      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: pl.title, load: tracks }) },
+      isAdminNow() && {
+        icon: 'collection',
+        label: 'Add to collection…',
+        onSelect: () => addToCollection({ kind: 'track', what: pl.title, load: tracks, suggest: pl.title }),
+      },
+      edit && { icon: 'edit', label: 'Rename…', onSelect: edit.onRename },
+      edit && { icon: 'trash', label: 'Delete playlist…', danger: true, onSelect: edit.onDelete },
+    ],
+  });
+}
+
+// `edit`: as for playlists, for the server's admin.
+export function collectionMenu(c, { edit = null } = {}) {
+  sheet({
+    title: c.title,
+    subtitle: c.childCount ? fmt.count(c.childCount, 'item', 'items') : null,
+    image: c.thumb || c.composite,
+    actions: [
+      { icon: 'play', label: 'Play', onSelect: () => playCollection(c) },
+      { icon: 'shuffle', label: 'Shuffle', onSelect: () => playCollection(c, { shuffle: true }) },
+      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: c.title, load: () => tracksOf([c]), suggest: c.title }) },
+      edit && { icon: 'edit', label: 'Rename…', onSelect: edit.onRename },
+      edit && { icon: 'trash', label: 'Delete collection…', danger: true, onSelect: edit.onDelete },
+    ],
+  });
+}
+
+// Up next: the queue (from the current track on) to a playlist or a
+// collection.
+export function queueMenu() {
+  const upcoming = () => Promise.resolve(player.queue.slice(Math.max(0, player.index)));
+  const n = Math.max(0, player.queue.length - Math.max(0, player.index));
+  sheet({
+    title: 'Up next',
+    subtitle: fmt.count(n, 'track', 'tracks'),
+    actions: [
+      { icon: 'playlistAdd', label: 'Save as a playlist…', onSelect: () => addToPlaylist({ what: fmt.count(n, 'track', 'tracks'), load: upcoming }) },
+      isAdminNow() && {
+        icon: 'collection',
+        label: 'Add to a collection…',
+        onSelect: () => addToCollection({ kind: 'track', what: fmt.count(n, 'track', 'tracks'), load: upcoming }),
+      },
+      player.upcoming.length > 0 && { icon: 'close', label: 'Clear Up next', onSelect: () => player.clearUpcoming() },
     ],
   });
 }

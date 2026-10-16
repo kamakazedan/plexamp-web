@@ -3,7 +3,7 @@
 import { app, saveSettings } from '../state.js';
 import { defaultDeviceName } from '../plex.js';
 import { popOverlay, dropCached } from '../router.js';
-import { h, icon, backHeader, row, sheet, toast, toggleRow, choiceRow } from '../ui.js';
+import { h, icon, backHeader, row, sheet, toast, toggleRow, choiceRow, enableDrag } from '../ui.js';
 import { homeLayout, saveHomeLayout, resetHomeLayout, sectionById } from '../home-sections.js';
 
 const set = (key) => (v) => saveSettings({ [key]: v });
@@ -286,10 +286,13 @@ export function homeEditorView({ el }) {
     });
   }
 
-  enableDrag(list, (order) => {
-    layout.order = order;
-    save();
-    render();
+  enableDrag(list, {
+    item: '.home-row',
+    onDrop: ({ order }) => {
+      layout.order = order.map((r) => r.dataset.id);
+      save();
+      render();
+    },
   });
 
   el.append(
@@ -316,73 +319,4 @@ export function homeEditorView({ el }) {
     ),
   );
   render();
-}
-
-// Drag rows by their handle to reorder them (mouse, touch or pen). Near the
-// top or bottom of the screen the page scrolls, so a row can travel the
-// whole list. Positions are page positions, so scrolling doesn't throw the
-// row off the pointer.
-function enableDrag(list, onDrop) {
-  const EDGE = 90; // px from the screen's edge where scrolling starts
-  let drag = null;
-
-  function place() {
-    const { item } = drag;
-    const pageY = drag.clientY + window.scrollY;
-    const rows = [...list.querySelectorAll('.home-row')];
-    const i = rows.indexOf(item);
-    const prev = rows[i - 1];
-    const next = rows[i + 1];
-    const dy = pageY - drag.y;
-    if (prev && dy < -prev.offsetHeight / 2) {
-      list.insertBefore(item, prev);
-      drag.y -= prev.offsetHeight;
-      drag.moved = true;
-    } else if (next && dy > next.offsetHeight / 2) {
-      list.insertBefore(next, item);
-      drag.y += next.offsetHeight;
-      drag.moved = true;
-    }
-    item.style.transform = `translateY(${pageY - drag.y}px)`;
-  }
-
-  function autoScroll() {
-    if (!drag) return;
-    const bottomEdge = window.innerHeight - (document.getElementById('tabs')?.offsetHeight || 0) - (document.getElementById('player-bar')?.offsetHeight || 0);
-    const y = drag.clientY;
-    const speed = y < EDGE ? -Math.ceil((EDGE - y) / 6) : y > bottomEdge - EDGE ? Math.ceil((y - (bottomEdge - EDGE)) / 6) : 0;
-    if (speed) {
-      const before = window.scrollY;
-      window.scrollBy(0, Math.max(-24, Math.min(24, speed)));
-      if (window.scrollY !== before) place();
-    }
-    drag.frame = requestAnimationFrame(autoScroll);
-  }
-
-  list.addEventListener('pointerdown', (e) => {
-    const handle = e.target.closest('.drag-handle');
-    if (!handle || e.button > 0) return;
-    e.preventDefault();
-    const item = handle.closest('.home-row');
-    handle.setPointerCapture?.(e.pointerId);
-    drag = { item, handle, y: e.clientY + window.scrollY, clientY: e.clientY, moved: false, frame: 0 };
-    item.classList.add('dragging');
-    drag.frame = requestAnimationFrame(autoScroll);
-  });
-  list.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    drag.clientY = e.clientY;
-    place();
-  });
-  const end = () => {
-    if (!drag) return;
-    const { item, moved, frame } = drag;
-    cancelAnimationFrame(frame);
-    drag = null;
-    item.style.transform = '';
-    item.classList.remove('dragging');
-    if (moved) onDrop([...list.querySelectorAll('.home-row')].map((r) => r.dataset.id));
-  };
-  list.addEventListener('pointerup', end);
-  list.addEventListener('pointercancel', end);
 }

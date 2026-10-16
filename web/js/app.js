@@ -20,6 +20,8 @@ import { loginView } from './views/login.js';
 import { togetherView } from './views/together.js';
 import { together } from './together.js';
 import { debugLog } from './debug.js';
+import { isAdmin } from './editing.js';
+import { cast } from './cast.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
@@ -162,7 +164,7 @@ function hideBanner() {
 // user: they're near the top and nothing is open over it.
 function refreshIfIdle(test) {
   const { path } = parseHash();
-  if (!test(path) || window.scrollY > 150 || overlayDepth() || document.querySelector('.ai-progress')) return;
+  if (!test(path) || window.scrollY > 150 || overlayDepth() || document.querySelector('.ai-progress, .view.is-editing')) return;
   refresh();
 }
 
@@ -248,13 +250,18 @@ function boot() {
 
   if (app.server) {
     player.restore();
+    // Still playing on another Plex player since the page was opened last?
+    cast.resume();
     ensureConnection();
+    isAdmin().catch(() => {});
     live.start();
     if (app.config.together) {
       together.resume().finally(() => together.watch());
     }
   }
   on('source', () => app.config.together && !together.inviteTimer && together.watch());
+  // Whether menus offer collection changes (only the server's admin can).
+  on('source', () => app.server && isAdmin().catch(() => {}));
 
   window.addEventListener('online', () => app.server && ensureConnection());
   window.addEventListener('unhandledrejection', (e) => {

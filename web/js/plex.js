@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.5.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.6.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -274,6 +274,13 @@ export function isListingPath(path) {
 
 export const TAG_FIELDS = new Set(['genre', 'style', 'mood', 'decade', 'year', 'studio', 'country']);
 const MEMO_LIMIT = 300;
+const WRITE_BATCH = 200; // items per request when adding to a playlist or collection
+
+const chunks = (list, size) => {
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+};
 
 // ---------- Plex Media Server ----------
 
@@ -288,8 +295,9 @@ export class PlexServer {
 
   // The app's own X-Plex-* values (the token above all) come last, so no
   // parameter from elsewhere, such as a filter in a link, can replace them.
-  url(path, params = {}) {
-    return withParams(this.uri + path, { ...params, ...plexParams(this.token) });
+  // `token` is only ever the server's own temporary token (for casting).
+  url(path, params = {}, token = this.token) {
+    return withParams(this.uri + path, { ...params, ...plexParams(token) });
   }
 
   async get(path, params, opts) {
@@ -476,11 +484,142 @@ export class PlexServer {
     return this.id;
   }
 
+  // ---------- changing playlists and collections ----------
+  // Items are given to Plex as a "server://" address listing their ids, a
+  // batch at a time (a long list would make the address too long).
+
+  async libraryUri(ids) {
+    return `server://${await this.machineId()}/com.plexapp.plugins.library/library/metadata/${ids.join(',')}`;
+  }
+
+  async send(method, path, params) {
+    const data = await request(this.url(path, params), { method });
+    return data?.MediaContainer || {};
+  }
+
   async createPlaylist(title, ids) {
-    const uri = `server://${await this.machineId()}/com.plexapp.plugins.library/library/metadata/${ids.join(',')}`;
-    const data = await request(this.url('/playlists', { type: 'audio', title, smart: 0, uri }), { method: 'POST' });
+    const [first, ...rest] = chunks(ids, WRITE_BATCH);
+    const mc = await this.send('POST', '/playlists', { type: 'audio', title, smart: 0, uri: await this.libraryUri(first || []) });
+    const pl = asArray(mc.Metadata)[0] || null;
+    if (pl) for (const batch of rest) await this.send('PUT', `/playlists/${pl.ratingKey}/items`, { uri: await this.libraryUri(batch) });
     this.forgetPlaylists();
-    return asArray(data.MediaContainer?.Metadata)[0] || null;
+    return pl;
+  }
+
+  // Adds to the end; returns the playlist (with its new track count).
+  async addToPlaylist(id, ids) {
+    let mc = {};
+    for (const batch of chunks(ids, WRITE_BATCH)) mc = await this.send('PUT', `/playlists/${id}/items`, { uri: await this.libraryUri(batch) });
+    this.forgetPlaylists();
+    return asArray(mc.Metadata)[0] || null;
+  }
+
+  // Playlist entries have their own ids (playlistItemID): the same track can
+  // be in a playlist twice. Removing an entry leaves the track in the library.
+  async removeFromPlaylist(id, itemId) {
+    await this.send('DELETE', `/playlists/${id}/items/${itemId}`);
+    this.forgetPlaylists();
+  }
+
+  // Moves an entry to just after another one, or to the top without one.
+  async movePlaylistItem(id, itemId, afterId = null) {
+    await this.send('PUT', `/playlists/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {});
+    this.forgetPlaylists();
+  }
+
+  async renamePlaylist(id, title) {
+    await this.send('PUT', `/playlists/${id}`, { title });
+    this.forgetPlaylists();
+  }
+
+  async deletePlaylist(id) {
+    await this.send('DELETE', `/playlists/${id}`);
+    this.forgetPlaylists();
+  }
+
+  // Collections hold one kind of item: artists (8), albums (9) or tracks (10).
+  async createCollection(section, type, title, ids) {
+    const [first, ...rest] = chunks(ids, WRITE_BATCH);
+    const mc = await this.send('POST', '/library/collections', { type, title, smart: 0, sectionId: section, uri: await this.libraryUri(first || []) });
+    const c = asArray(mc.Metadata)[0] || null;
+    if (c) for (const batch of rest) await this.send('PUT', `/library/collections/${c.ratingKey}/items`, { uri: await this.libraryUri(batch) });
+    this.forgetCollections();
+    return c;
+  }
+
+  async addToCollection(id, ids) {
+    for (const batch of chunks(ids, WRITE_BATCH)) await this.send('PUT', `/library/collections/${id}/items`, { uri: await this.libraryUri(batch) });
+    this.forgetCollections();
+  }
+
+  async removeFromCollection(id, itemId) {
+    await this.send('DELETE', `/library/collections/${id}/items/${itemId}`);
+    this.forgetCollections();
+  }
+
+  // Items keep a custom order only once the collection is sorted "custom".
+  async moveCollectionItem(id, itemId, afterId = null) {
+    await this.send('PUT', `/library/collections/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {});
+  }
+
+  async customOrder(id) {
+    await this.send('PUT', `/library/collections/${id}/prefs`, { collectionSort: 2 });
+  }
+
+  async renameCollection(section, id, title) {
+    await this.send('PUT', `/library/sections/${section}/all`, { type: 18, id, 'title.value': title, 'title.locked': 1 });
+    this.forgetCollections();
+  }
+
+  async deleteCollection(id) {
+    await this.send('DELETE', `/library/collections/${id}`);
+    this.forgetCollections();
+  }
+
+  forgetCollections() {
+    for (const k of this.cache.keys()) if (k.startsWith('collections:')) this.cache.delete(k);
+  }
+
+  // ---------- play queues (casting) ----------
+  // A play queue lives on the server: a player we cast to plays it from
+  // there. Each entry has its own playQueueItemID.
+
+  async createPlayQueue(ids, selectedId, { repeat = 0 } = {}) {
+    return this.send('POST', '/playQueues', {
+      type: 'audio',
+      uri: await this.libraryUri(ids),
+      key: `/library/metadata/${selectedId}`,
+      shuffle: 0,
+      repeat,
+      continuous: 0,
+      own: 1,
+    });
+  }
+
+  playQueue(id) {
+    return this.get(`/playQueues/${id}`, { window: 500, own: 1 });
+  }
+
+  // next: right after the playing entry, otherwise at the end.
+  async addToPlayQueue(id, ids, { next = false } = {}) {
+    return this.send('PUT', `/playQueues/${id}`, { uri: await this.libraryUri(ids), next: next ? 1 : 0 });
+  }
+
+  removeFromPlayQueue(id, itemId) {
+    return this.send('DELETE', `/playQueues/${id}/items/${itemId}`);
+  }
+
+  movePlayQueueItem(id, itemId, afterId) {
+    return this.send('PUT', `/playQueues/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {});
+  }
+
+  // A temporary token from the server, for a device we cast to (it never
+  // gets the account's own token).
+  async transientToken() {
+    const mc = await this.get('/security/token', { type: 'delegation', scope: 'all' });
+    const t = mc.token;
+    if (typeof t !== 'string' || !/^[A-Za-z0-9_.~-]{8,200}$/.test(t)) throw new Error('The server didn’t give a temporary token.');
+    return t;
   }
 
   // Star rating on Plex's 0–10 scale; null clears it.
@@ -529,28 +668,32 @@ export class PlexServer {
   }
 
   // The original file, played as-is by the browser.
-  directUrl(track) {
-    return track.partKey ? this.url(track.partKey) : null;
+  directUrl(track, token) {
+    return track.partKey ? this.url(track.partKey, {}, token || this.token) : null;
   }
 
   // Server-side conversion for formats the browser can't decode, or to save
   // data. Uses the same universal transcoder endpoint as python-plexapi.
-  transcodeUrl(track, bitrate = 320) {
-    return this.url('/audio/:/transcode/universal/start.m3u8', {
-      path: `/library/metadata/${track.id}`,
-      mediaIndex: 0,
-      partIndex: 0,
-      protocol: 'hls',
-      directPlay: 0,
-      directStream: 0,
-      directStreamAudio: 0,
-      hasMDE: 1,
-      musicBitrate: bitrate,
-      transcodeSessionId: `${clientId()}-${track.id}`,
-      'X-Plex-Session-Identifier': clientId(),
-      'X-Plex-Client-Profile-Extra':
-        'add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=aac,mp3)',
-    });
+  transcodeUrl(track, bitrate = 320, token = this.token) {
+    return this.url(
+      '/audio/:/transcode/universal/start.m3u8',
+      {
+        path: `/library/metadata/${track.id}`,
+        mediaIndex: 0,
+        partIndex: 0,
+        protocol: 'hls',
+        directPlay: 0,
+        directStream: 0,
+        directStreamAudio: 0,
+        hasMDE: 1,
+        musicBitrate: bitrate,
+        transcodeSessionId: `${clientId()}-${track.id}`,
+        'X-Plex-Session-Identifier': clientId(),
+        'X-Plex-Client-Profile-Extra':
+          'add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=aac,mp3)',
+      },
+      token,
+    );
   }
 }
 

@@ -3,6 +3,62 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.6.0 - 2026-10-16
+
+### Added
+
+- **Edit playlists**, with a lock so nothing changes by accident. Playlists
+  open locked, as before. Tap the padlock at the top to unlock one: drag
+  tracks by their handles to reorder them, or take them out with the −
+  button, and Undo puts a track back. Unlocked, a track's menu also has
+  **Move to top** and **Move to bottom**, and the playlist's menu has
+  **Rename** and **Delete**. Every change is saved to Plex straight away.
+  Taking a track out of a playlist leaves it in your library. **Done**, or
+  leaving the page, locks the playlist again. Smart playlists follow their
+  rules in Plex, so they can't be edited.
+- **Add to playlist…** on tracks, albums, artists, playlists and
+  collections, and **Save as a playlist…** in the ⋯ menu next to Up next.
+  **New playlist…** at the top of the list makes one. Tracks already in the
+  playlist aren't added again.
+- **Edit collections, for the server's admin**: the same lock and editing as
+  playlists, and **Add to collection…** on tracks, albums, artists,
+  playlists and Up next. Collections belong to the library, which everyone
+  you share it with sees, so only the server's owner gets these options.
+  For everyone else collections stay play-only. A collection holds one kind
+  of item (artists, albums or tracks), so you're offered collections of the
+  matching kind, and adding a playlist or the queue adds its tracks.
+- **Move to top** in the menu of a track in Up next, so it plays next.
+- **Play on**: the cast button next to Repeat (and in the desktop player
+  bar) plays on another Plex player on your network, such as Plexamp on a
+  Raspberry Pi, with this app as its remote. Play, pause, skip, seek,
+  volume and changes to Up next go to that player, and the app follows what
+  it plays, even after a reload. **This device** brings the music back,
+  from where it got to. It's for players signed in to your own Plex
+  account; with `PLEX_SERVER_URL` set, it's for the server's owner. Set
+  `CASTING=false` to turn it off.
+- **AirPlay or Cast…** in the same list, where the browser has its own
+  speaker picker (AirPlay in Safari, Google Cast in Chrome on Android).
+- **Volume**: a percentage shows while you drag the slider, with marks at
+  25, 50 and 75% that it settles on, and the speaker icon loses a wave
+  below 75, 50 and 25%, as in Plexamp.
+- A menu on artist pages: play, shuffle, artist radio, add to a playlist.
+
+Alexa speakers can't be added to Play on: Amazon only lets its approved
+music services play on them, so no app can, Plexamp included. Pairing the
+speaker with your phone or computer over Bluetooth works, and the Play on
+list says so.
+
+### Changed
+
+- **Security**: if your Plex server lets this container in without signing
+  in (Plex's "List of IP addresses and networks that are allowed without
+  auth"), only the server's owner now gets through the `/pms/` proxy. Plex
+  accepts any token from such a network and can treat its requests as the
+  owner's, so friends using the proxy could have seen the owner's view of
+  the server and made changes (a new playlist, say) as the owner. The
+  container's log says how to fix the Plex setting, after which friends get
+  through again.
+
 ## 0.5.0 - 2026-10-15
 
 ### Added

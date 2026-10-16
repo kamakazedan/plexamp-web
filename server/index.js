@@ -14,6 +14,7 @@ import { dirname } from 'node:path';
 import { log, setDebug, isDebug } from './log.js';
 import { PlexAuth, AuthError, validToken } from './plex.js';
 import { Together, TogetherError } from './together.js';
+import { Cast, CastError } from './cast.js';
 import { listenForNginx } from './syslog.js';
 
 // ---------- settings ----------
@@ -28,6 +29,9 @@ function loadConfig() {
     port: Number(env.PW_SERVICE_PORT || cfg.port || 0),
     debug: env.PW_SERVICE_DEBUG ? env.PW_SERVICE_DEBUG === 'true' : !!cfg.debug,
     together: env.PW_SERVICE_TOGETHER ? env.PW_SERVICE_TOGETHER === 'true' : cfg.together !== false,
+    cast: env.PW_SERVICE_CAST ? env.PW_SERVICE_CAST === 'true' : cfg.cast !== false,
+    // Development only: players at 127.0.0.1 (the mock player).
+    castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
     aiAuth: env.PW_SERVICE_AI_AUTH || cfg.aiAuth || 'plex',
     plexServerUrl: env.PW_SERVICE_PLEX_SERVER_URL ?? cfg.plexServerUrl ?? '',
     plexTvUrl: env.PW_SERVICE_PLEX_TV_URL || cfg.plexTvUrl || 'https://plex.tv',
@@ -46,6 +50,7 @@ const together = new Together({
   onChange: (s) => log.debug(`together ${s.id.slice(0, 6)}: v${s.version}, ${s.members.size} listening, track ${s.index + 1}/${s.queue.length}, ${s.playing ? 'playing' : 'paused'}${s.ended ? ', ended' : ''}`),
 });
 setInterval(() => together.sweep(), 60000).unref();
+const cast = new Cast({ auth, loopback: config.castLoopback });
 
 // ---------- rate limits ----------
 
@@ -205,9 +210,10 @@ function pmsToken(req) {
 
 // Called by nginx (auth_request) for each request to /pms/. Plex checks
 // tokens itself, so normally everything with a token goes through. But if
-// the Plex server lets this container in without signing in, it would
-// accept any token, so then the token must belong to a Plex account that
-// can use the server.
+// the Plex server lets this container in without signing in, it accepts
+// any token from here and can treat every request as its owner's: a friend
+// could see and change things as the owner. Then only the owner's own
+// sign-in gets through (checked with plex.tv).
 async function pmsAuth(req, res) {
   const token = pmsToken(req);
   if (!token) return send(res, 401);
@@ -219,8 +225,9 @@ async function pmsAuth(req, res) {
     const serverId = await auth.loadServerId();
     // Server unreachable and so unknown: the request will fail there anyway.
     if (!serverId && open === null) return send(res, 204);
-    if (serverId && (await auth.canUseServer(token, serverId))) return send(res, 204);
-    return send(res, 403);
+    if (!serverId) return send(res, 403);
+    const access = await auth.serverAccess(token, serverId);
+    return send(res, access.owned ? 204 : 403);
   } catch (err) {
     if (err instanceof AuthError) return send(res, 401);
     log.warn(`couldn't check a sign-in for /pms/ with plex.tv: ${err.message}`);
@@ -372,6 +379,44 @@ async function togetherRoute(req, res, parts, url) {
   throw new HttpError(404, 'Not found.');
 }
 
+// "Play on": the account's Plex players, and commands for one of them.
+//   GET  /api/cast/players
+//   POST /api/cast/players/{id}/play       { key, offset, playQueueID, serverId, token }
+//   POST /api/cast/players/{id}/command    { command, ... }
+//   GET  /api/cast/players/{id}/timeline
+// With PLEX_SERVER_URL set, only for the server's owner: the players this
+// can reach are on the home network, where the owner's are. (Friends'
+// players are on their own networks anyway.)
+async function castRoute(req, res, parts) {
+  if (!config.cast) throw new HttpError(404, 'Playing on other devices is turned off on this player.');
+  const { user, token } = await signedIn(req);
+  if (!allow(`cast|${user.id}`, 300)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
+  if (config.plexServerUrl) {
+    const serverId = await auth.loadServerId();
+    if (!serverId) throw new HttpError(503, 'The Plex server isn’t answering. Try again in a minute.');
+    const access = await auth.serverAccess(token, serverId).catch(() => null);
+    if (!access) throw new HttpError(503, 'Plex couldn’t be asked about your players right now. Try again in a minute.');
+    if (!access.owned) throw new HttpError(403, 'Only the server’s owner can play on Plex players from here.');
+  }
+  const [what, id, action] = parts;
+  if (what !== 'players') throw new HttpError(404, 'Not found.');
+  try {
+    if (!id && req.method === 'GET') {
+      const players = await cast.players(token);
+      return send(res, 200, { players: players.map(({ url, ...p }) => p) });
+    }
+    if (action === 'timeline' && req.method === 'GET') return send(res, 200, await cast.timeline(user, token, id));
+    if (action === 'play' && req.method === 'POST') return send(res, 200, await cast.play(user, token, id, await readBody(req, 8 * 1024)));
+    if (action === 'command' && req.method === 'POST') return send(res, 200, await cast.command(user, token, id, await readBody(req, 8 * 1024)));
+  } catch (err) {
+    if (err instanceof CastError) throw new HttpError(err.status, err.message);
+    if (err instanceof AuthError) throw new HttpError(401, err.message);
+    if (err.network || err.upstream) throw new HttpError(503, 'Plex couldn’t be asked about your players right now. Try again in a minute.');
+    throw err;
+  }
+  throw new HttpError(404, 'Not found.');
+}
+
 async function handle(req, res) {
   const started = Date.now();
   const url = new URL(req.url, 'http://service.local');
@@ -385,11 +430,12 @@ async function handle(req, res) {
   try {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
-    if (area === 'health') return send(res, 200, { ok: true, together: config.together, debug: config.debug });
+    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast, debug: config.debug });
     if (area === 'internal' && rest[0] === 'ai-auth') return await aiAuth(req, res);
     if (area === 'internal' && rest[0] === 'pms-auth') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
+    if (area === 'cast') return await castRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
     const known = err instanceof HttpError || err instanceof TogetherError;
@@ -443,7 +489,8 @@ function started() {
     log.error(`couldn't hand the socket to the ${config.user} user: ${err.message}`);
     process.exit(1);
   }
-  log.info(`ready${config.together ? '' : ' (Play Together off)'}${config.debug ? ', debug mode on' : ''}`);
+  const off = [!config.together && 'Play Together', !config.cast && 'playing on other devices'].filter(Boolean);
+  log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
 }
 

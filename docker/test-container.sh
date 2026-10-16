@@ -7,7 +7,8 @@
 #
 # The containers' service uses the mock for plex.tv too (PLEX_TV_URL), whose
 # accounts are t (Dan, who owns the server), t2 (Sam, a friend with access)
-# and t3 (Alex, a friend without access).
+# and t3 (Alex, a friend without access). Dan also has a Plex player, which
+# the mock runs on port 32500 at its address on the test network.
 set -eu
 
 IMAGE="${1:-plexamp-web:test}"
@@ -19,7 +20,7 @@ FAILED=0
 TV="PLEX_TV_URL=http://pw-plex:32400"
 
 cleanup() {
-    docker rm -f pw-plex pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web6 pw-web7 pw-bad >/dev/null 2>&1 || true
+    docker rm -f pw-plex pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web6 pw-web7 pw-web8 pw-bad >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -86,7 +87,7 @@ wait_http pw-web http://pw-web/
 wait_service pw-web
 W=http://pw-web
 
-contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true' "$(cb $W/config.js)"
+contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true, cast: true' "$(cb $W/config.js)"
 expect "app is served" 200 "$(c $W/)"
 expect "hls.js is bundled" 200 "$(c $W/vendor/hls.min.js)"
 lacks "nginx's version isn't shown" "nginx/" "$(docker run --rm --network "$NET" "$CURL" -sSI --max-time 20 $W/ 2>/dev/null || true)"
@@ -128,7 +129,7 @@ codes="$(docker run --rm --network "$NET" --entrypoint sh "$CURL" -c \
     "for i in \$(seq 1 30); do curl -s -o /dev/null -w '%{http_code} ' -H 'X-Plex-Token: ratelimit' $W/ollama/api/version; done" || true)"
 contains "AI: rate limited per user" "429" "$codes"
 
-contains "service: health" '"together":true' "$(cb $W/api/health)"
+contains "service: health" '"together":true,"cast":true' "$(cb $W/api/health)"
 expect "service: internal checks can't be called from outside" 404 "$(c -H 'X-Plex-Token: t' $W/api/internal/ai-auth)"
 expect "Play Together: needs a sign-in" 401 "$(c $W/api/together/me)"
 expect "Play Together: refuses a bad token" 401 "$(c -H 'X-Plex-Token: bad' $W/api/together/me)"
@@ -149,6 +150,17 @@ expect "Play Together: oversized requests refused" 413 "$(docker run --rm --netw
 contains "Play Together: long-polling answers when something changes" '"playing":true' "$(docker run --rm --network "$NET" --entrypoint sh "$CURL" -c \
     "(sleep 1; curl -s -o /dev/null -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{\"type\":\"play\"}' $W/api/together/sessions/$SID/command) & curl -s --max-time 20 -H 'X-Plex-Token: t2' '$W/api/together/sessions/$SID?since=999999&wait=10'; wait" || true)"
 expect "Play Together: the host ends it" 200 "$(c -H 'X-Plex-Token: t' -X DELETE $W/api/together/sessions/$SID)"
+CMD='Content-Type: application/json'
+expect "Play on: needs a sign-in" 401 "$(c $W/api/cast/players)"
+players="$(cb -H 'X-Plex-Token: t' $W/api/cast/players)"
+contains "Play on: lists the owner's Plex players" '"id":"mock-player-1","name":"Living Room"' "$players"
+lacks "Play on: players' addresses stay in the container" '"url"' "$players"
+expect "Play on: only for the server's owner" 403 "$(c -H 'X-Plex-Token: t2' $W/api/cast/players)"
+expect "Play on: commands reach the player on the network" 200 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"pause"}' $W/api/cast/players/mock-player-1/command)"
+contains "Play on: reads what the player is doing" '"state":"' "$(cb -H 'X-Plex-Token: t' $W/api/cast/players/mock-player-1/timeline)"
+expect "Play on: only players on the account" 404 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"pause"}' $W/api/cast/players/somebody-else/command)"
+expect "Play on: only commands it knows" 400 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"command":"../../resources"}' $W/api/cast/players/mock-player-1/command)"
+expect "Play on: friends can't send commands either" 403 "$(c -H 'X-Plex-Token: t2' -H "$CMD" -X POST -d '{"command":"pause"}' $W/api/cast/players/mock-player-1/command)"
 docker logs pw-web 2>&1 | grep -q "WebSockets turned off" && pass "startup log explains settings" || fail "startup log explains settings"
 docker logs pw-web 2>&1 | grep -q "plexamp-web service: ready" && pass "the service started" || fail "the service started"
 LOG="$(docker logs pw-web 2>&1)"
@@ -159,7 +171,7 @@ lacks "no tokens in the log" "X-Plex-Token=t" "$LOG"
 docker run -d --name pw-web2 --network "$NET" "$IMAGE" >/dev/null
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
-expect "defaults: Play Together on, nothing else" "window.PW_CONFIG = { together: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together and Play on, nothing else" "window.PW_CONFIG = { together: true, cast: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
 expect "defaults: Play Together needs a sign-in" 401 "$(c http://pw-web2/api/together/me)"
@@ -190,7 +202,11 @@ wait_service pw-web5
 expect "open server: made-up tokens refused at /pms/" 401 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=made-up-token")"
 expect "open server: accounts without access refused at /pms/" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t3")"
 expect "open server: the owner still gets in" 200 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t")"
-expect "open server: a friend with access still gets in" 200 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+# The server would treat a friend's requests as its owner's, so only the
+# owner gets through.
+expect "open server: friends are refused (they'd act as the owner)" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+expect "open server: ...and can't change things" 403 "$(c -X PUT "http://pw-web5/pms/playlists/999999?title=x&X-Plex-Token=t2")"
+expect "open server: the owner can change things" 404 "$(c -X PUT "http://pw-web5/pms/playlists/999999?title=x&X-Plex-Token=t")"
 expect "open server: shared AI not opened up by it" 401 "$(c -H 'X-Plex-Token: made-up-token' http://pw-web5/ollama/api/tags)"
 docker logs pw-web5 2>&1 | grep -q "lets this container in without signing in" && pass "open server: the log explains" || fail "open server: the log explains"
 c "http://pw-plex:32400/__mock/config?open=0" >/dev/null
@@ -222,8 +238,15 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js" "window.PW_CONFIG = {  };" "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js" "window.PW_CONFIG = { cast: true };" "$(cb http://pw-web7/config.js | tr -d '\n')"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
+
+# ---------- 7b. Playing on other Plex players off ----------
+docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false "$IMAGE" >/dev/null
+wait_http pw-web8 http://pw-web8/
+wait_service pw-web8
+expect "CASTING=false: not in config.js" "window.PW_CONFIG = { together: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 
 # ---------- 8. Bad settings stop the container with a clear message ----------
 bad() { # name expected-message docker-run-args...
@@ -240,6 +263,7 @@ bad() { # name expected-message docker-run-args...
 bad "rejects a server address without http://" "PLEX_SERVER_URL must start with http://" -e PLEX_SERVER_URL=192.168.1.10:32400
 bad "rejects an unclear true/false value" "expected true or false" -e DISABLE_WEBSOCKETS=maybe
 bad "rejects an unclear PLAY_TOGETHER" "PLAY_TOGETHER: expected true or false" -e PLAY_TOGETHER=sometimes
+bad "rejects an unclear CASTING" "CASTING: expected true or false" -e CASTING=sometimes
 bad "rejects an unknown OLLAMA_AUTH" "OLLAMA_AUTH must be plex or off" -e OLLAMA_URL=http://x:11434 -e OLLAMA_AUTH=sometimes
 bad "rejects an address with odd characters" "invalid path" -e 'OLLAMA_URL=http://x:11434/;evil'
 docker rm -f pw-bad >/dev/null 2>&1 || true

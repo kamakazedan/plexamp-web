@@ -1,5 +1,6 @@
 import { app } from '../state.js';
 import { normTrack } from '../plex.js';
+import { back, dropCached, describeError, refresh } from '../router.js';
 import {
   h,
   art,
@@ -9,14 +10,32 @@ import {
   sectionHeader,
   shelf,
   grid,
+  row,
   iconButton,
   clampText,
   pagedList,
   emptyState,
+  enableDrag,
+  askText,
+  confirmAction,
+  toast,
   fmt,
 } from '../ui.js';
 import { albumCard, artistCard, trackRow, collectionCard } from '../components.js';
-import { playAlbum, playArtist, playPlaylist, playCollection, artistRadio, albumMenu, playlistMenu, playList } from '../actions.js';
+import {
+  playAlbum,
+  playArtist,
+  playPlaylist,
+  playCollection,
+  artistRadio,
+  albumMenu,
+  artistMenu,
+  playlistMenu,
+  collectionMenu,
+  playList,
+  trackMenu,
+} from '../actions.js';
+import { isAdmin } from '../editing.js';
 
 function actionButtons(buttons) {
   return h(
@@ -176,7 +195,7 @@ export async function artistView({ el, params }) {
   const artist = await s.metadata(params.id);
   if (!artist) throw Object.assign(new Error('Not found'), { status: 404 });
 
-  const head = backHeader(artist.title, { collapse: true });
+  const head = backHeader(artist.title, { collapse: true, actions: iconButton('more', 'More options', () => artistMenu(artist)) });
   const title = h('h1.hero-title', null, artist.title);
   el.append(
     head,
@@ -258,14 +277,73 @@ export async function artistView({ el, params }) {
   await Promise.allSettled([popularP, albumsP, similarP]);
 }
 
+// ---------- editing (playlists and collections) ----------
+// Lists are locked: rows play when tapped, and nothing can be moved or
+// removed by accident. Unlocking (the lock button) shows a handle to drag
+// each row and a button to remove it; every change is saved to Plex at
+// once, removals can be undone, and the list locks again when you leave.
+
+function lockButton(label, onToggle) {
+  const btn = iconButton('lock', `Edit ${label}`, onToggle);
+  btn.classList.add('lock-btn');
+  return {
+    el: btn,
+    set(on) {
+      btn.replaceChildren(icon(on ? 'unlock' : 'lock', 24));
+      btn.classList.toggle('on', on);
+      btn.setAttribute('aria-pressed', String(on));
+      btn.setAttribute('aria-label', on ? `Lock ${label}` : `Edit ${label}`);
+      btn.title = on ? `Done (lock the ${label})` : `Edit ${label} (unlock)`;
+    },
+  };
+}
+
+function editBar(text, onDone) {
+  return h(
+    'div.edit-bar',
+    { hidden: true, role: 'status' },
+    icon('unlock', 20),
+    h('span.edit-bar-text', null, text),
+    h('button.btn.btn-primary.edit-done', { type: 'button', onclick: onDone }, 'Done'),
+  );
+}
+
+// The remove button and drag handle on a row in an unlocked list.
+function addEditControls(r, label, onRemove) {
+  if (r.querySelector(':scope > .row-remove')) return;
+  r.prepend(
+    h('button.icon-btn.row-remove', { type: 'button', 'aria-label': `Remove ${label}`, title: 'Remove', onclick: () => onRemove(r) }, icon('remove', 22)),
+  );
+  r.append(h('span.drag-handle', { title: 'Drag to reorder', 'aria-hidden': 'true' }, icon('grip', 22)));
+}
+
+function removeEditControls(r) {
+  r.querySelector(':scope > .row-remove')?.remove();
+  r.querySelector(':scope > .drag-handle')?.remove();
+}
+
+const failMessage = (err, what) => (err?.status === 401 || err?.status === 403 ? `You can’t change this ${what}.` : describeError(err));
+
 // ---------- Playlist ----------
 
-export async function playlistView({ el, params, onDispose }) {
+export async function playlistView({ el, params, onDispose, onHide }) {
   const s = app.server;
   const pl = await s.playlist(params.id);
   if (!pl) throw Object.assign(new Error('Not found'), { status: 404 });
-  const head = backHeader(pl.title, { collapse: true, fallback: '/library/playlists', actions: iconButton('more', 'More options', () => playlistMenu(pl)) });
+  // Smart playlists follow their rules in Plex; they can't be edited here.
+  const editable = !pl.smart && (pl.playlistType || 'audio') === 'audio';
+  let editing = false;
+  let total = pl.leafCount || 0;
+  let pager = null;
+
+  const lock = editable ? lockButton('playlist', () => setEditing(!editing)) : null;
+  lock?.set(false);
+  const menu = iconButton('more', 'More options', () =>
+    playlistMenu(pl, { edit: editing ? { onRename: rename, onDelete: remove } : null }),
+  );
+  const head = backHeader(pl.title, { collapse: true, fallback: '/library/playlists', actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, pl.title);
+  const countEl = h('span', null, fmt.count(total, 'track', 'tracks'));
   el.append(
     head,
     h(
@@ -276,7 +354,7 @@ export async function playlistView({ el, params, onDispose }) {
         'div.hero-info',
         null,
         title,
-        h('div.hero-meta', null, [fmt.count(pl.leafCount || 0, 'track', 'tracks'), fmt.long(pl.duration)].filter(Boolean).join(', ')),
+        h('div.hero-meta', null, countEl, pl.duration ? `, ${fmt.long(pl.duration)}` : ''),
         pl.smart ? h('div.hero-meta', null, 'Smart playlist') : null,
         actionButtons([
           { icon: 'play', label: 'Play', primary: true, onClick: () => playPlaylist(pl) },
@@ -289,14 +367,166 @@ export async function playlistView({ el, params, onDispose }) {
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
   const list = h('div.tracks');
-  el.append(list);
-  pagedList(list, {
+  const bar = editBar('Drag a track to move it, or remove it. Changes are saved to Plex as you go; the tracks stay in your library.', () => setEditing(false));
+  el.append(bar, list);
+
+  const rows = () => [...list.children].filter((r) => r.matches('.track'));
+  const setCount = (n) => {
+    total = Math.max(0, n);
+    pl.leafCount = total;
+    countEl.textContent = fmt.count(total, 'track', 'tracks');
+  };
+  const changed = () => dropCached((p) => p === '/' || p === '/library/playlists' || p === '/library');
+
+  function controls(r) {
+    if (editing) addEditControls(r, `“${r.dataset.title}” from the playlist`, removeRow);
+    else removeEditControls(r);
+  }
+
+  function editActions(r) {
+    return [
+      r !== rows()[0] && { icon: 'moveTop', label: 'Move to top', onSelect: () => moveTo(r, 'top') },
+      r !== rows().at(-1) && { icon: 'arrowDown', label: 'Move to bottom', onSelect: () => moveTo(r, 'bottom') },
+      { icon: 'remove', label: 'Remove from playlist', danger: true, onSelect: () => removeRow(r) },
+    ];
+  }
+
+  function rowFor(m) {
+    const t = normTrack(m);
+    const r = trackRow(t, {
+      showArt: true,
+      onPlay: () => playPlaylist(pl, { start: Math.max(0, rows().indexOf(r)) }),
+      onMenu: () => trackMenu(t, { extra: editing ? editActions(r) : [] }),
+    });
+    r.dataset.pid = m.playlistItemID ?? '';
+    r.dataset.title = t.title;
+    controls(r);
+    return r;
+  }
+
+  function setEditing(on) {
+    editing = on;
+    el.classList.toggle('is-editing', on);
+    list.classList.toggle('editing', on);
+    bar.hidden = !on;
+    lock?.set(on);
+    rows().forEach(controls);
+  }
+  onHide(() => editing && setEditing(false));
+
+  async function removeRow(r) {
+    const next = r.nextElementSibling;
+    const prevPid = r.previousElementSibling?.dataset.pid || null;
+    r.remove();
+    setCount(total - 1);
+    try {
+      await s.removeFromPlaylist(pl.ratingKey, r.dataset.pid);
+    } catch (err) {
+      list.insertBefore(r, next && next.parentElement === list ? next : null);
+      setCount(total + 1);
+      toast(failMessage(err, 'playlist'));
+      return;
+    }
+    changed();
+    toast(`Removed “${r.dataset.title}”`, { action: 'Undo', onAction: () => undoRemove(r, prevPid, next), timeout: 6000 });
+  }
+
+  // Put it back where it was: add it again (it goes to the end), then move
+  // the new entry after the one that was before it.
+  async function undoRemove(r, prevPid, next) {
+    try {
+      const updated = await s.addToPlaylist(pl.ratingKey, [r.dataset.trackId]);
+      const n = updated?.leafCount ?? total + 1;
+      const { items } = await s.playlistItems(pl.ratingKey, { start: Math.max(0, n - 1), size: 1 });
+      const entry = items.at(-1);
+      if (!entry) throw new Error('The playlist didn’t answer.');
+      await s.movePlaylistItem(pl.ratingKey, entry.playlistItemID, prevPid);
+      r.dataset.pid = entry.playlistItemID;
+      const before = next && next.parentElement === list ? next : prevPid ? rows().find((x) => x.dataset.pid === prevPid)?.nextElementSibling : rows()[0];
+      list.insertBefore(r, before || null);
+      setCount(n);
+      controls(r);
+      changed();
+    } catch (err) {
+      toast(failMessage(err, 'playlist'));
+      refresh();
+    }
+  }
+
+  async function moveTo(r, where) {
+    try {
+      if (where === 'top') {
+        list.prepend(r);
+        await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, null);
+      } else if (pager?.done) {
+        const last = rows().at(-1);
+        list.append(r);
+        await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, last.dataset.pid);
+      } else {
+        // Not all of it is loaded: move it after the last entry, then load
+        // the page again.
+        const { items } = await s.playlistItems(pl.ratingKey, { start: Math.max(0, total - 1), size: 1 });
+        await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, items.at(-1)?.playlistItemID || null);
+        refresh();
+        return;
+      }
+      changed();
+    } catch (err) {
+      toast(failMessage(err, 'playlist'));
+      refresh();
+    }
+  }
+
+  enableDrag(list, {
+    item: '.track',
+    onDrop: async ({ item }) => {
+      const prev = item.previousElementSibling;
+      try {
+        await s.movePlaylistItem(pl.ratingKey, item.dataset.pid, prev?.dataset.pid || null);
+        changed();
+      } catch (err) {
+        toast(failMessage(err, 'playlist'));
+        refresh();
+      }
+    },
+  });
+
+  async function rename() {
+    const name = await askText({ title: 'Rename playlist', label: 'Name', value: pl.title });
+    if (!name || name === pl.title) return;
+    try {
+      await s.renamePlaylist(pl.ratingKey, name);
+      pl.title = name;
+      title.textContent = name;
+      head.querySelector('.back-title').textContent = name;
+      changed();
+    } catch (err) {
+      toast(failMessage(err, 'playlist'));
+    }
+  }
+
+  async function remove() {
+    const sure = await confirmAction({
+      title: `Delete “${pl.title}”?`,
+      message: 'The playlist is deleted from Plex. The tracks in it stay in your library.',
+      confirm: 'Delete playlist',
+    });
+    if (!sure) return;
+    try {
+      await s.deletePlaylist(pl.ratingKey);
+      setEditing(false);
+      changed();
+      toast(`Deleted “${pl.title}”`);
+      back('/library/playlists');
+    } catch (err) {
+      toast(failMessage(err, 'playlist'));
+    }
+  }
+
+  pager = pagedList(list, {
     pageSize: 100,
     fetchPage: (start, size) => s.playlistItems(pl.ratingKey, { start, size }),
-    render: (m, i) => {
-      const t = normTrack(m);
-      return trackRow(t, { showArt: true, onPlay: () => playPlaylist(pl, { start: i }) });
-    },
+    render: (m) => rowFor(m),
     empty: 'This playlist is empty.',
     onDispose,
   });
@@ -304,46 +534,183 @@ export async function playlistView({ el, params, onDispose }) {
 
 // ---------- Collection ----------
 
-export async function collectionView({ el, params }) {
-  const { meta, items } = await app.server.collection(params.id);
+const KIND_UNITS = { artist: ['artist', 'artists'], album: ['album', 'albums'], track: ['track', 'tracks'] };
+
+export async function collectionView({ el, params, onHide }) {
+  const s = app.server;
+  const { meta, items: loaded } = await s.collection(params.id);
   if (!meta) throw Object.assign(new Error('Not found'), { status: 404 });
-  const head = backHeader(meta.title, { collapse: true });
+  let items = loaded;
+  // Only the server's admin can change a collection; smart ones follow
+  // their rules.
+  const editable = !meta.smart && (await isAdmin());
+  let editing = false;
+
+  const lock = editable ? lockButton('collection', () => setEditing(!editing)) : null;
+  lock?.set(false);
+  const menu = iconButton('more', 'More options', () => collectionMenu(meta, { edit: editing ? { onRename: rename, onDelete: remove } : null }));
+  const head = backHeader(meta.title, { collapse: true, actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, meta.title);
+  const countEl = h('div.hero-meta', null, fmt.count(items.length, 'item', 'items'));
+  const buttons = actionButtons([
+    { icon: 'play', label: 'Play', primary: true, onClick: () => playCollection(meta) },
+    { icon: 'shuffle', label: 'Shuffle', onClick: () => playCollection(meta, { shuffle: true }) },
+  ]);
   el.append(
     head,
-    h(
-      'section.hero.hero-album',
-      null,
-      art(meta.thumb || meta.composite, { size: 480, cls: 'hero-art', fallback: 'list' }),
-      h(
-        'div.hero-info',
-        null,
-        title,
-        h('div.hero-meta', null, fmt.count(items.length, 'item', 'items')),
-        items.length
-          ? actionButtons([
-              { icon: 'play', label: 'Play', primary: true, onClick: () => playCollection(meta) },
-              { icon: 'shuffle', label: 'Shuffle', onClick: () => playCollection(meta, { shuffle: true }) },
-            ])
-          : null,
-      ),
-    ),
+    h('section.hero.hero-album', null, art(meta.thumb || meta.composite, { size: 480, cls: 'hero-art', fallback: 'list' }), h('div.hero-info', null, title, countEl, buttons)),
   );
   collapseWhenHidden(head, title);
-  const tracks = items.filter((m) => m.type === 'track').map(normTrack);
-  if (tracks.length) {
-    const list = h('div.tracks');
-    tracks.forEach((t, i) => list.append(trackRow(t, { showArt: true, onPlay: () => playList(tracks, i, { title: meta.title, href: `/collection/${params.id}` }) })));
-    el.append(list);
+  const bar = editBar('Drag to change the order, or remove what doesn’t belong. Changes are saved to Plex as you go; nothing leaves your library.', () =>
+    setEditing(false),
+  );
+  const body = h('div.collection-body');
+  el.append(bar, body);
+  const changed = () => dropCached((p) => p === '/' || p === '/library' || p.startsWith('/browse/collections'));
+  const setCount = () => {
+    countEl.textContent = fmt.count(items.length, 'item', 'items');
+    buttons.hidden = !items.length;
+    meta.childCount = items.length;
+  };
+
+  // Locked: tracks as a track list, albums and artists as cards.
+  function renderLocked() {
+    const tracks = items.filter((m) => m.type === 'track').map(normTrack);
+    const kids = [];
+    if (tracks.length) {
+      const list = h('div.tracks');
+      tracks.forEach((t, i) => list.append(trackRow(t, { showArt: true, onPlay: () => playList(tracks, i, { title: meta.title, href: `/collection/${params.id}` }) })));
+      kids.push(list);
+    }
+    const others = items.filter((m) => m.type !== 'track');
+    if (others.length) {
+      kids.push(grid(others.map((m) => (m.type === 'artist' ? artistCard(m) : m.type === 'collection' ? collectionCard(m) : albumCard(m))), { centered: true }));
+    }
+    if (!items.length) kids.push(emptyState('This collection is empty.'));
+    body.replaceChildren(...kids);
   }
-  const others = items.filter((m) => m.type !== 'track');
-  if (others.length) {
-    el.append(
-      grid(
-        others.map((m) => (m.type === 'artist' ? artistCard(m) : m.type === 'collection' ? collectionCard(m) : albumCard(m))),
-        { centered: true },
-      ),
-    );
+
+  // Unlocked: everything as rows, to drag or remove.
+  const list = h('div.rows.edit-rows');
+  function itemRow(m) {
+    const t = m.type === 'track' ? normTrack(m) : null;
+    const sub = t ? [t.artist, t.album].filter(Boolean).join(' — ') : m.type === 'album' ? m.parentTitle : '';
+    const r = row({ image: t ? t.thumb : m.thumb, round: m.type === 'artist', fallback: m.type === 'artist' ? 'mic' : m.type === 'track' ? 'note' : 'disc', title: m.title, subtitle: sub });
+    r.classList.add('edit-row');
+    r.dataset.key = m.ratingKey;
+    r.dataset.title = m.title;
+    addEditControls(r, `“${m.title}” from the collection`, removeItem);
+    return r;
   }
-  if (!items.length) el.append(emptyState('This collection is empty.'));
+  function renderEditing() {
+    list.replaceChildren(...items.map(itemRow));
+    body.replaceChildren(items.length ? list : emptyState('This collection is empty.'));
+  }
+
+  function setEditing(on) {
+    editing = on;
+    el.classList.toggle('is-editing', on);
+    bar.hidden = !on;
+    lock?.set(on);
+    if (on) renderEditing();
+    else renderLocked();
+  }
+  onHide(() => editing && setEditing(false));
+
+  async function removeItem(r) {
+    const key = r.dataset.key;
+    const at = items.findIndex((m) => String(m.ratingKey) === key);
+    const item = items[at];
+    const next = r.nextElementSibling;
+    r.remove();
+    items = items.filter((m) => m !== item);
+    setCount();
+    try {
+      await s.removeFromCollection(meta.ratingKey, key);
+    } catch (err) {
+      items.splice(at, 0, item);
+      list.insertBefore(r, next && next.parentElement === list ? next : null);
+      setCount();
+      toast(failMessage(err, 'collection'));
+      return;
+    }
+    changed();
+    toast(`Removed “${item.title}”`, {
+      action: 'Undo',
+      timeout: 6000,
+      onAction: async () => {
+        try {
+          await s.addToCollection(meta.ratingKey, [key]);
+          const prev = items[at - 1];
+          if (meta.collectionSort === 2) await s.moveCollectionItem(meta.ratingKey, key, prev ? prev.ratingKey : null);
+          items.splice(at, 0, item);
+          setCount();
+          if (editing) list.insertBefore(r, list.children[at] || null);
+          else renderLocked();
+          changed();
+        } catch (err) {
+          toast(failMessage(err, 'collection'));
+          refresh();
+        }
+      },
+    });
+  }
+
+  enableDrag(list, {
+    item: '.edit-row',
+    onDrop: async ({ item, order }) => {
+      const prev = item.previousElementSibling;
+      try {
+        // A collection keeps a custom order only when sorted that way.
+        if (meta.collectionSort !== 2) {
+          await s.customOrder(meta.ratingKey);
+          meta.collectionSort = 2;
+        }
+        await s.moveCollectionItem(meta.ratingKey, item.dataset.key, prev?.dataset.key || null);
+        const byKey = new Map(items.map((m) => [String(m.ratingKey), m]));
+        items = order.map((r) => byKey.get(r.dataset.key)).filter(Boolean);
+        changed();
+      } catch (err) {
+        toast(failMessage(err, 'collection'));
+        refresh();
+      }
+    },
+  });
+
+  async function rename() {
+    const name = await askText({ title: 'Rename collection', label: 'Name', value: meta.title });
+    if (!name || name === meta.title) return;
+    try {
+      await s.renameCollection(app.source.sectionKey, meta.ratingKey, name);
+      meta.title = name;
+      title.textContent = name;
+      head.querySelector('.back-title').textContent = name;
+      changed();
+    } catch (err) {
+      toast(failMessage(err, 'collection'));
+    }
+  }
+
+  async function remove() {
+    const unit = KIND_UNITS[meta.subtype] || ['item', 'items'];
+    const sure = await confirmAction({
+      title: `Delete “${meta.title}”?`,
+      message: `The collection is deleted from Plex. The ${unit[1]} in it stay in your library.`,
+      confirm: 'Delete collection',
+    });
+    if (!sure) return;
+    try {
+      await s.deleteCollection(meta.ratingKey);
+      setEditing(false);
+      changed();
+      toast(`Deleted “${meta.title}”`);
+      back('/library');
+    } catch (err) {
+      toast(failMessage(err, 'collection'));
+    }
+  }
+
+  setCount();
+  renderLocked();
 }
+

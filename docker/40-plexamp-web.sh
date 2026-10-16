@@ -12,6 +12,8 @@
 #   OLLAMA_AUTH         "plex" (default): only people signed in to Plex can use
 #                       the shared model; "off": anyone who can open the app
 #   PLAY_TOGETHER       "false" turns off Play Together (on by default)
+#   CASTING             "false" turns off playing on other Plex players from
+#                       the app (on by default)
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
 set -eu
@@ -140,6 +142,8 @@ fi
 
 TOGETHER=true
 if ! truthy PLAY_TOGETHER "${PLAY_TOGETHER:-}" true; then TOGETHER=false; fi
+CAST=true
+if ! truthy CASTING "${CASTING:-}" true; then CAST=false; fi
 
 PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
 case "$PLEX_TV" in
@@ -350,11 +354,13 @@ location /api/ {
 }
 CONF
     if [ "$TOGETHER" = true ]; then add_config 'together: true'; fi
+    if [ "$CAST" = true ]; then add_config 'cast: true'; fi
     if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
 else
     echo 'location ^~ /api/ { return 404; }' >"$API_CONF"
     if [ "$TOGETHER" = true ]; then say "Play Together needs Node.js, which isn't installed here, so it's off"; fi
     TOGETHER=false
+    CAST=false
 fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
 
@@ -369,6 +375,7 @@ if [ "$SERVICE" = true ]; then
 {
   "socket": "$(json "$SERVICE_SOCKET")",
   "together": $TOGETHER,
+  "cast": $CAST,
   "debug": $DEBUG_ON,
   "aiAuth": "$AI_AUTH",
   "plexServerUrl": "$(json "${PLEX_SERVER_URL:-}")",
@@ -408,7 +415,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.

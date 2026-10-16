@@ -460,6 +460,13 @@ function restoreImages(root) {
 function show(entry) {
   const prev = currentEntry;
   if (prev && prev !== entry && prev.el.isConnected) {
+    for (const fn of prev.hiders) {
+      try {
+        fn();
+      } catch {
+        /* a view's own hook failing shouldn't stop the page changing */
+      }
+    }
     releaseImages(prev.el);
     prev.size = prev.el.getElementsByTagName('*').length;
   }
@@ -522,7 +529,7 @@ async function render(k, useCache) {
 
   const el = document.createElement('div');
   el.className = 'view';
-  const entry = { el, hash: location.hash, disposers: [], size: 0 };
+  const entry = { el, hash: location.hash, disposers: [], hiders: [], size: 0 };
   cache.set(k, entry);
   while (cache.size > CACHE_LIMIT) dropEntry(cache.keys().next().value);
   show(entry);
@@ -530,8 +537,17 @@ async function render(k, useCache) {
 
   try {
     // onDispose: for a view's own listeners and timers, run when the page
-    // is no longer kept.
-    await m.view({ params: m.params, query, path, el, key: k, onDispose: (fn) => entry.disposers.push(fn) });
+    // is no longer kept. onHide: run each time the page is put aside (a
+    // playlist unlocked for editing locks again, say).
+    await m.view({
+      params: m.params,
+      query,
+      path,
+      el,
+      key: k,
+      onDispose: (fn) => entry.disposers.push(fn),
+      onHide: (fn) => entry.hiders.push(fn),
+    });
   } catch (err) {
     console.error(err);
     if (!el.querySelector('.error-state')) {

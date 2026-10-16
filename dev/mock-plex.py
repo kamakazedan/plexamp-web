@@ -32,6 +32,12 @@ testing, these endpoints need no token:
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
                                   in silence (for testing transitions)
+    /__mock/player[?reset=1]      the mock Plex player: what it's playing and
+                                  the commands it got
+
+It also runs a Plex player (like Plexamp on a Raspberry Pi) on the next port
+up from the server's plus 100 (32500), controlled with Plex's remote-control
+protocol, and listed among Dan's devices on plex.tv as "Living Room".
 
 Every track is a 20-second tune. Some end with 6 seconds of silence, some
 start with 3, and their loudness analysis says so, the way a real server's
@@ -52,6 +58,7 @@ import json
 import math
 import queue
 import random
+import re
 import struct
 import sys
 import threading
@@ -219,18 +226,39 @@ for al in albums[9:12]:
         al['viewCount'] = al.get('viewCount', 0) + 3
 
 
+next_entry = [5000]
+
+
+def entry_id():
+    next_entry[0] += 1
+    return next_entry[0]
+
+
 def make_playlist(title, members, smart=False, viewed=None, section=SECTION):
     k = key()
     p = {
         'ratingKey': k, 'key': f'/playlists/{k}/items', 'type': 'playlist', 'playlistType': 'audio',
         'title': title, 'smart': smart, 'composite': f'/playlists/{k}/composite/1',
         'leafCount': len(members), 'duration': sum(m['duration'] for m in members),
-        'addedAt': NOW - 86400 * 40, 'updatedAt': NOW - 86400 * 3, '_items': members, '_section': section,
+        'addedAt': NOW - 86400 * 40, 'updatedAt': NOW - 86400 * 3, '_items': list(members),
+        '_pids': [entry_id() for _ in members], '_section': section,
     }
     if viewed:
         p['lastViewedAt'] = viewed
     items[k] = p
     return p
+
+
+def playlist_changed(pl):
+    pl['leafCount'] = len(pl['_items'])
+    pl['duration'] = sum(m['duration'] for m in pl['_items'])
+    pl['updatedAt'] = int(time.time())
+    timeline(pl['ratingKey'], 15, 5, section='-1')
+
+
+def ids_from_uri(uri):
+    """Item ids from a server://.../library/metadata/1,2,3 address."""
+    return [i for i in uri.rsplit('/library/metadata/', 1)[-1].split(',') if i in items] if '/library/metadata/' in uri else []
 
 
 playlists = [
@@ -242,6 +270,7 @@ playlists = [
     make_playlist('Bedtime stories', random.sample(tracks, 4), section='3'),
 ]
 
+COLLECTION_TYPES = {8: 'artist', 9: 'album', 10: 'track'}
 collections = []
 for i, (title, subtype, members) in enumerate([
     ('Harbour Records', 'album', [a for a in albums if a['studio'] == 'Harbour Records'][:5]),
@@ -252,8 +281,8 @@ for i, (title, subtype, members) in enumerate([
 ]):
     k = key()
     c = {'ratingKey': k, 'type': 'collection', 'subtype': subtype, 'title': title, 'childCount': len(members),
-         'thumb': members[0].get('thumb') or members[0].get('parentThumb'), '_items': members,
-         'addedAt': NOW - 86400 * (60 - i * 7), 'updatedAt': NOW - 86400 * (20 - i * 3)}
+         'thumb': members[0].get('thumb') or members[0].get('parentThumb'), '_items': list(members),
+         'addedAt': NOW - 86400 * (60 - i * 7), 'updatedAt': NOW - 86400 * (20 - i * 3), 'collectionSort': 0}
     items[k] = c
     collections.append(c)
 
@@ -567,10 +596,197 @@ SERVER_TOKENS = {'t': 'owned', 't2': 'shared'}
 FRIENDS = {'t': ['t2', 't3'], 't2': ['t', 't3'], 't3': ['t']}
 
 
+# Temporary tokens the server handed out (/security/token), and whose.
+TRANSIENT = {}
+
+
 def pms_token_ok(token):
     if MOCK['open']:
         return bool(token) and token != 'bad'
-    return token in SERVER_TOKENS
+    return token in SERVER_TOKENS or token in TRANSIENT
+
+
+def role(token):
+    return SERVER_TOKENS.get(token) or SERVER_TOKENS.get(TRANSIENT.get(token, ''))
+
+
+def is_admin(token):
+    # A server open to this network treats every request as its owner's.
+    return MOCK['open'] or role(token) == 'owned'
+
+
+# ---------------------------------------------------------------- play queues and a player
+
+PLAY_QUEUES = {}  # id -> {'id', 'items': [(item, pqid)], 'selected': pqid, 'version'}
+next_pq = [700]
+
+
+def pq_add(pq, new, after=None):
+    """Insert items after the entry `after` (a pqid), or at the end."""
+    entries = [(it, entry_id()) for it in new]
+    at = len(pq['items']) if after is None else next((i + 1 for i, (_, e) in enumerate(pq['items']) if e == after), len(pq['items']))
+    pq['items'][at:at] = entries
+    pq['version'] += 1
+    return entries
+
+
+def pq_json(pq):
+    rows = [dict(public(t), playQueueItemID=e) for t, e in pq['items']]
+    return {'playQueueID': pq['id'], 'playQueueSelectedItemID': pq['selected'], 'playQueueSelectedItemOffset': 0,
+            'playQueueVersion': pq['version'], 'playQueueTotalCount': len(rows), 'size': len(rows), 'Metadata': rows}
+
+
+def private_ip():
+    """This machine's address on its network, for the player's plex.tv
+    entry (falls back to 127.0.0.1 when it isn't a home-network address)."""
+    import socket
+    try:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(('10.255.255.255', 1))
+        ip = sk.getsockname()[0]
+        sk.close()
+    except OSError:
+        return '127.0.0.1'
+    a, b = (int(x) for x in ip.split('.')[:2])
+    home = a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+    return ip if home else '127.0.0.1'
+
+
+PLAYER_PORT = PORT + 100
+PLAYER = {'id': 'mock-player-1', 'name': 'Living Room', 'pq': None, 'entry': None, 'state': 'stopped', 'offset': 0,
+          'since': 0.0, 'volume': 100, 'shuffle': 0, 'repeat': 0, 'log': [], 'lock': threading.Lock()}
+
+
+def player_index():
+    pq = PLAYER['pq']
+    if not pq:
+        return -1
+    return next((i for i, (_, e) in enumerate(pq['items']) if e == PLAYER['entry']), -1)
+
+
+def player_track():
+    """The entry playing: (track, pqid), or (None, None). The player follows
+    its entry when the queue changes around it."""
+    i = player_index()
+    return PLAYER['pq']['items'][i] if i >= 0 else (None, None)
+
+
+def player_position():
+    """Where the player is (ms), moving on to the next track at the end of one."""
+    t, _ = player_track()
+    if not t:
+        return 0
+    pos = PLAYER['offset'] + ((time.monotonic() - PLAYER['since']) * 1000 if PLAYER['state'] == 'playing' else 0)
+    while t and pos >= t['duration']:
+        pos -= t['duration']
+        i = player_index()
+        if i + 1 < len(PLAYER['pq']['items']):
+            PLAYER['entry'] = PLAYER['pq']['items'][i + 1][1]
+        else:
+            PLAYER['state'], pos = 'stopped', 0
+            break
+        t, _ = player_track()
+    if PLAYER['state'] == 'playing':
+        PLAYER['offset'], PLAYER['since'] = pos, time.monotonic()
+    if PLAYER['entry'] is not None and PLAYER['pq']:
+        PLAYER['pq']['selected'] = PLAYER['entry']
+    return int(pos)
+
+
+def player_go(entry=None, offset=0, state='playing'):
+    if entry is not None:
+        PLAYER['entry'] = entry
+    PLAYER['offset'], PLAYER['since'], PLAYER['state'] = int(offset), time.monotonic(), state
+
+
+def player_timeline():
+    pos = player_position()
+    t, e = player_track()
+    music = {'type': 'music', 'state': PLAYER['state'] if t else 'stopped', 'controllable': 'playPause,stop,volume,shuffle,repeat,seekTo,skipPrevious,skipNext'}
+    if t:
+        music.update({'time': pos, 'duration': t['duration'], 'ratingKey': t['ratingKey'], 'key': f'/library/metadata/{t["ratingKey"]}',
+                      'playQueueID': PLAYER['pq']['id'], 'playQueueItemID': e, 'playQueueVersion': PLAYER['pq']['version'],
+                      'volume': PLAYER['volume'], 'shuffle': PLAYER['shuffle'], 'repeat': PLAYER['repeat'],
+                      'machineIdentifier': 'mock-server-1'})
+    attr = lambda d: ' '.join(f'{k}="{v}"' for k, v in d.items())
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<MediaContainer commandID="{PLAYER.get("commandID", 0)}" location="fullScreenMusic">'
+            f'<Timeline type="video" state="stopped"/><Timeline type="photo" state="stopped"/><Timeline {attr(music)}/></MediaContainer>')
+
+
+class PlayerHandler(BaseHTTPRequestHandler):
+    """Plex's remote-control protocol, as Plexamp on a Raspberry Pi speaks it."""
+    server_version = 'MockPlexamp/0.1'
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def reply(self, status, body, ctype='text/xml'):
+        data = body.encode()
+        self.send_response(status)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: C901 - one command per branch
+        u = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if self.headers.get('X-Plex-Target-Client-Identifier', PLAYER['id']) != PLAYER['id']:
+            return self.reply(404, '<Response code="404" status="Not this player"/>')
+        cmd = u.path.removeprefix('/player/')
+        with PLAYER['lock']:
+            if not cmd.startswith('timeline/'):
+                PLAYER['log'].append({'command': cmd, 'params': dict(q),
+                                      'client': self.headers.get('X-Plex-Client-Identifier', ''), 'hasToken': bool(self.headers.get('X-Plex-Token'))})
+                del PLAYER['log'][:-50]
+            PLAYER['commandID'] = int(q.get('commandID', '0') or 0)
+            player_position()
+            pq = PLAYER['pq']
+            by_key = lambda items, key: next((e for t, e in items if f'/library/metadata/{t["ratingKey"]}' == key), None)
+            if cmd == 'timeline/poll':
+                return self.reply(200, player_timeline())
+            if cmd == 'playback/playMedia':
+                # A real player fetches the queue from the server with this token.
+                if q.get('token') not in TRANSIENT:
+                    return self.reply(401, '<Response code="401" status="The server refused the token"/>')
+                m = re.fullmatch(r'/playQueues/(\d+)(\?.*)?', q.get('containerKey', ''))
+                new = PLAY_QUEUES.get(int(m.group(1))) if m else None
+                if not new:
+                    return self.reply(500, '<Response code="500" status="No such play queue"/>')
+                PLAYER['pq'] = new
+                sel = new['selected'] if by_key([(t, e) for t, e in new['items'] if e == new['selected']], q.get('key')) else by_key(new['items'], q.get('key'))
+                player_go(sel or new['items'][0][1], int(q.get('offset', '0') or 0))
+            elif not pq:
+                return self.reply(500, '<Response code="500" status="Nothing to play"/>')
+            elif cmd == 'playback/play':
+                player_go(offset=player_position())
+            elif cmd == 'playback/pause':
+                player_go(offset=player_position(), state='paused')
+            elif cmd == 'playback/stop':
+                player_go(offset=0, state='stopped')
+            elif cmd in ('playback/skipNext', 'playback/skipPrevious'):
+                i = player_index()
+                if cmd.endswith('Next'):
+                    j = i + 1 if i + 1 < len(pq['items']) else None
+                else:
+                    j = i - 1 if player_position() < 3000 and i > 0 else i
+                if j is not None:
+                    player_go(pq['items'][j][1], 0, 'playing')
+            elif cmd == 'playback/seekTo':
+                player_go(offset=int(q.get('offset', '0') or 0), state=PLAYER['state'])
+            elif cmd == 'playback/skipTo':
+                e = next((e for _, e in pq['items'] if str(e) == q.get('playQueueItemID')), None) or by_key(pq['items'], q.get('key'))
+                if e:
+                    player_go(e, 0, 'playing')
+            elif cmd == 'playback/setParameters':
+                for k in ('volume', 'shuffle', 'repeat'):
+                    if k in q:
+                        PLAYER[k] = int(q[k])
+            elif cmd == 'playback/refreshPlayQueue':
+                pass  # the player follows its entry, wherever it is in the queue now
+            else:
+                return self.reply(404, '<Response code="404" status="Unknown command"/>')
+            return self.reply(200, '<Response code="200" status="OK"/>')
 
 
 def server_resource(token, base):
@@ -662,6 +878,93 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         self.do_GET()
+
+    def do_DELETE(self):
+        self.do_GET()
+
+    def playlist_page(self, pl, q):
+        start = int(q.get('X-Plex-Container-Start', ['0'])[0])
+        size = int(q.get('X-Plex-Container-Size', ['50'])[0])
+        rows = [dict(public(t), playlistItemID=pid) for t, pid in zip(pl['_items'], pl['_pids'])]
+        chunk = rows[start:start + size] if size else []
+        self.send_json({'size': len(chunk), 'totalSize': len(rows), 'offset': start, 'leafCount': pl['leafCount'],
+                        'Metadata': chunk})
+
+    def edit_playlist(self, pl, parts, q):
+        """PUT/DELETE on /playlists/{id}[/items[/{entry}[/move]]]."""
+        if self.command == 'DELETE' and len(parts) == 2:
+            playlists.remove(pl)
+            items.pop(pl['ratingKey'], None)
+            timeline(pl['ratingKey'], 15, 9, section='-1')
+            return self.send_json({})
+        if len(parts) == 2:  # PUT: rename
+            if 'title' in q:
+                pl['title'] = q['title'][0][:200]
+            pl['updatedAt'] = int(time.time())
+            return self.send_json({'size': 1, 'Metadata': [public(pl)]})
+        if pl['smart']:
+            return self.send_json({'error': 'Smart playlists are edited by their rules'}, 400)
+        if len(parts) == 3:  # PUT .../items?uri=: add to the end
+            new = [items[i] for i in ids_from_uri(q.get('uri', [''])[0]) if items[i]['type'] == 'track']
+            pl['_items'] += new
+            pl['_pids'] += [entry_id() for _ in new]
+            playlist_changed(pl)
+            return self.send_json({'size': 1, 'Metadata': [public(pl)]})
+        pid = int(parts[3]) if parts[3].isdigit() else -1
+        if pid not in pl['_pids']:
+            return self.not_found()
+        at = pl['_pids'].index(pid)
+        if self.command == 'DELETE':
+            del pl['_items'][at], pl['_pids'][at]
+        elif len(parts) == 5 and parts[4] == 'move':
+            entry = (pl['_items'].pop(at), pl['_pids'].pop(at))
+            after = int(q.get('after', ['0'])[0] or 0)
+            to = pl['_pids'].index(after) + 1 if after in pl['_pids'] else 0
+            pl['_items'].insert(to, entry[0])
+            pl['_pids'].insert(to, entry[1])
+        else:
+            return self.not_found()
+        playlist_changed(pl)
+        return self.send_json({})
+
+    def edit_collection(self, c, parts, q, token):
+        """PUT/DELETE on /library/collections/{id}[/items[/{id}[/move]]|/prefs]: the server's admin only."""
+        if not is_admin(token):
+            return self.send_json({'error': 'Forbidden'}, 403)
+        sub = parts[3] if len(parts) > 3 else ''
+        if self.command == 'DELETE' and not sub:
+            collections.remove(c)
+            items.pop(c['ratingKey'], None)
+            return self.send_json({})
+        if sub == 'prefs':
+            if 'collectionSort' in q:
+                c['collectionSort'] = int(q['collectionSort'][0])
+            return self.send_json({})
+        if sub != 'items':
+            return self.not_found()
+        if len(parts) == 4:  # PUT: add
+            want = c['subtype']
+            new = [items[i] for i in ids_from_uri(q.get('uri', [''])[0]) if items[i]['type'] == want and items[i] not in c['_items']]
+            c['_items'] += new
+        else:
+            it = items.get(parts[4])
+            if it not in c['_items']:
+                return self.not_found()
+            if self.command == 'DELETE':
+                c['_items'].remove(it)
+            elif len(parts) == 6 and parts[5] == 'move':
+                if c['collectionSort'] != 2:  # like Plex: custom order needs custom sorting
+                    return self.send_json({'error': 'Sort this collection by custom order first'}, 400)
+                c['_items'].remove(it)
+                after = items.get(q.get('after', [''])[0])
+                c['_items'].insert(c['_items'].index(after) + 1 if after in c['_items'] else 0, it)
+            else:
+                return self.not_found()
+        c['childCount'] = len(c['_items'])
+        c['updatedAt'] = int(time.time())
+        if c['_items']:
+            c['thumb'] = c['_items'][0].get('thumb') or c['_items'][0].get('parentThumb')
+        return self.send_json({})
 
     def websocket(self):
         if not MOCK['ws']:
@@ -766,6 +1069,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/v2/resources':
             base = f'http://{self.headers.get("Host") or f"127.0.0.1:{PORT}"}'
             res = [server_resource(token, base)] if token in SERVER_TOKENS else []
+            if token == 't':
+                res.append({'name': PLAYER['name'], 'product': 'Plexamp', 'platform': 'Linux', 'device': 'Raspberry Pi',
+                            'provides': 'client,player,pubsub-player', 'clientIdentifier': PLAYER['id'], 'owned': True, 'presence': True,
+                            'connections': [{'protocol': 'http', 'address': PLAYER_ADDRESS, 'port': PLAYER_PORT,
+                                             'uri': f'http://{PLAYER_ADDRESS}:{PLAYER_PORT}', 'local': True, 'relay': False}]})
             return self.send_text(json.dumps(res), 'application/json')
         if p == '/api/users':
             return self.send_text(friends_xml(token), 'application/xml')
@@ -792,6 +1100,15 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
+        if p == '/__mock/player':
+            with PLAYER['lock']:
+                if q.get('reset'):
+                    PLAYER.update({'pq': None, 'entry': None, 'state': 'stopped', 'offset': 0, 'log': [], 'volume': 100})
+                pos = player_position()
+                t, e = player_track()
+                return self.send_json({'state': PLAYER['state'] if t else 'stopped', 'time': pos, 'ratingKey': t and t['ratingKey'],
+                                       'playQueueID': PLAYER['pq'] and PLAYER['pq']['id'], 'queue': [x['ratingKey'] for x, _ in (PLAYER['pq'] or {}).get('items', [])],
+                                       'volume': PLAYER['volume'], 'log': PLAYER['log']})
         if p == '/__mock/tracks':
             return self.send_json({'size': len(tracks), 'Metadata': [
                 {'ratingKey': t['ratingKey'], 'title': t['title'], 'album': t['parentRatingKey'], 'index': t['index'],
@@ -832,6 +1149,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == '/':
             return self.send_json({'friendlyName': "Dan's Test Server", 'machineIdentifier': 'mock-server-1', 'version': '1.41.0'})
+        if p == '/:/prefs':  # server settings: the admin only
+            return self.send_json({'size': 0, 'Setting': []}) if is_admin(token) else self.send_json({'error': 'Unauthorized'}, 401)
+        if p == '/security/token':
+            t = 'transient-' + hashlib.sha1(f'{token}{time.time()}{random.random()}'.encode()).hexdigest()[:24]
+            TRANSIENT[t] = token
+            return self.send_json({'token': t})
         if p == '/identity':
             return self.send_json({'machineIdentifier': 'mock-server-1', 'version': '1.41.0', 'claimed': True})
         if p == '/library/sections':
@@ -848,6 +1171,15 @@ class Handler(BaseHTTPRequestHandler):
             if sec != SECTION:
                 return self.send_json({'size': 0, 'totalSize': 0, 'Metadata': []})
             typ = int(q.get('type', ['9'])[0])
+            if sub == 'all' and self.command == 'PUT' and typ == 18:  # rename a collection
+                c = items.get(q.get('id', [''])[0])
+                if not c or c.get('type') != 'collection':
+                    return self.not_found()
+                if not is_admin(token):
+                    return self.send_json({'error': 'Forbidden'}, 403)
+                if 'title.value' in q:
+                    c['title'] = q['title.value'][0][:200]
+                return self.send_json({})
             if sub == 'all':
                 if MOCK['delay']:
                     time.sleep(MOCK['delay'] / 1000)
@@ -873,10 +1205,26 @@ class Handler(BaseHTTPRequestHandler):
                 a, b = q.get('startID', [''])[0], q.get('endID', [''])[0]
                 path = [items[a]] + random.sample(tracks, 8) + [items[b]]
                 return self.page(path, {'X-Plex-Container-Size': ['100']})
+        if p == '/library/collections' and self.command == 'POST':
+            if not is_admin(token):
+                return self.send_json({'error': 'Forbidden'}, 403)
+            subtype = COLLECTION_TYPES.get(int(q.get('type', ['0'])[0] or 0))
+            if not subtype:
+                return self.send_json({'error': 'Bad type'}, 400)
+            members = [items[i] for i in ids_from_uri(q.get('uri', [''])[0]) if items[i]['type'] == subtype]
+            k = key()
+            c = {'ratingKey': k, 'type': 'collection', 'subtype': subtype, 'title': q.get('title', ['Untitled'])[0][:200],
+                 'childCount': len(members), 'thumb': (members[0].get('thumb') or members[0].get('parentThumb')) if members else None,
+                 '_items': members, 'addedAt': int(time.time()), 'updatedAt': int(time.time()), 'collectionSort': 0}
+            items[k] = c
+            collections.append(c)
+            return self.send_json({'size': 1, 'Metadata': [public(c)]})
         if p.startswith('/library/collections/'):
             c = items.get(parts[2])
-            if not c:
+            if not c or c.get('type') != 'collection':
                 return self.not_found()
+            if self.command in ('PUT', 'DELETE', 'POST'):
+                return self.edit_collection(c, parts, q, token)
             if len(parts) > 3 and parts[3] == 'children':
                 return self.page(c['_items'], {'X-Plex-Container-Size': ['500']})
             return self.send_json({'size': 1, 'Metadata': [public(c)]})
@@ -907,11 +1255,48 @@ class Handler(BaseHTTPRequestHandler):
                 found = [public(x) for x in pool if needle in x['title'].lower()][:lim]
                 hubs.append({'type': typ, 'hubIdentifier': typ, 'size': len(found), 'Metadata': found})
             return self.send_json({'size': len(hubs), 'Hub': hubs})
+        if p == '/playQueues' and self.command == 'POST':
+            new = [items[i] for i in ids_from_uri(q.get('uri', [''])[0]) if items[i]['type'] == 'track']
+            if not new:
+                return self.send_json({'error': 'Nothing to play'}, 400)
+            next_pq[0] += 1
+            pq = {'id': next_pq[0], 'items': [], 'selected': None, 'version': 1}
+            pq_add(pq, new)
+            want = q.get('key', [''])[0]
+            pq['selected'] = next((e for t, e in pq['items'] if f'/library/metadata/{t["ratingKey"]}' == want), pq['items'][0][1])
+            PLAY_QUEUES[pq['id']] = pq
+            return self.send_json(pq_json(pq))
+        if p.startswith('/playQueues/'):
+            pq = PLAY_QUEUES.get(int(parts[1])) if parts[1].isdigit() else None
+            if not pq:
+                return self.not_found()
+            with PLAYER['lock']:
+                if PLAYER['pq'] is pq:
+                    player_position()  # the selected entry is the one playing
+                if self.command == 'PUT' and len(parts) == 2:  # add: after the selected entry (next=1) or at the end
+                    new = [items[i] for i in ids_from_uri(q.get('uri', [''])[0]) if items[i]['type'] == 'track']
+                    pq_add(pq, new, after=pq['selected'] if q.get('next', ['0'])[0] == '1' else None)
+                elif self.command == 'DELETE' and len(parts) == 4 and parts[2] == 'items':
+                    pq['items'] = [(t, e) for t, e in pq['items'] if str(e) != parts[3]]
+                    pq['version'] += 1
+                elif self.command == 'PUT' and len(parts) == 5 and parts[4] == 'move':
+                    entry = next(((t, e) for t, e in pq['items'] if str(e) == parts[3]), None)
+                    if not entry:
+                        return self.not_found()
+                    pq['items'].remove(entry)
+                    after = q.get('after', [''])[0]
+                    at = next((i + 1 for i, (_, e) in enumerate(pq['items']) if str(e) == after), 0)
+                    pq['items'].insert(at, entry)
+                    pq['version'] += 1
+                elif self.command != 'GET':
+                    return self.not_found()
+            return self.send_json(pq_json(pq))
         if p == '/playlists' and self.command == 'POST':
             uri = q.get('uri', [''])[0]
             ids = uri.rsplit('/', 1)[-1].split(',') if '/library/metadata/' in uri else []
             members = [items[i] for i in ids if i in items and items[i]['type'] == 'track']
             pl = make_playlist(q.get('title', ['Untitled'])[0], members)
+            pl['addedAt'] = pl['updatedAt'] = int(time.time())
             playlists.append(pl)
             timeline(pl['ratingKey'], 15, 5, section='-1')
             return self.send_json({'size': 1, 'Metadata': [public(pl)]})
@@ -922,10 +1307,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'size': 0})
         if p.startswith('/playlists/'):
             pl = items.get(parts[1])
-            if not pl:
+            if not pl or pl.get('type') != 'playlist':
                 return self.not_found()
+            if self.command in ('PUT', 'DELETE'):
+                return self.edit_playlist(pl, parts, q)
             if len(parts) > 2 and parts[2] == 'items':
-                return self.page(pl['_items'], q, {'leafCount': pl['leafCount']})
+                return self.playlist_page(pl, q)
             if len(parts) > 2 and parts[2] == 'composite':
                 return self.send_bytes(cover_png(p, 600), 'image/png')
             return self.send_json({'size': 1, 'Metadata': [public(pl)]})
@@ -971,7 +1358,11 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True  # long-lived WebSocket and event stream threads don't block exit
 
 
+PLAYER_ADDRESS = private_ip()
+
 if __name__ == '__main__':
     print(f'Mock Plex server on http://127.0.0.1:{PORT} '
-          f'({len(artists)} artists, {len(albums)} albums, {len(tracks)} tracks, {len(playlists)} playlists)', flush=True)
+          f'({len(artists)} artists, {len(albums)} albums, {len(tracks)} tracks, {len(playlists)} playlists); '
+          f'player "{PLAYER["name"]}" on http://{PLAYER_ADDRESS}:{PLAYER_PORT}', flush=True)
+    threading.Thread(target=Server(('0.0.0.0', PLAYER_PORT), PlayerHandler).serve_forever, daemon=True).start()
     Server(('0.0.0.0', PORT), Handler).serve_forever()

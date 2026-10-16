@@ -46,7 +46,7 @@ const decodeXml = (s) =>
     return Number.isFinite(code) ? String.fromCodePoint(code) : m;
   });
 
-function attrs(tag) {
+export function attrs(tag) {
   const out = {};
   for (const m of tag.matchAll(/([\w:-]+)="([^"]*)"/g)) out[m[1]] = decodeXml(m[2]);
   return out;
@@ -63,6 +63,7 @@ export class PlexAuth {
     this.denied = new TTLCache();
     this.access = new TTLCache();
     this.friendLists = new TTLCache(200);
+    this.resourceLists = new TTLCache(500);
     this.serverId = null;
   }
 
@@ -146,6 +147,18 @@ export class PlexAuth {
     return access;
   }
 
+  // The account's servers and devices on plex.tv, with their connections
+  // (for casting to its players). Kept for a minute.
+  async resources(token) {
+    const key = hash(token);
+    const hit = this.resourceLists.get(key);
+    if (hit) return hit;
+    const list = await this.fetchJSON(`${this.plexTv}/api/v2/resources?includeHttps=1&includeRelay=0&includeIPv6=1`, token);
+    const out = Array.isArray(list) ? list.slice(0, 200) : [];
+    this.resourceLists.set(key, out, 60000);
+    return out;
+  }
+
   async canUseServer(token, serverId) {
     return (await this.serverAccess(token, serverId)).ok;
   }
@@ -177,8 +190,8 @@ export class PlexAuth {
         this.access.set('pms-open-warned', true, 6 * 3600000);
         log.warn(
           'the Plex server at PLEX_SERVER_URL lets this container in without signing in (its "List of IP addresses and networks that are allowed without auth" includes this container). ' +
-            'So that nobody can use your server through /pms/ without signing in, requests there are now checked with plex.tv, and only Plex accounts with access to the server get through; friends using shared access may be refused. ' +
-            'To fix this, remove this container\'s address from that list in Plex (Settings > Network).',
+            'Plex can treat requests from such a network as yours, whoever sends them, so requests to /pms/ are now checked with plex.tv and only your own Plex sign-in gets through; friends are refused there until this is fixed. ' +
+            'To fix it, remove this container\'s address from that list in Plex (Settings > Network).',
         );
       }
       this.access.set('pms-open', open, 10 * 60000);

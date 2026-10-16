@@ -19,6 +19,8 @@ services:
       OLLAMA_AUTH: "plex"     # "off" lets anyone who can open the app use the model
       # Play Together (listen in sync with Plex friends) is on unless this is "false".
       PLAY_TOGETHER: "true"
+      # Play on (playing on other Plex players on your network) is on unless this is "false".
+      CASTING: "true"
       # "true" writes extra detail to the container log for troubleshooting
       # (tokens and keys are always removed). Turn it off again afterwards.
       DEBUG: ""
