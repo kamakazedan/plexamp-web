@@ -163,9 +163,13 @@ export async function browseView({ el, params, query, onDispose }) {
   const within = searchWithin({ kind, filters, title, sort: query.sort });
   el.append(head, chips, within, countEl);
 
+  // Pages put aside are kept, and still brought up to date.
+  let disposed = false;
+  onDispose(() => (disposed = true));
+
   // The filters by name, each removable; the page is named after them.
   filterLabels(kind, filters).then((labels) => {
-    if (!labels.length || !el.isConnected) return;
+    if (!labels.length || disposed) return;
     // Named after its filters, unless it has a name of its own ("Best of the 90s").
     if (!query.title && labels.length === Object.keys(filters).length) {
       const name = labels.map((l) => l.label).join(' · ');
@@ -381,7 +385,9 @@ async function collectionsView({ el, query }) {
 
 // How many albums (or artists) have each tag: tags nothing in the library
 // uses any more are left out, and the rest show their count.
-export async function tagsView({ el, params, query }) {
+export async function tagsView({ el, params, query, onDispose }) {
+  let disposed = false;
+  onDispose?.(() => (disposed = true));
   const { field, type } = params;
   const kind = KINDS[type];
   el.append(backHeader(query.title || 'Browse', { fallback: '/search' }));
@@ -401,12 +407,12 @@ export async function tagsView({ el, params, query }) {
   });
   el.append(list);
   await mapLimit(rows, 6, async ({ t, r, count }) => {
-    if (!el.isConnected) return;
+    if (disposed) return;
     const n = await s.memo(`tagCount:${sec}:${type}:${field}:${t.key}`, () => s.count(sec, type, { [field]: String(t.key) }), 10 * 60000).catch(() => null);
     if (n === 0) r.remove();
     else if (n) count.textContent = fmt.count(n, ...UNITS[kind]);
   });
-  if (!list.children.length && el.isConnected) list.replaceWith(emptyState('Nothing here.'));
+  if (!list.children.length && !disposed) list.replaceWith(emptyState('Nothing here.'));
 }
 
 // Generic paged listing for any server path (e.g. a genre's albums).

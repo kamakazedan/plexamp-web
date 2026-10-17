@@ -779,6 +779,15 @@ label.row:hover {
   color: rgba(255, 255, 255, 0.85);
 }
 
+/* Rows shown only sometimes, among the others. */
+.rows-group {
+  display: contents;
+}
+
+.rows-group[hidden] {
+  display: none;
+}
+
 .settings-rows .row {
   min-height: 72px;
 }
@@ -1247,7 +1256,8 @@ a.hero-link:hover {
   display: none;
 }
 
-.search-box .search-clear {
+.search-box .search-clear,
+.search-box .search-keep {
   flex: none;
   width: 36px;
   height: 36px;
@@ -1255,12 +1265,23 @@ a.hero-link:hover {
   color: var(--muted);
 }
 
-.search-box .search-clear:hover {
+.search-box .search-keep {
+  margin-right: 0;
+}
+
+.search-box .search-clear:hover,
+.search-box .search-keep:hover {
   color: #fff;
 }
 
-.search-box .search-clear[hidden] {
+.search-box .search-clear[hidden],
+.search-box .search-keep[hidden] {
   display: none;
+}
+
+/* Words kept from a search, above it: everything shown matches them all. */
+.search-tags {
+  padding-top: 4px;
 }
 
 .picker {
@@ -1949,6 +1970,22 @@ a.np-album[href]:hover {
 
 .np-stars {
   display: flex;
+}
+
+/* Settings › Experience › Player: the codec, the rating, or both. */
+.np-info.no-rating {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.np-info.no-rating .np-stars,
+.np-info.no-codec .np-codec,
+.np-info.no-codec .np-quality {
+  display: none;
+}
+
+.np-info.no-codec {
+  grid-template-columns: auto;
+  justify-content: center;
 }
 
 .star {

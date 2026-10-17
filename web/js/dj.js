@@ -212,7 +212,9 @@ class GuestDJ extends EventTarget {
     if (next?.dj) return; // a pick is already lined up
     if (dj.kind === 'insert' && cur.dj) return; // insert DJs only follow your own tracks
     if (dj.needsAI && !aiReady()) {
-      this.warnOnce('ai-missing', 'AI DJ needs an AI model. Set one up in Settings › AI.');
+      // AI turned off (or not available here): so is the AI DJ.
+      this.set(null, { quiet: true });
+      toast('The AI DJ is off, as AI features are.');
       return;
     }
 

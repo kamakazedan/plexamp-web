@@ -47,7 +47,8 @@ export const DEFAULT_SETTINGS = {
   backgroundStyle: 'gradient', // gradient (album colours) | artwork (blurred cover) | plain
 
   // Player
-  showCodecRating: true,
+  showCodec: true, // the track's format and quality, in the player
+  showRating: true, // your rating of it, there
   showVolume: true,
   seekbarStyle: 'smooth', // smooth | bars | simple
   sideBySide: true,
@@ -69,8 +70,19 @@ export const app = {
   auth: store.get('auth'), // { token, username, thumb, manual }
   source: store.get('source'), // { serverId, serverName, uri, token, kind, sectionKey, sectionTitle, connections }
   server: null,
-  settings: { ...DEFAULT_SETTINGS, ...(store.get('settings') || {}) },
+  settings: { ...DEFAULT_SETTINGS, ...storedSettings() },
 };
+
+function storedSettings() {
+  const s = store.get('settings') || {};
+  // Until 0.9.1 the codec and the rating were one setting.
+  if (s.showCodecRating === false) {
+    s.showCodec ??= false;
+    s.showRating ??= false;
+  }
+  delete s.showCodecRating;
+  return s;
+}
 
 setDeviceName(app.settings.playerName);
 
@@ -81,8 +93,8 @@ export function saveSettings(patch) {
   emit('settings', app.settings);
 }
 
-// Playlists from every library, or only this one; search one library or all
-// of them (Settings › Experience).
+// Playlists from every music library, or only this one; search one library
+// or all of them (Settings › Experience, with more than one music library).
 export const playlistScope = () => (app.settings.playlistsAllLibraries === false ? app.source?.sectionKey : undefined);
 export const searchScope = () => (app.settings.searchAllLibraries ? undefined : app.source?.sectionKey);
 

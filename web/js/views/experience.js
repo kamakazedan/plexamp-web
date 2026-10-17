@@ -52,6 +52,34 @@ const BACKGROUNDS = [
 
 export function experienceView({ el }) {
   const s = app.settings;
+  // Only with more than one music library on the server: whether Search and
+  // the Playlists tab cover the others too. (Film and TV playlists never
+  // show: only music ones.)
+  const libraries = h('div.rows-group', { hidden: true });
+  app.server
+    .musicSections()
+    .then((secs) => {
+      if (secs.length < 2) return;
+      const here = app.source.sectionTitle;
+      const others = secs.filter((x) => String(x.key) !== String(app.source.sectionKey)).map((x) => x.title);
+      const list = others.length === 1 ? others[0] : `${others.slice(0, -1).join(', ')} and ${others.at(-1)}`;
+      libraries.replaceChildren(
+        toggleRow({
+          title: 'Search all music libraries',
+          subtitle: `Search ${list} too, not just ${here}.`,
+          checked: s.searchAllLibraries,
+          onChange: setAndRefresh('searchAllLibraries'),
+        }),
+        toggleRow({
+          title: 'Playlists from all music libraries',
+          subtitle: `The Playlists tab shows playlists of music from ${list} too. Off: only those with music from ${here}.`,
+          checked: s.playlistsAllLibraries,
+          onChange: setAndRefresh('playlistsAllLibraries'),
+        }),
+      );
+      libraries.hidden = false;
+    })
+    .catch(() => {});
   el.append(
     backHeader('Experience', { fallback: '/settings' }),
     h(
@@ -74,8 +102,7 @@ export function experienceView({ el }) {
       toggleRow({ title: 'Show popular tracks', subtitle: 'Mark an album’s best-known tracks.', checked: s.popularTracks, onChange: setAndRefresh('popularTracks') }),
       choiceRow({ title: 'Top plays list size', subtitle: 'How many items the Most played lists in Search show.', options: TOP_SIZES, value: Number(s.topListSize) || 25, onChange: setAndRefresh('topListSize') }),
       toggleRow({ title: 'Show preview buttons', subtitle: 'A button on tracks for a 15-second listen, without changing what’s queued.', checked: s.previewButtons, onChange: setAndRefresh('previewButtons') }),
-      toggleRow({ title: 'Search all libraries', subtitle: 'Search every library on this server, not just this one.', checked: s.searchAllLibraries, onChange: setAndRefresh('searchAllLibraries') }),
-      toggleRow({ title: 'Show playlists from all libraries', subtitle: 'Off: only playlists with music from this library.', checked: s.playlistsAllLibraries, onChange: setAndRefresh('playlistsAllLibraries') }),
+      libraries,
       toggleRow({
         title: '1-tap playback',
         subtitle: 'Tapping a track always plays it. Off: while something’s playing, choose to play it now, next or later.',
@@ -151,7 +178,8 @@ export function playerSettingsView({ el }) {
     h(
       'div.rows',
       null,
-      toggleRow({ title: 'Show codec and rating', subtitle: 'Show the track’s format and your rating under the title.', checked: s.showCodecRating, onChange: set('showCodecRating') }),
+      toggleRow({ title: 'Show codec', subtitle: 'Show the track’s format and quality under its title, like FLAC 24/96.', checked: s.showCodec !== false, onChange: set('showCodec') }),
+      toggleRow({ title: 'Show rating', subtitle: 'Show your rating of the track under its title, to change it there.', checked: s.showRating !== false, onChange: set('showRating') }),
       toggleRow({ title: 'Show volume control', subtitle: 'Show the volume slider in the player.', checked: s.showVolume, onChange: set('showVolume') }),
       choiceRow({ title: 'Seekbar style', subtitle: 'How the playback position is drawn.', options: SEEKBARS, value: s.seekbarStyle, onChange: set('seekbarStyle') }),
       toggleRow({ title: 'Side by side layout', subtitle: 'On wide screens, show Up next beside the player.', checked: s.sideBySide, onChange: set('sideBySide') }),

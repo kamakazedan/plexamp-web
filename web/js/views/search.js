@@ -1,42 +1,48 @@
 import { app, searchScope } from '../state.js';
-import { normTrack, store } from '../plex.js';
-import { replaceQuery, navigate } from '../router.js';
-import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, sheet, debounce, fmt } from '../ui.js';
-import { artistRow, albumRow, playlistRow, trackRow, playlistArt } from '../components.js';
+import { normTrack } from '../plex.js';
+import { replaceQuery } from '../router.js';
+import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, debounce, fmt } from '../ui.js';
+import { artistRow, albumRow, playlistRow, trackRow } from '../components.js';
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
-import { aiReady } from '../ai.js';
+import { aiReady, aiEvents } from '../ai.js';
 import { libraryTiles } from './library.js';
 
-const RECENT_KEY = () => `recentSearches.${app.source?.serverId || 'default'}`;
-const MAX_RECENT = 12;
-
-function recentList() {
-  return store.get(RECENT_KEY(), []);
+// Recent searches were kept until 0.9.1; what was stored goes.
+try {
+  Object.keys(localStorage)
+    .filter((k) => k.startsWith('pw.recentSearches.'))
+    .forEach((k) => localStorage.removeItem(k));
+} catch {
+  /* storage unavailable */
 }
 
-function remember(item) {
-  const entry = {
-    id: String(item.ratingKey),
-    type: item.type,
-    title: item.title,
-    sub: item.type === 'album' ? item.parentTitle : item.type === 'track' ? item.grandparentTitle : null,
-    thumb: item.type === 'playlist' ? playlistArt(item) : item.type === 'track' ? item.parentThumb || item.thumb : item.thumb,
-  };
-  const list = recentList().filter((r) => !(r.id === entry.id && r.type === entry.type));
-  store.set(RECENT_KEY(), [entry, ...list].slice(0, MAX_RECENT));
-}
+// Words kept as tags narrow a search: everything shown matches all of them
+// (in its name, its artist, its album or its year).
+const fold = (v) =>
+  String(v ?? '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+const FIELDS = {
+  artist: (m) => [m.title],
+  album: (m) => [m.title, m.parentTitle, m.year],
+  track: (m) => [m.title, m.grandparentTitle, m.originalTitle, m.parentTitle, m.parentYear, m.year],
+  playlist: (m) => [m.title],
+};
+const matchesAll = (kind, m, terms) => {
+  const text = ` ${FIELDS[kind](m).map(fold).join(' ')} `;
+  return terms.every((t) => text.includes(fold(t)));
+};
+const SEP = '|';
 
-const hrefFor = (type, id) => ({ artist: `/artist/${id}`, album: `/album/${id}`, playlist: `/playlist/${id}` })[type];
-
-function describe(r) {
-  if (r.type === 'artist') return 'Artist';
-  if (r.type === 'album') return r.sub ? `Album by ${r.sub}` : 'Album';
-  if (r.type === 'playlist') return 'Playlist';
-  if (r.type === 'track') return r.sub ? `Track by ${r.sub}` : 'Track';
-  return '';
-}
-
-export async function searchView({ el, query }) {
+export async function searchView({ el, query, onDispose }) {
+  const words = String(query.words || '')
+    .split(SEP)
+    .map((w) => w.trim())
+    .filter(Boolean)
+    .slice(0, 6);
   const input = h('input', {
     type: 'search',
     placeholder: 'Artists, albums, tracks',
@@ -45,86 +51,176 @@ export async function searchView({ el, query }) {
     enterkeyhint: 'search',
     value: query.q || '',
   });
+  // Keeps what's typed as a tag, to add more words (Enter does too).
+  const keep = iconButton('plus', 'Keep this word, and add more', () => keepWord(), { size: 22, cls: 'search-keep' });
   // Clears the search in one tap, back to browsing (Escape too).
   const clear = iconButton('close', 'Clear search', () => clearSearch(), { size: 22, cls: 'search-clear' });
-  clear.hidden = !input.value;
-  const box = h('label.search-box.has-clear', null, icon('search', 22), input, clear);
+  const tags = h('div.chips.filter-chips.search-tags', { role: 'list', 'aria-label': 'Search words' });
+  const box = h('label.search-box.has-clear', null, icon('search', 22), input, keep, clear);
   const body = h('div.search-body');
-  el.append(pageHeader('Search'), box, body);
-  const clearSearch = () => {
+  el.append(pageHeader('Search'), tags, box, body);
+
+  // The AI playlist row, only while AI can be used here.
+  let aiRow = null;
+  const paintAI = () => aiRow && (aiRow.hidden = !aiReady());
+  aiEvents.addEventListener('change', paintAI);
+  onDispose?.(() => aiEvents.removeEventListener('change', paintAI));
+
+  const paintBox = () => {
+    keep.hidden = !input.value.trim() || words.length >= 6;
+    clear.hidden = !input.value && !words.length;
+    input.placeholder = words.length ? 'Add another word' : 'Artists, albums, tracks';
+    tags.hidden = !words.length;
+    tags.replaceChildren(
+      ...words.map((w, i) =>
+        h(
+          'button.chip.filter-chip',
+          { type: 'button', role: 'listitem', 'aria-label': `Remove “${w}”`, onclick: () => (words.splice(i, 1), update()) },
+          h('span', null, w),
+          icon('close', 16),
+        ),
+      ),
+    );
+  };
+  const keepWord = () => {
+    const w = input.value.trim();
+    if (!w || words.length >= 6) return;
+    if (!words.some((x) => fold(x) === fold(w))) words.push(w);
     input.value = '';
-    clear.hidden = true;
-    run('');
+    update();
     input.focus();
+  };
+  const clearSearch = () => {
+    words.length = 0;
+    input.value = '';
+    update();
+    input.focus();
+  };
+  const update = () => {
+    paintBox();
+    run();
+  };
+
+  // A tag's search is kept while the tag is there; what's being typed is
+  // looked up afresh (and given up when the next letter comes).
+  const found = new Map();
+  const lookup = (term, signal) => {
+    if (signal) return app.server.search(term, searchScope(), { signal, limit: 40 });
+    const key = fold(term);
+    if (!found.has(key)) {
+      found.set(
+        key,
+        app.server.search(term, searchScope(), { limit: 40 }).catch((err) => {
+          found.delete(key);
+          throw err;
+        }),
+      );
+    }
+    return found.get(key);
   };
 
   let controller = null;
-  const run = async (q) => {
+  const run = async () => {
     controller?.abort();
-    replaceQuery(q ? `/search?q=${encodeURIComponent(q)}` : '/search');
-    if (!q.trim()) {
-      body.replaceChildren(browseContent());
+    const text = input.value.trim();
+    const terms = [...words, text].filter(Boolean);
+    const q = new URLSearchParams();
+    if (input.value) q.set('q', input.value);
+    if (words.length) q.set('words', words.join(SEP));
+    replaceQuery(q.toString() ? `/search?${q}` : '/search');
+    if (!terms.length) {
+      found.clear();
+      body.replaceChildren(browseContent((r) => (aiRow = r)));
+      paintAI();
       return;
     }
     controller = new AbortController();
     const mine = controller;
     body.replaceChildren(spinner('Searching'));
     try {
-      const res = await app.server.search(q.trim(), searchScope(), { signal: mine.signal, limit: 12 });
+      let res;
+      if (terms.length === 1) {
+        res = await app.server.search(terms[0], searchScope(), { signal: mine.signal, limit: 12 });
+      } else {
+        // Each word looked up, and only what matches every word kept.
+        const typed = fold(text);
+        const lists = await Promise.all(
+          [...new Set(terms.map(fold))].filter(Boolean).map((t) => lookup(terms.find((x) => fold(x) === t), t === typed && !words.some((w) => fold(w) === t) ? mine.signal : null)),
+        );
+        res = {};
+        for (const kind of Object.keys(FIELDS)) {
+          const seen = new Set();
+          res[kind] = lists
+            .flatMap((l) => l[kind] || [])
+            .filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey) && matchesAll(kind, m, terms));
+        }
+      }
       if (mine.signal.aborted) return;
-      body.replaceChildren(results(res, q));
+      body.replaceChildren(results(res, terms));
     } catch (err) {
-      if (!err.aborted) body.replaceChildren(emptyState("Search didn't work. Check your connection and try again."));
+      if (!err.aborted && !mine.signal.aborted) body.replaceChildren(emptyState("Search didn't work. Check your connection and try again."));
     }
   };
-  input.addEventListener('input', () => (clear.hidden = !input.value));
-  input.addEventListener('input', debounce(() => run(input.value), 280));
+  input.addEventListener('input', () => paintBox());
+  input.addEventListener('input', debounce(() => run(), 280));
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') input.blur();
-    if (e.key === 'Escape' && input.value) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (input.value.trim()) keepWord();
+      else input.blur();
+    }
+    if (e.key === 'Backspace' && !input.value && words.length) {
+      e.preventDefault();
+      words.pop();
+      update();
+    }
+    if (e.key === 'Escape' && (input.value || words.length)) {
       e.preventDefault();
       e.stopPropagation();
       clearSearch();
     }
   });
-  await run(input.value);
+  paintBox();
+  await run();
 }
 
-function results(res, q) {
+function results(res, terms) {
   const frag = h('div');
   const add = (title, items, render) => {
     if (!items.length) return;
     frag.append(h('section.block', null, sectionHeader(title), h('div.rows', null, items.map(render))));
   };
-  const wrap = (item, el) => {
-    el.addEventListener('click', () => remember(item), { capture: true });
-    return el;
-  };
-  add('Artists', res.artist.slice(0, 6), (m) => wrap(m, artistRow(m)));
-  add('Albums', res.album.slice(0, 8), (m) => wrap(m, albumRow(m)));
+  const asked = terms.map((t) => `“${t}”`).join(' and ');
+  add('Artists', res.artist.slice(0, 6), (m) => artistRow(m));
+  add('Albums', res.album.slice(0, 8), (m) => albumRow(m));
   if (res.track.length) {
-    const tracks = res.track.map(normTrack);
+    const tracks = res.track.slice(0, 40).map(normTrack);
     const list = h('div.tracks');
     tracks.forEach((t, i) => {
-      const r = trackRow(t, {
-        showArt: true,
-        subtitle: [t.artist, t.album].filter(Boolean).join(' — '),
-        onPlay: () => {
-          remember(res.track[i]);
-          playList(tracks, i, { title: `Search: ${q}`, href: null });
-        },
-      });
-      list.append(r);
+      list.append(
+        trackRow(t, {
+          showArt: true,
+          subtitle: [t.artist, t.album].filter(Boolean).join(' — '),
+          onPlay: () => playList(tracks, i, { title: `Search: ${terms.join(' ')}`, href: null }),
+        }),
+      );
     });
     frag.append(h('section.block', null, sectionHeader('Tracks'), list));
   }
-  add('Playlists', res.playlist.slice(0, 6), (m) => wrap(m, playlistRow(m)));
-  if (!frag.children.length) frag.append(emptyState(`Nothing in ${searchScope() ? app.source.sectionTitle : 'your libraries'} matches “${q}”.`));
+  add('Playlists', res.playlist.slice(0, 6), (m) => playlistRow(m));
+  if (!frag.children.length) frag.append(emptyState(`Nothing in ${searchScope() ? app.source.sectionTitle : 'your libraries'} matches ${asked}.`));
   return frag;
 }
 
-function browseContent() {
+function browseContent(setAiRow) {
   const frag = h('div');
+  const aiRow = row({
+    href: '/ai-playlist',
+    lead: h('span.tile.tile-plain', null, icon('sparkle', 26)),
+    title: 'AI playlist',
+    subtitle: 'Describe a playlist and your AI model builds it',
+  });
+  setAiRow(aiRow);
   frag.append(
     h('section.block.browse-block', null, sectionHeader('Library'), libraryTiles()),
     h(
@@ -146,58 +242,12 @@ function browseContent() {
       h(
         'div.rows',
         null,
-        row({
-          href: '/ai-playlist',
-          lead: h('span.tile.tile-plain', null, icon('sparkle', 26)),
-          title: 'AI playlist',
-          subtitle: aiReady() ? 'Describe a playlist and your AI model builds it' : 'Describe a playlist; needs an AI model',
-        }),
+        aiRow,
         row({ href: '/sonic-path', lead: h('span.tile.tile-plain', null, icon('path', 26)), title: 'Sonic path', subtitle: 'A smooth journey from one track to another' }),
         row({ onClick: () => shuffleLibrary(), lead: h('span.tile.tile-plain', null, icon('shuffle', 26)), title: 'Shuffle library', subtitle: `Random tracks from ${app.source.sectionTitle}`, chevron: true }),
       ),
     ),
   );
-
-  const recent = recentList();
-  if (recent.length) {
-    const block = h('section.block');
-    const list = h('div.rows');
-    const renderRecent = () => {
-      const items = recentList();
-      if (!items.length) return block.remove();
-      list.replaceChildren(
-        ...items.map((r) => {
-          const href = hrefFor(r.type, r.id);
-          const remove = iconButton('close', `Remove ${r.title}`, (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            store.set(RECENT_KEY(), recentList().filter((x) => !(x.id === r.id && x.type === r.type)));
-            renderRecent();
-          });
-          return row({
-            href: href || undefined,
-            onClick: href ? undefined : () => navigate(`/search?q=${encodeURIComponent(r.title)}`),
-            image: r.thumb,
-            round: r.type === 'artist',
-            title: r.title,
-            subtitle: describe(r),
-            right: remove,
-            chevron: false,
-          });
-        }),
-      );
-    };
-    const moreBtn = iconButton('more', 'Recent search options', () =>
-      sheet({
-        title: 'Recent searches',
-        actions: [{ icon: 'close', label: 'Clear recent searches', onSelect: () => { store.set(RECENT_KEY(), []); block.remove(); } }],
-      }),
-      { size: 20, cls: 'head-more' },
-    );
-    block.append(sectionHeader('Recent searches', null, moreBtn), list);
-    renderRecent();
-    frag.append(block);
-  }
   return frag;
 }
 

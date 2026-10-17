@@ -331,6 +331,51 @@ with sync_playwright() as pw:
         check('ai: model test through the container', page.wait_for_selector('text=It works', timeout=20000) is not None)
         shot(page, 'ai-04-settings')
 
+        # A playlist being made carries on while you're elsewhere, and shows
+        # when you come back.
+        mock_ai = lambda q: urllib.request.urlopen(f'{OLLAMA}/__mock/config?{q}', timeout=10).read()
+        mock_ai('think=1.5')
+        page.goto(APP + '#/search')
+        page.wait_for_selector('a.row:has-text("AI playlist")')
+        page.click('a.row:has-text("AI playlist")')
+        page.wait_for_selector('.ai-box input')
+        page.click('button:has-text("Make another playlist")')
+        page.fill('.ai-box input', 'Rainy afternoon jazz')
+        page.press('.ai-box input', 'Enter')
+        page.wait_for_selector('.ai-progress')
+        page.click('#tabs .tab[data-tab=home]')
+        told = page.wait_for_selector('.toast:has-text("is ready")', timeout=30000) is not None
+        page.click('#tabs .tab[data-tab=search]')
+        page.wait_for_timeout(800)
+        check('ai: a playlist made while you\'re elsewhere says so, and is there when you come back', told
+              and js(page, '() => location.hash') == '#/ai-playlist' and page.locator('.ai-result').count() == 1 and page.locator('.ai-progress').count() == 0)
+        mock_ai('think=0')
+
+        # AI turned off: nothing about it shows.
+        settings(page, {'ai': {'mode': 'off'}})
+        page.goto(APP + '#/search')
+        page.wait_for_selector('a.browse-tile')
+        off_row = page.locator('a.row:has-text("AI playlist")').is_visible()
+        page.goto(APP + '#/ai-playlist')
+        page.wait_for_timeout(800)
+        off_page = js(page, '() => location.hash')
+        if not player(page, '!!p.current'):
+            play_first_album_track(page, APP)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.click('.np-tool[data-tool=dj]')
+        page.wait_for_selector('.sheet.dialog.open')
+        djs = page.locator('.sheet.open .sheet-action').all_inner_texts()
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(300)
+        page.keyboard.press('Escape')
+        check('ai: with AI off, it isn\'t offered anywhere', not off_row and off_page == '#/search' and djs and not any('AI DJ' in d for d in djs), f'{off_row} {off_page} {djs}')
+        settings(page, {'ai': {'mode': 'auto'}})
+        page.goto(APP + '#/search')
+        page.wait_for_selector('a.browse-tile')
+        check('ai: ...and with it on again, it is', page.locator('a.row:has-text("AI playlist")').is_visible())
+        player(page, 'p.pause()')
+
         # Someone whose Plex account can't use the server (the container
         # refuses them: see docker/test-container.sh) is told so up front.
         other_ctx = browser.new_context(**MOBILE)
@@ -427,9 +472,11 @@ with sync_playwright() as pw:
         attach(page, 'custom')
         login(page, APP_NOWS)
         page.goto(APP_NOWS + '#/ai-playlist')
-        page.wait_for_selector('.ai-setup')
-        check('custom: asks to set up a model when there is no shared one', True)
-        shot(page, 'custom-01-setup')
+        page.wait_for_timeout(800)
+        redirected = js(page, '() => location.hash')
+        page.wait_for_selector('a.browse-tile')
+        check('custom: with no AI model set up, AI isn\'t offered', redirected == '#/search'
+              and not page.locator('a.row:has-text("AI playlist")').is_visible(), redirected)
         page.goto(APP_NOWS + '#/settings/ai')
         page.click('.radio-row:has-text("My own Ollama server")')
         page.fill('.ai-custom input[type=url]', OLLAMA)
@@ -438,6 +485,9 @@ with sync_playwright() as pw:
         page.click('.ai-models .radio-row:has-text("llama3.1:8b")')
         page.click('button:has-text("Test the model")')
         check('custom: own Ollama answers', page.wait_for_selector('text=It works', timeout=20000) is not None)
+        page.goto(APP_NOWS + '#/search')
+        page.wait_for_selector('a.browse-tile')
+        check('custom: once it is, AI playlists are offered', page.locator('a.row:has-text("AI playlist")').is_visible())
         page.goto(APP_NOWS + '#/ai-playlist')
         page.wait_for_selector('.ai-box input:not([disabled])')
         page.fill('.ai-box input', 'Moody electronic for a rainy evening')
@@ -673,6 +723,40 @@ with sync_playwright() as pw:
         page.press('.search-box input', 'Escape')
         page.wait_for_timeout(400)
         check('library: Escape clears it too', page.locator('.search-box input').input_value() == '' and page.locator('a.browse-tile').count() > 0)
+
+        # Words kept as tags narrow a search: everything shown matches them all.
+        page.fill('.search-box input', 'glass')
+        page.press('.search-box input', 'Enter')
+        page.wait_for_selector('.search-tags .filter-chip')
+        page.fill('.search-box input', 'engine')
+        narrowed = wait_for(lambda: page.locator('.search-body .track').count() > 0 and page.locator('.search-body .section-head h2').all_inner_texts() == ['TRACKS'], 8)
+        titles = page.locator('.search-body .track .track-title').all_inner_texts()
+        subs = page.locator('.search-body .track .track-sub').all_inner_texts()
+        check('library: Enter keeps a word as a tag, and the next words narrow the search', narrowed
+              and page.locator('.search-tags .filter-chip').all_inner_texts() == ['glass'] and titles and all('engine' in t.lower() for t in titles)
+              and all(x.startswith('Glass Harbour') for x in subs), f'{titles} {subs}')
+        shot(page, 'library-01b-tags')
+        page.fill('.search-box input', '')
+        page.press('.search-box input', 'Backspace')
+        page.wait_for_timeout(500)
+        check('library: Backspace in an empty search takes the last tag off', page.locator('.search-tags .filter-chip').count() == 0
+              and page.locator('a.browse-tile').count() > 0)
+        page.fill('.search-box input', 'glass')
+        page.click('.search-keep')
+        page.fill('.search-box input', 'lights')
+        page.wait_for_timeout(800)
+        page.click('.search-clear')
+        page.wait_for_timeout(400)
+        check('library: + keeps a word too, and × clears the tags with the rest', page.locator('.search-tags .filter-chip').count() == 0
+              and page.locator('.search-box input').input_value() == '' and page.locator('a.browse-tile').count() > 0)
+        page.fill('.search-box input', 'harbour')
+        page.wait_for_selector('.search-body a.row[href^="#/artist/"]', timeout=8000)
+        page.locator('.search-body a.row[href^="#/artist/"]').first.click()
+        page.wait_for_timeout(600)
+        page.goto(APP + '#/search')
+        page.wait_for_selector('a.browse-tile')
+        check('library: no recent searches kept', page.locator('.section-head', has_text='Recent searches').count() == 0
+              and not js(page, "() => Object.keys(localStorage).some((k) => k.startsWith('pw.recentSearches'))"))
 
         # Genres: each with how many albums have it; ones nothing has are left out.
         def total(q):
@@ -1515,6 +1599,8 @@ with sync_playwright() as pw:
         dan.goto(APP + '#/together')
         dan.wait_for_selector('button:has-text("Start a session")')
         check('together: tab is there', dan.locator('#tabs .tab[data-tab=together]').count() == 1)
+        note = dan.locator('.together-note').last.inner_text()
+        check('together: it says friends need access to the library', 'needs access to Music [Hi-Res]' in note and 'shared with them in Plex' in note, note)
         shot(dan, 'together-01-lobby')
         dan.click('button:has-text("Start a session")')
         dan.wait_for_selector('label.friend')
@@ -1731,6 +1817,34 @@ with sync_playwright() as pw:
         page.wait_for_selector('.grid .card')
         after = page.locator('.card-title').all_text_contents()
         check('settings: playlists from this library only', 'Bedtime stories' in before and 'Bedtime stories' not in after, f'{before} / {after}')
+        settings(page, {'playlistsAllLibraries': True})
+        page.goto(APP + '#/settings/experience')
+        page.wait_for_selector('.rows-group:not([hidden]) .toggle-row', timeout=10000)
+        libs = page.locator('.rows-group .toggle-row').all_inner_texts()
+        check('settings: with two music libraries, the library settings say which', len(libs) == 2 and all('Audiobooks' in t for t in libs), str(libs))
+
+        # The codec and the rating are separate settings.
+        if not player(page, '!!p.current'):
+            play_first_album_track(page, APP)
+        page.goto(APP + '#/settings/player')
+        page.wait_for_selector('label.toggle-row:has-text("Show codec")')
+        toggle(page, 'Show codec', False)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.wait_for_timeout(400)
+        check('settings: the codec can be hidden, keeping the rating', not page.locator('.np-codec').is_visible() and page.locator('.np-stars').is_visible())
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.np.open', state='detached')
+        toggle(page, 'Show codec', True)
+        toggle(page, 'Show rating', False)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.wait_for_timeout(400)
+        check('settings: ...and the rating, keeping the codec', page.locator('.np-codec').is_visible() and not page.locator('.np-stars').is_visible())
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.np.open', state='detached')
+        toggle(page, 'Show rating', True)
+        player(page, 'p.pause()')
         # About: the version is the newest one in the changelog, with a link to it.
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'CHANGELOG.md')) as f:
             newest = next(line.split()[1] for line in f if line.startswith('## '))

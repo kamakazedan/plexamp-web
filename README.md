@@ -104,7 +104,7 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 ## Features
 
 - **Home**: sections you choose and order for each library (see below), including **Collections**, shown just like Recent playlists. There's a quick library switcher too.
-- **Search**: live results (one tap on × clears them), and browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Any list can be searched within: in the 1990s, type "rock" to narrow it to rock albums from the 1990s, then "calm" for a mood, and take each filter off again with a tap. Also recent searches, top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
+- **Search**: live results, narrowed word by word: press Enter (or +) to keep a word as a tag, and what you type next only finds things that match every tag ("prodigy", then "fire"). One tap on × clears it all. Browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Any list can be searched within: in the 1990s, type "rock" to narrow it to rock albums from the 1990s, then "calm" for a mood, and take each filter off again with a tap. Also top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
 - **Playlists tab**: all your music playlists, with ❤️ Tracks first.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
 - **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
@@ -201,11 +201,12 @@ Plex doesn't fully document how its players are controlled, and Play on has been
 **Settings → Experience** follows the layout of Plexamp's own settings:
 
 - **Appearance**: colour from artwork, and the background (album colours, blurred artwork, or plain).
-- **Player**: show codec and rating, the volume control, the seekbar style (smooth, bars or simple), Up next side by side on wide screens, the album year, opening the full player when something starts, playback speed, long-form controls (for tracks over 20 minutes: skip buttons, and carrying on where you stopped), and quick skip buttons with times you choose.
+- **Player**: show the codec, show the rating, the volume control, the seekbar style (smooth, bars or simple), Up next side by side on wide screens, the album year, opening the full player when something starts, playback speed, long-form controls (for tracks over 20 minutes: skip buttons, and carrying on where you stopped), and quick skip buttons with times you choose.
 - **Home screen**: the sections on Home for the current library. Drag to reorder, tap one to show or hide it, or to pick its time period. Sections: Mixes for you, Recent plays, Recent playlists, Collections, More in (a genre), Best of the 70s to the 20s, Recently added, Top albums from (a period), Stations (library radio, deep cuts, time travel and a random album), Most played in (a period), More from (a record label), History, and Haven't played in (a period).
 - **Grid size, font size and rating system** (five stars, half stars, thumbs or off).
 - **Album codec badges, popular-track badges and preview buttons** (a 15-second listen without changing the queue).
-- **Search all libraries** and **playlists from all libraries**, **top plays list size**, and **1-tap playback** (when off, tapping a track while something plays asks whether to play it now, next or later).
+- **Top plays list size**, and **1-tap playback** (when off, tapping a track while something plays asks whether to play it now, next or later).
+- **Search all music libraries** and **playlists from all music libraries**, only shown when your server has more than one music library: whether Search and the Playlists tab cover the others too. Film and TV playlists never show.
 - **Sync recent plays**, **desktop integration** (media keys, the tab title, keyboard shortcuts) and the **player name** Plex shows on its dashboard (and your other devices show, see [Your devices](#your-devices)).
 
 Settings are kept per device.
@@ -246,7 +247,7 @@ Playlists are built in two passes so they only contain music you have. First the
 
 Every request asks the model to keep to what you asked for, and to be creative within it. The app checks too, because small models drift: a playlist about particular artists ("best of The Prodigy", "Daft Punk deep cuts") is built only from those artists' tracks, best known first, and is shorter rather than padded with other artists if they don't have enough. "Music like The Prodigy" is mostly them, with similar artists. An era you name ("90s") holds for the artists' tracks too.
 
-A finished playlist can be played, shuffled, added to the queue, or saved to Plex: as a new playlist, into one of yours, or (for the server's owner) into a collection.
+A playlist carries on being made while you use the rest of the app, which says when it's ready. A finished playlist can be played, shuffled, added to the queue, or saved to Plex: as a new playlist, into one of yours, or (for the server's owner) into a collection.
 
 There are two ways to connect.
 
@@ -281,7 +282,7 @@ Then install the model once: `docker compose exec ollama ollama pull llama3.1:8b
 
 Browsers only ever talk to the player's own address, so this works from anywhere the player does (a work network included), and Ollama needs no extra setup. Requests go through the container's own service, which checks each one:
 
-- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app: **Settings → AI** shows the model's name, whether it's ready, and a test button, and nothing else about the AI server. Each device can still turn AI features off.
+- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app: **Settings → AI** shows the model's name, whether it's ready, and a test button, and nothing else about the AI server. Each device can still turn AI features off, and then nothing about AI shows on it (nor for anyone the container doesn't let use the model).
 - **People with access to your Plex server** (`OLLAMA_AUTH=plex`). Every request is checked with plex.tv. With `PLEX_SERVER_URL` set, Plex accounts that can use that server get through: you, and the friends you share it with. Without it, any signed-in Plex account is accepted. Anyone refused is told why in the app (the AI playlist page says so before they try), and the container log notes it, without names unless debug mode is on.
 - **Only chats** are passed on, with just the fields the app uses, each checked (the model's options within sensible limits). The AI server's other models, its version and its settings can't be reached through the player, and nothing can be downloaded, changed or deleted.
 - **Rate-limited** per user, at most two requests at a time each (six in all), and the browser's Plex token, cookies and origin aren't forwarded to Ollama. Closing the page or pressing **Stop** stops the model too.

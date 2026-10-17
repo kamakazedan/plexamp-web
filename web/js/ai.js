@@ -11,7 +11,7 @@
 // are built in two passes grounded in the library: the model first picks
 // tags, artists and songs that fit, the app finds matching tracks on the
 // Plex server, and the model then chooses and orders tracks from that list.
-import { app } from './state.js';
+import { app, on } from './state.js';
 import { normTrack } from './plex.js';
 import { debugLog } from './debug.js';
 
@@ -58,10 +58,46 @@ export function aiTarget(settings = aiSettings()) {
   return null;
 }
 
+// Whether AI features can be used here: AI is on (Settings › AI), there's
+// a model (the shared one, or this device's own Ollama with one chosen),
+// and a shared model is for this Plex account (people who can use the
+// player's Plex server). Features that can't be used are hidden.
 export const aiReady = () => {
   const t = aiTarget();
-  return !!t && (t.kind === 'shared' || !!t.model);
+  if (!t) return false;
+  if (t.kind !== 'shared') return !!t.model;
+  if (allowed === null) checkAIAccess();
+  return allowed !== false;
 };
+
+// 'change': whether AI can be used here may have changed.
+export const aiEvents = new EventTarget();
+const changed = () => aiEvents.dispatchEvent(new Event('change'));
+
+// Asked of the container once per sign-in and library.
+let allowed = null;
+let asking = null;
+export function checkAIAccess() {
+  if (asking || aiTarget()?.kind !== 'shared') return asking;
+  asking = sharedStatus()
+    .then(
+      () => true,
+      (err) => ([401, 403].includes(err?.status) ? false : null),
+    )
+    .then((v) => {
+      asking = null;
+      if (v === null || v === allowed) return;
+      allowed = v;
+      changed();
+    });
+  return asking;
+}
+on('source', () => {
+  allowed = null;
+  changed();
+});
+on('signout', () => (allowed = null));
+on('settings', changed);
 
 // The shared model: { model, ready, problem } (nothing else about the AI
 // server is shown here).

@@ -41,6 +41,7 @@ MODELS = [
 ORIGINS = ['http://localhost', 'https://localhost', 'http://localhost:*', 'https://localhost:*', 'http://127.0.0.1',
            'https://127.0.0.1', 'http://127.0.0.1:*', 'https://127.0.0.1:*', 'http://0.0.0.0', 'http://0.0.0.0:*']
 ORIGINS += [o.strip() for o in ARGS.origins.split(',') if o.strip()]
+STATE = {'think': 0.0}  # seconds before each answer starts (/__mock/config?think=)
 
 
 def origin_allowed(origin):
@@ -157,6 +158,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'models': [dict(m, model=m['name'], modified_at='2026-10-01T10:00:00Z', digest='0' * 64) for m in MODELS]})
         if self.path == '/':
             return self.send_json({'status': 'Ollama is running'})
+        if self.path.startswith('/__mock/config'):
+            # For tests: a slower model (seconds before answering).
+            m = re.search(r'[?&]think=([0-9.]+)', self.path)
+            if m:
+                STATE['think'] = float(m.group(1))
+            return self.send_json(STATE)
         return self.send_json({'error': 'not found'}, 404)
 
     def do_DELETE(self):
@@ -181,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'error': f'"{model}" does not support thinking'}, 400)
 
         content = json.dumps(reply_for(body))
+        if STATE['think']:
+            time.sleep(STATE['think'])
         started = time.time()
         if body.get('stream', True) is False:
             return self.send_json({'model': model, 'message': {'role': 'assistant', 'content': content}, 'done': True})

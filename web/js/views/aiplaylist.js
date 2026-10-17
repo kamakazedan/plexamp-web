@@ -1,8 +1,9 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
-import { aiReady, aiTarget, sharedAI, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { aiReady, aiTarget, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
 import { playList } from '../actions.js';
 import { player } from '../player.js';
+import { navigate } from '../router.js';
 import { h, icon, backHeader, iconButton, toast, fmt } from '../ui.js';
 import { trackRow } from '../components.js';
 import { addToPlaylist, addToCollection, isAdminNow } from '../editing.js';
@@ -30,9 +31,53 @@ const STEPS = [
 let last = null;
 let length = 25;
 let suggestion = Math.floor(Math.random() * SUGGESTIONS.length);
-let running = null; // { ctrl } while generating
 
-export async function aiPlaylistView({ el }) {
+// The playlist being made. It carries on while you're elsewhere in the app;
+// any AI playlist page shows it, and then what came of it.
+let job = null; // { prompt, ctrl, started, step, done, result, error, listeners }
+
+function startJob(prompt) {
+  const j = { prompt, ctrl: new AbortController(), started: Date.now(), step: 'plan', done: false, listeners: new Set() };
+  const emit = () => j.listeners.forEach((fn) => fn(j));
+  job = j;
+  generatePlaylist({
+    prompt,
+    length,
+    signal: j.ctrl.signal,
+    onStep: (id) => {
+      if (j.step === id) return;
+      j.step = id;
+      emit();
+    },
+  })
+    .then((result) => {
+      j.result = result;
+      last = { prompt, result };
+      // Made while you were somewhere else: say so.
+      if (!location.hash.startsWith('#/ai-playlist')) {
+        toast(`Your AI playlist “${result.title}” is ready`, { action: 'Open', onAction: () => navigate('/ai-playlist'), timeout: 8000 });
+      }
+    })
+    .catch((err) => {
+      j.error = err;
+      if (err?.code !== 'aborted' && !location.hash.startsWith('#/ai-playlist')) {
+        toast('Your AI playlist couldn’t be made.', { action: 'See why', onAction: () => navigate('/ai-playlist'), timeout: 8000 });
+      }
+    })
+    .finally(() => {
+      j.done = true;
+      if (job === j) job = null;
+      emit();
+    });
+  return j;
+}
+
+export async function aiPlaylistView({ el, onDispose }) {
+  // Turned off, or not set up: not shown anywhere, so not here either.
+  if (!aiReady() && !job) {
+    navigate('/search', { replace: true });
+    return;
+  }
   const input = h('input', {
     type: 'search',
     placeholder: 'Describe your playlist…',
@@ -74,25 +119,25 @@ export async function aiPlaylistView({ el }) {
   const body = h('div.ai-body');
   el.append(backHeader('AI playlist', { fallback: '/search' }), form, lengthRow, body);
 
-  if (!aiReady()) {
-    body.append(setupCard());
-    input.disabled = true;
-    lengthRow.hidden = true;
-    return;
-  }
+  // Pages put aside are kept, and still brought up to date.
+  let disposed = false;
+  onDispose?.(() => (disposed = true));
 
   // A shared model is only for people who can use this player's Plex
   // server: anyone else is told so here, rather than after a wait.
   if (aiTarget()?.kind === 'shared') {
     sharedStatus().catch((err) => {
-      if (!el.isConnected || running || ![401, 403].includes(err?.status)) return;
+      if (disposed || job || ![401, 403].includes(err?.status)) return;
       input.disabled = true;
       lengthRow.hidden = true;
       body.replaceChildren(noAccessCard(describeAIError(err)));
     });
   }
 
-  if (last) {
+  if (job) {
+    input.value = job.prompt;
+    follow(job);
+  } else if (last) {
     input.value = last.prompt;
     showResult(last.result);
   } else {
@@ -134,16 +179,21 @@ export async function aiPlaylistView({ el }) {
     );
   }
 
-  async function start(raw) {
+  function start(raw) {
     const prompt = raw.trim();
-    if (!prompt || running) return;
+    if (!prompt || job) return;
     input.blur();
-    const ctrl = new AbortController();
-    running = { ctrl };
+    follow(startJob(prompt));
+  }
+
+  // Shows a playlist being made, step by step, and then the playlist (or
+  // what went wrong).
+  function follow(j) {
     const steps = STEPS.map(([id, label]) => ({ id, el: h('li.ai-step', null, h('span.ai-step-mark'), h('span', null, label)) }));
-    const elapsed = h('span', null, '0 s');
-    const started = Date.now();
-    const tick = setInterval(() => (elapsed.textContent = `${Math.round((Date.now() - started) / 1000)} s`), 1000);
+    const elapsed = h('span');
+    const time = () => (elapsed.textContent = `${Math.round((Date.now() - j.started) / 1000)} s`);
+    time();
+    const tick = setInterval(time, 1000);
     body.replaceChildren(
       h(
         'div.ai-progress',
@@ -153,46 +203,48 @@ export async function aiPlaylistView({ el }) {
           'div.ai-progress-foot',
           null,
           h('span.ai-elapsed', null, aiTarget()?.model || '', ' · ', elapsed),
-          h('button.btn.btn-secondary', { type: 'button', onclick: () => ctrl.abort() }, 'Stop'),
+          h('button.btn.btn-secondary', { type: 'button', onclick: () => j.ctrl.abort() }, 'Stop'),
         ),
       ),
     );
-    const mark = (id) => {
-      const at = steps.findIndex((s) => s.id === id);
-      steps.forEach((s, i) => {
-        s.el.classList.toggle('done', i < at);
-        s.el.classList.toggle('active', i === at);
-      });
-    };
-    try {
-      const result = await generatePlaylist({ prompt, length, signal: ctrl.signal, onStep: (id) => mark(id) });
-      last = { prompt, result };
-      if (el.isConnected) showResult(result);
-    } catch (err) {
-      if (!el.isConnected) return;
-      if (err.code === 'aborted') {
-        showSuggestions();
-        return;
+    const update = () => {
+      if (disposed) return stop();
+      if (!j.done) {
+        const at = steps.findIndex((s) => s.id === j.step);
+        steps.forEach((s, i) => {
+          s.el.classList.toggle('done', i < at);
+          s.el.classList.toggle('active', i === at);
+        });
+        return undefined;
       }
-      body.replaceChildren(
-        h(
-          'div.ai-error',
-          { role: 'alert' },
-          h('p', null, describeAIError(err)),
-          h(
-            'div.button-row',
-            null,
-            h('button.btn.btn-secondary', { type: 'button', onclick: () => start(prompt) }, 'Try again'),
-            err.code === 'not-configured' || err.code === 'no-model' || err.status === 404
-              ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings')
-              : null,
-          ),
-        ),
-      );
-    } finally {
+      stop();
+      if (j.result) return showResult(j.result);
+      if (j.error?.code === 'aborted') return showSuggestions();
+      return showError(j.error, j.prompt);
+    };
+    function stop() {
       clearInterval(tick);
-      running = null;
+      j.listeners.delete(update);
     }
+    j.listeners.add(update);
+    onDispose?.(stop);
+    update();
+  }
+
+  function showError(err, prompt) {
+    body.replaceChildren(
+      h(
+        'div.ai-error',
+        { role: 'alert' },
+        h('p', null, describeAIError(err)),
+        h(
+          'div.button-row',
+          null,
+          h('button.btn.btn-secondary', { type: 'button', onclick: () => start(prompt) }, 'Try again'),
+          err?.code === 'not-configured' || err?.code === 'no-model' || err?.status === 404 ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings') : null,
+        ),
+      ),
+    );
   }
 
   function showResult(result) {
@@ -289,31 +341,5 @@ function noAccessCard(message) {
     h('div.ai-setup-icon', null, icon('sparkle', 34)),
     h('h2', null, 'AI playlists aren’t available to you here'),
     h('p', null, message),
-  );
-}
-
-function setupCard() {
-  // This player shares a model, and AI is turned off on this device.
-  if (sharedAI()) {
-    return h(
-      'div.ai-setup',
-      null,
-      h('div.ai-setup-icon', null, icon('sparkle', 34)),
-      h('h2', null, 'AI features are off'),
-      h('p', null, 'They’re turned off on this device. Turn them on in Settings › AI.'),
-      h('a.btn.btn-primary', { href: '#/settings/ai' }, 'AI settings'),
-    );
-  }
-  return h(
-    'div.ai-setup',
-    null,
-    h('div.ai-setup-icon', null, icon('sparkle', 34)),
-    h('h2', null, 'Connect an AI model'),
-    h(
-      'p',
-      null,
-      'Playlists are made by an AI model running on your own hardware through Ollama. Point this app at an Ollama server, or ask whoever runs this app to set up a shared one.',
-    ),
-    h('a.btn.btn-primary', { href: '#/settings/ai' }, 'Set up AI'),
   );
 }

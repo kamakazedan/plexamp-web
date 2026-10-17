@@ -9,7 +9,7 @@ import { trackRow } from '../components.js';
 import { openNowPlaying } from '../nowplaying.js';
 
 const HOW = [
-  ['together', 'Invite Plex friends', 'Choose friends who can play from this music library. They open this same player and sign in with their own Plex account.'],
+  ['together', 'Invite Plex friends', 'Choose friends you’ve shared this music library with in Plex. They open this same player and sign in with their own Plex account.'],
   ['play', 'Everyone hears the same thing', 'Play, pause, skips and seeks happen for everyone, at the same moment.'],
   ['queue', 'One queue for all', 'Anyone in the session can add tracks with Play next or Add to queue, and remove what’s coming up.'],
 ];
@@ -118,7 +118,11 @@ function lobby(highlight) {
       null,
       HOW.map(([ic, title, text]) => h('li', null, h('span.tile.tile-plain', null, icon(ic, 22)), h('div', null, h('strong', null, title), h('p', null, text)))),
     ),
-    h('p.together-note', null, `Everyone needs to open this player (${location.host}) and sign in with Plex.`),
+    h(
+      'p.together-note',
+      null,
+      `Everyone needs access to ${app.source.sectionTitle} on ${app.source.serverName || 'this Plex server'} (shared with them in Plex), and to open this player (${location.host}) and sign in with their own Plex account.`,
+    ),
   );
   return frag;
 }

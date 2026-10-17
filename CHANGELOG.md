@@ -3,6 +3,43 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.9.1 - 2026-10-17
+
+### Added
+
+- **Search tags.** Press Enter (or +) and the word you typed becomes a tag
+  above the search; what you type next only finds things that match every
+  tag, in their name, artist, album or year. "prodigy", then "fire", finds
+  The Prodigy's tracks with "fire" in them. Tap a tag to take it off;
+  Backspace in an empty search takes off the last one; × clears it all.
+- An AI playlist made while you're elsewhere in the app says when it's
+  ready, with a button to open it.
+
+### Changed
+
+- **AI features show only where they can be used.** With AI turned off in
+  Settings › AI (or no AI model, or a Plex account the shared model isn't
+  for), the AI playlist row in Search, the AI DJ and the AI playlist page
+  are gone, rather than saying they aren't available.
+- **Recent searches are gone** from Search, and what they kept on each
+  device is deleted.
+- Settings › Experience › Player: **Show codec** and **Show rating** are
+  separate settings.
+- **Search all music libraries** and **Playlists from all music libraries**
+  (renamed) say which libraries they mean, and only show when the server has
+  more than one music library. Film and TV playlists were never shown.
+- Play Together says that friends need access to the music library, shared
+  with them in Plex, as well as signing in.
+
+### Fixed
+
+- **An AI playlist that looked stuck.** Made while you were on another tab,
+  it was ready, but going back to its page showed it still being made. It
+  now shows the playlist (or what went wrong), and any AI playlist page
+  shows one being made.
+- Genre, style, mood and decade lists finish counting, and library lists
+  finish naming their filters, while you're on another page.
+
 ## 0.9.0 - 2026-10-17
 
 ### Added

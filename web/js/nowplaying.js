@@ -626,24 +626,17 @@ function openDJSheet() {
           toast('Guest DJ off');
         },
       },
-      ...DJS.map((d) => {
-        const needsSetup = d.needsAI && !ai;
-        return {
-          icon: 'dj',
-          label: d.name,
-          description: needsSetup ? 'Needs an AI model. Choose this to set one up in Settings › AI.' : d.description,
-          checked: active?.id === d.id,
-          muted: needsSetup,
-          onSelect: () => {
-            if (needsSetup) {
-              navigate('/settings/ai');
-              return;
-            }
-            guestDJ.set(d.id);
-            toast(`${d.name} is on`);
-          },
-        };
-      }),
+      // The AI DJ only where AI can be used.
+      ...DJS.filter((d) => !d.needsAI || ai).map((d) => ({
+        icon: 'dj',
+        label: d.name,
+        description: d.description,
+        checked: active?.id === d.id,
+        onSelect: () => {
+          guestDJ.set(d.id);
+          toast(`${d.name} is on`);
+        },
+      })),
     ],
   });
 }
@@ -814,7 +807,13 @@ function buildNowPlaying() {
     speedBtn.hidden = !app.settings.playbackSpeed || remote;
     setToggle(speedBtn, player.speed !== 1, player.speed !== 1 ? `Playback speed (${player.speed}×)` : 'Playback speed');
     vol.el.hidden = app.settings.showVolume === false;
-    main.querySelector('.np-info').hidden = app.settings.showCodecRating === false;
+    // The format and quality, and the rating, each if they're wanted.
+    const info = main.querySelector('.np-info');
+    const showCodec = app.settings.showCodec !== false;
+    const showRating = app.settings.showRating !== false && (app.settings.ratingSystem || 'stars') !== 'off';
+    info.hidden = !showCodec && !showRating;
+    info.classList.toggle('no-codec', !showCodec);
+    info.classList.toggle('no-rating', !showRating);
     // Skip buttons: "quick skip" always, "long-form" for long tracks.
     const skips = !!app.settings.quickSkip || (!!app.settings.longForm && player.isLongForm);
     back.hidden = fwd.hidden = !skips;
