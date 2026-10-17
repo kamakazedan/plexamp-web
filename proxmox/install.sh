@@ -142,6 +142,9 @@ Requires=plexamp-web-config.service
 After=plexamp-web-config.service network-online.target
 
 [Service]
+# Without io_uring, giving up root really gives it all up (CVE-2024-22017),
+# and Node.js lets it (Debian 13's refuses to otherwise).
+Environment=UV_USE_IO_URING=0
 ExecStart=/usr/bin/node $BASE/app/server/index.js /run/plexamp-web/service.json
 Restart=always
 RestartSec=2

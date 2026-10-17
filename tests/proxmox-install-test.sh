@@ -26,7 +26,7 @@ for release in "${releases[@]}"; do
         set +a
         HTML_DIR=/opt/plexamp-web/html CONF_DIR=/etc/nginx/conf.d SERVICE_DIR=/opt/plexamp-web/app/server \
             RUN_DIR=/run/plexamp-web SERVICE_USER=www-data SERVICE_START=false sh /opt/plexamp-web/app/docker/40-plexamp-web.sh
-        node /opt/plexamp-web/app/server/index.js /run/plexamp-web/service.json >/tmp/service.log 2>&1 &
+        UV_USE_IO_URING=0 node /opt/plexamp-web/app/server/index.js /run/plexamp-web/service.json >/tmp/service.log 2>&1 &
         nginx -t -q
         nginx
         for _ in $(seq 1 40); do curl -fs -o /dev/null http://127.0.0.1/api/health && break; sleep 0.5; done
@@ -54,6 +54,17 @@ for release in "${releases[@]}"; do
         expect "settings readable by root only" test "$(stat -c %a /etc/plexamp-web/plexamp-web.env)" = 600
         expect "update-plexamp-web is there" test -x /usr/local/bin/update-plexamp-web
         expect "systemd units are written" grep -q "SERVICE_START=false" /etc/systemd/system/plexamp-web-config.service
+        expect "its unit turns io_uring off" grep -q "^Environment=UV_USE_IO_URING=0$" /etc/systemd/system/plexamp-web.service
+        service_uid() {
+            local p
+            for p in /proc/[0-9]*; do
+                if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -q "^[^ ]*node [^ ]*[s]erver/index.js"; then
+                    awk "/^Uid:/ { print \$2 }" "$p/status"
+                    return
+                fi
+            done
+        }
+        expect "the service gave up root (for www-data)" test "$(service_uid)" = 33
         # Debug mode: its access log goes to the journal, as the units set it.
         DEBUG=true NGINX_ACCESS_LOG=syslog:server=unix:/dev/log,tag=nginx,nohostname \
             HTML_DIR=/opt/plexamp-web/html CONF_DIR=/etc/nginx/conf.d SERVICE_DIR=/opt/plexamp-web/app/server \

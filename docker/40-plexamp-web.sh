@@ -379,11 +379,12 @@ fi
 if [ "$SERVICE" = true ] && [ "${SERVICE_START:-true}" != false ]; then
     rm -f "$SERVICE_SOCKET"
     # Restarted if it ever stops. nginx runs as PID 1, so when the container
-    # stops this goes with it.
+    # stops this goes with it. UV_USE_IO_URING=0: without io_uring, giving up
+    # root really gives it all up (CVE-2024-22017), and Node.js lets it.
     (
         set +e
         while :; do
-            "$NODE_BIN" "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null
+            UV_USE_IO_URING=0 "$NODE_BIN" "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null
             code=$?
             [ -f "$RUN_DIR/stop" ] && exit 0
             echo "plexamp-web: the service stopped (exit $code); restarting it in 2 seconds" >&2
