@@ -11,6 +11,9 @@ FAILED=0
 releases=("$@")
 [ "${#releases[@]}" -gt 0 ] || releases=(12 13)
 
+LOG="$(mktemp)"
+trap 'rm -f "$LOG"' EXIT
+
 for release in "${releases[@]}"; do
     echo "--- Debian $release"
     if docker run --rm -v "$ROOT:/src:ro" "debian:$release" bash -c '
@@ -49,11 +52,16 @@ for release in "${releases[@]}"; do
         # An update keeps the settings.
         PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 bash /src/proxmox/install.sh >/dev/null
         expect "an update keeps the settings" grep -q "^DISABLE_WEBSOCKETS=true$" /etc/plexamp-web/plexamp-web.env
-    '; then
+    ' >"$LOG" 2>&1; then
+        cat "$LOG"
         echo "Debian $release: OK"
     else
+        cat "$LOG"
         echo "FAIL Debian $release"
-        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::error title=Proxmox install test::the install failed on Debian $release"; fi
+        # The end of its output, on the run's summary page too.
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then
+            echo "::error title=Proxmox install test (Debian $release)::$(tail -n 40 "$LOG" | cut -c1-300 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{ printf "%s%%0A", $0 }')"
+        fi
         FAILED=1
     fi
 done
