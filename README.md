@@ -36,6 +36,7 @@ A review of the code with one main question: **can any of it leak your data?** T
 | Response headers | nginx's version was shown in headers. | Hidden. A `Permissions-Policy` and `object-src 'none'` were added. |
 | Start-up messages | When an address such as `PLEX_SERVER_URL` had a user name and password in it (which the container refuses), the error printed it in full, password included. | Passwords are hidden in every message the container prints. |
 | Link parameters | A value in a link (a filter in `#/browse/…`) could replace the app's own Plex parameters, the token among them. | The app's own Plex parameters always win. |
+| Service account | The container's service starts as root to make its socket, then becomes nginx's user. It kept root's other groups when it did (in a container, several, `disk` and `adm` among them). | It keeps only its own group, and the container test checks it isn't root and has no other groups. |
 
 ### Safeguards in Play Together
 
@@ -81,6 +82,15 @@ Changed in 0.9.0. Browsers reach the model only through the container's service 
 Added in 0.6.0. Changes go to your Plex server with your own token, so Plex decides what you may change: your own playlists, and collections only if you own the server. The app only offers collection editing to the server's owner.
 
 Building this showed a gap in the `/pms/` proxy. If your Plex server lets the container in without signing in, it accepts any token from there and can treat requests as its owner's. Friends with access were let through, so they could have seen your view of the server and made changes (a new playlist, say) as you. In that situation the proxy now lets only the owner through.
+
+### Safeguards in the Proxmox install
+
+Added in 0.10.0. The script runs as root on your Proxmox node, so it's careful with what it's given:
+
+- Everything you type, or set beforehand, must match a strict pattern (one line, no quotes or shell characters) before it goes into a command or a settings file. Addresses with a user name and password in them are refused. The settings file is written on the node and copied into the container, so nothing you typed passes through a shell in there, and only root can read it.
+- The container is unprivileged, and the app's service gives up root (for `www-data`) as soon as its socket exists, as in the Docker image.
+- Only what the Docker image has is installed: nginx and Node.js from Debian, the app from this repository, and hls.js from npm, checked against the npm registry's checksum.
+- `update-plexamp-web` fetches the installer from this repository each time, so updates trust GitHub just as the first install did.
 
 ### What debug mode logs
 
@@ -138,6 +148,38 @@ docker compose up -d
 Open `http://<your-docker-host>:8080`, choose **Sign in with Plex**, then pick your server and music library.
 
 The image is built, tested and published by GitHub Actions on every push to `main`, for amd64 and arm64 (a Raspberry Pi 4 or CM4 works well). If pulling fails because the package is private, either make it public in the package settings on GitHub or run `docker login ghcr.io` first. To build locally instead, uncomment `build: .` in `docker-compose.yml`.
+
+## Run it on Proxmox VE
+
+On your Proxmox VE node's shell, as root:
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/plexamp-web.sh)"
+```
+
+It makes a small unprivileged Debian container (LXC) on the node and installs the player in it, without Docker: nginx and Node.js from Debian, the app from this repository, and hls.js from npm, checked against the registry's checksum. It asks for the container's ID, name, storage and network, and your Plex and Ollama addresses (Enter keeps each suggestion), shows what it's about to make, and when it's done prints the address to open. It needs Proxmox VE 8 or later, and internet access for the container while it installs. As with any script from the internet that runs as root, [read it](proxmox/plexamp-web.sh) first.
+
+To answer the questions beforehand, set them in front of the command. With `YES=1` it asks nothing:
+
+```sh
+CTID=120 PLEX_SERVER_URL=http://192.168.1.10:32400 YES=1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/plexamp-web.sh)"
+```
+
+| Variable | Suggested | What it is |
+| --- | --- | --- |
+| `CTID` | the next free ID | The container's ID. |
+| `CT_HOSTNAME` | `plexamp-web` | Its name. |
+| `STORAGE` | `local-lvm`, or `local-zfs` | Where its disk goes. |
+| `IP` and `GATEWAY` | `dhcp` | Or a fixed address, such as `IP=192.168.1.50/24 GATEWAY=192.168.1.1`. |
+| `PLEX_SERVER_URL`, `OLLAMA_URL`, `OLLAMA_MODEL` | not set | As in [Container settings](#container-settings). |
+| `CORES`, `RAM_MB`, `DISK_GB` | `1`, `512`, `4` | Its size. |
+| `BRIDGE`, `TEMPLATE_STORAGE` | `vmbr0`, `local` | Its network bridge, and where the Debian template is kept. |
+
+In the container (`pct enter <ID>` on the node):
+
+- **Settings** are in `/etc/plexamp-web/plexamp-web.env`, with the same names as [Container settings](#container-settings). After a change: `systemctl restart plexamp-web-config nginx plexamp-web`.
+- **Updates**: `update-plexamp-web` (or `pct exec <ID> -- update-plexamp-web` on the node). Your settings are kept.
+- **Logs**: `journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`.
 
 ## Container settings
 
@@ -213,7 +255,7 @@ Settings are kept per device.
 
 ## Debug mode
 
-If something doesn't work, set `DEBUG=true` on the container, restart it, and watch its log (`docker logs -f plexamp-web`, or the container's Logs page in Portainer). You'll see:
+If something doesn't work, set `DEBUG=true` on the container, restart it, and watch its log (`docker logs -f plexamp-web`, or the container's Logs page in Portainer; on Proxmox, see [Run it on Proxmox VE](#run-it-on-proxmox-ve)). You'll see:
 
 - the settings the container started with (secrets show only as "set") and the `config.js` it wrote;
 - whether the container can reach your Plex server, Ollama and plex.tv;

@@ -96,6 +96,14 @@ W=http://pw-web
 contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true, cast: true' "$(cb $W/config.js)"
 expect "app is served" 200 "$(c $W/)"
 expect "hls.js is bundled" 200 "$(c $W/vendor/hls.min.js)"
+# The service starts as root to make its socket, then gives up root and
+# root's groups (a container gives root several).
+svc="$(docker exec pw-web sh -c 'for p in /proc/[0-9]*; do if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -q "^[^ ]*node [^ ]*[s]erver/index.js"; then grep -E "^(Uid|Gid|Groups):" "$p/status"; break; fi; done' 2>/dev/null || true)"
+svc_uid="$(printf '%s\n' "$svc" | awk '/^Uid:/ { print $2 }')"
+svc_gid="$(printf '%s\n' "$svc" | awk '/^Gid:/ { print $2 }')"
+svc_groups="$(printf '%s\n' "$svc" | awk '/^Groups:/ { $1 = ""; print }' | xargs)"
+expect "the service isn't root" yes "$(if [ -n "$svc_uid" ] && [ "$svc_uid" != 0 ]; then echo yes; else echo "no (uid ${svc_uid:-unknown})"; fi)"
+expect "the service has none of root's groups" "${svc_gid:-unknown}" "${svc_groups:-none}"
 lacks "nginx's version isn't shown" "nginx/" "$(docker run --rm --network "$NET" "$CURL" -sSI --max-time 20 $W/ 2>/dev/null || true)"
 contains "scripts only from the player itself" "script-src 'self';" "$(docker run --rm --network "$NET" "$CURL" -sSI --max-time 20 $W/ 2>/dev/null || true)"
 

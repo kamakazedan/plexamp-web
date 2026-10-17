@@ -130,8 +130,14 @@ if truthy DEBUG "${DEBUG:-}"; then DEBUG_ON=true; fi
 # Plex requests carry the sign-in token in the query string, so nginx never
 # logs query strings: the access log is off, and in debug mode it shows the
 # path only.
+# Where it goes: the container's log, or (NGINX_ACCESS_LOG, set by the
+# Proxmox install, where nginx has no log to write to) the system's.
+ACCESS_LOG="${NGINX_ACCESS_LOG:-/dev/stdout}"
+case "$ACCESS_LOG" in
+    "" | *[!A-Za-z0-9=:,._/-]*) fail "NGINX_ACCESS_LOG can only be a path or syslog:… (got: $ACCESS_LOG)" ;;
+esac
 if [ "$DEBUG_ON" = true ]; then
-    echo 'access_log /dev/stdout pw_debug;' >"$LOG_CONF"
+    echo "access_log $ACCESS_LOG pw_debug;" >"$LOG_CONF"
     # nginx's errors for proxied Plex requests quote the request (and so the
     # token); in debug mode they go through the service, which removes it.
     PMS_ERROR_LOG="error_log syslog:server=127.0.0.1:${NGINX_LOG_PORT},tag=nginx,nohostname warn;"
@@ -367,6 +373,10 @@ if [ "$SERVICE" = true ]; then
 }
 JSON
     chmod 600 "$RUN_DIR/service.json"
+fi
+# SERVICE_START=false: something else starts it (systemd, on Proxmox: see
+# proxmox/install.sh).
+if [ "$SERVICE" = true ] && [ "${SERVICE_START:-true}" != false ]; then
     rm -f "$SERVICE_SOCKET"
     # Restarted if it ever stops. nginx runs as PID 1, so when the container
     # stops this goes with it.

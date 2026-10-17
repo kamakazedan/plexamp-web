@@ -43,6 +43,14 @@ jobs:
           sh -n tests/run-browser-tests.sh
           sh -n dev/fetch-hls.sh
           python3 -m py_compile dev/mock-plex.py dev/mock-ollama.py tests/browser_test.py
+      - name: Check the Proxmox scripts
+        run: |
+          shellcheck --version | head -n 2
+          shellcheck proxmox/plexamp-web.sh proxmox/install.sh tests/proxmox-install-test.sh docker/40-plexamp-web.sh
+          shellcheck --severity=warning tests/proxmox-test.sh docker/test-container.sh
+          bash tests/proxmox-test.sh
+      - name: Test the Proxmox install (in Debian 12 and 13)
+        run: bash tests/proxmox-install-test.sh
       - name: Build the image
         run: docker build -t plexamp-web:test .
       - name: Test the container (proxies, sign-in check, settings)

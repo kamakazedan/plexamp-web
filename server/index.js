@@ -662,6 +662,8 @@ function started() {
       chmodSync(config.socket, 0o660);
     }
     if (account) {
+      // Root's other groups go too (a container gives root several).
+      process.setgroups([account.gid]);
       process.setgid(account.gid);
       process.setuid(account.uid);
     }
