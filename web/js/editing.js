@@ -63,28 +63,28 @@ export function isAdminNow() {
 const TRACK_LIMIT = 5000;
 
 // Tracks of a list of items, in order: tracks as they are, albums and
-// artists by their tracks, playlists by their entries.
-export async function tracksOf(items) {
+// artists by their tracks, playlists by their entries. At most `limit`.
+export async function tracksOf(items, { limit = TRACK_LIMIT } = {}) {
   const s = app.server;
   const out = [];
   for (const m of items) {
-    if (out.length >= TRACK_LIMIT) break;
+    if (out.length >= limit) break;
     const type = m.type || 'track';
     if (type === 'track') out.push(m.partKey !== undefined ? m : normTrack(m));
     else if (type === 'album') out.push(...(await s.children(m.ratingKey)).filter((x) => x.type === 'track').map(normTrack));
     else if (type === 'artist') out.push(...(await s.allLeaves(m.ratingKey)).filter((x) => x.type === 'track').map(normTrack));
     else if (type === 'playlist') {
-      for (let start = 0; out.length < TRACK_LIMIT; start += 500) {
+      for (let start = 0; out.length < limit; start += 500) {
         const { items: page, total } = await s.playlistItems(m.ratingKey, { start, size: 500 });
         out.push(...page.filter((x) => x.type === 'track').map(normTrack));
         if (!page.length || start + page.length >= total) break;
       }
     } else if (type === 'collection') {
       const { items: kids } = await s.collection(m.ratingKey);
-      out.push(...(await tracksOf(kids)));
+      out.push(...(await tracksOf(kids, { limit: limit - out.length })));
     }
   }
-  return out.slice(0, TRACK_LIMIT);
+  return out.slice(0, limit);
 }
 
 const ids = (list) => [...new Set(list.map((t) => String(t.id || t.ratingKey)).filter((x) => /^\d+$/.test(x)))];
@@ -100,8 +100,9 @@ export function refreshLists(kind) {
 
 // Add music to one of your playlists, or a new one. `what` is a short
 // description for the sheet ("3 tracks", an album's name); `load` gives the
-// tracks (it can be slow, so it runs after a playlist is picked).
-export async function addToPlaylist({ what, load, suggest = '' }) {
+// tracks (it can be slow, so it runs after a playlist is picked). `extra`:
+// more choices, shown after New playlist (Add to a collection, say).
+export async function addToPlaylist({ what, load, suggest = '', title = 'Add to playlist', extra = [] }) {
   const s = app.server;
   let lists = [];
   try {
@@ -112,10 +113,11 @@ export async function addToPlaylist({ what, load, suggest = '' }) {
   }
   lists.sort((a, b) => (b.lastViewedAt || b.updatedAt || 0) - (a.lastViewedAt || a.updatedAt || 0));
   sheet({
-    title: 'Add to playlist',
+    title,
     subtitle: what,
     actions: [
       { icon: 'plus', label: 'New playlist…', onSelect: () => newPlaylist({ load, suggest }) },
+      ...extra,
       ...lists.map((p) => ({
         icon: 'list',
         label: p.title,

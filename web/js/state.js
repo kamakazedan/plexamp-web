@@ -22,7 +22,7 @@ export const DEFAULT_SETTINGS = {
   reportPlays: true, // "Sync recent plays": tell Plex what's played
   liveUpdates: 'auto', // 'auto' (WebSocket first) | 'nows' (no WebSockets) | 'off'
   // mode: 'auto' (the app's shared model when there is one) | 'shared' | 'custom' | 'off'
-  ai: { mode: 'auto', url: '', apiKey: '', model: '', sharedModel: '', notes: '' },
+  ai: { mode: 'auto', url: '', apiKey: '', model: '', notes: '' },
 
   // Experience
   gridSize: 'normal', // small | normal | large

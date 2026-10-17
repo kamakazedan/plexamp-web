@@ -263,7 +263,6 @@ function sessionPage() {
     h('section.block.together-people'),
     h('section.block.together-queue'),
     h('section.block.together-activity'),
-    sessionActions(s),
   );
   fillSession(wrap);
   updateStatus(wrap);
@@ -317,11 +316,8 @@ function fillSession(wrap) {
     ...s.invited.map((m) => personRow(m, 'Invited', isHost)),
   ];
   people.replaceChildren();
-  append(people, [
-    sectionHeader(`People (${s.members.length})`),
-    h('div.rows', null, rows),
-    isHost ? h('div.pad.button-row', null, h('button.btn.btn-secondary', { type: 'button', onclick: inviteFlow }, icon('plus', 20), h('span', null, 'Invite friends'))) : null,
-  ]);
+  // The session's buttons, together: invite, copy the link, leave, end.
+  append(people, [sectionHeader(`People (${s.members.length})`), h('div.rows', null, rows), sessionActions(s)]);
 
   // Up next
   const queue = wrap.querySelector('.together-queue');
@@ -350,7 +346,6 @@ function fillSession(wrap) {
     sectionHeader('Activity'),
     h('ul.together-events', null, events.map((e) => h('li', null, h('span', null, e.text), h('time', null, fmt.ago((e.at - (together.offset || 0)) / 1000))))),
   );
-  wrap.querySelector('.together-actions')?.replaceWith(sessionActions(s));
 }
 
 function personRow(m, status, canRemove) {
@@ -378,6 +373,7 @@ function sessionActions(s) {
   return h(
     'div.pad.button-row.together-actions',
     null,
+    isHost ? h('button.btn.btn-secondary', { type: 'button', onclick: inviteFlow }, icon('plus', 20), h('span', null, 'Invite friends')) : null,
     h(
       'button.btn.btn-secondary',
       {

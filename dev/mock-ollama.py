@@ -70,9 +70,30 @@ def reply_for(body):
         song = line.split(' — ', 1)[-1].split(' (')[0]
         return {'pick': n, 'intro': f'Keeping that warm late-night feel going, here is {song}.'}
     if 'genres' in props or 'Tags used in the library' in text:
+        asked = re.search(r'^Playlist request: (.*)$', text, re.M)
+        best = re.match(r'(?i)\s*best of (.+?)(?: playlist)?\s*$', asked.group(1) if asked else '')
+        if best:
+            # Like a small model that names the artist, and similar ones, but
+            # doesn't say the playlist is only about them: the app has to
+            # work that out from the request.
+            name = best.group(1)
+            return {
+                'title': f'Best of {name}',
+                'summary': f'The essential {name}.',
+                'focus_artists': [],
+                'artist_scope': 'any',
+                'genres': tag_line(text, 'Genres')[:1],
+                'styles': [],
+                'moods': [],
+                'decades': [],
+                'artists': [name, 'Juniper & Ash', 'Kilo Meridian'],
+                'tracks': [{'artist': 'Kilo Meridian', 'title': 'Ember'}],
+            }
         return {
             'title': 'Late Night Harbour Lights',
             'summary': 'A moody, slow-building mix for driving after dark.',
+            'focus_artists': [],
+            'artist_scope': 'any',
             'genres': tag_line(text, 'Genres')[:2],
             'styles': tag_line(text, 'Styles')[:2],
             'moods': tag_line(text, 'Moods')[:1],

@@ -5,8 +5,10 @@
 #
 #   PLEX_SERVER_URL     proxy one Plex server at /pms/ (WebSockets included)
 #   DISABLE_WEBSOCKETS  "true": the app never opens a WebSocket
-#   OLLAMA_URL          proxy an Ollama server at /ollama/ as a shared AI model
-#   OLLAMA_MODEL        the shared model's default, e.g. llama3.1:8b
+#   OLLAMA_URL          share an Ollama server's model with the app's users
+#                       (through the service, at /ollama/)
+#   OLLAMA_MODEL        the one model used, e.g. llama3.1:8b (default: the
+#                       first one installed)
 #   OLLAMA_API_KEY      sent as a bearer token, for an Ollama behind a proxy
 #                       that asks for one
 #   OLLAMA_AUTH         "plex" (default): only people signed in to Plex can use
@@ -249,90 +251,64 @@ fi
 
 # ---------- Ollama ----------
 
+# The app's requests to the shared model go through the service, which
+# checks who's asking and what's asked, and uses only the model set with
+# OLLAMA_MODEL (see server/ai.js).
 AI_AUTH=none
+AI_ON=false
 if [ -n "${OLLAMA_URL:-}" ]; then
     prepare_upstream OLLAMA_URL "$OLLAMA_URL"
-    AI_URL="$UP_URL$UP_PATH"
-    AI_HOST="$UP_HOST"
-    AI_NAME="$UP_NAME"
-    AI_RESOLVER="$UP_RESOLVER"
     MODEL="${OLLAMA_MODEL:-}"
     printf '%s\n' "$MODEL" | grep -Eq '^[A-Za-z0-9._:/@+-]*$' || fail "OLLAMA_MODEL has unexpected characters (got: $MODEL)"
     KEY="${OLLAMA_API_KEY:-}"
     printf '%s\n' "$KEY" | grep -Eq '^[A-Za-z0-9._~+/=-]*$' || fail "OLLAMA_API_KEY has unexpected characters"
-    AUTHZ='""'
-    if [ -n "$KEY" ]; then AUTHZ="\"Bearer $KEY\""; fi
 
     case "$(lower "${OLLAMA_AUTH:-plex}")" in
         plex | on | true | yes | 1) AI_AUTH=plex ;;
         off | none | false | no | 0) AI_AUTH=off ;;
         *) fail "OLLAMA_AUTH must be plex or off (got: $OLLAMA_AUTH)" ;;
     esac
-
-    AUTH_LINE=""
     if [ "$AI_AUTH" = plex ]; then
-        # Checked by the service; if it isn't running, nginx refuses AI
-        # requests rather than letting them through unchecked.
-        AUTH_LINE="auth_request /_ai_auth;"
         if [ -n "$PMS_URL" ]; then AUTH_DESC="people with access to the Plex server"; else AUTH_DESC="anyone signed in to Plex"; fi
-        [ "$SERVICE" = true ] || say "warning: the sign-in check for the shared AI model isn't available (no Node.js), so AI requests will be refused" >&2
     else
         AUTH_DESC="anyone who can open the app"
     fi
 
-    # Only the endpoints the app uses are passed on: models can't be pulled,
-    # pushed, copied or deleted through this proxy.
-    ai_location() { # path method extra-directives
-        cat <<CONF
+    if [ "$SERVICE" = true ]; then
+        AI_ON=true
+        # Only what the app uses: chatting, and the model's name and
+        # whether it's ready. Nothing else reaches the AI server.
+        ai_location() { # path method
+            cat <<CONF
 location = /ollama/api/$1 {
     limit_except $2 { deny all; }
-    ${AUTH_LINE}
     limit_req zone=ai burst=20 nodelay;
     limit_req_status 429;
-    ${AI_RESOLVER}
-    set \$ai_upstream "${AI_URL}";
-    proxy_pass \$ai_upstream/api/$1;
+    proxy_pass http://unix:${SERVICE_SOCKET}:/api/ai/$1;
     proxy_http_version 1.1;
-    proxy_set_header Host ${AI_HOST};
     proxy_set_header Connection "";
-    proxy_set_header Authorization ${AUTHZ};
-    proxy_set_header X-Plex-Token "";
-    proxy_set_header X-Plex-Server-Token "";
-    proxy_set_header Origin "";
     proxy_set_header Cookie "";
-    proxy_ssl_server_name on;
-    proxy_ssl_name ${AI_NAME};
-$3
-}
-CONF
-    }
-
-    {
-        ai_location version GET ''
-        ai_location tags GET ''
-        ai_location chat POST '    client_max_body_size 4m;
+    proxy_set_header X-Real-IP \$remote_addr;
     proxy_buffering off;
     proxy_read_timeout 600s;
-    proxy_send_timeout 600s;'
-        echo 'location ^~ /ollama/ { return 404; }'
-        if [ "$AI_AUTH" = plex ]; then
-            cat <<CONF
-location = /_ai_auth {
-    internal;
-    proxy_pass http://unix:${SERVICE_SOCKET}:/api/internal/ai-auth;
-    # Subrequests inherit the original method (POST for chat); the check is a GET.
-    proxy_method GET;
-    proxy_pass_request_body off;
-    proxy_set_header Content-Length "";
-    proxy_set_header Cookie "";
-    proxy_connect_timeout 5s;
-    proxy_read_timeout 30s;
+    proxy_send_timeout 600s;
+    client_max_body_size 4m;
 }
 CONF
-        fi
-    } >"$AI_CONF"
-    add_config "ai: { proxy: \"ollama/\", model: \"$MODEL\" }"
-    say "proxying /ollama/ to $(safe_url "$OLLAMA_URL") (model: ${MODEL:-not set}; allowed: $AUTH_DESC)"
+        }
+        {
+            ai_location chat POST
+            ai_location status GET
+            ai_location tags GET
+            echo 'location ^~ /ollama/ { return 404; }'
+        } >"$AI_CONF"
+        add_config "ai: { proxy: \"ollama/\", model: \"$MODEL\" }"
+        say "sharing the AI model ${MODEL:-"(the first one installed)"} from $(safe_url "$OLLAMA_URL") with $AUTH_DESC"
+        [ -n "$MODEL" ] || say "OLLAMA_MODEL isn't set, so the first model installed on the AI server is used. Set it to choose the model."
+    else
+        echo 'location ^~ /ollama/ { return 404; }' >"$AI_CONF"
+        say "the shared AI model needs Node.js, which isn't installed here, so it's off" >&2
+    fi
 else
     echo 'location ^~ /ollama/ { return 404; }' >"$AI_CONF"
 fi
@@ -342,6 +318,7 @@ fi
 if [ "$SERVICE" = true ]; then
     cat >"$API_CONF" <<CONF
 location ^~ /api/internal/ { return 404; }
+location ^~ /api/ai/ { return 404; }
 location /api/ {
     proxy_pass http://unix:${SERVICE_SOCKET};
     proxy_http_version 1.1;
@@ -380,6 +357,9 @@ if [ "$SERVICE" = true ]; then
   "devices": $SERVICE,
   "debug": $DEBUG_ON,
   "aiAuth": "$AI_AUTH",
+  "ollamaUrl": "$([ "$AI_ON" = true ] && json "${OLLAMA_URL%/}")",
+  "ollamaModel": "$([ "$AI_ON" = true ] && json "${OLLAMA_MODEL:-}")",
+  "ollamaKey": "$([ "$AI_ON" = true ] && json "${OLLAMA_API_KEY:-}")",
   "plexServerUrl": "$(json "${PLEX_SERVER_URL:-}")",
   "plexTvUrl": "$(json "$PLEX_TV")",
   "nginxLogPort": $NGINX_LOG_PORT,

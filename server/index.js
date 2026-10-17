@@ -1,7 +1,9 @@
 // plexamp-web service: the small server-side part of the app, reached by
-// nginx at /api/. It checks Plex sign-ins for the shared AI model, runs
-// Play Together sessions, and in debug mode writes browser-side problems to
-// the container log. It listens on a Unix socket that only nginx can reach.
+// nginx at /api/ (and /ollama/). It passes the app's requests to the shared
+// AI model on, after checking them, runs Play Together sessions, Play on and
+// sharing playback between your devices, and in debug mode writes
+// browser-side problems to the container log. It listens on a Unix socket
+// that only nginx can reach.
 //
 //   node server/index.js [config.json]
 //
@@ -9,6 +11,7 @@
 // (see docker/40-plexamp-web.sh), or from PW_SERVICE_* environment variables
 // for development.
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, unlinkSync, chmodSync, chownSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { log, setDebug, isDebug } from './log.js';
@@ -16,6 +19,7 @@ import { PlexAuth, AuthError, validToken } from './plex.js';
 import { Together, TogetherError } from './together.js';
 import { Cast, CastError } from './cast.js';
 import { Devices, DevicesError } from './devices.js';
+import { SharedModel, AIRequestError, cleanChat, AI_LIMITS } from './ai.js';
 import { listenForNginx } from './syslog.js';
 
 // ---------- settings ----------
@@ -35,6 +39,10 @@ function loadConfig() {
     // Development only: players at 127.0.0.1 (the mock player).
     castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
     aiAuth: env.PW_SERVICE_AI_AUTH || cfg.aiAuth || 'plex',
+    // The shared AI model: an Ollama server, and the one model it's used for.
+    ollamaUrl: env.PW_SERVICE_OLLAMA_URL ?? cfg.ollamaUrl ?? '',
+    ollamaModel: env.PW_SERVICE_OLLAMA_MODEL ?? cfg.ollamaModel ?? '',
+    ollamaKey: env.PW_SERVICE_OLLAMA_KEY ?? cfg.ollamaKey ?? '',
     plexServerUrl: env.PW_SERVICE_PLEX_SERVER_URL ?? cfg.plexServerUrl ?? '',
     plexTvUrl: env.PW_SERVICE_PLEX_TV_URL || cfg.plexTvUrl || 'https://plex.tv',
     user: cfg.user || env.PW_SERVICE_USER || 'nginx',
@@ -55,6 +63,7 @@ setInterval(() => together.sweep(), 60000).unref();
 const cast = new Cast({ auth, loopback: config.castLoopback });
 const devices = new Devices();
 setInterval(() => devices.sweep(), 15000).unref();
+const sharedModel = config.ollamaUrl ? new SharedModel({ url: config.ollamaUrl, key: config.ollamaKey, model: config.ollamaModel, log }) : null;
 
 // ---------- rate limits ----------
 
@@ -132,27 +141,119 @@ async function signedIn(req) {
 
 // ---------- routes ----------
 
-// Called by nginx (auth_request) before passing a request to the shared
-// Ollama. 204 lets it through; 401/403 refuse it; 503 means it couldn't be
-// checked (nginx then refuses it too).
-async function aiAuth(req, res) {
-  if (config.aiAuth === 'off') return send(res, 204);
+// ---------- the shared AI model ----------
+
+// Who may use the shared model (OLLAMA_AUTH): people signed in to Plex who
+// can use the Plex server at PLEX_SERVER_URL (anyone signed in to Plex when
+// it isn't set), or, with OLLAMA_AUTH=off, anyone who can open the app.
+// Resolves with a key for limits; throws for anyone else, with a message
+// that says why.
+async function aiAllowed(req) {
+  if (config.aiAuth === 'off') return { key: `ip|${req.headers['x-real-ip'] || 'local'}` };
   const pick = (v) => (validToken(v) ? v : null);
   const token = pick(req.headers['x-plex-token']);
   const serverToken = pick(req.headers['x-plex-server-token']);
-  if (!token && !serverToken) return send(res, 401);
+  if (!token && !serverToken) {
+    aiRefused('a request without a Plex sign-in');
+    throw new HttpError(401, 'Sign in to Plex to use the AI model.');
+  }
+  let verdict;
   try {
-    const verdict = await aiVerdict(token, serverToken);
-    if (verdict !== 204) log.debug(`shared AI: refused a request (${verdict === 403 ? 'no access to the Plex server' : 'not signed in'})`);
-    return send(res, verdict);
+    verdict = await aiVerdict(token, serverToken);
   } catch (err) {
     log.warn(`couldn't check a sign-in for the shared AI model: ${err.message}`);
-    return send(res, 503);
+    throw new HttpError(503, 'Your Plex sign-in couldn’t be checked right now (plex.tv or the Plex server didn’t answer). Try again in a minute.');
   }
+  if (verdict.status === 401) {
+    aiRefused('a Plex sign-in that plex.tv and the Plex server didn’t accept');
+    throw new HttpError(401, 'Plex didn’t accept your sign-in. Sign out and in again.');
+  }
+  if (verdict.status === 403) {
+    aiRefused('a Plex account that can’t use the Plex server at PLEX_SERVER_URL', verdict.user);
+    throw new HttpError(403, 'The AI model on this player is for people who can use its Plex server, and your Plex account can’t.');
+  }
+  return { key: verdict.user ? `user|${verdict.user.id}` : `token|${createHash('sha256').update(String(token || serverToken)).digest('hex').slice(0, 16)}` };
+}
+
+// Refusals are logged (at most once a minute for each reason), so whoever
+// runs the container can see why someone couldn't use the model. Names
+// only in debug mode.
+const refusalsSaid = new Map();
+function aiRefused(reason, user = null) {
+  log.debug(`shared AI: refused ${user ? `${user.title}: ` : ''}${reason}`);
+  if (isDebug()) return;
+  const last = refusalsSaid.get(reason) || 0;
+  if (Date.now() - last < 60000) return;
+  refusalsSaid.set(reason, Date.now());
+  log.info(`shared AI: refused ${reason}`);
+}
+
+const aiBusy = new Map(); // limit key -> chats under way
+let aiChats = 0;
+
+async function aiRoute(req, res, parts) {
+  if (!sharedModel) throw new HttpError(404, 'This player has no shared AI model.');
+  const what = parts[0] || '';
+  const method = req.method;
+  if (!['status', 'tags', 'chat'].includes(what) || parts.length > 1) throw new HttpError(404, 'Not found.');
+  if ((what === 'chat') !== (method === 'POST') || (method !== 'GET' && method !== 'POST')) throw new HttpError(405, 'Not allowed.');
+  const who = await aiAllowed(req);
+  // Only the model in use, never the others on the AI server or its settings.
+  if (what === 'status') return send(res, 200, await sharedModel.status());
+  if (what === 'tags') {
+    const model = await sharedModel.model();
+    return send(res, 200, { models: [{ name: model, model }] });
+  }
+  return aiChat(req, res, who);
+}
+
+async function aiChat(req, res, who) {
+  const body = await readBody(req, AI_LIMITS.body);
+  const chat = cleanChat(body, await sharedModel.model());
+  const mine = aiBusy.get(who.key) || 0;
+  if (mine >= AI_LIMITS.perUser || aiChats >= AI_LIMITS.total) {
+    throw new HttpError(429, 'The AI model is busy with other requests. Try again in a moment.');
+  }
+  aiBusy.set(who.key, mine + 1);
+  aiChats += 1;
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    aiChats -= 1;
+    const n = (aiBusy.get(who.key) || 1) - 1;
+    if (n > 0) aiBusy.set(who.key, n);
+    else aiBusy.delete(who.key);
+  };
+  // Someone who stops waiting (Stop, or the page closed) stops the model too.
+  const ctrl = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) ctrl.abort();
+    finish();
+  });
+  let upstream;
+  try {
+    upstream = await sharedModel.request('/api/chat', { method: 'POST', body: chat, signal: ctrl.signal, idleMs: AI_LIMITS.idleMs });
+  } catch (err) {
+    finish();
+    if (ctrl.signal.aborted) return undefined;
+    log.warn(`shared AI: couldn't reach the AI server: ${err.message}`);
+    throw new HttpError(502, 'The AI server didn’t answer. Check that Ollama is running.');
+  }
+  res.writeHead(upstream.statusCode || 502, {
+    'Content-Type': String(upstream.headers['content-type'] || 'application/json'),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Accel-Buffering': 'no',
+  });
+  upstream.on('error', () => res.destroy());
+  upstream.pipe(res);
+  return undefined;
 }
 
 // Without PLEX_SERVER_URL, anyone signed in to Plex may use the shared
-// model. With it, only people who can use that Plex server.
+// model. With it, only people who can use that Plex server: { status: 204
+// (yes), 401 (not signed in) or 403 (no access), user }.
 async function aiVerdict(token, serverToken) {
   let user = null;
   let userToken = null;
@@ -166,17 +267,18 @@ async function aiVerdict(token, serverToken) {
       if (!(err instanceof AuthError)) plexTvError = err;
     }
   }
+  const says = (status) => ({ status, user });
   if (!config.plexServerUrl) {
-    if (user) return 204;
+    if (user) return says(204);
     if (plexTvError) throw plexTvError;
-    return 401;
+    return says(401);
   }
   let serverId = null;
   if (user) {
     serverId = await auth.loadServerId();
     if (serverId) {
       try {
-        if (await auth.canUseServer(userToken, serverId)) return 204;
+        if (await auth.canUseServer(userToken, serverId)) return says(204);
       } catch (err) {
         if (!(err instanceof AuthError)) plexTvError = err;
       }
@@ -191,11 +293,11 @@ async function aiVerdict(token, serverToken) {
   } catch (err) {
     pmsError = err;
   }
-  if (pmsSays === true) return 204;
-  if (pmsSays === false) return user ? 403 : 401;
-  if (user && serverId && !plexTvError) return 403; // plex.tv says: no access
+  if (pmsSays === true) return says(204);
+  if (pmsSays === false) return says(user ? 403 : 401);
+  if (user && serverId && !plexTvError) return says(403); // plex.tv says: no access
   if (plexTvError || pmsError) throw plexTvError || pmsError;
-  return user ? 403 : 401;
+  return says(user ? 403 : 401);
 }
 
 // The token on a request nginx is about to pass to Plex at /pms/: from the
@@ -508,15 +610,15 @@ async function handle(req, res) {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
     if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast, devices: config.devices, debug: config.debug });
-    if (area === 'internal' && rest[0] === 'ai-auth') return await aiAuth(req, res);
     if (area === 'internal' && rest[0] === 'pms-auth') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
     if (area === 'cast') return await castRoute(req, res, rest);
     if (area === 'devices') return await devicesRoute(req, res, rest, url);
+    if (area === 'ai') return await aiRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
-    const known = err instanceof HttpError || err instanceof TogetherError;
+    const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError;
     if (!known) log.error(`${req.method} ${url.pathname}: ${err.stack || err.message}`);
     if (!res.headersSent) send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.' });
   } finally {

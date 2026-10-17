@@ -3,6 +3,56 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.9.0 - 2026-10-17
+
+### Added
+
+- **Search within library lists.** Every list in the library (a genre, a
+  decade, all albums, all artists) has a search box: in the 1990s, type
+  "rock" to narrow it to rock albums from the 1990s, then "calm" for a
+  mood, or words from the title. Only choices that leave something are
+  offered, each with how many. The filters show as chips above the list;
+  tap one to take it off.
+- **A clear button for search**, as soon as there's something typed.
+  Escape clears it too.
+- **AI playlists: Add to queue**, and **Save to Plex** asks where: a new
+  playlist (named after it), one of yours, or, for the server's owner, a
+  collection.
+- **Play next and Add to queue** in the menus of playlists, collections
+  and artists (where mixes lead).
+- Genres, styles, moods and decades say how many albums (or artists) each
+  has.
+
+### Changed
+
+- **The shared AI model is the one you set.** With `OLLAMA_URL` set, the
+  app uses only the model in `OLLAMA_MODEL` (or, if it isn't set, the first
+  one installed), whatever a request asks for. Settings › AI shows its
+  name, whether it's ready and a test, and turns AI on or off for the
+  device; there's no list of the AI server's models, and no other servers.
+  Requests now go through the container's service, which passes on chats
+  only: the AI server's version and models are no longer reachable at
+  `/ollama/`.
+- **AI playlists keep to what you ask for.** Every request asks the model
+  to stay with the artists, era, genre or mood you name, and to be creative
+  within that, and the app checks. "Best of The Prodigy" is built only from
+  The Prodigy's tracks, best known first, and is shorter rather than padded
+  with other artists when they don't have enough. "Music like The Prodigy"
+  is mostly them. An era you name holds for artists' tracks too.
+- **Play Together:** Copy link, Leave and End for everyone are next to
+  Invite friends, rather than at the bottom of the page.
+
+### Fixed
+
+- **Genres with nothing in them.** Many genres opened to "0 albums,
+  Nothing here". The app followed the address Plex gives each genre, which
+  can lead to artists rather than albums; it now asks for albums itself.
+  Genres nothing in the library uses any more are left out.
+- **When someone can't use the shared AI model, they're told why**: the
+  AI playlist page says so before they try (for example, that the model is
+  for people who can use the player's Plex server), and the container log
+  notes the refusal. Before, it said to sign in again.
+
 ## 0.8.0 - 2026-10-16
 
 ### Added

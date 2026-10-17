@@ -124,6 +124,12 @@ expect "AI: friend with access to the server allowed" 200 "$(c -H 'X-Plex-Token:
 expect "AI: Plex account without access to the server refused" 403 "$(c -H 'X-Plex-Token: t3' $W/ollama/api/tags)"
 expect "AI: a server token works when the account token doesn't" 200 "$(c -H 'X-Plex-Token: bad' -H 'X-Plex-Server-Token: t2' $W/ollama/api/tags)"
 contains "AI: models listed" '"llama3.1:8b"' "$(cb -H 'X-Plex-Token: t' $W/ollama/api/tags)"
+lacks "AI: the AI server's other models aren't shown" 'qwen2.5' "$(cb -H 'X-Plex-Token: t' $W/ollama/api/tags)"
+contains "AI: says whether the model is ready" '"model":"llama3.1:8b","ready":true' "$(cb -H 'X-Plex-Token: t' $W/ollama/api/status)"
+expect "AI: the AI server's version isn't passed on" 404 "$(c -H 'X-Plex-Token: t' $W/ollama/api/version)"
+contains "AI: only the shared model is used, whatever a request asks for" '"model": "llama3.1:8b"' "$(cb -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"model":"qwen2.5:7b","stream":false,"messages":[{"role":"user","content":"Reply with {\"ok\": true} and nothing else."}],"format":"json"}' $W/ollama/api/chat)"
+contains "AI: someone without access is told why" 'can use its Plex server' "$(cb -H 'X-Plex-Token: t3' $W/ollama/api/status)"
+expect "AI: the service's own AI path can't be called directly" 404 "$(c -H 'X-Plex-Token: t' $W/api/ai/status)"
 CHAT='{"model":"llama3.1:8b","stream":true,"messages":[{"role":"user","content":"Reply with {\"ok\": true} and nothing else."}],"format":"json"}'
 contains "AI: chat streams through the proxy (POST + sign-in check)" '"done": true' "$(cb -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d "$CHAT" $W/ollama/api/chat)"
 expect "AI: browser Origin isn't passed to Ollama" 200 "$(c -H 'X-Plex-Token: t' -H 'Origin: http://evil.example' $W/ollama/api/tags)"
@@ -132,7 +138,7 @@ expect "AI: model deletion blocked" 404 "$(c -H 'X-Plex-Token: t' -X DELETE -d '
 expect "AI: wrong method refused" 403 "$(c -H 'X-Plex-Token: t' -X DELETE $W/ollama/api/tags)"
 expect "AI: other paths blocked" 404 "$(c -H 'X-Plex-Token: t' $W/ollama/)"
 codes="$(docker run --rm --network "$NET" --entrypoint sh "$CURL" -c \
-    "for i in \$(seq 1 30); do curl -s -o /dev/null -w '%{http_code} ' -H 'X-Plex-Token: ratelimit' $W/ollama/api/version; done" || true)"
+    "for i in \$(seq 1 30); do curl -s -o /dev/null -w '%{http_code} ' -H 'X-Plex-Token: ratelimit' $W/ollama/api/status; done" || true)"
 contains "AI: rate limited per user" "429" "$codes"
 
 contains "service: health" '"together":true,"cast":true,"devices":true' "$(cb $W/api/health)"
@@ -198,6 +204,7 @@ docker rm -f pw-web3 >/dev/null
 docker run -d --name pw-web3 --network "$NET" -e OLLAMA_URL=http://pw-ollama:11434 -e OLLAMA_AUTH=off "$IMAGE" >/dev/null
 wait_http pw-web3 http://pw-web3/
 expect "OLLAMA_AUTH=off: no sign-in needed" 200 "$(c http://pw-web3/ollama/api/tags)"
+contains "OLLAMA_MODEL not set: the first model installed is used" '"model":"llama3.1:8b"' "$(cb http://pw-web3/ollama/api/status)"
 
 # ---------- 4. No Plex proxy: sign-in checked with the real plex.tv ----------
 docker run -d --name pw-web4 --network "$NET" -e OLLAMA_URL=http://pw-ollama:11434 "$IMAGE" >/dev/null

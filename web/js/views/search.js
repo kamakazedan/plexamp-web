@@ -45,9 +45,18 @@ export async function searchView({ el, query }) {
     enterkeyhint: 'search',
     value: query.q || '',
   });
-  const box = h('label.search-box', null, icon('search', 22), input);
+  // Clears the search in one tap, back to browsing (Escape too).
+  const clear = iconButton('close', 'Clear search', () => clearSearch(), { size: 22, cls: 'search-clear' });
+  clear.hidden = !input.value;
+  const box = h('label.search-box.has-clear', null, icon('search', 22), input, clear);
   const body = h('div.search-body');
   el.append(pageHeader('Search'), box, body);
+  const clearSearch = () => {
+    input.value = '';
+    clear.hidden = true;
+    run('');
+    input.focus();
+  };
 
   let controller = null;
   const run = async (q) => {
@@ -68,8 +77,16 @@ export async function searchView({ el, query }) {
       if (!err.aborted) body.replaceChildren(emptyState("Search didn't work. Check your connection and try again."));
     }
   };
+  input.addEventListener('input', () => (clear.hidden = !input.value));
   input.addEventListener('input', debounce(() => run(input.value), 280));
-  input.addEventListener('keydown', (e) => e.key === 'Enter' && input.blur());
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape' && input.value) {
+      e.preventDefault();
+      e.stopPropagation();
+      clearSearch();
+    }
+  });
   await run(input.value);
 }
 

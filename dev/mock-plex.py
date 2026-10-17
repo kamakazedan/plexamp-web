@@ -338,7 +338,11 @@ def tag_dir(field, typ):
             continue
         for t in it.get(field.capitalize(), []):
             values[t['tag'].lower().replace(' ', '-')] = t['tag']
-    return [{'key': k, 'title': v, 'fastKey': f'/library/sections/{SECTION}/all?type={typ}&{field}={k}'}
+    if field == 'genre' and typ == 9:
+        # Plex lists tags nothing uses any more (until the database is
+        # cleaned), and their fastKey leaves out the type, as Plex's can.
+        values['polka'] = 'Polka'
+    return [{'key': k, 'title': v, 'fastKey': f'/library/sections/{SECTION}/all?{field}={k}'}
             for k, v in sorted(values.items())]
 
 
@@ -366,6 +370,8 @@ def matches(it, field, value):
         return any(t['tag'] in values for t in it.get('Subformat', []))
     if field == 'decade':
         return bool(it.get('year')) and str(it['year'] // 10 * 10) in values
+    if field == 'title':  # Plex: the title contains it
+        return value.lower() in str(it.get('title', '')).lower()
     if field in ('genre', 'style', 'mood'):
         return any(slug(t['tag']) in values for t in it.get(field.capitalize(), []))
     return True

@@ -2,8 +2,10 @@
 // the AI DJ.
 //
 // The model can be shared by the container (OLLAMA_URL, reached through the
-// app's own /ollama/ path, so browsers need no CORS setup or direct access)
-// or set per device in Settings > AI (any Ollama the browser can reach).
+// app's own /ollama/ path, so browsers need no CORS setup or direct access).
+// Then it's the only one: the container uses the model set with OLLAMA_MODEL
+// and nothing else. Without a shared model, each device can use an Ollama of
+// its own (Settings > AI).
 //
 // Small local models are poor at recalling exact song titles, so playlists
 // are built in two passes grounded in the library: the model first picks
@@ -27,31 +29,49 @@ export class AIError extends Error {
 
 // ---------- configuration ----------
 
-const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', sharedModel: '', notes: '' };
+const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '' };
 
 export const aiSettings = () => ({ ...DEFAULTS, ...(app.settings.ai || {}) });
 export const sharedAI = () => (app.config.ai?.proxy ? app.config.ai : null);
 
-// Which Ollama to use, or null when none is set up on this device.
+// The shared model's name, once the container has said it (when it's the
+// first one installed rather than one set with OLLAMA_MODEL).
+let sharedName = '';
+
+// Which Ollama to use, or null when there's none (or AI is off here).
 export function aiTarget(settings = aiSettings()) {
+  if (settings.mode === 'off') return null;
   const shared = sharedAI();
-  const mode = settings.mode === 'auto' ? (shared ? 'shared' : 'none') : settings.mode;
-  if (mode === 'custom' && settings.url.trim()) {
-    const headers = settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {};
-    return { kind: 'custom', base: settings.url.trim().replace(/\/+$/, ''), model: settings.model, headers };
-  }
-  if (mode === 'shared' && shared) {
-    // The container checks these against Plex before passing a request on.
+  if (shared) {
+    // The container checks these against Plex before passing a request on,
+    // and uses its own model whatever a request names.
     const headers = {};
     if (app.auth?.token) headers['X-Plex-Token'] = app.auth.token;
     if (app.source?.token && app.source.token !== app.auth?.token && !skipServerToken) headers['X-Plex-Server-Token'] = app.source.token;
     const base = new URL(shared.proxy, location.href).toString().replace(/\/+$/, '');
-    return { kind: 'shared', base, model: settings.sharedModel || shared.model || '', headers };
+    return { kind: 'shared', base, model: shared.model || sharedName, headers };
+  }
+  if (settings.mode === 'custom' && settings.url.trim()) {
+    const headers = settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {};
+    return { kind: 'custom', base: settings.url.trim().replace(/\/+$/, ''), model: settings.model, headers };
   }
   return null;
 }
 
-export const aiReady = () => !!aiTarget()?.model;
+export const aiReady = () => {
+  const t = aiTarget();
+  return !!t && (t.kind === 'shared' || !!t.model);
+};
+
+// The shared model: { model, ready, problem } (nothing else about the AI
+// server is shown here).
+export async function sharedStatus() {
+  const target = aiTarget();
+  if (target?.kind !== 'shared') return null;
+  const st = await simple(target, '/api/status');
+  if (st?.model) sharedName = String(st.model);
+  return { model: st?.model || null, ready: !!st?.ready, problem: st?.problem || null };
+}
 
 // The container checks the token for the Plex server it fronts. If this app
 // is using a different server, that token won't work there, so after one
@@ -143,13 +163,13 @@ const noThink = new Set(); // Ollama servers that rejected the "think" option
 export async function chat({ messages, schema, temperature = 0.6, signal, onProgress, maxTokens }) {
   const target = aiTarget();
   if (!target) throw new AIError('not-configured', 'No AI model is set up.');
-  if (!target.model) throw new AIError('no-model', 'Choose an AI model in Settings › AI.');
+  if (!target.model && target.kind !== 'shared') throw new AIError('no-model', 'Choose an AI model in Settings › AI.');
   // One context size for every request (unless a prompt needs more), so
   // Ollama doesn't reload the model between steps.
   const chars = messages.reduce((n, m) => n + m.content.length, 0);
   const numCtx = Math.min(32768, Math.max(8192, 2 ** Math.ceil(Math.log2(chars / 3 + 1500))));
   const body = {
-    model: target.model,
+    model: target.model || 'shared', // the container uses its own model anyway
     messages,
     stream: true,
     format: schema || 'json',
@@ -211,6 +231,7 @@ async function streamChat(target, body, signal, onProgress) {
       onProgress?.(content.length);
     }
     if (obj.done) final = obj;
+    if (target.kind === 'shared' && obj.model) sharedName = String(obj.model);
   };
 
   try {
@@ -271,6 +292,7 @@ export function parseReply(text) {
 
 export function describeAIError(err, target = aiTarget()) {
   const where = target?.kind === 'custom' ? target.base : 'the AI service';
+  const shared = target?.kind === 'shared';
   switch (err?.code) {
     case 'not-configured':
       return 'No AI model is set up. Choose one in Settings › AI.';
@@ -291,14 +313,22 @@ export function describeAIError(err, target = aiTarget()) {
       break;
   }
   const status = err?.status;
+  // The container's own explanation (not an error page from a proxy).
+  const said = err?.message && !/^\s*</.test(err.message) && !/^HTTP \d+$/.test(err.message) ? err.message : '';
+  if (shared && said && [401, 403, 413, 429, 502, 503].includes(status)) return said;
   if (status === 401 || status === 403) {
-    return target?.kind === 'shared' ? 'The AI service couldn’t confirm your Plex sign-in. Sign out and in again.' : 'Ollama refused the request. Check the API key.';
+    return shared ? 'The AI model couldn’t confirm your Plex sign-in. Sign out and in again.' : 'Ollama refused the request. Check the API key.';
   }
-  if (status === 404 && /model/i.test(err.message)) return `The model “${target?.model}” isn’t installed there. Choose another in Settings › AI.`;
-  if (status === 404) return target?.kind === 'shared' ? 'This app doesn’t have a shared AI model set up.' : `${where} doesn’t look like an Ollama server.`;
+  if (status === 404 && /model/i.test(said)) {
+    const name = /"([^"]+)"/.exec(said)?.[1] || target?.model || 'the model';
+    return shared
+      ? `The AI model “${name}” isn’t installed on the AI server. Whoever runs this player can install it, or set OLLAMA_MODEL to one that is.`
+      : `The model “${name}” isn’t installed there. Choose another in Settings › AI.`;
+  }
+  if (status === 404) return shared ? 'This player doesn’t have a shared AI model set up.' : `${where} doesn’t look like an Ollama server.`;
   if (status === 429) return 'Too many AI requests in a short time. Wait a minute and try again.';
-  if (status === 502 || status === 503 || status === 504) return 'The AI service didn’t respond. Check that Ollama is running.';
-  return `The AI model reported a problem: ${err?.message || 'unknown error'}`;
+  if (status === 502 || status === 503 || status === 504) return 'The AI model didn’t respond. Check that Ollama is running.';
+  return `The AI model reported a problem: ${said || 'unknown error'}`;
 }
 
 // ---------- helpers ----------
@@ -429,6 +459,8 @@ const PLAN_SCHEMA = {
   properties: {
     title: { type: 'string' },
     summary: { type: 'string' },
+    focus_artists: { type: 'array', items: { type: 'string' } },
+    artist_scope: { type: 'string', enum: ['only', 'mostly', 'any'] },
     genres: { type: 'array', items: { type: 'string' } },
     styles: { type: 'array', items: { type: 'string' } },
     moods: { type: 'array', items: { type: 'string' } },
@@ -439,7 +471,7 @@ const PLAN_SCHEMA = {
       items: { type: 'object', properties: { artist: { type: 'string' }, title: { type: 'string' } }, required: ['artist', 'title'] },
     },
   },
-  required: ['title', 'summary', 'genres', 'styles', 'moods', 'decades', 'artists', 'tracks'],
+  required: ['title', 'summary', 'focus_artists', 'artist_scope', 'genres', 'styles', 'moods', 'decades', 'artists', 'tracks'],
 };
 
 const ORDER_SCHEMA = {
@@ -450,13 +482,18 @@ const ORDER_SCHEMA = {
 
 const lines = (...parts) => parts.filter((p) => p !== null && p !== undefined).join('\n');
 
+// Added to every request: keep to what was asked, and be creative within it.
+const FOLLOW =
+  'Follow the request closely. If it names artists, keep to those artists; if it names an era, a genre or a mood, keep to that. ' +
+  'Only bring in other artists or styles when the request asks for similar music or leaves room for it. ' +
+  'Within those limits, be creative: mix well-known songs with deeper cuts, and vary the energy so the playlist flows.';
+
 function planMessages(prompt, notes, vocab, length) {
   const list = (items) => items.map((t) => t.title).join(', ') || '(none)';
   return [
     {
       role: 'system',
-      content:
-        'You plan playlists that will be built from the listener’s own music library. You know music well: genres, eras, artists and their songs. Answer with JSON only.',
+      content: `You plan playlists that will be built from the listener’s own music library. You know music well: genres, eras, artists and their songs. ${FOLLOW} Answer with JSON only.`,
     },
     {
       role: 'user',
@@ -474,29 +511,33 @@ function planMessages(prompt, notes, vocab, length) {
         'Reply with:',
         '- "title": a short, catchy playlist title (2 to 6 words)',
         '- "summary": one sentence describing the playlist',
+        '- "focus_artists": the artists the request is about, if it names any (for "best of Daft Punk": ["Daft Punk"]); otherwise an empty list',
+        '- "artist_scope": "only" if the playlist should have nothing but the focus artists (a best-of, greatest hits, "only", "just", deep cuts by them), "mostly" if it should be mainly them with a few similar artists, or "any" if it isn’t about particular artists',
         '- "genres", "styles", "moods": up to 4 each that fit the request, copied exactly from the lists above',
         '- "decades": up to 3 from the list above, or an empty list if any era fits',
-        '- "artists": up to 12 artists whose music fits the request',
+        '- "artists": up to 12 artists whose music fits the request, the focus artists first',
         '- "tracks": up to 15 specific songs that fit, each as {"artist": "...", "title": "..."}',
       ),
     },
   ];
 }
 
-function orderMessages(prompt, notes, pool, length) {
+function orderMessages(prompt, notes, pool, length, focus) {
   const list = pool.map((c, i) => `${i + 1}. ${describeTrack(c.track)}${c.why ? ` [${c.why}]` : ''}${c.track.viewCount ? `, played ${c.track.viewCount} times` : ''}`);
+  const names = focus.artists.join(', ');
   return [
     {
       role: 'system',
-      content:
-        'You are a DJ building a playlist from tracks in the listener’s library. Pick the tracks that best fit the request and put them in an order that flows well. Use only numbers from the list. Answer with JSON only.',
+      content: `You are a DJ building a playlist from tracks in the listener’s library. ${FOLLOW} Pick the tracks that best fit the request, leaving out any that don’t, and put them in an order that flows well. Use only numbers from the list. Answer with JSON only.`,
     },
     {
       role: 'user',
       content: lines(
         `Playlist request: ${prompt}`,
         notes ? `About the listener: ${notes}` : null,
-        `Choose ${length} tracks, with no repeats. Spread artists out rather than grouping them, unless the request asks otherwise.`,
+        focus.scope === 'only' ? `Every track in the list is by ${names}, as the request asks. Tracks marked “popular” are their best known: a best-of should lean on them.` : null,
+        focus.scope === 'mostly' ? `The request is mainly about ${names}: at least ${Math.ceil(length * 0.6)} of the tracks should be theirs.` : null,
+        `Choose ${length} tracks, with no repeats.${focus.scope === 'only' ? '' : ' Spread artists out rather than grouping them, unless the request asks otherwise.'}`,
         '',
         'Tracks:',
         ...list,
@@ -505,6 +546,21 @@ function orderMessages(prompt, notes, pool, length) {
       ),
     },
   ];
+}
+
+// One of each song (the same track on an album and a compilation, say).
+function dedupe(list, cap) {
+  const out = [];
+  const seen = new Set();
+  for (const c of list) {
+    const key = `${norm(c.track.artist)}|${norm(c.track.title)}`;
+    if (seen.has(c.track.id) || seen.has(key)) continue;
+    seen.add(c.track.id);
+    seen.add(key);
+    out.push(c);
+    if (out.length >= cap) break;
+  }
+  return out;
 }
 
 function topUp(chosen, pool, length) {
@@ -519,7 +575,63 @@ function topUp(chosen, pool, length) {
   return chosen;
 }
 
-async function findCandidates(plan, vocab, length, signal) {
+// Which artists the request is about, and whether others may join them.
+// Small models don't always say, or name artists the request never
+// mentioned, so it's checked against the request itself: "best of The
+// Prodigy" is about The Prodigy alone, "music like The Prodigy" mostly
+// about them, and "90s rock" about no one in particular.
+export function focusOf(plan, prompt) {
+  const words = norm(prompt).split(' ').filter(Boolean);
+  const asked = ` ${words.join(' ')} `;
+  const named = (name) => norm(name).length > 1 && asked.includes(` ${norm(name)} `);
+  // Spelt a little differently ("prodigey"): close enough.
+  const near = (name) =>
+    norm(name)
+      .split(' ')
+      .filter((w) => w.length >= 4)
+      .some((w) => words.some((x) => Math.abs(x.length - w.length) <= 2 && editDistance(w, x) <= (w.length > 6 ? 2 : 1)));
+  const tidy = (list) => asList(list).map((n) => clean(n, 100)).filter(Boolean);
+  let artists = tidy(plan.focus_artists).filter((a) => named(a) || near(a));
+  if (!artists.length) artists = tidy(plan.artists).filter(named);
+  artists = [...new Map(artists.map((a) => [norm(a), a])).values()].slice(0, 6);
+  if (!artists.length) return { artists: [], scope: 'any' };
+  const like = /\b(like|similar|inspired|influenced|style of|sounds? like|fans? of|vibes?)\b/.test(asked);
+  const just = /\b(best of|greatest|hits|essentials?|only|just|deep cuts?|discography|everything|all of|songs by|tracks by)\b/.test(asked);
+  let scope = ['only', 'mostly', 'any'].includes(plan.artist_scope) ? plan.artist_scope : 'any';
+  if (scope === 'only' && like) scope = 'mostly';
+  if (scope === 'any') scope = just && !like ? 'only' : 'mostly';
+  return { artists, scope };
+}
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// Tracks by an artist, best known first (Plex's popularity, from Last.fm),
+// or least known first for deep cuts; one of each song.
+async function artistTracks(artist, size, signal, { deep = false } = {}) {
+  const s = app.server;
+  const sort = deep ? 'ratingCount' : 'ratingCount:desc';
+  const { items } = await s.list(app.source.sectionKey, 10, { sort, size, filters: { 'artist.id': artist.ratingKey, group: 'title' }, signal });
+  return items;
+}
+
+const DEEP_CUTS = /\b(deep cuts?|rarities|b-?sides|lesser[- ]known|hidden gems|obscure)\b/i;
+const ONLY_POOL = 150; // tracks of the focus artists the model chooses from
+
+// Decade tags ("1990") as ranges of years.
+const inDecades = (decades) => {
+  const ranges = decades.map((d) => Number(d.id)).filter((y) => y > 1000);
+  return (t) => !ranges.length || !t.year || ranges.some((y) => t.year >= y && t.year <= y + 9);
+};
+
+async function findCandidates(plan, vocab, length, signal, focus, prompt) {
   const s = app.server;
   const sec = app.source.sectionKey;
   const genres = matchTags(plan.genres, vocab.genres).slice(0, 4);
@@ -527,6 +639,7 @@ async function findCandidates(plan, vocab, length, signal) {
   const moods = matchTags(plan.moods, vocab.moods).slice(0, 4);
   const decades = matchTags(plan.decades, vocab.decades).slice(0, 3);
   const ids = (tags) => tags.map((t) => t.id).join(',');
+  const fitsEra = inDecades(decades);
   const era = decades.length ? { 'album.decade': ids(decades) } : {};
   const per = Math.max(30, Math.ceil(length * 1.6));
 
@@ -538,6 +651,46 @@ async function findCandidates(plan, vocab, length, signal) {
 
   const cand = (m, source, why = '') => ({ track: normTrack(m), source, why });
   const matchedArtists = [];
+
+  // The artists the request is about: all their tracks are candidates.
+  const focused = [];
+  if (focus.artists.length) {
+    const found = (await mapLimit(focus.artists, 3, (name) => findArtist(name, signal))).filter(Boolean);
+    const seen = new Set();
+    for (const artist of found) {
+      if (seen.has(artist.ratingKey)) continue;
+      seen.add(artist.ratingKey);
+      matchedArtists.push(artist.title);
+      const deep = DEEP_CUTS.test(prompt);
+      const items = await artistTracks(artist, focus.scope === 'only' ? ONLY_POOL : Math.max(40, length * 2), signal, { deep }).catch(() => []);
+      const popular = Math.max(10, Math.ceil(items.length / 4));
+      let list = items.map((m, i) => cand(m, 'focus', !deep && i < popular && m.ratingCount ? 'popular' : ''));
+      const inEra = list.filter((c) => fitsEra(c.track));
+      if (inEra.length >= 3) list = inEra;
+      focused.push(list);
+    }
+    if (signal?.aborted) throw new AIError('aborted', 'Stopped.');
+    if (focus.scope === 'only') {
+      if (!focused.length) {
+        throw new AIError('no-matches', `${focus.artists.join(' or ')} ${focus.artists.length > 1 ? 'aren’t' : 'isn’t'} in ${app.source.sectionTitle}.`);
+      }
+      // Nothing but them: their tracks, taking turns between artists.
+      const pool = [];
+      const lanes = focused.map((l) => l.slice());
+      for (let added = true; added && pool.length < ONLY_POOL; ) {
+        added = false;
+        for (const lane of lanes) {
+          const c = lane.shift();
+          if (c) {
+            pool.push(c);
+            added = true;
+          }
+        }
+      }
+      return { pool: dedupe(pool, ONLY_POOL), basedOn: { tags: [], artists: matchedArtists }, only: true };
+    }
+  }
+
   const [byTag, byArtist, bySong] = await Promise.all([
     mapLimit(queries, 3, async (q) => {
       let items = await tracksMatching({ ...q.filters, ...era }, per, signal).catch(() => []);
@@ -545,8 +698,9 @@ async function findCandidates(plan, vocab, length, signal) {
       return items.map((m) => cand(m, 'tag', q.tags.map((t) => t.title).join(', ')));
     }),
     mapLimit(asList(plan.artists).slice(0, 12), 4, async (name) => {
+      if (focus.artists.some((f) => norm(f) === norm(name))) return [];
       const artist = await findArtist(name, signal);
-      if (!artist) return [];
+      if (!artist || matchedArtists.includes(artist.title)) return [];
       matchedArtists.push(artist.title);
       let items = await s.popularTracks(sec, artist.ratingKey, 8).catch(() => []);
       if (items.length < 4) {
@@ -573,9 +727,12 @@ async function findCandidates(plan, vocab, length, signal) {
     seenSongs.add(key);
     pool.push(c);
   };
-  bySong.flat().forEach(add);
+  // Mostly the focus artists: their best known tracks come first.
+  focused.flat().slice(0, Math.ceil(cap * 0.5)).forEach(add);
+  // Songs and artists the model suggested, within the era asked for.
+  bySong.flat().filter((c) => fitsEra(c.track)).forEach(add);
   // Take turns between artists and tag searches so no single source dominates.
-  const lanes = [...byArtist, ...byTag].filter((l) => l.length).map(shuffled);
+  const lanes = [...byArtist.map((l) => l.filter((c) => fitsEra(c.track))), ...byTag].filter((l) => l.length).map(shuffled);
   for (let added = true; added && pool.length < cap; ) {
     added = false;
     for (const lane of lanes) {
@@ -603,9 +760,10 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep }) 
     onProgress: (n) => onStep?.('plan', n),
   });
   const plan = parseReply(planned.content);
+  const focus = focusOf(plan, prompt);
 
   onStep?.('search');
-  const { pool, basedOn } = await findCandidates(plan, vocab, length, signal);
+  const { pool, basedOn, only } = await findCandidates(plan, vocab, length, signal, focus, prompt);
   if (!pool.length) {
     throw new AIError('no-matches', `Nothing in ${app.source.sectionTitle} matched. Try describing the playlist another way.`);
   }
@@ -616,7 +774,7 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep }) 
     onStep?.('order');
     try {
       const ordered = await chat({
-        messages: orderMessages(prompt, notes, pool, length),
+        messages: orderMessages(prompt, notes, pool, length, focus),
         schema: ORDER_SCHEMA,
         temperature: 0.6,
         signal,
@@ -646,6 +804,8 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep }) 
     summary: clean(plan.summary, 240),
     tracks: chosen.map((c) => c.track),
     basedOn,
+    // Fewer tracks than asked for, because that's all there is.
+    note: only && pool.length < length ? `That’s every track by ${basedOn.artists.join(' and ')} in ${app.source.sectionTitle}.` : '',
     model: planned.model,
     seconds: Math.round((performance.now() - started) / 1000),
   };

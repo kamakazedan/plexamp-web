@@ -6,6 +6,8 @@ import { redact, oneLine } from './log.js';
 import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
 import { isPlexDirectCert, plexServerIdentity, certProblem } from './plex.js';
+import { cleanChat, SharedModel, AIRequestError, AI_LIMITS } from './ai.js';
+import { createServer } from 'node:http';
 
 const dan = { id: 1, title: 'Dan', thumb: null };
 const sam = { id: 2, title: 'Sam', thumb: null };
@@ -382,4 +384,61 @@ test('your devices: what one device can send another is checked', () => {
   assert.ok(h.commands.reduce((n, c) => n + (c.tracks?.length || 0), 0) <= DEVICE_LIMITS.commandTracks);
   for (let i = 0; i < 5; i++) d.command(h, { id: 'device-0001', name: 'D1' }, { type: 'add', tracks: many });
   assert.ok(h.commands.reduce((n, c) => n + (c.tracks?.length || 0), 0) <= DEVICE_LIMITS.commandTracks);
+});
+
+test('the shared AI model: only the one model, and only what the app sends', () => {
+  const body = {
+    model: 'llama3.1:70b',
+    messages: [{ role: 'system', content: 'Be brief.' }, { role: 'user', content: 'Hello', images: ['x'] }],
+    stream: true,
+    format: { type: 'object' },
+    options: { temperature: 9, num_ctx: 999999, num_predict: 20.4, num_gpu: 99, stop: ['x'] },
+    keep_alive: '24h',
+    think: false,
+    tools: [{ type: 'function' }],
+    template: '{{ .Prompt }}',
+  };
+  const out = cleanChat(body, 'gemma4:12b');
+  assert.deepEqual(out, {
+    model: 'gemma4:12b',
+    messages: [{ role: 'system', content: 'Be brief.' }, { role: 'user', content: 'Hello' }],
+    stream: true,
+    format: { type: 'object' },
+    options: { temperature: 2, num_ctx: 32768, num_predict: 20 },
+    think: false,
+    keep_alive: '3600s',
+  });
+  assert.equal(cleanChat({ messages: [{ role: 'user', content: 'x' }], keep_alive: '-1' }, 'm').keep_alive, undefined);
+  assert.equal(cleanChat({ messages: [{ role: 'user', content: 'x' }], format: 'json' }, 'm').format, 'json');
+  assert.throws(() => cleanChat({ messages: [] }, 'm'), (e) => e instanceof AIRequestError && e.status === 400);
+  assert.throws(() => cleanChat({ messages: [{ role: 'tool', content: 'x' }] }, 'm'), (e) => e.status === 400);
+  assert.throws(() => cleanChat({ messages: [{ role: 'user', content: 'x'.repeat(AI_LIMITS.chars + 1) }] }, 'm'), (e) => e.status === 413);
+  assert.throws(() => cleanChat({ messages: Array.from({ length: AI_LIMITS.messages + 1 }, () => ({ role: 'user', content: 'x' })) }, 'm'), (e) => e.status === 400);
+});
+
+test('the shared AI model: its name and whether it is ready, nothing else', async () => {
+  const seen = [];
+  const ollama = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url} ${req.headers.authorization || ''}`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ models: [{ name: 'qwen2.5:7b', size: 1 }, { name: 'nomic-embed-text:latest', details: { families: ['nomic-bert'] } }, { name: 'llama3.1:8b' }] }));
+  });
+  await new Promise((r) => ollama.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${ollama.address().port}`;
+  try {
+    const chosen = new SharedModel({ url, key: 'sk-1', model: 'llama3.1:8b' });
+    assert.deepEqual(await chosen.status(), { model: 'llama3.1:8b', ready: true, problem: null });
+    assert.equal(await chosen.model(), 'llama3.1:8b');
+    const missing = new SharedModel({ url, model: 'mistral' });
+    assert.deepEqual(await missing.status(), { model: 'mistral', ready: false, problem: 'not-installed' });
+    // Not set: the first chat model installed (not an embedding model).
+    const first = new SharedModel({ url, log: { info() {} } });
+    assert.equal(await first.model(), 'llama3.1:8b');
+    assert.ok(seen.every((l) => l.startsWith('GET /api/tags')));
+    assert.ok(seen[0].endsWith('Bearer sk-1'));
+  } finally {
+    ollama.close();
+  }
+  const down = new SharedModel({ url: 'http://127.0.0.1:9', model: 'x' });
+  assert.deepEqual(await down.status(), { model: 'x', ready: false, problem: 'unreachable' });
 });

@@ -1,11 +1,11 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
-import { app } from '../state.js';
-import { aiReady, aiTarget, generatePlaylist, describeAIError } from '../ai.js';
-import { playList, guard } from '../actions.js';
-import { navigate } from '../router.js';
+import { aiReady, aiTarget, sharedAI, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { playList } from '../actions.js';
+import { player } from '../player.js';
 import { h, icon, backHeader, iconButton, toast, fmt } from '../ui.js';
 import { trackRow } from '../components.js';
+import { addToPlaylist, addToCollection, isAdminNow } from '../editing.js';
 
 const SUGGESTIONS = [
   'Late-night drive: moody electronic and trip-hop that slowly builds.',
@@ -79,6 +79,17 @@ export async function aiPlaylistView({ el }) {
     input.disabled = true;
     lengthRow.hidden = true;
     return;
+  }
+
+  // A shared model is only for people who can use this player's Plex
+  // server: anyone else is told so here, rather than after a wait.
+  if (aiTarget()?.kind === 'shared') {
+    sharedStatus().catch((err) => {
+      if (!el.isConnected || running || ![401, 403].includes(err?.status)) return;
+      input.disabled = true;
+      lengthRow.hidden = true;
+      body.replaceChildren(noAccessCard(describeAIError(err)));
+    });
   }
 
   if (last) {
@@ -188,22 +199,40 @@ export async function aiPlaylistView({ el }) {
     const tracks = result.tracks;
     const totalMs = tracks.reduce((n, t) => n + (t.duration || 0), 0);
     const context = { title: result.title, href: '/ai-playlist' };
+    const what = `${result.title} (${fmt.count(tracks.length, 'track', 'tracks')})`;
+    const load = async () => tracks;
+    // Into a new playlist, one of yours, or (for the server's owner) a
+    // collection.
     const save = h(
-      'button.btn.btn-secondary',
+      'button.btn.btn-secondary.ai-save',
       {
         type: 'button',
         onclick: () =>
-          guard(async () => {
-            save.disabled = true;
-            const pl = await app.server.createPlaylist(result.title, tracks.map((t) => t.id));
-            save.replaceChildren(icon('check', 20), h('span', null, 'Saved'));
-            toast(`Saved to Plex as “${result.title}”`, pl ? { action: 'Open', onAction: () => navigate(`/playlist/${pl.ratingKey}`) } : {});
-          }).finally(() => {
-            if (!save.textContent.includes('Saved')) save.disabled = false;
+          addToPlaylist({
+            title: 'Save to Plex',
+            what,
+            load,
+            suggest: result.title,
+            extra: isAdminNow()
+              ? [{ icon: 'collection', label: 'Add to a collection…', onSelect: () => addToCollection({ kind: 'track', what, load, suggest: result.title }) }]
+              : [],
           }),
       },
-      icon('addQueue', 20),
+      icon('playlistAdd', 20),
       h('span', null, 'Save to Plex'),
+    );
+    const queue = h(
+      'button.btn.btn-secondary.ai-queue',
+      {
+        type: 'button',
+        onclick: () => {
+          const playing = !!player.current;
+          player.addToQueue(tracks);
+          toast(playing ? `Added ${fmt.count(tracks.length, 'track', 'tracks')} to the queue` : 'Playing');
+        },
+      },
+      icon('addQueue', 20),
+      h('span', null, 'Add to queue'),
     );
     const list = h('div.tracks');
     tracks.forEach((t, i) => list.append(trackRow(t, { showArt: true, subtitle: t.artist, onPlay: () => playList(tracks, i, context) })));
@@ -219,11 +248,13 @@ export async function aiPlaylistView({ el }) {
           null,
           [fmt.count(tracks.length, 'track', 'tracks'), fmt.long(totalMs), `made by ${result.model} in ${result.seconds} s`].filter(Boolean).join(', '),
         ),
+        result.note ? h('p.ai-note', null, result.note) : null,
         h(
           'div.hero-actions.ai-actions',
           null,
           h('button.btn.btn-primary', { type: 'button', onclick: () => playList(tracks, 0, context) }, icon('play', 20), h('span', null, 'Play')),
           h('button.btn.btn-secondary', { type: 'button', onclick: () => playList(tracks, 0, context, { shuffle: true }) }, icon('shuffle', 20), h('span', null, 'Shuffle')),
+          queue,
           save,
         ),
       ),
@@ -251,7 +282,28 @@ export async function aiPlaylistView({ el }) {
   }
 }
 
+function noAccessCard(message) {
+  return h(
+    'div.ai-setup.ai-no-access',
+    null,
+    h('div.ai-setup-icon', null, icon('sparkle', 34)),
+    h('h2', null, 'AI playlists aren’t available to you here'),
+    h('p', null, message),
+  );
+}
+
 function setupCard() {
+  // This player shares a model, and AI is turned off on this device.
+  if (sharedAI()) {
+    return h(
+      'div.ai-setup',
+      null,
+      h('div.ai-setup-icon', null, icon('sparkle', 34)),
+      h('h2', null, 'AI features are off'),
+      h('p', null, 'They’re turned off on this device. Turn them on in Settings › AI.'),
+      h('a.btn.btn-primary', { href: '#/settings/ai' }, 'AI settings'),
+    );
+  }
   return h(
     'div.ai-setup',
     null,

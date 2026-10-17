@@ -24,8 +24,8 @@ and t3 (Alex, a friend without access).
 
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
-Sections: core ws ai dj nows blocked poll custom desktop nav edit cast ratings
-devices fades together settings home debug memory (default: all).
+Sections: core ws ai dj nows blocked poll custom desktop nav library edit cast
+ratings devices fades together settings home debug memory (default: all).
 """
 
 import json
@@ -287,19 +287,62 @@ with sync_playwright() as pw:
         check('ai: playlist generated', title and rows == 25, f'{title!r}, {rows} tracks')
         based = page.locator('.ai-based').inner_text()
         check('ai: built from library tags and real artists', 'Glass Harbour' in based and 'Not A Real Band' not in based, based)
-        page.click('button:has-text("Save to Plex")')
-        page.wait_for_selector('.toast')
+        # Saving: which playlist (or a new one) is asked.
+        page.click('.ai-actions button:has-text("Save to Plex")')
+        page.wait_for_selector('.sheet.open .sheet-title:has-text("Save to Plex")')
+        offered = page.locator('.sheet.open .sheet-action').all_inner_texts()
+        page.locator('.sheet.open .sheet-action', has_text='New playlist').click()
+        page.wait_for_selector('.sheet.open .ask-form input')
+        page.wait_for_timeout(250)
+        suggested = page.locator('.sheet.open .ask-form input').input_value()
+        page.click('.sheet.open .ask-form button[type=submit]')
+        page.wait_for_selector('.toast:has-text("Made")')
         after = mock('/playlists?X-Plex-Token=t')['MediaContainer']['Metadata']
-        check('ai: saved to Plex', len(after) == before + 1 and after[-1]['title'] == title, f'{len(after)} playlists')
+        check('ai: Save to Plex asks where: a new playlist (named after it) or one of yours', len(after) == before + 1 and after[-1]['title'] == title
+              and suggested == title and any('Favourite tracks' in o for o in offered) and any('Add to a collection' in o for o in offered), f'{len(after)} playlists, {offered}')
+        page.wait_for_selector('.sheet', state='detached')
         page.click('.ai-actions button:has-text("Play")')
         check('ai: plays the generated playlist', wait_for(lambda: player(page, 'p.context && p.context.title') == title, 10))
+        n = player(page, 'p.queue.length')
+        page.click('.ai-actions button:has-text("Add to queue")')
+        check('ai: ...or adds it to the queue', wait_for(lambda: player(page, 'p.queue.length') == n + rows, 5), player(page, 'p.queue.length'))
+        player(page, 'p.pause()')
+
+        # A best-of stays on its artist, even when the model brings in others.
+        page.click('button:has-text("Make another playlist")')
+        page.fill('.ai-box input', 'Best of Glass Harbour')
+        page.press('.ai-box input', 'Enter')
+        page.wait_for_selector('.ai-result', timeout=60000)
+        by = set(page.locator('.ai-body .tracks .track .track-sub').all_inner_texts())
+        has = mock('/library/sections/1/all?type=10&artist.id=101&group=title&X-Plex-Token=t&X-Plex-Container-Size=0')['MediaContainer']['totalSize']
+        got = page.locator('.ai-body .tracks .track').count()
+        check('ai: "best of" an artist is only that artist', by == {'Glass Harbour'} and 0 < got <= has, f'{by}, {got} of {has}')
+        check('ai: ...and says when that\'s all there is', got >= 25 or 'every track by Glass Harbour' in page.locator('.ai-note').inner_text())
+        shot(page, 'ai-03-best-of')
+
+        # Settings: the model in use, and nothing else about the AI server.
         page.goto(APP + '#/settings/ai')
-        page.wait_for_selector('text=Connected', timeout=15000)
-        models = page.locator('.ai-models .radio-row .row-title').all_text_contents()
-        check('ai: lists chat models only', models == ['llama3.1:8b', 'qwen2.5:7b'], str(models))
+        page.wait_for_selector('.ai-model-row')
+        check('ai: settings show the model in use and that it\'s ready', 'llama3.1:8b' in page.locator('.ai-model-row').inner_text()
+              and page.wait_for_selector('.ai-shared p.hint:has-text("Ready")', timeout=15000) is not None)
+        check('ai: no choosing models or servers', page.locator('.ai-models').count() == 0 and page.locator('text=My own Ollama server').count() == 0
+              and page.locator('text=qwen2.5').count() == 0)
         page.click('button:has-text("Test the model")')
         check('ai: model test through the container', page.wait_for_selector('text=It works', timeout=20000) is not None)
-        shot(page, 'ai-03-settings')
+        shot(page, 'ai-04-settings')
+
+        # Someone whose Plex account can't use the server (the container
+        # refuses them: see docker/test-container.sh) is told so up front.
+        other_ctx = browser.new_context(**MOBILE)
+        other = other_ctx.new_page()
+        attach(other, 'ai-refused')
+        login(other, APP)
+        refusal = 'The AI model on this player is for people who can use its Plex server, and your Plex account can’t.'
+        other.route('**/ollama/api/status', lambda route: route.fulfill(status=403, content_type='application/json', body=json.dumps({'error': refusal})))
+        other.goto(APP + '#/ai-playlist')
+        check('ai: someone without access to the server is told why, before asking', other.wait_for_selector('.ai-no-access', timeout=10000) is not None
+              and refusal in other.locator('.ai-no-access').inner_text() and other.locator('.ai-box input').is_disabled())
+        other_ctx.close()
 
     # ---------- dj: Guest DJ and the AI DJ ----------
     if run('dj'):
@@ -601,6 +644,120 @@ with sync_playwright() as pw:
         check('nav: a link into another tab opens there', tab() == 'settings' and where() == '#/settings/source', f'{where()} in {tab()}')
         header_back()
         check('nav: ...and back goes to that tab\'s first page', where() == '#/settings', where())
+        ctx.close()
+
+    # ---------- library: search, narrowing lists, and adding lists to the queue ----------
+    if run('library'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'library')
+        login(page, APP)
+        where = lambda: js(page, '() => location.hash')
+        heads = lambda: page.locator('.search-body .section-head h2').all_inner_texts()
+
+        # Search: one tap clears it, back to browsing.
+        page.goto(APP + '#/search')
+        page.wait_for_selector('.search-box input')
+        check('library: no clear button before typing', not page.locator('.search-clear').is_visible())
+        page.fill('.search-box input', 'harbour')
+        searched = wait_for(lambda: any('ARTISTS' in t.upper() for t in heads()), 8)
+        check('library: a clear button once there\'s a search', searched and page.locator('.search-clear').is_visible(), str(heads()))
+        shot(page, 'library-01-search')
+        page.click('.search-clear')
+        page.wait_for_timeout(400)
+        check('library: ...which clears it, back to browsing the library', page.locator('.search-box input').input_value() == ''
+              and page.locator('a.browse-tile').count() > 0 and where() == '#/search' and not page.locator('.search-clear').is_visible()
+              and js(page, "() => document.activeElement === document.querySelector('.search-box input')"), where())
+        page.fill('.search-box input', 'harbour')
+        page.wait_for_timeout(500)
+        page.press('.search-box input', 'Escape')
+        page.wait_for_timeout(400)
+        check('library: Escape clears it too', page.locator('.search-box input').input_value() == '' and page.locator('a.browse-tile').count() > 0)
+
+        # Genres: each with how many albums have it; ones nothing has are left out.
+        def total(q):
+            return mock(f'/library/sections/1/all?type=9&{q}&X-Plex-Token=t&X-Plex-Container-Size=0')['MediaContainer']['totalSize']
+
+        page.goto(APP + '#/tags/genre/9?title=Genres')
+        page.wait_for_selector('.view .rows .row')
+        counted = wait_for(lambda: all(page.locator('.view .rows .row .row-sub').all_inner_texts()), 8)
+        names = page.locator('.view .rows .row .row-title').all_inner_texts()
+        subs = page.locator('.view .rows .row .row-sub').all_inner_texts()
+        electronic = total('genre=electronic')
+        check('library: genres nothing has are left out, and each says how many albums have it', counted and 'Polka' not in names
+              and 'Electronic' in names and subs[names.index('Electronic')] == f'{electronic} albums', f'{names} {subs}')
+        page.locator('.view .rows .row', has_text='Electronic').click()
+        page.wait_for_selector('.grid .card')
+        check('library: a genre lists its albums', page.locator('.back-title').inner_text() == 'Electronic'
+              and wait_for(lambda: page.locator('.list-count').inner_text() == f'{electronic} albums', 5), page.locator('.list-count').inner_text())
+
+        # Searching within it: a decade, then a mood, each with how many albums.
+        page.fill('.within input', '2020')
+        page.wait_for_selector('.within-option', timeout=8000)
+        both = total('genre=electronic&decade=2020')
+        option = page.locator('.within-option').first.inner_text().replace('\n', ' ')
+        check('library: searching within a genre offers a decade, with how many albums', '2020s' in option and f'Decade · {both} albums' in option, option)
+        shot(page, 'library-02-within')
+        page.locator('.within-option').first.click()
+        page.wait_for_selector('.filter-chip')
+        page.wait_for_timeout(500)
+        check('library: ...and narrows the list to both', page.locator('.back-title').inner_text() == 'Electronic · 2020s'
+              and page.locator('.filter-chip').all_inner_texts() == ['Electronic', '2020s']
+              and wait_for(lambda: page.locator('.list-count').inner_text() == f'{both} albums', 5), page.locator('.back-title').inner_text())
+        page.fill('.within input', 'calm')
+        page.wait_for_selector('.within-option:has-text("Mood")', timeout=8000)
+        page.locator('.within-option', has_text='Mood').first.click()
+        page.wait_for_selector('.filter-chip >> nth=2')
+        three = total('genre=electronic&decade=2020&mood=calm')
+        check('library: ...and narrows again with a mood', page.locator('.back-title').inner_text() == 'Electronic · 2020s · Calm'
+              and wait_for(lambda: page.locator('.list-count').inner_text() == f'{three} album{"" if three == 1 else "s"}', 5), page.locator('.list-count').inner_text())
+        shot(page, 'library-03-narrowed')
+        page.locator('.filter-chip', has_text='Electronic').click()
+        page.wait_for_timeout(800)
+        two = total('decade=2020&mood=calm')
+        check('library: a filter can be taken off', page.locator('.back-title').inner_text() == '2020s · Calm'
+              and wait_for(lambda: page.locator('.list-count').inner_text() == f'{two} album{"" if two == 1 else "s"}', 5), page.locator('.list-count').inner_text())
+        page.fill('.within input', 'zzzz')
+        page.wait_for_selector('.within-none', timeout=8000)
+        check('library: nothing offered when nothing would be left', page.locator('.within-option').count() == 0)
+        page.goto(APP + '#/browse/albums')
+        page.wait_for_selector('.grid .card')
+        page.fill('.within input', 'tidal')
+        page.wait_for_selector('.within-option:has-text("tidal")', timeout=8000)
+        page.locator('.within-option', has_text='tidal').click()
+        page.wait_for_timeout(800)
+        check('library: words in the title narrow a list too', page.locator('.grid .card .card-title').all_inner_texts() == ['Tidal Lines'],
+              str(page.locator('.grid .card .card-title').all_inner_texts()))
+
+        # A playlist, a collection or a mix (an artist's page) into the queue.
+        play_first_album_track(page, APP, album=0, track=0)
+        fav = next(p for p in mock('/playlists?X-Plex-Token=t')['MediaContainer']['Metadata'] if p['title'] == 'Favourite tracks')
+        page.goto(APP + f'#/playlist/{fav["ratingKey"]}')
+        page.wait_for_selector('.hero-album')
+        before = player(page, 'p.queue.length')
+        sheet_action(page, '.back-head button[aria-label="More options"]', 'Add to queue')
+        check('library: a playlist\'s menu adds it to the queue', wait_for(lambda: player(page, 'p.queue.length') == before + fav['leafCount'], 5)
+              and page.locator('.toast', has_text=f'Added {fav["leafCount"]} tracks to the queue').count() > 0, player(page, 'p.queue.length'))
+        sheet_action(page, '.back-head button[aria-label="More options"]', 'Play next')
+        first = mock(f'/playlists/{fav["ratingKey"]}/items?X-Plex-Token=t&X-Plex-Container-Size=1')['MediaContainer']['Metadata'][0]['ratingKey']
+        check('library: ...or plays it next', wait_for(lambda: player(page, 'p.queue[p.index + 1] && p.queue[p.index + 1].id') == str(first), 5))
+        page.goto(APP + '#/artist/101')
+        page.wait_for_selector('.back-head button[aria-label="More options"]')
+        page.click('.back-head button[aria-label="More options"]')
+        page.wait_for_selector('.sheet.open')
+        artist_menu = page.locator('.sheet.open .sheet-action').all_inner_texts()
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(400)
+        cols = mock('/library/sections/1/collections?X-Plex-Token=t')['MediaContainer']['Metadata']
+        page.goto(APP + f'#/collection/{cols[0]["ratingKey"]}')
+        page.wait_for_selector('.back-head button[aria-label="More options"]')
+        page.click('.back-head button[aria-label="More options"]')
+        page.wait_for_selector('.sheet.open')
+        col_menu = page.locator('.sheet.open .sheet-action').all_inner_texts()
+        page.keyboard.press('Escape')
+        check('library: mixes (artists) and collections can be added to the queue too',
+              all(any(a in x for x in m) for m in (artist_menu, col_menu) for a in ('Play next', 'Add to queue')), f'{artist_menu} {col_menu}')
+        player(page, 'p.pause()')
         ctx.close()
 
     # ---------- edit: the queue, playlists and collections ----------
@@ -1374,6 +1531,9 @@ with sync_playwright() as pw:
               player(dan, 'p.state'))
         status = dan.locator('.together-status').inner_text()
         check('together: status line', status.strip().startswith('Live') and 'null' not in status and 'host' in status, status)
+        buttons = dan.locator('.together-people .together-actions button').all_inner_texts()
+        check('together: the session\'s buttons are together, by Invite friends',
+              buttons == ['Invite friends', 'Copy link', 'Leave', 'End for everyone'] and dan.locator('.together-session > .together-actions').count() == 0, str(buttons))
 
         sam_ctx = browser.new_context(**MOBILE)
         sam = sam_ctx.new_page()

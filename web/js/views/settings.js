@@ -3,7 +3,7 @@ import { APP_INFO, PlexServer, listServers, pickConnection, clientId, canPlayCod
 import { navigate, clearViewCache, describeError, dropCached } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
-import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, chat, parseReply, describeAIError } from '../ai.js';
+import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
@@ -492,8 +492,8 @@ function aiSummary() {
   const t = aiTarget(s);
   if (s.mode === 'off') return 'Off';
   if (!t) return 'Not set up';
-  if (!t.model) return t.kind === 'shared' ? 'Shared model, none chosen' : 'Your Ollama, no model chosen';
-  return t.kind === 'shared' ? `Shared model: ${t.model}` : `Your Ollama: ${t.model}`;
+  if (t.kind === 'shared') return t.model ? `On: ${t.model}` : 'On';
+  return t.model ? `Your Ollama: ${t.model}` : 'Your Ollama, no model chosen';
 }
 
 function saveAI(patch) {
@@ -504,29 +504,28 @@ function saveAI(patch) {
 const gb = (bytes) => (bytes ? `${(bytes / 1e9).toFixed(1)} GB` : '');
 
 function aiView({ el }) {
-  const shared = sharedAI();
+  el.append(backHeader('AI', { fallback: '/settings' }));
+  // A model shared by this player is the only one used: its name and whether
+  // it's ready are all that's shown of the AI server.
+  if (sharedAI()) return sharedAIView(el);
   const settings = aiSettings();
-  const effective = settings.mode === 'auto' ? (shared ? 'shared' : '') : settings.mode;
-
-  const options = [];
-  if (shared) {
-    options.push(['shared', 'Shared model from this app', shared.model ? `Set up by whoever runs this app. Uses ${shared.model} unless you choose another below.` : 'Set up by whoever runs this app.']);
-  }
-  options.push(['custom', 'My own Ollama server', 'An Ollama server this device can reach, such as one on this computer.']);
-  options.push(['off', 'Off', 'Hide AI features on this device.']);
+  const effective = settings.mode === 'custom' ? 'custom' : 'off';
+  const options = [
+    ['custom', 'My own Ollama server', 'An Ollama server this device can reach, such as one on this computer.'],
+    ['off', 'Off', 'Hide AI features on this device.'],
+  ];
 
   const customBox = h('div.ai-custom');
   const modelBox = h('div.ai-models');
 
   el.append(
-    backHeader('AI', { fallback: '/settings' }),
     h('p.lede', null, 'AI playlists and the AI DJ use a model running on your own hardware through Ollama. These settings apply to this device.'),
     h('div.section-head', null, h('h2', null, 'Where the model runs')),
     radioRows('Where the model runs', options, effective, (v) => {
       saveAI({ mode: v });
       render();
     }),
-    h('p.hint.pad', { hidden: !!shared }, 'This app has no shared model. Whoever runs it can add one with the OLLAMA_URL setting.'),
+    h('p.hint.pad', null, 'This player has no shared model. Whoever runs it can add one with the OLLAMA_URL setting.'),
     customBox,
     modelBox,
     notesSection(),
@@ -535,17 +534,17 @@ function aiView({ el }) {
 
   function render() {
     const s = aiSettings();
-    const mode = s.mode === 'auto' ? (shared ? 'shared' : '') : s.mode;
+    const mode = s.mode === 'custom' ? 'custom' : '';
     customBox.replaceChildren(...(mode === 'custom' ? customForm(s) : []));
     modelBox.replaceChildren();
-    if (mode === 'shared' || (mode === 'custom' && s.url)) loadModels();
+    if (mode === 'custom' && s.url) loadModels();
   }
 
   function customForm(s) {
     const url = h('input', { type: 'url', placeholder: 'http://localhost:11434', autocomplete: 'url', value: s.url, required: true });
     const key = h('input', { type: 'password', placeholder: 'Optional', autocomplete: 'off', value: s.apiKey });
     const insecure = () => location.protocol === 'https:' && /^http:\/\//i.test(url.value) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url.value);
-    const warn = h('p.hint.warn', { hidden: !insecure() }, 'This page is served over https, so the browser will block an http address unless it’s on this device (localhost). Use an https address, or the shared model.');
+    const warn = h('p.hint.warn', { hidden: !insecure() }, 'This page is served over https, so the browser will block an http address unless it’s on this device (localhost). Use an https address.');
     url.addEventListener('input', () => (warn.hidden = !insecure()));
     const form = h(
       'form.form',
@@ -598,7 +597,6 @@ function aiView({ el }) {
       status.textContent += ' Install one with “ollama pull”, for example ollama pull llama3.1:8b.';
       return;
     }
-    const key = target.kind === 'shared' ? 'sharedModel' : 'model';
     let current = target.model;
     if (current && !models.some((m) => m.name === current)) {
       status.textContent += ` The model “${current}” isn’t installed, so choose another.`;
@@ -608,61 +606,124 @@ function aiView({ el }) {
     modelBox.append(
       radioRows('Model', opts, current, (v) => {
         current = v;
-        saveAI({ [key]: v });
+        saveAI({ model: v });
         test.textContent = '';
       }),
-      h(
-        'div.pad.button-row',
-        null,
-        h(
-          'button.btn.btn-secondary',
-          {
-            type: 'button',
-            onclick: async (e) => {
-              const btn = e.currentTarget;
-              btn.disabled = true;
-              test.classList.remove('warn');
-              test.textContent = `Asking ${aiTarget().model}… The first request can take a while as the model loads.`;
-              try {
-                const r = await chat({
-                  messages: [{ role: 'user', content: 'Reply with {"ok": true} and nothing else.' }],
-                  schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
-                  temperature: 0,
-                  maxTokens: 20,
-                });
-                parseReply(r.content);
-                test.textContent = `It works. ${r.model} answered in ${r.seconds.toFixed(1)} s.`;
-              } catch (err) {
-                test.textContent = describeAIError(err);
-                test.classList.add('warn');
-              } finally {
-                btn.disabled = false;
-              }
-            },
-          },
-          icon('sparkle', 20),
-          h('span', null, 'Test the model'),
-        ),
-      ),
+      testButton(test),
       test,
     );
   }
+}
 
-  function notesSection() {
-    const area = h('textarea.notes', {
-      rows: 3,
-      maxlength: 500,
-      placeholder: 'For example: I love 90s trip-hop and dub; skip live recordings and Christmas music.',
-    });
-    area.value = aiSettings().notes;
-    area.addEventListener('input', debounce(() => saveAI({ notes: area.value }), 400));
-    return h(
-      'div',
+// The shared model: its name, whether it's ready, a test, and AI on or off
+// on this device. Which model is used is up to whoever runs this player.
+function sharedAIView(el) {
+  const on = aiSettings().mode !== 'off';
+  const name = h('span', null, sharedAI().model || '…');
+  const status = h('p.hint.pad', { role: 'status' });
+  const test = h('p.hint.pad', { role: 'status' });
+  const box = h(
+    'div.ai-shared',
+    { hidden: !on },
+    h('div.section-head', null, h('h2', null, 'Model')),
+    h('div.rows', null, row({ lead: h('span.tile.tile-plain', null, icon('sparkle', 24)), title: name, subtitle: 'Set up by whoever runs this player', chevron: false, cls: 'ai-model-row' })),
+    status,
+    testButton(test),
+    test,
+  );
+  const notes = notesSection();
+  notes.hidden = !on;
+  el.append(
+    h('p.lede', null, 'AI playlists and the AI DJ use an AI model this player shares, running on its owner’s hardware through Ollama.'),
+    h(
+      'div.rows',
       null,
-      h('div.section-head', null, h('h2', null, 'Notes for the AI')),
-      h('label.field.pad', null, h('span', null, 'Anything the AI should know about your taste. Used for AI playlists and the AI DJ.'), area),
-    );
+      toggleRow({
+        title: 'AI features',
+        subtitle: 'AI playlists and the AI DJ on this device.',
+        checked: on,
+        onChange: (v) => {
+          saveAI({ mode: v ? 'auto' : 'off' });
+          box.hidden = !v;
+          notes.hidden = !v;
+          if (v) check();
+        },
+      }),
+    ),
+    box,
+    notes,
+  );
+  if (on) check();
+
+  async function check() {
+    status.classList.remove('warn');
+    status.textContent = 'Checking…';
+    try {
+      const st = await sharedStatus();
+      if (st?.model) name.textContent = st.model;
+      if (st?.ready) status.textContent = 'Ready.';
+      else if (st?.problem === 'not-installed') status.textContent = `“${st.model}” isn’t installed on the AI server yet.`;
+      else if (st?.problem === 'no-model') status.textContent = 'The AI server has no models installed yet.';
+      else status.textContent = 'The AI server isn’t answering right now.';
+      status.classList.toggle('warn', !st?.ready);
+    } catch (err) {
+      status.textContent = describeAIError(err);
+      status.classList.add('warn');
+    }
   }
+}
+
+function testButton(out) {
+  return h(
+    'div.pad.button-row',
+    null,
+    h(
+      'button.btn.btn-secondary',
+      {
+        type: 'button',
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          out.classList.remove('warn');
+          const model = aiTarget()?.model;
+          out.textContent = `Asking ${model || 'the model'}… The first request can take a while as the model loads.`;
+          try {
+            const r = await chat({
+              messages: [{ role: 'user', content: 'Reply with {"ok": true} and nothing else.' }],
+              schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+              temperature: 0,
+              maxTokens: 20,
+            });
+            parseReply(r.content);
+            out.textContent = `It works. ${r.model} answered in ${r.seconds.toFixed(1)} s.`;
+          } catch (err) {
+            out.textContent = describeAIError(err);
+            out.classList.add('warn');
+          } finally {
+            btn.disabled = false;
+          }
+        },
+      },
+      icon('sparkle', 20),
+      h('span', null, 'Test the model'),
+    ),
+  );
+}
+
+function notesSection() {
+  const area = h('textarea.notes', {
+    rows: 3,
+    maxlength: 500,
+    placeholder: 'For example: I love 90s trip-hop and dub; skip live recordings and Christmas music.',
+  });
+  area.value = aiSettings().notes;
+  area.addEventListener('input', debounce(() => saveAI({ notes: area.value }), 400));
+  return h(
+    'div',
+    null,
+    h('div.section-head', null, h('h2', null, 'Notes for the AI')),
+    h('label.field.pad', null, h('span', null, 'Anything the AI should know about your taste. Used for AI playlists and the AI DJ.'), area),
+  );
 }
 
 // ---------- About ----------

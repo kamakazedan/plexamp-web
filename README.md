@@ -67,6 +67,15 @@ Added in 0.8.0. Your devices share what's playing through the container's servic
 - **No tokens between devices.** A device that takes over plays from the server with its own sign-in, and only Plex's ids and paths are passed along.
 - **Checked on the way in.** Tracks are reduced to the fields the app needs, ids must be numbers, and file and artwork paths must have Plex's own shape, so one device can't point another at a website or another part of the server. Commands come from a fixed list (play, pause, skip, seek, volume, shuffle, repeat, and changes to the queue), with every value checked. Requests are limited per account, and bodies to 512 KB.
 
+### Safeguards in the shared AI model
+
+Changed in 0.9.0. Browsers reach the model only through the container's service (see [Shared: one Ollama for everyone](#shared-one-ollama-for-everyone)), which:
+
+- checks every request's Plex sign-in: with `PLEX_SERVER_URL` set, only people who can use your Plex server get through;
+- passes on chats only, with the fields the app uses, each checked, and always on the model in `OLLAMA_MODEL`;
+- never shows the AI server's other models, its version or its settings;
+- keeps the API key (`OLLAMA_API_KEY`) to itself: it goes to Ollama only, never to browsers or the log.
+
 ### Safeguards in editing playlists and collections
 
 Added in 0.6.0. Changes go to your Plex server with your own token, so Plex decides what you may change: your own playlists, and collections only if you own the server. The app only offers collection editing to the server's owner.
@@ -95,18 +104,18 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 ## Features
 
 - **Home**: sections you choose and order for each library (see below), including **Collections**, shown just like Recent playlists. There's a quick library switcher too.
-- **Search**: live results, and browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Also recent searches, top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
+- **Search**: live results (one tap on × clears them), and browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Any list can be searched within: in the 1990s, type "rock" to narrow it to rock albums from the 1990s, then "calm" for a mood, and take each filter off again with a tap. Also recent searches, top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
 - **Playlists tab**: all your music playlists, with ❤️ Tracks first.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
 - **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
 - **❤️ Tracks**: tracks you give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out when they lose that rating, as in Plexamp. If yours is Plexamp's own (a smart playlist), Plex keeps it up to date itself.
 - **Now Playing**: big artwork, a seek bar drawn from your server's loudness analysis, ratings that save to Plex, the file format and quality, an Up next queue (with **Move to top**), Guest DJ, shuffle, repeat and a sleep timer. A volume slider with a percentage and marks at 25, 50 and 75%. Optional playback speed and skip buttons.
-- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, remove, rename, delete. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
+- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, remove, rename, delete. A playlist's, collection's or artist's menu can also play it next or add it to the queue. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
 - **Collections**, for the server's owner: the same editing, and adding tracks, albums or artists, including a playlist's tracks or the queue.
 - **Play on**: play on another Plex player on your network (Plexamp on a Raspberry Pi, say) with this app as the remote, or on AirPlay and Google Cast speakers where the browser supports them. See [Play on](#play-on).
 - **Your devices**: open the player on your phone while your computer plays, and the phone shows what's playing and controls it. **Listen here** moves the music to the device in your hand, from the same spot. See [Your devices](#your-devices).
 - **Play Together**: listen in sync with Plex friends. Everyone hears the same track at the same moment, and anyone in the session can play, pause, skip, seek, and change the queue.
-- **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, which you can play or save to Plex.
+- **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, keeping to what you asked for ("best of The Prodigy" is just The Prodigy). Play it, add it to the queue, or save it to a playlist or collection in Plex.
 - **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys). The AI DJ uses your Ollama model to pick each next track and introduce it.
 - **Live updates**: new music, playlist changes and ratings from other Plex apps appear without reloading. Works with or without WebSockets (see [Behind a work proxy](#behind-a-work-proxy)).
 - **Playback**: gapless playback, and crossfades like Plexamp's: **Smart** crossfade uses your server's loudness analysis to fade into the next track where the music really ends, so silence at the end of a track doesn't leave a gap, and plays tracks that follow each other on an album gaplessly (see [Good to know](#good-to-know) for the Plex setting it needs). Also lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
@@ -138,8 +147,8 @@ All optional. Set them as environment variables on the container.
 | --- | --- | --- |
 | `PLEX_SERVER_URL` | `http://192.168.1.10:32400` | Proxies that Plex server at `/pms/`, adds "Server set up for this app" to the server list, and gives the app a route to the server when its local address doesn't work in the browser. `https://` works too. |
 | `DISABLE_WEBSOCKETS` | `true` | The app never opens a WebSocket. Live updates use Plex's event stream, or check every minute. |
-| `OLLAMA_URL` | `http://192.168.1.20:11434` | Shares that Ollama server with everyone who uses the app, through `/ollama/`. |
-| `OLLAMA_MODEL` | `llama3.1:8b` | The shared model people get unless they choose another installed one. |
+| `OLLAMA_URL` | `http://192.168.1.20:11434` | Shares a model on that Ollama server with the people who use the app (see [Shared: one Ollama for everyone](#shared-one-ollama-for-everyone)). |
+| `OLLAMA_MODEL` | `llama3.1:8b` | The one model the app uses. Its other models can't be used or seen. If it isn't set, the first model installed is used. |
 | `OLLAMA_API_KEY` | | Sent as a bearer token, for an Ollama behind a proxy that asks for one. Never reaches browsers. |
 | `OLLAMA_AUTH` | `plex` (default) or `off` | Who may use the shared model: `plex` means signed-in Plex users (see below), `off` means anyone who can open the app. |
 | `PLAY_TOGETHER` | `true` (default) or `false` | Play Together and its tab. |
@@ -235,7 +244,11 @@ Both use a model on your own hardware through [Ollama](https://ollama.com); noth
 
 Playlists are built in two passes so they only contain music you have. First the model picks genres, styles, moods, artists and songs that fit your description, chosen from tags your library actually uses. The app then finds matching tracks on your Plex server, and finally the model chooses and orders tracks from that list.
 
-There are two ways to connect. Each device chooses in **Settings → AI**.
+Every request asks the model to keep to what you asked for, and to be creative within it. The app checks too, because small models drift: a playlist about particular artists ("best of The Prodigy", "Daft Punk deep cuts") is built only from those artists' tracks, best known first, and is shorter rather than padded with other artists if they don't have enough. "Music like The Prodigy" is mostly them, with similar artists. An era you name ("90s") holds for the artists' tracks too.
+
+A finished playlist can be played, shuffled, added to the queue, or saved to Plex: as a new playlist, into one of yours, or (for the server's owner) into a collection.
+
+There are two ways to connect.
 
 ### Shared: one Ollama for everyone
 
@@ -266,17 +279,18 @@ volumes:
 
 Then install the model once: `docker compose exec ollama ollama pull llama3.1:8b`.
 
-Browsers only ever talk to the player's own address, so this works from anywhere the player does (a work network included), and Ollama needs no extra setup. The proxy is locked down:
+Browsers only ever talk to the player's own address, so this works from anywhere the player does (a work network included), and Ollama needs no extra setup. Requests go through the container's own service, which checks each one:
 
-- **Signed-in users only** (`OLLAMA_AUTH=plex`). Every request is checked with plex.tv. With `PLEX_SERVER_URL` set, only Plex accounts that can use that server get through: you, and the people you share it with. Without it, any signed-in Plex account is accepted.
-- **Only what the app needs** is passed on: listing models, the version and chat. Downloading, deleting or changing models through the player isn't possible.
-- **Rate-limited** per user, and the browser's Plex token, cookies and origin aren't forwarded to Ollama.
+- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app: **Settings → AI** shows the model's name, whether it's ready, and a test button, and nothing else about the AI server. Each device can still turn AI features off.
+- **People with access to your Plex server** (`OLLAMA_AUTH=plex`). Every request is checked with plex.tv. With `PLEX_SERVER_URL` set, Plex accounts that can use that server get through: you, and the friends you share it with. Without it, any signed-in Plex account is accepted. Anyone refused is told why in the app (the AI playlist page says so before they try), and the container log notes it, without names unless debug mode is on.
+- **Only chats** are passed on, with just the fields the app uses, each checked (the model's options within sensible limits). The AI server's other models, its version and its settings can't be reached through the player, and nothing can be downloaded, changed or deleted.
+- **Rate-limited** per user, at most two requests at a time each (six in all), and the browser's Plex token, cookies and origin aren't forwarded to Ollama. Closing the page or pressing **Stop** stops the model too.
 
 Ollama on the same machine as Docker works too: use `OLLAMA_URL: http://host.docker.internal:11434` (the bundled `docker-compose.yml` already maps that name on Linux), and start Ollama with `OLLAMA_HOST=0.0.0.0` so containers can reach it.
 
 ### On one device: your own Ollama
 
-In **Settings → AI**, choose **My own Ollama server** and enter its address, such as `http://localhost:11434` for Ollama on the same computer. The browser connects directly, so Ollama has to trust the player's address. Set this on the computer running Ollama and restart it (the settings page shows the exact value):
+Without a shared model, each device can use its own. In **Settings → AI**, choose **My own Ollama server** and enter its address, such as `http://localhost:11434` for Ollama on the same computer. The browser connects directly, so Ollama has to trust the player's address. Set this on the computer running Ollama and restart it (the settings page shows the exact value):
 
 ```sh
 OLLAMA_ORIGINS=https://music.example.com

@@ -1239,6 +1239,30 @@ a.hero-link:hover {
   outline: 1.5px solid rgba(255, 255, 255, 0.35);
 }
 
+/* The search's own clear button, in place of the browser's (which only
+   some browsers have). */
+.search-box.has-clear input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
+.search-box .search-clear {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  margin-right: -8px;
+  color: var(--muted);
+}
+
+.search-box .search-clear:hover {
+  color: #fff;
+}
+
+.search-box .search-clear[hidden] {
+  display: none;
+}
+
 .picker {
   margin-top: 22px;
 }
@@ -2463,6 +2487,42 @@ body.np-open #toasts {
   font-weight: 600;
 }
 
+/* A library list's filters (Electronic, 2020s), each removable. */
+.filter-chips {
+  flex-wrap: wrap;
+}
+
+.filter-chips[hidden] {
+  display: none;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 14px;
+  color: #fff;
+  cursor: pointer;
+}
+
+.filter-chip .ic {
+  color: var(--muted);
+}
+
+/* Searching within a library list: choices that narrow it. */
+.within-results {
+  margin-top: 6px;
+}
+
+.within-results[hidden] {
+  display: none;
+}
+
+.within-none {
+  margin: 10px var(--gutter);
+  color: var(--muted);
+}
+
 .ai-body {
   padding-bottom: 12px;
 }
@@ -2606,6 +2666,13 @@ body.np-open #toasts {
   justify-content: flex-start;
   flex-wrap: wrap;
   margin-bottom: 14px;
+}
+
+/* "That's every track by …": fewer tracks than asked for. */
+.ai-note {
+  margin: 6px 0 0;
+  font-size: calc(14px * var(--fs, 1));
+  color: var(--muted);
 }
 
 .ai-based {

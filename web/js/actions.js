@@ -22,6 +22,22 @@ export async function guard(fn) {
 
 const ctx = (title, href) => ({ title, href });
 
+// A whole list into the queue: next, or at the end (at most 1,000 tracks).
+const queueAll = (load, where) =>
+  guard(async () => {
+    const tracks = (await load()).slice(0, PLAYLIST_PLAY_LIMIT);
+    if (!tracks.length) return toast('There’s nothing to add.');
+    const playing = !!player.current;
+    if (where === 'next') player.playNext(tracks);
+    else player.addToQueue(tracks);
+    const n = fmt.count(tracks.length, 'track', 'tracks');
+    toast(!playing ? 'Playing' : where === 'next' ? `${n} playing next` : `Added ${n} to the queue`);
+  });
+const queueActions = (load) => [
+  { icon: 'playNext', label: 'Play next', onSelect: () => queueAll(load, 'next') },
+  { icon: 'addQueue', label: 'Add to queue', onSelect: () => queueAll(load, 'end') },
+];
+
 export function playList(tracks, start, context, opts = {}) {
   if (!tracks.length) return toast('There are no tracks to play.');
   player.playTracks(tracks, start, { context, ...opts });
@@ -230,6 +246,7 @@ export function artistMenu(artist) {
       { icon: 'play', label: 'Play', onSelect: () => playArtist(artist) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playArtist(artist, { shuffle: true }) },
       { icon: 'radio', label: 'Artist radio', onSelect: () => artistRadio(artist) },
+      ...queueActions(() => tracksOf([artist], { limit: PLAYLIST_PLAY_LIMIT })),
       { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: artist.title, load: () => tracksOf([artist]), suggest: artist.title }) },
       isAdminNow() && {
         icon: 'collection',
@@ -250,6 +267,7 @@ export function playlistMenu(pl, { edit = null } = {}) {
     actions: [
       { icon: 'play', label: 'Play', onSelect: () => playPlaylist(pl) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playPlaylist(pl, { shuffle: true }) },
+      ...queueActions(() => tracksOf([pl], { limit: PLAYLIST_PLAY_LIMIT })),
       { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: pl.title, load: tracks }) },
       isAdminNow() && {
         icon: 'collection',
@@ -271,6 +289,7 @@ export function collectionMenu(c, { edit = null } = {}) {
     actions: [
       { icon: 'play', label: 'Play', onSelect: () => playCollection(c) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playCollection(c, { shuffle: true }) },
+      ...queueActions(() => tracksOf([c], { limit: PLAYLIST_PLAY_LIMIT })),
       { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: c.title, load: () => tracksOf([c]), suggest: c.title }) },
       edit && { icon: 'edit', label: 'Rename…', onSelect: edit.onRename },
       edit && { icon: 'trash', label: 'Delete collection…', danger: true, onSelect: edit.onDelete },
