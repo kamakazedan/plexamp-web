@@ -26,15 +26,26 @@ for release in "${releases[@]}"; do
         set +a
         HTML_DIR=/opt/plexamp-web/html CONF_DIR=/etc/nginx/conf.d SERVICE_DIR=/opt/plexamp-web/app/server \
             RUN_DIR=/run/plexamp-web SERVICE_USER=www-data SERVICE_START=false sh /opt/plexamp-web/app/docker/40-plexamp-web.sh
-        node /opt/plexamp-web/app/server/index.js /run/plexamp-web/service.json &
+        node /opt/plexamp-web/app/server/index.js /run/plexamp-web/service.json >/tmp/service.log 2>&1 &
         nginx -t -q
         nginx
-        for _ in $(seq 1 40); do curl -fsS -o /dev/null http://127.0.0.1/api/health && break; sleep 0.5; done
-        echo "node $(node --version)"
+        for _ in $(seq 1 40); do curl -fs -o /dev/null http://127.0.0.1/api/health && break; sleep 0.5; done
+        echo "node $(node --version), $(nginx -v 2>&1)"
         expect() { # name, then a command that must succeed
             local name="$1"
             shift
-            if "$@" >/dev/null 2>&1; then echo "PASS $name"; else echo "FAIL $name"; exit 1; fi
+            if "$@" >/dev/null 2>&1; then
+                echo "PASS $name"
+            else
+                echo "FAIL $name"
+                echo "--- the service:"
+                cat /tmp/service.log
+                ls -la /run/plexamp-web
+                echo "--- nginx:"
+                tail -n 15 /var/log/nginx/error.log
+                grep -hE "^(Name|Uid|Gid):" /proc/[0-9]*/status 2>/dev/null | paste - - - | grep -E "nginx|node" || true
+                exit 1
+            fi
         }
         expect "the app is served" sh -c "curl -fsS http://127.0.0.1/ | grep -q \"<title>\""
         expect "settings reach the app" sh -c "curl -fsS http://127.0.0.1/config.js | grep -q \"websockets: false\""
@@ -60,7 +71,7 @@ for release in "${releases[@]}"; do
         echo "FAIL Debian $release"
         # The end of its output, on the run's summary page too.
         if [ -n "${GITHUB_ACTIONS:-}" ]; then
-            echo "::error title=Proxmox install test (Debian $release)::$(tail -n 40 "$LOG" | cut -c1-300 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{ printf "%s%%0A", $0 }')"
+            echo "::error title=Proxmox install test (Debian $release)::$(grep -v '^curl: ' "$LOG" | tail -n 60 | cut -c1-300 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{ printf "%s%%0A", $0 }')"
         fi
         FAILED=1
     fi
