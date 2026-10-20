@@ -77,8 +77,15 @@ jobs:
     needs: check
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # to move the stable branch (see the last step)
+      packages: write
     steps:
       - uses: actions/checkout@v4
+      - name: Read the version
+        id: version
+        run: |
+          echo "app=$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" web/js/plex.js)" >>"$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -92,6 +99,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.app }},enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=sha,format=short
       - uses: docker/build-push-action@v6
@@ -103,3 +111,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # The Proxmox install (proxmox/install.sh) and its updates take the app
+      # from this branch: the newest commit that passed every test, as the
+      # image just published was.
+      - name: Move the stable branch here
+        if: github.ref == 'refs/heads/main'
+        run: git push --force origin "HEAD:refs/heads/stable"

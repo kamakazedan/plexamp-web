@@ -22,6 +22,7 @@ import {
   fmt,
   pointOut,
   learned,
+  sheet,
 } from '../ui.js';
 import { albumCard, artistCard, trackRow, collectionCard, playlistArt } from '../components.js';
 import {
@@ -38,6 +39,7 @@ import {
   trackMenu,
 } from '../actions.js';
 import { isAdmin } from '../editing.js';
+import { sortChoices, sortedOrder, planMoves, restoreOrder, applyMoves } from '../sorting.js';
 
 function actionButtons(buttons) {
   return h(
@@ -300,15 +302,47 @@ function lockButton(label, onToggle) {
   };
 }
 
-function editBar(text, onDone) {
-  return h(
-    'div.edit-bar',
-    { hidden: true, role: 'status' },
-    icon('unlock', 20),
-    h('span.edit-bar-text', null, text),
-    h('button.btn.btn-primary.edit-done', { type: 'button', onclick: onDone }, 'Done'),
-  );
+// The bar over an unlocked list: what you can do, Sort, and Done. While a
+// sort is being saved it says how far it's got, with a Stop button.
+function editBar(text, { onDone, onSort }) {
+  const textEl = h('span.edit-bar-text', null, text);
+  const sortBtn = onSort ? h('button.btn.btn-secondary.edit-sort', { type: 'button', onclick: onSort }, icon('sort', 18), h('span', null, 'Sort')) : null;
+  const doneBtn = h('button.btn.btn-primary.edit-done', { type: 'button', onclick: onDone }, 'Done');
+  const actions = h('div.edit-bar-actions', null, sortBtn, doneBtn);
+  const el = h('div.edit-bar', { hidden: true, role: 'status' }, icon('unlock', 20), textEl, actions);
+  return {
+    el,
+    working(message, onStop) {
+      el.classList.add('busy');
+      textEl.textContent = message;
+      actions.replaceChildren(h('button.btn.btn-secondary.edit-stop', { type: 'button', onclick: onStop }, 'Stop'));
+    },
+    say(message) {
+      textEl.textContent = message;
+    },
+    idle() {
+      el.classList.remove('busy');
+      textEl.textContent = text;
+      actions.replaceChildren(...[sortBtn, doneBtn].filter(Boolean));
+    },
+  };
 }
+
+// "Sort by": the ways a list of tracks, albums or artists can be sorted.
+function chooseSort(kind, title, onPick) {
+  const icons = { artist: 'mic', title: kind === 'album' ? 'disc' : 'note', album: 'disc', year: 'calendar', reverse: 'arrowUp' };
+  sheet({
+    title: 'Sort by',
+    subtitle: `“${title}” is saved to Plex in its new order.`,
+    actions: sortChoices(kind).map(([by, label]) => ({ icon: icons[by] || 'sort', label, onSelect: () => onPick(by, label) })),
+  });
+}
+
+// What a sort says while it's saved, and after.
+const sortWords = (by, label) =>
+  by === 'reverse' ? ['Reversing the order', 'Reversed'] : [`Sorting by ${label.toLowerCase()}`, `Sorted by ${label.toLowerCase()}`];
+
+const SORT_LIMIT = 5000; // entries; longer lists aren't sorted here
 
 // The remove button and drag handle on a row in an unlocked list.
 function addEditControls(r, label, onRemove) {
@@ -371,8 +405,11 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
   const list = h('div.tracks');
-  const bar = editBar('Drag a track to move it, or remove it. Changes are saved to Plex as you go; the tracks stay in your library.', () => setEditing(false));
-  el.append(bar, list);
+  const bar = editBar('Drag a track to move it, or remove it. Changes are saved to Plex as you go; the tracks stay in your library.', {
+    onDone: () => setEditing(false),
+    onSort: () => chooseSort('track', pl.title, (by, label) => sortBy(by, label)),
+  });
+  el.append(bar.el, list);
 
   const rows = () => [...list.children].filter((r) => r.matches('.track'));
   const setCount = (n) => {
@@ -416,7 +453,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     editing = on;
     el.classList.toggle('is-editing', on);
     list.classList.toggle('editing', on);
-    bar.hidden = !on;
+    bar.el.hidden = !on;
     lock?.set(on);
     rows().forEach(controls);
     if (on) {
@@ -538,13 +575,88 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     }
   }
 
-  pager = pagedList(list, {
-    pageSize: 100,
-    fetchPage: (start, size) => s.playlistItems(pl.ratingKey, { start, size }),
-    render: (m) => rowFor(m),
-    empty: 'This playlist is empty.',
-    onDispose,
-  });
+  // ---------- sorting ----------
+  // The new order is worked out from every entry, then saved with the
+  // fewest moves (see sorting.js). Undo puts it back the same way.
+
+  let sorting = null;
+
+  async function allEntries() {
+    const out = [];
+    for (let start = 0; ; start += 500) {
+      const { items, total: t } = await s.playlistItems(pl.ratingKey, { start, size: 500 });
+      out.push(...items);
+      if (out.length > SORT_LIMIT) throw Object.assign(new Error(`Playlists of more than ${fmt.number(SORT_LIMIT)} tracks can’t be sorted here.`), { tooLong: true });
+      if (!items.length || start + items.length >= t) break;
+    }
+    return out;
+  }
+
+  // makeTarget(entries) gives the entries' ids (playlistItemID) in the
+  // order wanted.
+  async function reorder(makeTarget, [doing, done]) {
+    if (sorting) return;
+    const ctrl = new AbortController();
+    sorting = ctrl;
+    busy(true);
+    bar.working(`${doing}…`, () => ctrl.abort());
+    let before = null;
+    try {
+      const entries = await allEntries();
+      before = entries.map((m) => String(m.playlistItemID));
+      const moves = planMoves(before, makeTarget(entries));
+      if (!moves.length) {
+        toast('It’s in that order already.');
+        return;
+      }
+      const made = await applyMoves(moves, (id, after) => s.movePlaylistItem(pl.ratingKey, id, after), {
+        signal: ctrl.signal,
+        onProgress: (n, of) => bar.say(`${doing}… ${n} of ${of} moved`),
+      });
+      changed();
+      reload();
+      const undo = { action: 'Undo', onAction: () => reorder((now) => restoreOrder(now.map((m) => String(m.playlistItemID)), before), ['Putting it back', 'Put back']), timeout: 8000 };
+      toast(made < moves.length ? 'Stopped, part way through.' : done, undo);
+    } catch (err) {
+      toast(err?.tooLong ? err.message : failMessage(err, 'playlist'));
+      if (before) reload();
+    } finally {
+      sorting = null;
+      busy(false);
+      bar.idle();
+    }
+  }
+
+  // While a new order is saved: the list waits, the lock stays as it is, and
+  // live updates don't reload the page under it.
+  function busy(on) {
+    list.classList.toggle('sorting', on);
+    el.classList.toggle('is-sorting', on);
+    if (lock) lock.el.disabled = on;
+  }
+
+  function sortBy(by, label) {
+    reorder((entries) => sortedOrder(entries, by).map((m) => String(m.playlistItemID)), sortWords(by, label));
+  }
+
+  function showList() {
+    pager = pagedList(list, {
+      pageSize: 100,
+      fetchPage: (start, size) => s.playlistItems(pl.ratingKey, { start, size }),
+      render: (m) => rowFor(m),
+      empty: 'This playlist is empty.',
+      onDispose,
+    });
+  }
+
+  // The list again, from the top, as Plex now has it.
+  function reload() {
+    pager?.destroy();
+    list.replaceChildren();
+    showList();
+  }
+
+  showList();
 }
 
 // ---------- Collection ----------
@@ -577,11 +689,12 @@ export async function collectionView({ el, params, onHide }) {
     h('section.hero.hero-album', null, art(meta.thumb || meta.composite, { size: 480, cls: 'hero-art', fallback: 'list' }), h('div.hero-info', null, title, countEl, buttons)),
   );
   collapseWhenHidden(head, title);
-  const bar = editBar('Drag to change the order, or remove what doesn’t belong. Changes are saved to Plex as you go; nothing leaves your library.', () =>
-    setEditing(false),
-  );
+  const bar = editBar('Drag to change the order, or remove what doesn’t belong. Changes are saved to Plex as you go; nothing leaves your library.', {
+    onDone: () => setEditing(false),
+    onSort: () => chooseSort(meta.subtype || 'album', meta.title, (by, label) => sortBy(by, label)),
+  });
   const body = h('div.collection-body');
-  el.append(bar, body);
+  el.append(bar.el, body);
   const changed = () => dropCached((p) => p === '/' || p === '/search' || p.startsWith('/browse/collections'));
   const setCount = () => {
     countEl.textContent = fmt.count(items.length, 'item', 'items');
@@ -635,7 +748,7 @@ export async function collectionView({ el, params, onHide }) {
   function setEditing(on) {
     editing = on;
     el.classList.toggle('is-editing', on);
-    bar.hidden = !on;
+    bar.el.hidden = !on;
     lock?.set(on);
     if (on) {
       learned('lock');
@@ -739,6 +852,65 @@ export async function collectionView({ el, params, onHide }) {
     } catch (err) {
       toast(failMessage(err, 'collection'));
     }
+  }
+
+  // ---------- sorting (see the playlist's) ----------
+
+  let sorting = null;
+
+  // makeTarget(items) gives the items' ids in the order wanted.
+  async function reorder(makeTarget, [doing, done]) {
+    if (sorting) return;
+    const ctrl = new AbortController();
+    sorting = ctrl;
+    busy(true);
+    bar.working(`${doing}…`, () => ctrl.abort());
+    let before = null;
+    try {
+      // A collection keeps an order of its own only when sorted "custom".
+      // Its custom order can differ from the one it was showing, so the
+      // moves are worked out from the order Plex has once it's custom.
+      if (meta.collectionSort !== 2) {
+        await s.customOrder(meta.ratingKey);
+        meta.collectionSort = 2;
+      }
+      const { items: now } = await s.collection(meta.ratingKey);
+      if (now.length > SORT_LIMIT) throw Object.assign(new Error(`Collections of more than ${fmt.number(SORT_LIMIT)} items can’t be sorted here.`), { tooLong: true });
+      before = now.map((m) => String(m.ratingKey));
+      const target = makeTarget(now);
+      const moves = planMoves(before, target);
+      if (moves.length) {
+        const made = await applyMoves(moves, (id, after) => s.moveCollectionItem(meta.ratingKey, id, after), {
+          signal: ctrl.signal,
+          onProgress: (n, of) => bar.say(`${doing}… ${n} of ${of} moved`),
+        });
+        changed();
+        const undo = { action: 'Undo', onAction: () => reorder((list2) => restoreOrder(list2.map((m) => String(m.ratingKey)), before), ['Putting it back', 'Put back']), timeout: 8000 };
+        toast(made < moves.length ? 'Stopped, part way through.' : done, undo);
+      } else {
+        toast('It’s in that order already.');
+      }
+      items = (await s.collection(meta.ratingKey)).items;
+    } catch (err) {
+      toast(err?.tooLong ? err.message : failMessage(err, 'collection'));
+    } finally {
+      sorting = null;
+      busy(false);
+      bar.idle();
+      setCount();
+      if (editing) renderEditing();
+      else renderLocked();
+    }
+  }
+
+  function busy(on) {
+    list.classList.toggle('sorting', on);
+    el.classList.toggle('is-sorting', on);
+    if (lock) lock.el.disabled = on;
+  }
+
+  function sortBy(by, label) {
+    reorder((now) => sortedOrder(now, by).map((m) => String(m.ratingKey)), sortWords(by, label));
   }
 
   setCount();

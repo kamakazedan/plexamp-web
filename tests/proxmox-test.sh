@@ -84,12 +84,13 @@ case "$create" in
     *) fail "the container: $create" ;;
 esac
 calls | grep -q '^pveam download local debian-13-standard_13.1-2_amd64.tar.zst$' && pass "downloads the newest Debian template" || fail "template download: $(calls | grep pveam)"
-expected="$(printf '%s\n' '# plexamp-web settings (the same as the Docker image'"'"'s; see the README).' '# After a change: systemctl restart plexamp-web-config nginx plexamp-web' \
-    'PLEX_SERVER_URL=http://192.168.1.10:32400' 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b')"
+expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'"'"'s (see "Container' '# settings" in the README). Change them with: plexamp-web-settings' \
+    'PLEX_SERVER_URL=http://192.168.1.10:32400' 'DISABLE_WEBSOCKETS=' 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b' \
+    'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'DEBUG=')"
 [ "$(cat "$T/pushed/plexamp-web.env" 2>/dev/null)" = "$expected" ] && pass "writes the settings" || fail "settings: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
 calls | grep -q -- '^pct push 123 .*/plexamp-web.env /etc/plexamp-web/plexamp-web.env --perms 600$' && pass "settings readable by root only" || fail "settings permissions: $(calls | grep push)"
 cmp -s "$T/pushed/install-plexamp-web.sh" "$ROOT/proxmox/install.sh" && pass "copies in the installer" || fail "the installer wasn't copied in"
-calls | grep -q '^pct exec 123 -- env PW_REPO=kamakazedan/plexamp-web PW_REF=main bash /root/install-plexamp-web.sh$' && pass "runs the installer" || fail "installer run: $(calls | grep install)"
+calls | grep -q '^pct exec 123 -- env LC_ALL=C.UTF-8 PW_REPO=kamakazedan/plexamp-web PW_REF=stable bash /root/install-plexamp-web.sh$' && pass "runs the installer, for the stable branch" || fail "installer run: $(calls | grep install)"
 grep -q 'plexamp-web is ready: http://10.0.0.5/' "$T/out" && pass "says where to find it" || fail "address: $(tail -3 "$T/out")"
 
 # ---------- a fixed address, another storage, a template already there ----------
@@ -104,6 +105,35 @@ case "$create" in
     *) fail "settings from the environment: $create $(tail -3 "$T/out")" ;;
 esac
 calls | grep -q '^pveam download' && fail "downloaded a template it had" || pass "no download when there's a template"
+
+# ---------- asking (in a terminal) ----------
+
+# Declining the defaults asks about each setting; Enter keeps a suggestion.
+reset
+if command -v script >/dev/null 2>&1; then
+    printf 'n\n\nmusic\ntank\n2\n\n\n\n192.168.1.60/24\n192.168.1.1\nhttp://192.168.1.10:32400\n\n\n' |
+        env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" TERM=dumb PW_INSTALL_SCRIPT="$ROOT/proxmox/install.sh" \
+            script -qec "bash $(printf '%q' "$SCRIPT")" /dev/null >"$T/out" 2>&1 || true
+    create="$(calls | grep '^pct create' || true)"
+    case "$create" in
+        "pct create 123 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst --hostname music --cores 2 --memory 512 --swap 512 --rootfs tank:4 --net0 name=eth0,bridge=vmbr0,ip=192.168.1.60/24,gw=192.168.1.1 "*)
+            pass "asks about each setting when the defaults are declined" ;;
+        *) fail "asking: $create $(tail -5 "$T/out" | tr -d '\r')" ;;
+    esac
+    grep -qx 'PLEX_SERVER_URL=http://192.168.1.10:32400' "$T/pushed/plexamp-web.env" 2>/dev/null && pass "a Plex address given when asked reaches the settings" ||
+        fail "asked settings: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
+    reset
+    printf '\n\n' | env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" TERM=dumb PW_INSTALL_SCRIPT="$ROOT/proxmox/install.sh" \
+        script -qec "bash $(printf '%q' "$SCRIPT")" /dev/null >"$T/out" 2>&1 || true
+    calls | grep -q '^pct create 123 .* --hostname plexamp-web --cores 1 --memory 512 --swap 512 --rootfs local-lvm:4 --net0 name=eth0,bridge=vmbr0,ip=dhcp ' &&
+        pass "Enter twice makes it with the default settings" || fail "defaults in a terminal: $(calls | grep create) $(tail -5 "$T/out" | tr -d '\r')"
+    reset
+    printf '\nn\n' | env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" TERM=dumb PW_INSTALL_SCRIPT="$ROOT/proxmox/install.sh" \
+        script -qec "bash $(printf '%q' "$SCRIPT")" /dev/null >"$T/out" 2>&1 || true
+    if calls | grep -q '^pct create'; then fail "answering no to \"Make it?\" made a container"; else pass "answering no to \"Make it?\" makes nothing"; fi
+else
+    echo "SKIP asking: no script(1) here"
+fi
 
 # ---------- what it refuses ----------
 

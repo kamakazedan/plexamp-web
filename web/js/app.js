@@ -13,6 +13,7 @@ import { browseView, playlistsView, tagsView, itemsView } from './views/library.
 import { albumView, artistView, playlistView, collectionView } from './views/detail.js';
 import { searchView, topView, sonicPathView } from './views/search.js';
 import { aiPlaylistView } from './views/aiplaylist.js';
+import { appearsInView } from './views/appearsin.js';
 import { live } from './live.js';
 import './dj.js';
 import { settingsView, settingsPageView, sourceView } from './views/settings.js';
@@ -53,6 +54,7 @@ route('/album/:id', needsSource(albumView));
 route('/artist/:id', needsSource(artistView));
 route('/playlist/:id', needsSource(playlistView));
 route('/collection/:id', needsSource(collectionView));
+route('/appears/:id', needsSource(appearsInView));
 route('/search', needsSource(searchView), { tab: 'search' });
 route('/top/:kind', needsSource(topView), { tab: 'search' });
 route('/sonic-path', needsSource(sonicPathView), { tab: 'search' });
@@ -192,7 +194,7 @@ function hideBanner() {
 // user: they're near the top and nothing is open over it.
 function refreshIfIdle(test) {
   const { path } = parseHash();
-  if (!test(path) || window.scrollY > 150 || overlayDepth() || document.querySelector('.ai-progress, .view.is-editing')) return;
+  if (!test(path) || window.scrollY > 150 || overlayDepth() || document.querySelector('.ai-progress, .view.is-editing, .view.is-sorting')) return;
   refresh();
 }
 

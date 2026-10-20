@@ -373,6 +373,14 @@ if [ "$SERVICE" = true ]; then
 }
 JSON
     chmod 600 "$RUN_DIR/service.json"
+    # SERVICE_START=false: systemd starts the service (on Proxmox: see
+    # proxmox/install.sh), as SERVICE_USER from the start rather than as
+    # root, so its settings and the folder for its socket are that user's.
+    if [ "${SERVICE_START:-true}" = false ] && [ -n "${SERVICE_USER:-}" ] && [ "$(id -u)" = 0 ]; then
+        chown "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$RUN_DIR" "$RUN_DIR/service.json" ||
+            fail "SERVICE_USER $SERVICE_USER can't own $RUN_DIR"
+        chmod 750 "$RUN_DIR"
+    fi
 fi
 # SERVICE_START=false: something else starts it (systemd, on Proxmox: see
 # proxmox/install.sh).

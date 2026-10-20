@@ -5,22 +5,33 @@
 # build does). It's what proxmox/plexamp-web.sh runs inside the container it
 # makes, and what `update-plexamp-web` runs there later.
 #
+# The app comes from the repository's "stable" branch, which CI moves to
+# each commit that passed every test (the commits the Docker image is built
+# from), or from main if there's no such branch yet. PW_REF picks another.
+#
 # Settings live in /etc/plexamp-web/plexamp-web.env, with the same names as
-# the Docker image's (PLEX_SERVER_URL, OLLAMA_URL and so on). After changing
-# them: systemctl restart plexamp-web-config nginx plexamp-web
+# the Docker image's (PLEX_SERVER_URL, OLLAMA_URL and so on). To change
+# them: plexamp-web-settings (it opens the file, then restarts the app).
 #
 # For tests: PW_SOURCE_DIR installs from a folder instead of GitHub, and
 # PW_NO_SYSTEMD=1 skips systemd (in a container without it).
 set -euo pipefail
 
 REPO="${PW_REPO:-kamakazedan/plexamp-web}"
-REF="${PW_REF:-main}"
+REF="${PW_REF:-stable}"
+WANT_REF="$REF" # for updates (REF may fall back to main below)
 BASE=/opt/plexamp-web
 ENV_FILE=/etc/plexamp-web/plexamp-web.env
 
-say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+if [ -t 1 ]; then
+    OK=$'\033[1;32m✔\033[0m' BAD=$'\033[1;31m✖\033[0m' DIM=$'\033[2m' RESET=$'\033[0m'
+else
+    OK='✔' BAD='✖' DIM='' RESET=''
+fi
+say() { printf '  %s %s\n' "$OK" "$*"; }
+note() { printf '    %s%s%s\n' "$DIM" "$*" "$RESET"; }
 fail() {
-    printf '\033[1;31mError:\033[0m %s\n' "$*" >&2
+    printf '  %s %s\n' "$BAD" "$*" >&2
     exit 1
 }
 
@@ -32,35 +43,43 @@ printf '%s\n' "$REF" | grep -Eq '^[A-Za-z0-9_./-]+$' || fail "PW_REF should be a
 systemd=true
 if [ "${PW_NO_SYSTEMD:-}" = 1 ] || [ ! -d /run/systemd/system ]; then systemd=false; fi
 
-say "Installing nginx and Node.js from Debian"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends nginx nodejs curl wget ca-certificates tar gzip >/dev/null
+say "Installed nginx $(nginx -v 2>&1 | sed -n 's#.*nginx/##p') and Node.js $(node --version) from Debian"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 if [ -n "${PW_SOURCE_DIR:-}" ]; then
-    say "Copying plexamp-web from $PW_SOURCE_DIR"
     mkdir "$work/app"
     cp -r "$PW_SOURCE_DIR/web" "$PW_SOURCE_DIR/server" "$PW_SOURCE_DIR/docker" "$PW_SOURCE_DIR/proxmox" "$PW_SOURCE_DIR/Dockerfile" "$work/app/"
+    say "Copied plexamp-web from $PW_SOURCE_DIR"
 else
-    say "Downloading plexamp-web ($REPO, $REF)"
-    curl -fsSL "https://github.com/$REPO/archive/$REF.tar.gz" -o "$work/app.tar.gz"
+    # The stable branch, or main until CI has made one.
+    if ! curl -fsSL "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" -o "$work/app.tar.gz" 2>/dev/null; then
+        if [ "$REF" = stable ]; then
+            REF=main
+            curl -fsSL "https://github.com/$REPO/archive/refs/heads/main.tar.gz" -o "$work/app.tar.gz" || fail "Couldn't download plexamp-web from GitHub."
+        else
+            curl -fsSL "https://github.com/$REPO/archive/$REF.tar.gz" -o "$work/app.tar.gz" || fail "Couldn't download plexamp-web ($REF) from GitHub."
+        fi
+    fi
     mkdir "$work/app"
     tar -xzf "$work/app.tar.gz" -C "$work/app" --strip-components=1
 fi
-for f in web/index.html server/index.js docker/40-plexamp-web.sh docker/nginx.conf proxmox/install.sh Dockerfile; do
+for f in web/index.html web/js/plex.js server/index.js docker/40-plexamp-web.sh docker/nginx.conf proxmox/install.sh Dockerfile; do
     [ -f "$work/app/$f" ] || fail "The download is missing $f."
 done
+version="$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" "$work/app/web/js/plex.js")"
+[ -n "${PW_SOURCE_DIR:-}" ] || say "Downloaded plexamp-web ${version:-?} ($REPO, $REF)"
 
 # hls.js: the version the Docker image bundles, checked against the npm
 # registry's own checksum for it.
 hls="$(sed -n 's/^ARG HLS_JS_VERSION=\([0-9][0-9.]*\)$/\1/p' "$work/app/Dockerfile" | head -n 1)"
 [ -n "$hls" ] || fail "Couldn't tell which hls.js version to use."
-say "Downloading hls.js $hls"
-curl -fsSL "https://registry.npmjs.org/hls.js/$hls" -o "$work/hls.json"
-curl -fsSL "https://registry.npmjs.org/hls.js/-/hls.js-$hls.tgz" -o "$work/hls.tgz"
+curl -fsSL "https://registry.npmjs.org/hls.js/$hls" -o "$work/hls.json" || fail "Couldn't reach the npm registry for hls.js."
+curl -fsSL "https://registry.npmjs.org/hls.js/-/hls.js-$hls.tgz" -o "$work/hls.tgz" || fail "Couldn't download hls.js."
 node -e '
     const { readFileSync } = require("fs");
     const { createHash } = require("crypto");
@@ -70,8 +89,8 @@ node -e '
 ' "$work/hls.json" "$work/hls.tgz" || fail "hls.js didn't match its checksum, so it wasn't installed."
 mkdir "$work/hls"
 tar -xzf "$work/hls.tgz" -C "$work/hls"
+say "Downloaded hls.js $hls (it matched the npm registry's checksum)"
 
-say "Putting the files in place"
 mkdir -p "$BASE" /etc/plexamp-web
 rm -rf "$BASE/app.new" "$BASE/html.new"
 cp -r "$work/app" "$BASE/app.new"
@@ -87,14 +106,21 @@ for d in app html; do
 done
 rm -rf "$BASE/app.old" "$BASE/html.old"
 
-# Settings: kept as they are on an update.
+# Settings: written once (proxmox/plexamp-web.sh may have put them here
+# already), and kept as they are on an update.
 if [ ! -f "$ENV_FILE" ]; then
     cat >"$ENV_FILE" <<'ENV'
-# plexamp-web settings (the same as the Docker image's; see the README).
-# After a change: systemctl restart plexamp-web-config nginx plexamp-web
+# plexamp-web settings, the same as the Docker image's (see "Container
+# settings" in the README). Change them with: plexamp-web-settings
 PLEX_SERVER_URL=
+DISABLE_WEBSOCKETS=
 OLLAMA_URL=
 OLLAMA_MODEL=
+OLLAMA_API_KEY=
+OLLAMA_AUTH=plex
+PLAY_TOGETHER=true
+CASTING=true
+DEBUG=
 ENV
 fi
 chmod 600 "$ENV_FILE"
@@ -103,22 +129,54 @@ chmod 600 "$ENV_FILE"
 rm -f /etc/nginx/sites-enabled/default
 sed -e "s#root /usr/share/nginx/html;#root $BASE/html;#" "$BASE/app/docker/nginx.conf" >/etc/nginx/conf.d/default.conf
 for inc in pms-proxy ai-proxy api log; do touch "/etc/nginx/conf.d/$inc.inc"; done
+say "Put plexamp-web ${version:-} in $BASE"
 
 # `update-plexamp-web`: the newest version, with the same settings.
 cat >/usr/local/bin/update-plexamp-web <<UPDATE
 #!/bin/sh
-# Updates plexamp-web to the newest version; settings are kept.
+# Updates plexamp-web to the newest tested version; settings are kept.
 set -eu
 tmp="\$(mktemp)"
 trap 'rm -f "\$tmp"' EXIT
-curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/proxmox/install.sh" -o "\$tmp"
-PW_REPO="$REPO" PW_REF="$REF" bash "\$tmp"
+curl -fsSL "https://raw.githubusercontent.com/$REPO/$WANT_REF/proxmox/install.sh" -o "\$tmp" 2>/dev/null ||
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/proxmox/install.sh" -o "\$tmp"
+LC_ALL=C.UTF-8 PW_REPO="$REPO" PW_REF="$WANT_REF" bash "\$tmp"
 UPDATE
 chmod 755 /usr/local/bin/update-plexamp-web
 
-# The start-up script the Docker image runs (it writes nginx's settings and
-# the app's), then the service, then nginx. The service starts as root to
-# read its settings and make its socket, then becomes www-data.
+# `plexamp-web-settings`: opens the settings, then restarts the app with them.
+cat >/usr/local/bin/plexamp-web-settings <<'SETTINGS'
+#!/bin/sh
+# Opens plexamp-web's settings in an editor, then restarts it with them.
+set -eu
+file=/etc/plexamp-web/plexamp-web.env
+editor="${VISUAL:-${EDITOR:-}}"
+if [ -z "$editor" ]; then
+    for e in nano vim.tiny vi; do
+        if command -v "$e" >/dev/null 2>&1; then editor="$e" && break; fi
+    done
+fi
+[ -n "$editor" ] || { echo "No editor found: edit $file, then run: systemctl restart plexamp-web-config plexamp-web nginx" >&2; exit 1; }
+before="$(cksum <"$file")"
+"$editor" "$file"
+if [ "$(cksum <"$file")" = "$before" ]; then
+    echo "Nothing changed."
+    exit 0
+fi
+if systemctl restart plexamp-web-config plexamp-web nginx; then
+    echo "plexamp-web restarted with the new settings."
+else
+    echo "plexamp-web didn't start with these settings. What went wrong:" >&2
+    journalctl -u plexamp-web-config -n 5 --no-pager -o cat >&2 || true
+    exit 1
+fi
+SETTINGS
+chmod 755 /usr/local/bin/plexamp-web-settings
+
+# The start-up script the Docker image runs writes nginx's settings and the
+# app's (plexamp-web-config), then the service starts, then nginx. The
+# service runs as www-data from the start: Node.js on Debian 13 can't give
+# up root itself (it refuses to while io_uring may be in use, CVE-2024-22017).
 mkdir -p /etc/systemd/system/nginx.service.d
 cat >/etc/systemd/system/plexamp-web-config.service <<UNIT
 [Unit]
@@ -142,9 +200,8 @@ Requires=plexamp-web-config.service
 After=plexamp-web-config.service network-online.target
 
 [Service]
-# Without io_uring, giving up root really gives it all up (CVE-2024-22017),
-# and Node.js lets it (Debian 13's refuses to otherwise).
-Environment=UV_USE_IO_URING=0
+User=www-data
+Group=www-data
 ExecStart=/usr/bin/node $BASE/app/server/index.js /run/plexamp-web/service.json
 Restart=always
 RestartSec=2
@@ -160,7 +217,6 @@ After=plexamp-web-config.service
 UNIT
 
 if [ "$systemd" = true ]; then
-    say "Starting plexamp-web"
     systemctl daemon-reload
     systemctl enable --quiet plexamp-web-config.service plexamp-web.service nginx.service
     systemctl restart plexamp-web-config.service
@@ -171,7 +227,8 @@ if [ "$systemd" = true ]; then
         sleep 0.5
     done
     curl -fsS -o /dev/null http://127.0.0.1/ || fail "plexamp-web didn't start. See: journalctl -u plexamp-web-config -u plexamp-web -u nginx"
-    say "plexamp-web is running"
+    curl -fsS -o /dev/null http://127.0.0.1/api/health || note "Its service (Play Together, Play on, your devices) isn't answering yet: journalctl -u plexamp-web"
+    say "plexamp-web ${version:-} is running"
 else
     say "Installed. systemd isn't running here, so start it yourself."
 fi

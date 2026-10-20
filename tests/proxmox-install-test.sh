@@ -20,17 +20,26 @@ for release in "${releases[@]}"; do
         set -euo pipefail
         PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 bash /src/proxmox/install.sh
         printf "PLEX_SERVER_URL=\nOLLAMA_URL=\nOLLAMA_MODEL=\nDISABLE_WEBSOCKETS=true\n" >/etc/plexamp-web/plexamp-web.env
-        # What the systemd units do (see install.sh).
-        set -a
-        . /etc/plexamp-web/plexamp-web.env
-        set +a
-        HTML_DIR=/opt/plexamp-web/html CONF_DIR=/etc/nginx/conf.d SERVICE_DIR=/opt/plexamp-web/app/server \
-            RUN_DIR=/run/plexamp-web SERVICE_USER=www-data SERVICE_START=false sh /opt/plexamp-web/app/docker/40-plexamp-web.sh
-        UV_USE_IO_URING=0 node /opt/plexamp-web/app/server/index.js /run/plexamp-web/service.json >/tmp/service.log 2>&1 &
+        # What the systemd units do, read from the units install.sh wrote: the
+        # settings, then the service as its user, then nginx.
+        unit=/etc/systemd/system/plexamp-web.service
+        config=/etc/systemd/system/plexamp-web-config.service
+        configure() {
+            (
+                set -a
+                . /etc/plexamp-web/plexamp-web.env
+                set +a
+                env "$@" $(sed -n "s/^Environment=//p" "$config") $(sed -n "s/^ExecStart=//p" "$config")
+            )
+        }
+        configure
+        user="$(sed -n "s/^User=//p" "$unit")"
+        group="$(sed -n "s/^Group=//p" "$unit")"
+        setpriv --reuid="$user" --regid="$group" --init-groups $(sed -n "s/^ExecStart=//p" "$unit") >/tmp/service.log 2>&1 &
         nginx -t -q
         nginx
         for _ in $(seq 1 40); do curl -fs -o /dev/null http://127.0.0.1/api/health && break; sleep 0.5; done
-        echo "node $(node --version), $(nginx -v 2>&1)"
+        echo "node $(node --version), $(nginx -v 2>&1), service as $user:$group"
         expect() { # name, then a command that must succeed
             local name="$1"
             shift
@@ -52,23 +61,23 @@ for release in "${releases[@]}"; do
         expect "hls.js is bundled" curl -fsS -o /dev/null http://127.0.0.1/vendor/hls.min.js
         expect "the service answers through nginx" sh -c "curl -fsS http://127.0.0.1/api/health | grep -q \"\\\"ok\\\":true\""
         expect "settings readable by root only" test "$(stat -c %a /etc/plexamp-web/plexamp-web.env)" = 600
+        expect "the service runs as www-data (its unit)" test "$user:$group" = "www-data:www-data"
+        expect "the service'"'"'s own settings are its, and no one else'"'"'s" test "$(stat -c "%U %a" /run/plexamp-web/service.json)" = "www-data 600"
         expect "update-plexamp-web is there" test -x /usr/local/bin/update-plexamp-web
-        expect "systemd units are written" grep -q "SERVICE_START=false" /etc/systemd/system/plexamp-web-config.service
-        expect "its unit turns io_uring off" grep -q "^Environment=UV_USE_IO_URING=0$" /etc/systemd/system/plexamp-web.service
-        service_uid() {
+        expect "plexamp-web-settings is there" test -x /usr/local/bin/plexamp-web-settings
+        expect "systemd units are written" grep -q "SERVICE_START=false" "$config"
+        service_ids() {
             local p
             for p in /proc/[0-9]*; do
                 if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -q "^[^ ]*node [^ ]*[s]erver/index.js"; then
-                    awk "/^Uid:/ { print \$2 }" "$p/status"
+                    awk "/^Uid:/ { u = \$2 } /^Groups:/ { g = \$2 \$3 } END { print u \"/\" g }" "$p/status"
                     return
                 fi
             done
         }
-        expect "the service gave up root (for www-data)" test "$(service_uid)" = 33
+        expect "the service isn'"'"'t root, and has only its own group" test "$(service_ids)" = "33/33"
         # Debug mode: its access log goes to the journal, as the units set it.
-        DEBUG=true NGINX_ACCESS_LOG=syslog:server=unix:/dev/log,tag=nginx,nohostname \
-            HTML_DIR=/opt/plexamp-web/html CONF_DIR=/etc/nginx/conf.d SERVICE_DIR=/opt/plexamp-web/app/server \
-            RUN_DIR=/run/plexamp-web SERVICE_USER=www-data SERVICE_START=false sh /opt/plexamp-web/app/docker/40-plexamp-web.sh >/dev/null
+        configure DEBUG=true >/dev/null
         expect "debug mode logs to the journal" grep -q "access_log syslog:server=unix:/dev/log" /etc/nginx/conf.d/log.inc
         expect "nginx takes debug mode'"'"'s settings" nginx -t -q
         # An update keeps the settings.

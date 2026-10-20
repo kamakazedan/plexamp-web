@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # plexamp-web on Proxmox VE: makes a small Debian container (LXC) on this
-# node and installs plexamp-web in it.
+# node and installs plexamp-web in it, in the manner of the Proxmox VE
+# community helper scripts.
 #
 # On the node's shell (as root):
 #
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/plexamp-web.sh)"
 #
-# It asks a few questions; Enter keeps the suggestion. Any answer can be set
-# beforehand instead, and with YES=1 it asks nothing:
+# It offers its default settings, or asks about each one ("advanced"). Any
+# of them can be set beforehand instead, and with YES=1 it asks nothing:
 #
 #   CTID CT_HOSTNAME CORES RAM_MB DISK_GB STORAGE TEMPLATE_STORAGE BRIDGE
 #   IP (dhcp, or an address like 192.168.1.50/24) GATEWAY
@@ -15,17 +16,55 @@
 #
 # The container is unprivileged, starts with the node, and runs nginx and
 # Node.js from Debian (no Docker). Inside it, `update-plexamp-web` updates
-# the app; its settings are in /etc/plexamp-web/plexamp-web.env.
+# the app and `plexamp-web-settings` changes its settings.
 set -euo pipefail
 
 REPO="${PW_REPO:-kamakazedan/plexamp-web}"
-REF="${PW_REF:-main}"
+REF="${PW_REF:-stable}"
 
-say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+# ---------- output ----------
+
+if [ -t 1 ]; then
+    BOLD=$'\033[1m' DIM=$'\033[2m' CYAN=$'\033[1;36m' GREEN=$'\033[1;32m' RED=$'\033[1;31m' YELLOW=$'\033[1;33m' RESET=$'\033[0m'
+    LIVE=true
+else
+    BOLD='' DIM='' CYAN='' GREEN='' RED='' YELLOW='' RESET=''
+    LIVE=false
+fi
+STEP=""
+# A step starting, and done (the line is rewritten in a terminal).
+info() {
+    if [ "$LIVE" = true ] && [ -n "$STEP" ]; then printf '\r\033[K'; fi
+    STEP="$*"
+    if [ "$LIVE" = true ]; then printf '  %s…%s %s' "$YELLOW" "$RESET" "$STEP"; else printf '  … %s\n' "$STEP"; fi
+}
+ok() {
+    if [ "$LIVE" = true ] && [ -n "$STEP" ]; then printf '\r\033[K'; fi
+    printf '  %s✔%s %s\n' "$GREEN" "$RESET" "${1:-$STEP}"
+    STEP=""
+}
 fail() {
-    printf '\033[1;31mError:\033[0m %s\n' "$*" >&2
+    if [ "$LIVE" = true ] && [ -n "$STEP" ]; then printf '\r\033[K'; fi
+    STEP=""
+    printf '  %s✖%s %s\n' "$RED" "$RESET" "$*" >&2
     exit 1
 }
+item() { printf '    %s%-13s%s %s\n' "$DIM" "$1" "$RESET" "$2"; }
+
+header() {
+    printf '%s' "$CYAN"
+    cat <<'ART'
+
+         _                                                 _
+   _ __ | | ___ __ __ __ _  _ __   _ __      __ __ __ ___ | |__
+  | '_ \| |/ -_)\ \ // _` || '  \ | '_ \ ___ \ V  V // -_)| '_ \
+  | .__/|_|\___|/_\_\\__,_||_|_|_|| .__/      \_/\_/ \___||_.__/
+  |_|                             |_|
+ART
+    printf '%s\n  %sA Plexamp-style web player for your Plex music, in its own container.%s\n\n' "$RESET" "$DIM" "$RESET"
+}
+
+header
 
 # ---------- checks ----------
 
@@ -33,23 +72,27 @@ fail() {
 for tool in pct pveam pvesm pvesh; do
     command -v "$tool" >/dev/null 2>&1 || fail "This runs on a Proxmox VE node ($tool wasn't found)."
 done
-pve="$(pveversion 2>/dev/null | sed -n 's#^pve-manager/\([0-9]*\)\..*#\1#p')"
+pve_full="$(pveversion 2>/dev/null | sed -n 's#^pve-manager/\([0-9][0-9.]*\)/.*#\1#p')"
+pve="${pve_full%%.*}"
 if [ -z "$pve" ] || [ "$pve" -lt 8 ]; then fail "This needs Proxmox VE 8 or later."; fi
 arch="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
 printf '%s\n' "$REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || fail "PW_REPO should look like owner/name."
 printf '%s\n' "$REF" | grep -Eq '^[A-Za-z0-9_./-]+$' || fail "PW_REF should be a branch or tag name."
+ok "Proxmox VE $pve_full ($arch)"
 
-# ---------- questions ----------
+# ---------- settings ----------
 
 tty=false
 if [ "${YES:-}" != 1 ] && [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then tty=true; fi
 
-# ask VAR "Question" default: the answer goes in VAR (already set: kept).
+# ask VAR "Question" default: the answer goes in VAR (already set: kept;
+# default settings or no terminal: the default).
+advanced=false
 ask() {
     local var="$1" question="$2" def="${3:-}" answer
     if [ -n "${!var:-}" ]; then return; fi
-    if [ "$tty" = true ]; then
-        read -r -p "$question${def:+ [$def]}: " answer </dev/tty || answer=""
+    if [ "$tty" = true ] && [ "$advanced" = true ]; then
+        read -r -p "  $question${def:+ [$def]}: " answer </dev/tty || answer=""
         printf -v "$var" '%s' "${answer:-$def}"
     else
         printf -v "$var" '%s' "$def"
@@ -64,11 +107,16 @@ valid() {
     [[ "${!var}" =~ $re ]] || fail "$what isn't right: ${!var}"
 }
 
-# The first storage, of those with this content, that's active.
+# Storages with this content that are active.
 storages() { pvesm status -content "$1" 2>/dev/null | awk 'NR > 1 && $3 == "active" { print $1 }'; }
 
-# Your settings for the app, before anything is made.
 URL_RE='^$|^https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$|^https?://\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
+
+if [ "$tty" = true ]; then
+    read -r -p "  Use the default settings? [Y/n] (n: choose each one) " answer </dev/tty || answer=""
+    case "$answer" in [nN]*) advanced=true ;; esac
+    echo
+fi
 
 next_id="$(pvesh get /cluster/nextid 2>/dev/null || echo 100)"
 ask CTID "Container ID" "$next_id"
@@ -84,8 +132,7 @@ default_disk="${disk_choices[0]}"
 for s in local-lvm local-zfs; do
     if printf '%s\n' "${disk_choices[@]}" | grep -qx "$s"; then default_disk="$s" && break; fi
 done
-[ "$tty" = true ] && [ "${#disk_choices[@]}" -gt 1 ] && [ -z "${STORAGE:-}" ] && say "Storage for containers: ${disk_choices[*]}"
-ask STORAGE "Storage" "$default_disk"
+ask STORAGE "Storage for its disk (${disk_choices[*]})" "$default_disk"
 printf '%s\n' "${disk_choices[@]}" | grep -qx -- "$STORAGE" || fail "$STORAGE can't hold containers (choose from: ${disk_choices[*]})."
 
 mapfile -t template_choices < <(storages vztmpl)
@@ -95,14 +142,23 @@ if printf '%s\n' "${template_choices[@]}" | grep -qx local; then default_tmpl=lo
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-$default_tmpl}"
 printf '%s\n' "${template_choices[@]}" | grep -qx -- "$TEMPLATE_STORAGE" || fail "$TEMPLATE_STORAGE can't hold templates."
 
-ask IP "Network: dhcp, or a fixed address like 192.168.1.50/24" "dhcp"
+ask CORES "CPU cores" 1
+ask RAM_MB "Memory (MB)" 512
+ask DISK_GB "Disk (GB)" 4
+valid CORES "The number of cores" '^([1-9]|[1-5][0-9]|6[0-4])$'
+valid RAM_MB "The memory" '^[1-9][0-9]{2,5}$'
+valid DISK_GB "The disk size" '^[1-9][0-9]{0,3}$'
+[ "$RAM_MB" -ge 256 ] || fail "The memory should be at least 256 MB."
+[ "$DISK_GB" -ge 2 ] || fail "The disk should be at least 2 GB."
+
+ask BRIDGE "Network bridge" "vmbr0"
+valid BRIDGE "The bridge" '^[A-Za-z0-9_.-]{1,15}$'
+ask IP "Address: dhcp, or a fixed one like 192.168.1.50/24" "dhcp"
 valid IP "The address" '^dhcp$|^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
 if [ "$IP" != dhcp ]; then
     ask GATEWAY "Gateway" ""
     valid GATEWAY "The gateway" '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 fi
-BRIDGE="${BRIDGE:-vmbr0}"
-valid BRIDGE "The bridge" '^[A-Za-z0-9_.-]{1,15}$'
 
 ask PLEX_SERVER_URL "Your Plex server's address, like http://192.168.1.10:32400 (Enter to skip)" ""
 valid PLEX_SERVER_URL "The Plex server's address" "$URL_RE"
@@ -114,38 +170,43 @@ fi
 OLLAMA_MODEL="${OLLAMA_MODEL:-}"
 valid OLLAMA_MODEL "The model" '^[A-Za-z0-9._:/@+-]*$'
 
-CORES="${CORES:-1}"
-RAM_MB="${RAM_MB:-512}"
-DISK_GB="${DISK_GB:-4}"
-valid CORES "CORES" '^([1-9]|[1-5][0-9]|6[0-4])$'
-valid RAM_MB "RAM_MB" '^[1-9][0-9]{2,5}$'
-valid DISK_GB "DISK_GB" '^[1-9][0-9]{0,3}$'
-[ "$RAM_MB" -ge 256 ] || fail "RAM_MB should be at least 256."
-[ "$DISK_GB" -ge 2 ] || fail "DISK_GB should be at least 2."
-
-echo
 cores="$CORES cores"
 [ "$CORES" != 1 ] || cores="1 core"
-say "Container $CTID ($CT_HOSTNAME): $cores, $RAM_MB MB, $DISK_GB GB on $STORAGE, network $IP${GATEWAY:+ via $GATEWAY} on $BRIDGE"
-say "Plex server: ${PLEX_SERVER_URL:-not set}; Ollama: ${OLLAMA_URL:-not set}${OLLAMA_MODEL:+ ($OLLAMA_MODEL)}"
+network="DHCP"
+[ "$IP" = dhcp ] || network="$IP via $GATEWAY"
+which="Default"
+[ "$advanced" = true ] || echo
+if [ "$advanced" = true ]; then
+    which="Your"
+    echo
+fi
+printf '  %s%s settings%s\n' "$BOLD" "$which" "$RESET"
+item "Container" "$CTID, named $CT_HOSTNAME (unprivileged Debian, starts with the node)"
+item "Size" "$cores, $RAM_MB MB memory, $DISK_GB GB disk on $STORAGE"
+item "Network" "$network on $BRIDGE"
+item "Plex server" "${PLEX_SERVER_URL:-not set (it can be set later)}"
+item "AI (Ollama)" "${OLLAMA_URL:-not set}${OLLAMA_MODEL:+, $OLLAMA_MODEL}"
+echo
 if [ "$tty" = true ]; then
-    read -r -p "Make it? [Y/n] " go </dev/tty || go=n
+    read -r -p "  Make it? [Y/n] " go </dev/tty || go=n
     case "$go" in [nN]*) fail "Nothing was made." ;; esac
+    echo
 fi
 
 # ---------- template ----------
 
 # The newest Debian template (13, or else 12) for this machine.
 pick() { grep -Eo "debian-1[23]-standard_[0-9][0-9.]*-[0-9]+_${arch}\.tar\.(zst|gz|xz)" | sort -V | tail -n 1; }
+info "Looking for a Debian template"
 template="$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | pick || true)"
 if [ -z "$template" ]; then
-    say "Downloading a Debian template"
+    info "Downloading a Debian template"
     pveam update >/dev/null || true
     template="$(pveam available --section system 2>/dev/null | pick || true)"
     [ -n "$template" ] || fail "No Debian 12 or 13 template for $arch was found (pveam available --section system)."
     pveam download "$TEMPLATE_STORAGE" "$template" >/dev/null || fail "The template $template couldn't be downloaded."
 fi
-say "Template: $template"
+ok "Template ${template%%_"$arch"*} on $TEMPLATE_STORAGE"
 
 # ---------- the container ----------
 
@@ -157,11 +218,11 @@ finish() {
     local code=$?
     if [ -n "$work" ]; then rm -rf "$work"; fi
     if [ "$code" != 0 ] && [ "$made" = true ]; then
-        printf '\nContainer %s was made, but plexamp-web was not installed. To remove it: pct stop %s; pct destroy %s\n' "$CTID" "$CTID" "$CTID" >&2
+        printf '\n  Container %s was made, but plexamp-web was not installed. To remove it: pct stop %s; pct destroy %s\n' "$CTID" "$CTID" "$CTID" >&2
     fi
 }
 trap finish EXIT
-say "Making container $CTID"
+info "Making container $CTID"
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$template" \
     --hostname "$CT_HOSTNAME" \
     --cores "$CORES" --memory "$RAM_MB" --swap 512 \
@@ -170,32 +231,44 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$template" \
     --unprivileged 1 --features nesting=1 \
     --onboot 1 --ostype debian --timezone host \
     --tags plexamp-web \
-    --description "plexamp-web: https://github.com/$REPO" >/dev/null
+    --description "plexamp-web: https://github.com/$REPO" >/dev/null || fail "Container $CTID couldn't be made."
 made=true
-pct start "$CTID"
+ok "Made container $CTID"
+info "Starting it"
+pct start "$CTID" || fail "Container $CTID didn't start."
+ok "Started container $CTID"
 
-say "Waiting for its network"
+info "Waiting for its network"
 for _ in $(seq 1 60); do
     if pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1; then break; fi
     sleep 1
 done
 pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 || fail "Container $CTID can't reach the internet (check its network: pct config $CTID)."
+address="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{ print $1 }')"
+ok "Network up${address:+: $address}"
 
 # Settings: written here and copied in, so nothing typed above passes through
 # a shell inside the container.
 work="$(mktemp -d)"
 cat >"$work/plexamp-web.env" <<ENV
-# plexamp-web settings (the same as the Docker image's; see the README).
-# After a change: systemctl restart plexamp-web-config nginx plexamp-web
+# plexamp-web settings, the same as the Docker image's (see "Container
+# settings" in the README). Change them with: plexamp-web-settings
 PLEX_SERVER_URL=$PLEX_SERVER_URL
+DISABLE_WEBSOCKETS=
 OLLAMA_URL=$OLLAMA_URL
 OLLAMA_MODEL=$OLLAMA_MODEL
+OLLAMA_API_KEY=
+OLLAMA_AUTH=plex
+PLAY_TOGETHER=true
+CASTING=true
+DEBUG=
 ENV
 pct exec "$CTID" -- mkdir -p /etc/plexamp-web
 pct push "$CTID" "$work/plexamp-web.env" /etc/plexamp-web/plexamp-web.env --perms 600
 
 # The installer: next to this script when it's run from a copy of the repo
-# (bash proxmox/plexamp-web.sh), otherwise (bash -c "$(curl …)") from GitHub.
+# (bash proxmox/plexamp-web.sh), otherwise (bash -c "$(curl …)") from GitHub:
+# the stable branch (the commits that passed every test), or main.
 here=""
 src="${BASH_SOURCE[0]:-}"
 if [ -n "$src" ] && [ -f "$src" ]; then here="$(cd "$(dirname "$src")" && pwd)"; fi
@@ -203,17 +276,26 @@ if [ -n "${PW_INSTALL_SCRIPT:-}" ]; then
     cp "$PW_INSTALL_SCRIPT" "$work/install.sh"
 elif [ -n "$here" ] && [ -f "$here/install.sh" ] && [ -f "$here/plexamp-web.sh" ]; then
     cp "$here/install.sh" "$work/install.sh"
-else
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/proxmox/install.sh" -o "$work/install.sh" || fail "Couldn't download the installer."
+elif ! curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/proxmox/install.sh" -o "$work/install.sh" 2>/dev/null; then
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/proxmox/install.sh" -o "$work/install.sh" || fail "Couldn't download the installer."
 fi
 pct push "$CTID" "$work/install.sh" /root/install-plexamp-web.sh --perms 700
-say "Installing plexamp-web in container $CTID (this takes a minute or two)"
-pct exec "$CTID" -- env PW_REPO="$REPO" PW_REF="$REF" bash /root/install-plexamp-web.sh
+printf '  %sInstalling plexamp-web in it (a minute or two)%s\n' "$BOLD" "$RESET"
+# (LC_ALL: the node's own language setting may not exist in the container,
+# and Debian's tools would complain about it.)
+pct exec "$CTID" -- env LC_ALL=C.UTF-8 PW_REPO="$REPO" PW_REF="$REF" bash /root/install-plexamp-web.sh || fail "The install in container $CTID didn't finish (see above)."
 pct exec "$CTID" -- rm -f /root/install-plexamp-web.sh
 
-address="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{ print $1 }')"
-echo
+[ -n "$address" ] || address="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{ print $1 }')"
 [ -n "$address" ] || address="this-container's-address"
-say "plexamp-web is ready: http://$address/"
-say "Settings: pct enter $CTID, then edit /etc/plexamp-web/plexamp-web.env and run: systemctl restart plexamp-web-config nginx plexamp-web"
-say "Updates: pct exec $CTID -- update-plexamp-web"
+echo
+printf '  %s✔ plexamp-web is ready: %shttp://%s/%s\n' "$GREEN" "$BOLD" "$address" "$RESET"
+printf '    Open it, choose Sign in with Plex, then pick your server and music library.\n\n'
+if [ -z "$PLEX_SERVER_URL" ]; then
+    printf '    %sTip:%s set your Plex server'"'"'s address (PLEX_SERVER_URL), so the player can reach it\n' "$BOLD" "$RESET"
+    printf '    on your network: pct exec %s -- plexamp-web-settings\n\n' "$CTID"
+fi
+item "Settings" "pct exec $CTID -- plexamp-web-settings"
+item "Updates" "pct exec $CTID -- update-plexamp-web"
+item "Logs" "pct exec $CTID -- journalctl -u plexamp-web -u plexamp-web-config -f"
+echo

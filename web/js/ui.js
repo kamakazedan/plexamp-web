@@ -102,6 +102,8 @@ const ICONS = {
   trash: S('<path d="M4.5 6.5h15M9.5 6.5V4.8a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.7M6.5 6.5l.9 12.2a1.5 1.5 0 0 0 1.5 1.3h6.2a1.5 1.5 0 0 0 1.5-1.3l.9-12.2M10.2 10.5v6M13.8 10.5v6"/>'),
   remove: S('<circle cx="12" cy="12" r="8.5"/><path d="M8 12h8"/>'),
   playlistAdd: S('<path d="M4 6.5h11M4 11.5h11M4 16.5h7M17.5 13v7M14 16.5h7"/>'),
+  // Which lists a track is in: a list, and a magnifying glass.
+  appears: S('<path d="M4 6.5h12M4 11.5h6M4 16.5h4"/><circle cx="15.2" cy="14.8" r="3.6"/><path d="m17.9 17.5 2.6 2.6"/>'),
   collection: S('<rect x="3.5" y="8" width="13" height="12" rx="2"/><path d="M7 5h11.5a2 2 0 0 1 2 2v9.5"/><path d="M8.5 13.5h3M10 12v3"/>'),
   moveTop: S('<path d="M5 4.5h14M12 20V9.5M7 14l5-5 5 5"/>'),
   terminal: S('<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7 9.5 3 2.5-3 2.5M12.5 15H17"/>'),
@@ -702,6 +704,7 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
   let done = false;
   const all = [];
   const sentinel = h('div.sentinel', null, spinner());
+  const added = []; // what's put after the list besides the sentinel: an empty or error state
   container.after(sentinel);
   const hasIO = 'IntersectionObserver' in window;
   const near = hasIO ? new IntersectionObserver(farAway, { rootMargin: NEAR }) : null;
@@ -711,6 +714,7 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
     loading = true;
     try {
       const { items, total: t } = await fetchPage(start, pageSize);
+      if (destroyed) return;
       total = t || start + items.length;
       onTotal?.(total);
       items.forEach((item, i) => {
@@ -724,9 +728,10 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
       if (!items.length || start >= total) finish();
     } catch (err) {
       finish();
-      container.after(
-        errorState(err?.network ? "Can't reach your server." : 'This list could not be loaded.', () => location.reload()),
-      );
+      if (destroyed) throw err;
+      const state = errorState(err?.network ? "Can't reach your server." : 'This list could not be loaded.', () => location.reload());
+      added.push(state);
+      container.after(state);
       throw err;
     } finally {
       loading = false;
@@ -741,9 +746,14 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
     done = true;
     more?.disconnect();
     sentinel.remove();
-    if (!all.length) container.after(emptyState(empty));
+    if (!all.length && !destroyed) {
+      const state = emptyState(empty);
+      added.push(state);
+      container.after(state);
+    }
   }
 
+  let destroyed = false;
   const more = hasIO ? new IntersectionObserver((es) => es[0].isIntersecting && load(), { rootMargin: '800px 0px' }) : null;
   more?.observe(sentinel);
   load().catch(() => {});
@@ -757,6 +767,13 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
     items: all,
     load,
     dispose,
+    // Stops, and takes away what it put after the list (to start it again).
+    destroy() {
+      destroyed = true;
+      dispose();
+      sentinel.remove();
+      added.splice(0).forEach((el) => el.remove());
+    },
     get done() {
       return done;
     },

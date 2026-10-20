@@ -1275,7 +1275,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.command in ('PUT', 'DELETE', 'POST'):
                 return self.edit_collection(c, parts, q, token)
             if len(parts) > 3 and parts[3] == 'children':
-                return self.page(c['_items'], {'X-Plex-Container-Size': ['500']})
+                # Everything unless asked for a page, like Plex.
+                return self.page(c['_items'], {'X-Plex-Container-Size': ['500'], **q})
             return self.send_json({'size': 1, 'Metadata': [public(c)]})
         if p.startswith('/library/metadata/'):
             it = items.get(parts[2])

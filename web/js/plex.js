@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.9.1' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.10.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -113,7 +113,10 @@ function withParams(url, params) {
 
 const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 
-async function request(url, { method = 'GET', timeout = 20000, signal } = {}) {
+// `discard`: the answer isn't needed, so it isn't read (Plex can answer a
+// change with the whole list it changed: sorting a long playlist makes
+// hundreds of changes).
+async function request(url, { method = 'GET', timeout = 20000, signal, discard = false } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const onAbort = () => ctrl.abort();
@@ -135,6 +138,10 @@ async function request(url, { method = 'GET', timeout = 20000, signal } = {}) {
       err.status = res.status;
       debugLog('plex', `${method} ${safeUrl(url)} answered ${res.status}`, 'warn');
       throw err;
+    }
+    if (discard) {
+      res.body?.cancel().catch(() => {});
+      return {};
     }
     const text = await res.text();
     if (!text) return {};
@@ -411,6 +418,15 @@ export class PlexServer {
     return { meta: asArray(meta.Metadata)[0] || null, items: asArray(items.Metadata) };
   }
 
+  // A page of what's in a collection, in its order.
+  async collectionItems(id, { start = 0, size = 500 } = {}) {
+    const mc = await this.get(`/library/collections/${id}/children`, {
+      'X-Plex-Container-Start': start,
+      'X-Plex-Container-Size': size,
+    });
+    return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0 };
+  }
+
   // Music playlists; with a section, only those with music from it.
   playlists(section) {
     return this.memo(`playlists:${section || 'all'}`, async () =>
@@ -502,8 +518,8 @@ export class PlexServer {
     return `server://${await this.machineId()}/com.plexapp.plugins.library/library/metadata/${ids.join(',')}`;
   }
 
-  async send(method, path, params) {
-    const data = await request(this.url(path, params), { method });
+  async send(method, path, params, { discard = false } = {}) {
+    const data = await request(this.url(path, params), { method, discard });
     return data?.MediaContainer || {};
   }
 
@@ -533,7 +549,7 @@ export class PlexServer {
 
   // Moves an entry to just after another one, or to the top without one.
   async movePlaylistItem(id, itemId, afterId = null) {
-    await this.send('PUT', `/playlists/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {});
+    await this.send('PUT', `/playlists/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {}, { discard: true });
     this.forgetPlaylists();
   }
 
@@ -569,7 +585,7 @@ export class PlexServer {
 
   // Items keep a custom order only once the collection is sorted "custom".
   async moveCollectionItem(id, itemId, afterId = null) {
-    await this.send('PUT', `/library/collections/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {});
+    await this.send('PUT', `/library/collections/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {}, { discard: true });
   }
 
   async customOrder(id) {

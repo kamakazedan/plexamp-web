@@ -24,12 +24,15 @@ and t3 (Alex, a friend without access).
 
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
-Sections: core ws ai dj nows blocked poll custom desktop nav library edit cast
-ratings devices fades together settings home debug memory (default: all).
+Sections: core ws ai dj nows blocked poll custom desktop nav library edit lists
+missing cast ratings devices fades together settings home debug memory (default:
+all).
 """
 
 import json
 import os
+import random
+import re
 import sys
 import time
 import urllib.parse
@@ -1090,6 +1093,344 @@ with sync_playwright() as pw:
         page.wait_for_timeout(400)
         check('edit: collections can\'t be changed by a friend', 'Add to playlist…' in labels and 'Add to collection…' not in labels
               and page.locator('.lock-btn').count() == 0, str(labels))
+        ctx.close()
+
+    # ---------- lists: Appears in, and sorting playlists and collections ----------
+    if run('lists'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'lists', expected=('Error: Not found',))  # an album's id, below
+        login(page, APP)
+
+        def mc(path, base=MOCK):
+            sep = '&' if '?' in path else '?'
+            with urllib.request.urlopen(f'{base}{path}{sep}X-Plex-Token=t', timeout=20) as r:
+                return json.loads(r.read() or b'{}').get('MediaContainer', {})
+
+        def done_looking():
+            page.wait_for_selector('.appears-track')
+            page.wait_for_function("() => !document.querySelector('.appears-status .spinner')", timeout=30000)
+
+        # What Plex says a track is in, worked out the long way.
+        pls = mc('/playlists?X-Plex-Container-Size=500').get('Metadata', [])
+        fav = next(p for p in pls if p['title'] == 'Favourite tracks')
+        t = mc(f"/playlists/{fav['ratingKey']}/items?X-Plex-Container-Size=500")['Metadata'][0]
+        want_pl = {}
+        for p in pls:
+            ids = [m['ratingKey'] for m in mc(f"/playlists/{p['ratingKey']}/items?X-Plex-Container-Size=5000").get('Metadata', [])]
+            if t['ratingKey'] in ids:
+                want_pl[p['title']] = ids.count(t['ratingKey'])
+        cols = mc('/library/sections/1/collections?X-Plex-Container-Size=200').get('Metadata', [])
+        key_for = {'track': t['ratingKey'], 'album': t['parentRatingKey'], 'artist': t['grandparentRatingKey']}
+        want_col = {c['title'] for c in cols
+                    if key_for.get(c['subtype']) in [m['ratingKey'] for m in mc(f"/library/collections/{c['ratingKey']}/children").get('Metadata', [])]}
+
+        page.goto(APP + f"#/playlist/{fav['ratingKey']}")
+        page.wait_for_selector('.view .tracks .track')
+        page.locator('.view .tracks .track .track-more').first.click()
+        page.wait_for_selector('.sheet.open')
+        page.locator('.sheet.open .sheet-action', has_text='Appears in').click()
+        done_looking()
+        shot(page, 'lists-01-appears-in')
+        got_pl = page.locator('.appears-playlists .row-title').all_inner_texts()
+        got_col = page.locator('.appears-collections .row-title').all_inner_texts()
+        subs = dict(zip(got_pl, page.locator('.appears-playlists .row-sub').all_inner_texts()))
+        check('lists: Appears in lists the playlists a track is in', set(got_pl) == set(want_pl), f'{got_pl} vs {want_pl}')
+        twice = [k for k, v in want_pl.items() if v > 1]
+        check('lists: ...saying when it\'s in one more than once', twice and all(f'in it {want_pl[k]} times' in subs[k] for k in twice), str(subs))
+        check('lists: ...and the collections it\'s in (its own, its album\'s or its artist\'s)', set(got_col) == want_col, f'{got_col} vs {want_col}')
+        check('lists: ...in order of name', got_pl == sorted(got_pl, key=str.casefold), str(got_pl))
+        page.locator('.appears-playlists a.row', has_text='Favourite tracks').click()
+        page.wait_for_timeout(500)
+        check('lists: a row opens its playlist', js(page, '() => location.hash') == f"#/playlist/{fav['ratingKey']}")
+
+        # Looking again reads nothing again, until a list changes.
+        reads = []
+        page.on('request', lambda r: reads.append(r.url) if re.search(r'/(items|children)\?', r.url) else None)
+        page.goto(APP + '#/')
+        page.wait_for_selector('.wide-card')
+        page.goto(APP + f"#/appears/{t['ratingKey']}")
+        done_looking()
+        check('lists: looking again is quick (what was read is kept)', not reads and set(page.locator('.appears-playlists .row-title').all_inner_texts()) == set(want_pl), str(reads))
+        page.click('.appears-actions button:has-text("Add to a playlist")')
+        page.wait_for_selector('.sheet.open')
+        page.locator('.sheet.open .sheet-action', has_text='New playlist').first.click()
+        page.wait_for_selector('.sheet.open .ask-form input')
+        page.wait_for_timeout(250)
+        page.fill('.sheet.open .ask-form input', 'Appears test')
+        page.click('.sheet.open .ask-form button[type=submit]')
+        page.wait_for_selector('.toast:has-text("Made")')
+        page.goto(APP + '#/')
+        page.wait_for_selector('.wide-card')
+        page.goto(APP + f"#/appears/{t['ratingKey']}")
+        done_looking()
+        check('lists: ...and a new playlist with the track shows up', 'Appears test' in page.locator('.appears-playlists .row-title').all_inner_texts())
+        page.goto(APP + '#/appears/not-a-track')
+        page.wait_for_timeout(600)
+        nowhere = page.locator('.empty-state:has-text("doesn’t exist")').count() == 1
+        page.goto(APP + f"#/appears/{t['parentRatingKey']}")
+        page.wait_for_timeout(800)
+        check('lists: an address that isn\'t a track\'s goes nowhere', nowhere and page.locator('.error-state').count() == 1 and page.locator('.appears-track').count() == 0)
+
+        # The fewest moves: checked against every order of a few lists, made
+        # move by move as Plex makes them.
+        planned = js(page, """() => import('./js/sorting.js').then(({ planMoves }) => {
+            const lis = (seq) => { const best = seq.map(() => 1); let top = 0;
+                seq.forEach((v, i) => { for (let j = 0; j < i; j++) if (seq[j] < v) best[i] = Math.max(best[i], best[j] + 1); top = Math.max(top, best[i]); });
+                return top; };
+            let rnd = 7; const random = () => ((rnd = (rnd * 16807) % 2147483647) / 2147483647);
+            for (let n = 0; n < 30; n++) for (let k = 0; k < 25; k++) {
+                const cur = Array.from({ length: n }, (_, i) => 'e' + i);
+                const tgt = cur.slice();
+                for (let i = n - 1; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [tgt[i], tgt[j]] = [tgt[j], tgt[i]]; }
+                if (k === 0) tgt.sort();
+                const moves = planMoves(cur, tgt);
+                const list = cur.slice();
+                for (const { id, after } of moves) { list.splice(list.indexOf(id), 1); list.splice(after === null ? 0 : list.indexOf(after) + 1, 0, id); }
+                if (list.join() !== tgt.join()) return 'wrong order: ' + cur + ' -> ' + tgt + ' gave ' + list;
+                const pos = new Map(cur.map((id, i) => [id, i]));
+                if (moves.length !== n - lis(tgt.map((id) => pos.get(id)))) return 'more moves than needed';
+            }
+            return 'ok'; })""")
+        check('lists: sorting makes the fewest moves, and they give the order wanted', planned == 'ok', planned)
+
+        # Sorting a playlist: a new one, with tracks from all over, out of order.
+        tracks = mc('/library/sections/1/all?type=10&X-Plex-Container-Size=1000')['Metadata']
+        picked = random.Random(5).sample(tracks, 14)
+        uri = 'server://mock-server-1/com.plexapp.plugins.library/library/metadata/' + ','.join(m['ratingKey'] for m in picked)
+        q = urllib.parse.urlencode({'type': 'audio', 'title': 'Sort test', 'smart': 0, 'uri': uri, 'X-Plex-Token': 't'})
+        with urllib.request.urlopen(urllib.request.Request(f'{MOCK}/playlists?{q}', method='POST'), timeout=20) as r:
+            sort_pl = json.loads(r.read())['MediaContainer']['Metadata'][0]
+        rk = sort_pl['ratingKey']
+
+        def entries():
+            return mc(f'/playlists/{rk}/items?X-Plex-Container-Size=500')['Metadata']
+
+        def bare(v):
+            return re.sub(r'^(the|a|an)\s+', '', (v or '').strip(), flags=re.I).casefold()
+
+        def by_artist(m):
+            return (bare(m.get('originalTitle') or m.get('grandparentTitle')), m.get('parentYear') or 9999, bare(m.get('parentTitle')),
+                    m.get('parentIndex') or 0, m.get('index') or 0, bare(m.get('title')))
+
+        def by_title(m):
+            return (bare(m.get('title')), bare(m.get('originalTitle') or m.get('grandparentTitle')), bare(m.get('parentTitle')))
+
+        def fewest(before, after):
+            pos = {pid: i for i, pid in enumerate(before)}
+            seq = [pos[pid] for pid in after]
+            best = [1] * len(seq)
+            for i in range(len(seq)):
+                for j in range(i):
+                    if seq[j] < seq[i]:
+                        best[i] = max(best[i], best[j] + 1)
+            return len(seq) - (max(best) if best else 0)
+
+        moves = []
+        page.on('request', lambda r: moves.append(r.url) if '/move' in r.url and r.method == 'PUT' else None)
+
+        def sort_by(label, wait='Sorted'):
+            del moves[:]
+            page.click('.edit-bar .edit-sort')
+            page.wait_for_selector('.sheet.open .sheet-title:has-text("Sort by")')
+            page.locator(f'.sheet.open .sheet-action:has(.sheet-action-label:text-is("{label}"))').click()
+            page.wait_for_selector(f'.toast:has-text("{wait}")', timeout=30000)
+            page.wait_for_timeout(500)
+
+        page.goto(APP + f'#/playlist/{rk}')
+        page.wait_for_selector('.view .tracks .track')
+        page.click('.lock-btn')
+        page.wait_for_selector('.edit-bar:not([hidden]) .edit-sort')
+        shot(page, 'lists-02-sort-button')
+        start = [m['playlistItemID'] for m in entries()]
+        page.click('.edit-bar .edit-sort')
+        page.wait_for_selector('.sheet.open .sheet-title:has-text("Sort by")')
+        offered = page.locator('.sheet.open .sheet-action-label').all_inner_texts()
+        shot(page, 'lists-03-sort-by')
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        check('lists: an unlocked playlist can be sorted by artist, track name, album or year, or reversed',
+              offered == ['Artist', 'Track name', 'Album', 'Year', 'Reverse the order'], str(offered))
+        sort_by('Artist')
+        now = entries()
+        want = sorted(now, key=by_artist)
+        shown = page.locator('.view .tracks .track').evaluate_all('rs => rs.map((r) => r.dataset.trackId)')
+        check('lists: sorting by artist saves the new order in Plex (albums in order, by year)',
+              [m['ratingKey'] for m in now] == [m['ratingKey'] for m in want], str([(m.get('originalTitle') or m['grandparentTitle'], m['title']) for m in now]))
+        check('lists: ...shows it', shown == [m['ratingKey'] for m in now], str(shown))
+        check('lists: ...in the fewest moves', len(moves) == fewest(start, [m['playlistItemID'] for m in now]) and len(moves) > 0, f'{len(moves)} moves')
+        check('lists: ...and stays unlocked', page.locator('.edit-bar:not([hidden])').count() == 1 and page.locator('.view .tracks .track .drag-handle').count() == len(now))
+        sort_by('Artist', wait='in that order already')
+        check('lists: sorting what\'s sorted already changes nothing', not moves, str(moves))
+        by_artist_pids = [m['playlistItemID'] for m in entries()]
+        sort_by('Track name')
+        now = entries()
+        check('lists: sorting by track name', [m['ratingKey'] for m in now] == [m['ratingKey'] for m in sorted(now, key=by_title)],
+              str([m['title'] for m in now]))
+        page.click('.toast-action:has-text("Undo")')
+        page.wait_for_selector('.toast:has-text("Put back")', timeout=30000)
+        check('lists: Undo puts the order back', [m['playlistItemID'] for m in entries()] == by_artist_pids)
+        sort_by('Reverse the order', wait='Reversed')
+        check('lists: reversing the order', [m['playlistItemID'] for m in entries()] == by_artist_pids[::-1])
+        check('lists: sorting leaves every track in the playlist', sorted(m['playlistItemID'] for m in entries()) == sorted(start))
+
+        # Stop, part way: what's moved stays moved, and Undo puts it back.
+        # (Reversed, sorting by artist again moves all but one.)
+        def slowly(route):
+            time.sleep(0.5)
+            route.continue_()
+        page.route('**/move**', slowly)
+        reversed_pids = [m['playlistItemID'] for m in entries()]
+        page.click('.edit-bar .edit-sort')
+        page.wait_for_selector('.sheet.open .sheet-title:has-text("Sort by")')
+        page.locator('.sheet.open .sheet-action:has(.sheet-action-label:text-is("Artist"))').click()
+        page.wait_for_function("() => /\\d+ of \\d+ moved/.test(document.querySelector('.edit-bar-text').textContent)", timeout=10000)
+        progress = page.locator('.edit-bar-text').inner_text()
+        page.click('.edit-bar .edit-stop')
+        page.wait_for_selector('.toast:has-text("Stopped")', timeout=20000)
+        part = [m['playlistItemID'] for m in entries()]
+        check('lists: a sort can be stopped part way, saying how far it got', part not in (reversed_pids, by_artist_pids)
+              and page.locator('.edit-bar:not(.busy) .edit-sort').count() == 1, f'{progress} {part}')
+        page.unroute('**/move**')
+        page.click('.toast-action:has-text("Undo")')
+        page.wait_for_selector('.toast:has-text("Put back")', timeout=30000)
+        check('lists: ...and Undo puts it back', [m['playlistItemID'] for m in entries()] == reversed_pids)
+
+        # Collections (the server's owner): they switch to a custom order.
+        def collection(title):
+            return next(c for c in mc('/library/sections/1/collections?X-Plex-Container-Size=200')['Metadata'] if c['title'] == title)
+
+        def children(cid):
+            return mc(f'/library/collections/{cid}/children')['Metadata']
+
+        c22 = collection('Best of 2022')
+        page.goto(APP + f"#/collection/{c22['ratingKey']}")
+        page.wait_for_selector('.hero-album')
+        page.click('.lock-btn')
+        page.wait_for_selector('.edit-rows .edit-row')
+        sort_by('Track name')
+        kids = children(c22['ratingKey'])
+        shown = page.locator('.edit-rows .edit-row .row-title').all_inner_texts()
+        check('lists: sorting a collection by track name (it switches to custom order)',
+              [m['ratingKey'] for m in kids] == [m['ratingKey'] for m in sorted(kids, key=by_title)] and collection('Best of 2022')['collectionSort'] == 2
+              and shown == [m['title'] for m in kids], str([m['title'] for m in kids]))
+        for title, want_opts in (('Road trip', ['Artist', 'Album name', 'Year', 'Reverse the order']), ('Piano and strings', ['Name', 'Reverse the order'])):
+            c = collection(title)
+            page.goto(APP + f"#/collection/{c['ratingKey']}")
+            page.wait_for_selector('.hero-album')
+            page.click('.lock-btn')
+            page.click('.edit-bar .edit-sort')
+            page.wait_for_selector('.sheet.open .sheet-title:has-text("Sort by")')
+            opts = page.locator('.sheet.open .sheet-action-label').all_inner_texts()
+            page.keyboard.press('Escape')
+            page.wait_for_selector('.sheet', state='detached')
+            check(f'lists: a {c["subtype"]} collection\'s sorts', opts == want_opts, str(opts))
+        road = collection('Road trip')
+        page.goto(APP + f"#/collection/{road['ratingKey']}")
+        page.wait_for_selector('.hero-album')
+        page.click('.lock-btn')
+        sort_by('Album name')
+        names = [m['title'] for m in children(road['ratingKey'])]
+        check('lists: sorting an album collection by album name', names == sorted(names, key=bare), str(names))
+        ctx.close()
+
+        # A big smart playlist (all of a big library) isn't read.
+        if APP_BIG and MOCK_BIG:
+            ctx = browser.new_context(**MOBILE)
+            page = ctx.new_page()
+            attach(page, 'lists-big')
+            login(page, APP_BIG)
+            first = mc('/library/sections/1/all?type=10&X-Plex-Container-Size=1', base=MOCK_BIG)['Metadata'][0]
+            page.goto(APP_BIG + f"#/appears/{first['ratingKey']}")
+            done_looking()
+            note = page.locator('.appears-note').inner_text() if page.locator('.appears-note:not([hidden])').count() else ''
+            check('lists: very long smart playlists aren\'t looked through, and it says so', 'Everything' in note, note)
+            ctx.close()
+
+    # ---------- missing: songs and artists AI playlists suggest that aren't here ----------
+    if run('missing'):
+        ctx = browser.new_context(accept_downloads=True, **MOBILE)
+        ctx.grant_permissions(['clipboard-read', 'clipboard-write'], origin=APP.rstrip('/'))
+        page = ctx.new_page()
+        attach(page, 'missing')
+        login(page, APP)
+
+        def make(prompt):
+            page.goto(APP + '#/ai-playlist')
+            page.wait_for_selector('.ai-box input')
+            if page.locator('button:has-text("Make another playlist")').count():
+                page.click('button:has-text("Make another playlist")')
+            page.fill('.ai-box input', prompt)
+            page.press('.ai-box input', 'Enter')
+            page.wait_for_selector('.ai-result, .ai-error', timeout=60000)
+
+        def stored():
+            return js(page, "() => JSON.parse(localStorage.getItem('pw.aiMissing') || '[]')")
+
+        # Off (the default): nothing shown or kept.
+        make('Late night drive')
+        check('missing: off by default, so nothing is shown or kept', page.locator('.ai-missing').count() == 0 and stored() == [])
+
+        page.goto(APP + '#/settings/ai')
+        page.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
+        check('missing: Settings › AI has Show missing tracks (and no list yet)', page.locator('a.missing-link').is_hidden())
+        toggle(page, 'Show missing tracks', True)
+        page.wait_for_timeout(200)
+        check('missing: ...and once it\'s on, the list', page.locator('a.missing-link').is_visible())
+        shot(page, 'missing-01-settings')
+
+        make('Late night drive')
+        lines = []
+        if page.locator('.ai-missing').count():
+            page.click('.ai-missing summary')
+            lines = page.locator('.ai-missing-list li').all_inner_texts()
+        shot(page, 'missing-02-result')
+        check('missing: an AI playlist lists the songs and artists it suggested that aren\'t in the library',
+              'Not A Real Band (no music by them)' in lines and 'Imaginary Act — Made Up Song' in lines, str(lines))
+        check('missing: ...not ones that are there', not any(a in ' '.join(lines) for a in ('Juniper & Ash', 'Glass Harbour (no music')), str(lines))
+        make('Best of Glass Harbour')
+        make('Best of Glass Harbour')
+        kept = {(m['kind'], m['artist'], m['title']): m for m in stored()}
+        never = kept.get(('track', 'Glass Harbour', 'A Song They Never Made'))
+        check('missing: a best-of notes the artist\'s own songs that aren\'t here, counting repeats', never and never['times'] == 2 and never['prompt'] == 'Best of Glass Harbour', json.dumps(never))
+
+        # The list: shown, exported, copied, trimmed and checked again.
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
+        titles = page.locator('.missing-row .row-title').all_inner_texts()
+        shot(page, 'missing-03-list')
+        check('missing: the list, artists first', titles == ['Not A Real Band', 'A Song They Never Made', 'Made Up Song'], str(titles))
+        with page.expect_download() as dl:
+            page.click('.missing-csv')
+        csv_text = open(dl.value.path(), encoding='utf-8-sig').read()
+        check('missing: downloads as a spreadsheet (CSV)', dl.value.suggested_filename.startswith('missing-tracks-') and dl.value.suggested_filename.endswith('.csv')
+              and csv_text.startswith('"Artist","Title","Missing","Times suggested"') and '"Glass Harbour","A Song They Never Made","Track","2"' in csv_text, csv_text[:300])
+        page.click('.missing-copy')
+        page.wait_for_selector('.toast:has-text("Copied")')
+        copied = js(page, '() => navigator.clipboard.readText()')
+        check('missing: copies as plain text, one to a line', copied.splitlines() == ['Not A Real Band (no music by them)', 'Glass Harbour — A Song They Never Made', 'Imaginary Act — Made Up Song'], copied)
+        js(page, """() => { const l = JSON.parse(localStorage.getItem('pw.aiMissing'));
+            l.push(Object.assign({}, l[0], { kind: 'track', artist: '=HYPERLINK("http://example.com")', title: '+1' }));
+            localStorage.setItem('pw.aiMissing', JSON.stringify(l)); }""")
+        csv_text = js(page, "() => import('./js/missing.js').then((m) => m.missingCsv())")
+        check('missing: nothing in the CSV can be read as a formula', '"\'=HYPERLINK(""http://example.com"")","\'+1"' in csv_text, csv_text[-200:])
+        page.goto(APP + '#/settings/ai')
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
+        page.locator('.missing-row', has_text='+1').locator('button').click()
+        page.wait_for_timeout(300)
+        check('missing: one can be taken off the list', '+1' not in page.locator('.missing-row .row-title').all_inner_texts() and len(stored()) == 3)
+        mock('/__mock/add-album?title=A%20Song%20They%20Never%20Made')
+        page.click('.missing-check')
+        page.wait_for_selector('.missing-status:has-text("off the list"), .missing-status:has-text("yet")', timeout=30000)
+        check('missing: Check again lets go of what\'s in the library now', 'A Song They Never Made' not in page.locator('.missing-row .row-title').all_inner_texts()
+              and page.locator('.missing-status').inner_text().startswith('1 is in your library now'), page.locator('.missing-status').inner_text())
+        page.click('button:has-text("Clear the list")')
+        page.wait_for_selector('.sheet.open .ask-form .btn-danger')
+        page.click('.sheet.open .ask-form .btn-danger')
+        page.wait_for_timeout(400)
+        check('missing: the list can be cleared', stored() == [] and page.locator('.missing-row').count() == 0 and page.locator('.empty-state').count() == 1)
+        settings(page, {'ai': {'mode': 'auto'}})
         ctx.close()
 
     # ---------- cast: playing on another Plex player, and AirPlay/Cast ----------

@@ -88,7 +88,8 @@ def reply_for(body):
                 'moods': [],
                 'decades': [],
                 'artists': [name, 'Juniper & Ash', 'Kilo Meridian'],
-                'tracks': [{'artist': 'Kilo Meridian', 'title': 'Ember'}],
+                # One of theirs that isn't in the library (for missing tracks).
+                'tracks': [{'artist': 'Kilo Meridian', 'title': 'Ember'}, {'artist': name, 'title': 'A Song They Never Made'}],
             }
         return {
             'title': 'Late Night Harbour Lights',

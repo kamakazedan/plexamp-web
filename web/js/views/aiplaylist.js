@@ -1,6 +1,7 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
-import { aiReady, aiTarget, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { noteMissing, missingCount } from '../missing.js';
 import { playList } from '../actions.js';
 import { player } from '../player.js';
 import { navigate } from '../router.js';
@@ -53,6 +54,7 @@ function startJob(prompt) {
     .then((result) => {
       j.result = result;
       last = { prompt, result };
+      keepMissing(result, prompt);
       // Made while you were somewhere else: say so.
       if (!location.hash.startsWith('#/ai-playlist')) {
         toast(`Your AI playlist “${result.title}” is ready`, { action: 'Open', onAction: () => navigate('/ai-playlist'), timeout: 8000 });
@@ -60,6 +62,7 @@ function startJob(prompt) {
     })
     .catch((err) => {
       j.error = err;
+      keepMissing(err, prompt);
       if (err?.code !== 'aborted' && !location.hash.startsWith('#/ai-playlist')) {
         toast('Your AI playlist couldn’t be made.', { action: 'See why', onAction: () => navigate('/ai-playlist'), timeout: 8000 });
       }
@@ -70,6 +73,30 @@ function startJob(prompt) {
       emit();
     });
   return j;
+}
+
+// Settings › AI › Show missing tracks: what wasn't found goes on the list
+// (and what was found comes off it).
+function keepMissing(found, prompt) {
+  if (!found?.missing && !found?.seen) return;
+  if (!aiSettings().missing && !missingCount()) return;
+  noteMissing(aiSettings().missing ? found.missing || [] : [], found.seen || {}, prompt);
+}
+
+const missingLine = (m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`);
+
+// Under a playlist: the suggested songs and artists it couldn't have.
+function missingBlock(missing) {
+  const tracks = missing.filter((m) => m.kind === 'track').length;
+  const artists = missing.length - tracks;
+  const what = [tracks && fmt.count(tracks, 'track', 'tracks'), artists && fmt.count(artists, 'artist', 'artists')].filter(Boolean).join(' and ');
+  return h(
+    'details.ai-missing',
+    null,
+    h('summary', null, icon('appears', 20), h('span', null, `Not in your library: ${what}`)),
+    h('ul.ai-missing-list', null, missing.map((m) => h('li', null, missingLine(m)))),
+    h('a.link-btn.ai-missing-all', { href: '#/settings/missing' }, 'All missing tracks, to export'),
+  );
 }
 
 export async function aiPlaylistView({ el, onDispose }) {
@@ -237,6 +264,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         'div.ai-error',
         { role: 'alert' },
         h('p', null, describeAIError(err)),
+        aiSettings().missing && err?.missing?.length ? missingBlock(err.missing) : null,
         h(
           'div.button-row',
           null,
@@ -311,6 +339,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         ),
       ),
       list,
+      aiSettings().missing && result.missing?.length ? missingBlock(result.missing) : null,
       h('p.ai-based', { hidden: !based.length }, `Based on ${based.slice(0, 12).join(', ')}`),
       h(
         'div.pad',

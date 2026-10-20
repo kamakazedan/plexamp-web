@@ -17,6 +17,7 @@ A review of the code with one main question: **can any of it leak your data?** T
 
 - **Your Plex sign-in.** After you sign in, the browser keeps your Plex token (and, for servers shared with you, that server's access token) in its local storage. The token is sent only to plex.tv, to your Plex server (directly or through the container's `/pms/` proxy), and to the container's own service (to check who you are for Play Together, Play on, sharing playback between your devices and the shared AI model). When you use Play on with a Plex player, the service also sends it with each command to that player, one of your own devices, as Plex's own apps do.
 - **Your library and listening.** Requests go from your browser to your Plex server. Plays are reported back to Plex if **Sync recent plays** is on.
+- **Missing tracks.** With **Show missing tracks** on (Settings › AI), the songs and artists AI playlists suggest that your library doesn't have are kept in the browser's storage on that device, with the request each came from, until you clear them or sign out. They go nowhere else, unless you download, copy or share the list.
 - **The container** has no database and writes nothing to disk except its start-up configuration. Play Together sessions, and what your devices are playing, are held in memory only. The service never stores tokens; it keeps short-lived SHA-256 hashes of them as cache keys, so it doesn't have to ask plex.tv on every request.
 - **No outside code or tracking.** No analytics and no third-party scripts. hls.js is bundled into the image, so nothing is loaded from a CDN. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and an Ollama server if you set one up.
 
@@ -88,9 +89,9 @@ Building this showed a gap in the `/pms/` proxy. If your Plex server lets the co
 Added in 0.10.0. The script runs as root on your Proxmox node, so it's careful with what it's given:
 
 - Everything you type, or set beforehand, must match a strict pattern (one line, no quotes or shell characters) before it goes into a command or a settings file. Addresses with a user name and password in them are refused. The settings file is written on the node and copied into the container, so nothing you typed passes through a shell in there, and only root can read it.
-- The container is unprivileged, and the app's service gives up root (for `www-data`) as soon as its socket exists, as in the Docker image.
+- The container is unprivileged, and the app's service never runs as root: systemd starts it as `www-data`, which owns only its own settings and socket.
 - Only what the Docker image has is installed: nginx and Node.js from Debian, the app from this repository, and hls.js from npm, checked against the npm registry's checksum.
-- `update-plexamp-web` fetches the installer from this repository each time, so updates trust GitHub just as the first install did.
+- The app comes from the repository's `stable` branch, which CI moves only to commits that passed every test (the ones the Docker image is published from), so an untested change never reaches a container. `update-plexamp-web` fetches the installer from there each time, so updates trust GitHub just as the first install did.
 
 ### What debug mode logs
 
@@ -117,15 +118,16 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 - **Search**: live results, narrowed word by word: press Enter (or +) to keep a word as a tag, and what you type next only finds things that match every tag ("prodigy", then "fire"). One tap on × clears it all. Browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Any list can be searched within: in the 1990s, type "rock" to narrow it to rock albums from the 1990s, then "calm" for a mood, and take each filter off again with a tap. Also top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
 - **Playlists tab**: all your music playlists, with ❤️ Tracks first.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
-- **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
+- **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, appears in, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
+- **Appears in**: from any track's menu (in a list, Up next or Now Playing), the playlists and collections it's in, including collections of its album or its artist. Each opens with a tap.
 - **❤️ Tracks**: tracks you give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out when they lose that rating, as in Plexamp. If yours is Plexamp's own (a smart playlist), Plex keeps it up to date itself.
 - **Now Playing**: big artwork, a seek bar drawn from your server's loudness analysis, ratings that save to Plex, the file format and quality, an Up next queue (with **Move to top**), Guest DJ, shuffle, repeat and a sleep timer. A volume slider with a percentage and marks at 25, 50 and 75%. Optional playback speed and skip buttons.
-- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, remove, rename, delete. A playlist's, collection's or artist's menu can also play it next or add it to the queue. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
-- **Collections**, for the server's owner: the same editing, and adding tracks, albums or artists, including a playlist's tracks or the queue.
+- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, sort (by artist, track name, album or year, or reversed, with Undo), remove, rename, delete. A playlist's, collection's or artist's menu can also play it next or add it to the queue. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
+- **Collections**, for the server's owner: the same editing and sorting, and adding tracks, albums or artists, including a playlist's tracks or the queue.
 - **Play on**: play on another Plex player on your network (Plexamp on a Raspberry Pi, say) with this app as the remote, or on AirPlay and Google Cast speakers where the browser supports them. See [Play on](#play-on).
 - **Your devices**: open the player on your phone while your computer plays, and the phone shows what's playing and controls it. **Listen here** moves the music to the device in your hand, from the same spot. See [Your devices](#your-devices).
 - **Play Together**: listen in sync with Plex friends. Everyone hears the same track at the same moment, and anyone in the session can play, pause, skip, seek, and change the queue.
-- **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, keeping to what you asked for ("best of The Prodigy" is just The Prodigy). Play it, add it to the queue, or save it to a playlist or collection in Plex.
+- **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, keeping to what you asked for ("best of The Prodigy" is just The Prodigy). Play it, add it to the queue, or save it to a playlist or collection in Plex. Optionally, it keeps a list of the songs and artists it suggested that your library doesn't have, to export and go looking for.
 - **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys). The AI DJ uses your Ollama model to pick each next track and introduce it.
 - **Live updates**: new music, playlist changes and ratings from other Plex apps appear without reloading. Works with or without WebSockets (see [Behind a work proxy](#behind-a-work-proxy)).
 - **Playback**: gapless playback, and crossfades like Plexamp's: **Smart** crossfade uses your server's loudness analysis to fade into the next track where the music really ends, so silence at the end of a track doesn't leave a gap, and plays tracks that follow each other on an album gaplessly (see [Good to know](#good-to-know) for the Plex setting it needs). Also lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
@@ -147,7 +149,7 @@ docker compose up -d
 
 Open `http://<your-docker-host>:8080`, choose **Sign in with Plex**, then pick your server and music library.
 
-The image is built, tested and published by GitHub Actions on every push to `main`, for amd64 and arm64 (a Raspberry Pi 4 or CM4 works well). If pulling fails because the package is private, either make it public in the package settings on GitHub or run `docker login ghcr.io` first. To build locally instead, uncomment `build: .` in `docker-compose.yml`.
+The image is built, tested and published by GitHub Actions on every push to `main`, for amd64 and arm64 (a Raspberry Pi 4 or CM4 works well). `latest` is the newest; each version is also tagged with its number (such as `0.10.0`), to stay on one. If pulling fails because the package is private, either make it public in the package settings on GitHub or run `docker login ghcr.io` first. To build locally instead, uncomment `build: .` in `docker-compose.yml`.
 
 ## Run it on Proxmox VE
 
@@ -157,29 +159,30 @@ On your Proxmox VE node's shell, as root:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/plexamp-web.sh)"
 ```
 
-It makes a small unprivileged Debian container (LXC) on the node and installs the player in it, without Docker: nginx and Node.js from Debian, the app from this repository, and hls.js from npm, checked against the registry's checksum. It asks for the container's ID, name, storage and network, and your Plex and Ollama addresses (Enter keeps each suggestion), shows what it's about to make, and when it's done prints the address to open. It needs Proxmox VE 8 or later, and internet access for the container while it installs. As with any script from the internet that runs as root, [read it](proxmox/plexamp-web.sh) first.
+Like the [Proxmox VE community scripts](https://github.com/community-scripts/ProxmoxVE), it makes a small unprivileged Debian container (LXC) on the node and installs the player in it, without Docker: nginx and Node.js from Debian, the app from this repository, and hls.js from npm, checked against the registry's checksum. Press Enter to use its default settings (the next free ID, 1 core, 512 MB, 4 GB, DHCP on `vmbr0`), or `n` to choose each one, including your Plex and Ollama addresses. It shows what it's about to make, and when it's done, the address to open. It needs Proxmox VE 8 or later, and internet access for the container while it installs. As with any script from the internet that runs as root, [read it](proxmox/plexamp-web.sh) first.
 
-To answer the questions beforehand, set them in front of the command. With `YES=1` it asks nothing:
+The app comes from the `stable` branch: the newest commit that passed every test, as the Docker image is. Settings can be given beforehand instead, and with `YES=1` it asks nothing:
 
 ```sh
 CTID=120 PLEX_SERVER_URL=http://192.168.1.10:32400 YES=1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/plexamp-web.sh)"
 ```
 
-| Variable | Suggested | What it is |
+| Variable | Default | What it is |
 | --- | --- | --- |
 | `CTID` | the next free ID | The container's ID. |
 | `CT_HOSTNAME` | `plexamp-web` | Its name. |
 | `STORAGE` | `local-lvm`, or `local-zfs` | Where its disk goes. |
+| `CORES`, `RAM_MB`, `DISK_GB` | `1`, `512`, `4` | Its size. |
+| `BRIDGE` | `vmbr0` | Its network bridge. |
 | `IP` and `GATEWAY` | `dhcp` | Or a fixed address, such as `IP=192.168.1.50/24 GATEWAY=192.168.1.1`. |
 | `PLEX_SERVER_URL`, `OLLAMA_URL`, `OLLAMA_MODEL` | not set | As in [Container settings](#container-settings). |
-| `CORES`, `RAM_MB`, `DISK_GB` | `1`, `512`, `4` | Its size. |
-| `BRIDGE`, `TEMPLATE_STORAGE` | `vmbr0`, `local` | Its network bridge, and where the Debian template is kept. |
+| `TEMPLATE_STORAGE` | `local` | Where the Debian template is kept. |
 
-In the container (`pct enter <ID>` on the node):
+Then, on the node (or inside the container, without `pct exec <ID> --`):
 
-- **Settings** are in `/etc/plexamp-web/plexamp-web.env`, with the same names as [Container settings](#container-settings). After a change: `systemctl restart plexamp-web-config nginx plexamp-web`.
-- **Updates**: `update-plexamp-web` (or `pct exec <ID> -- update-plexamp-web` on the node). Your settings are kept.
-- **Logs**: `journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`.
+- **Settings**: `pct exec <ID> -- plexamp-web-settings` opens them in an editor, with the same names as [Container settings](#container-settings), and restarts the player with them. They're kept in `/etc/plexamp-web/plexamp-web.env`.
+- **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version. Your settings are kept.
+- **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`.
 
 ## Container settings
 
@@ -291,6 +294,8 @@ Every request asks the model to keep to what you asked for, and to be creative w
 
 A playlist carries on being made while you use the rest of the app, which says when it's ready. A finished playlist can be played, shuffled, added to the queue, or saved to Plex: as a new playlist, into one of yours, or (for the server's owner) into a collection.
 
+**Missing tracks.** Turn on **Settings → AI → Show missing tracks**, and each AI playlist also lists the songs and artists the model suggested that your library doesn't have (a song is looked for by its title and among its artist's tracks, so a slightly different title still counts as there). They're collected in **Settings → AI → Missing tracks**, with how often each was suggested and for what, to download as a spreadsheet (CSV), copy or share, so whoever looks after the server can go and find them. **Check again**, after adding music, takes off what's in the library now. The list is kept on that device. Models sometimes suggest songs that don't exist, so check before you go looking.
+
 There are two ways to connect.
 
 ### Shared: one Ollama for everyone
@@ -374,6 +379,8 @@ Tests, which CI runs against the built image:
 
 ```sh
 node --test server/test.js                       # the service: sessions, sync, cleaning, redaction
+bash tests/proxmox-test.sh                       # the Proxmox script, with stand-ins for pct and the rest
+bash tests/proxmox-install-test.sh               # its installer, in Debian 12 and 13 containers
 docker build -t plexamp-web:test .
 sh docker/test-container.sh plexamp-web:test     # proxies, sign-in checks, logging, settings
 sh tests/run-browser-tests.sh plexamp-web:test   # headless Chromium (needs Playwright)
@@ -391,6 +398,9 @@ web/
   js/together.js         Play Together: sessions, long-polling, the shared clock
   js/cast.js             Play on: Plex players through the service, AirPlay and Cast
   js/editing.js          adding to playlists and collections, and who may edit collections
+  js/sorting.js          sorting playlists and collections with the fewest moves
+  js/membership.js       which playlists and collections a track is in (Appears in)
+  js/missing.js          missing tracks from AI playlists, and exporting them
   js/ratings.js          ratings in the player and in track lists, and keeping ❤️ Tracks
   js/live.js             live updates: WebSocket, event stream or polling
   js/ai.js               Ollama client, AI playlists and the AI DJ's picks
@@ -403,6 +413,7 @@ web/
   js/views/              home, library, detail pages, search, Play Together, AI playlist, settings, sign-in
 server/                  the service behind /api/: Play Together, Play on, sign-in checks, debug log
 docker/                  nginx config, start-up script and container tests
+proxmox/                 the Proxmox VE script and the installer it runs in the container
 dev/                     fake Plex and Ollama servers for development
 tests/                   browser tests
 ```

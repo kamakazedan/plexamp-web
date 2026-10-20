@@ -29,7 +29,9 @@ export class AIError extends Error {
 
 // ---------- configuration ----------
 
-const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '' };
+// missing: keep a list of the songs and artists AI playlists suggest that
+// aren't in the library (Settings › AI › Show missing tracks).
+const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '', missing: false };
 
 export const aiSettings = () => ({ ...DEFAULTS, ...(app.settings.ai || {}) });
 export const sharedAI = () => (app.config.ai?.proxy ? app.config.ai : null);
@@ -488,6 +490,35 @@ async function findSong(song, signal) {
   return tracks.find((m) => norm(m.title) === title && byArtist(m)) || tracks.find((m) => norm(m.title).startsWith(title) && byArtist(m)) || null;
 }
 
+// Titles that are the same song, near enough: "Out of Space" and "Out Of
+// Space (Remastered)", or a letter or two different.
+function sameTitle(a, b) {
+  if (!a || !b) return false;
+  if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
+  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
+}
+
+// Whether a song ({ artist, title }) is in the library: looked for by its
+// title and, if its artist is here, among that artist's own tracks, so a
+// song with a common title isn't taken for missing. `searched`: looked for
+// by title already.
+export async function songInLibrary(song, signal, { searched = false } = {}) {
+  if (!searched && (await findSong(song, signal))) return true;
+  const want = norm(song?.title);
+  if (!want) return true; // nothing to look for
+  const artist = await findArtist(song.artist, signal);
+  if (!artist) return false;
+  const needle = want.split(' ').find((w) => w.length >= 3) || want;
+  const { items } = await app.server
+    .list(app.source.sectionKey, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal })
+    .catch(() => ({ items: [] }));
+  return items.some((m) => sameTitle(norm(m.title), want));
+}
+
+export async function artistInLibrary(name, signal) {
+  return !!(await findArtist(name, signal));
+}
+
 // ---------- playlists from a description ----------
 
 const PLAN_SCHEMA = {
@@ -667,9 +698,14 @@ const inDecades = (decades) => {
   return (t) => !ranges.length || !t.year || ranges.some((y) => t.year >= y && t.year <= y + 9);
 };
 
-async function findCandidates(plan, vocab, length, signal, focus, prompt) {
+async function findCandidates(plan, vocab, length, signal, focus, prompt, trackMissing = false) {
   const s = app.server;
   const sec = app.source.sectionKey;
+  // Suggested songs and artists that aren't here (when asked to keep track),
+  // and those that are (so earlier notes of them as missing can go).
+  const missing = [];
+  const seen = { songs: [], artists: [] };
+  const lacking = (entry) => trackMissing && missing.push(entry);
   const genres = matchTags(plan.genres, vocab.genres).slice(0, 4);
   const styles = matchTags(plan.styles, vocab.styles).slice(0, 4);
   const moods = matchTags(plan.moods, vocab.moods).slice(0, 4);
@@ -691,11 +727,13 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt) {
   // The artists the request is about: all their tracks are candidates.
   const focused = [];
   if (focus.artists.length) {
-    const found = (await mapLimit(focus.artists, 3, (name) => findArtist(name, signal))).filter(Boolean);
-    const seen = new Set();
+    const looked = await mapLimit(focus.artists, 3, (name) => findArtist(name, signal));
+    focus.artists.forEach((name, i) => (looked[i] ? seen.artists.push(name) : lacking({ kind: 'artist', artist: name })));
+    const found = looked.filter(Boolean);
+    const done = new Set();
     for (const artist of found) {
-      if (seen.has(artist.ratingKey)) continue;
-      seen.add(artist.ratingKey);
+      if (done.has(artist.ratingKey)) continue;
+      done.add(artist.ratingKey);
       matchedArtists.push(artist.title);
       const deep = DEEP_CUTS.test(prompt);
       const items = await artistTracks(artist, focus.scope === 'only' ? ONLY_POOL : Math.max(40, length * 2), signal, { deep }).catch(() => []);
@@ -708,7 +746,20 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt) {
     if (signal?.aborted) throw new AIError('aborted', 'Stopped.');
     if (focus.scope === 'only') {
       if (!focused.length) {
-        throw new AIError('no-matches', `${focus.artists.join(' or ')} ${focus.artists.length > 1 ? 'aren’t' : 'isn’t'} in ${app.source.sectionTitle}.`);
+        throw new AIError('no-matches', `${focus.artists.join(' or ')} ${focus.artists.length > 1 ? 'aren’t' : 'isn’t'} in ${app.source.sectionTitle}.`, { missing });
+      }
+      // Songs of theirs the model named that aren't among their tracks here.
+      if (trackMissing) {
+        const theirs = focused.flat().map((c) => norm(c.track.title));
+        const byFocus = (song) => !norm(song?.artist) || focus.artists.some((a) => norm(a) === norm(song.artist));
+        await mapLimit(asList(plan.tracks).slice(0, 15).filter(byFocus), 4, async (song) => {
+          const title = clean(song?.title, 120);
+          if (!title) return;
+          const there = theirs.some((t) => sameTitle(t, norm(title))) || (await songInLibrary({ artist: song.artist || focus.artists[0], title }, signal));
+          if (there) seen.songs.push({ artist: song.artist || focus.artists[0], title });
+          else lacking({ kind: 'track', artist: clean(song.artist, 100) || focus.artists[0], title });
+        });
+        if (signal?.aborted) throw new AIError('aborted', 'Stopped.');
       }
       // Nothing but them: their tracks, taking turns between artists.
       const pool = [];
@@ -723,7 +774,7 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt) {
           }
         }
       }
-      return { pool: dedupe(pool, ONLY_POOL), basedOn: { tags: [], artists: matchedArtists }, only: true };
+      return { pool: dedupe(pool, ONLY_POOL), basedOn: { tags: [], artists: matchedArtists }, only: true, missing, seen };
     }
   }
 
@@ -736,7 +787,12 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt) {
     mapLimit(asList(plan.artists).slice(0, 12), 4, async (name) => {
       if (focus.artists.some((f) => norm(f) === norm(name))) return [];
       const artist = await findArtist(name, signal);
-      if (!artist || matchedArtists.includes(artist.title)) return [];
+      if (!artist) {
+        if (clean(name, 100)) lacking({ kind: 'artist', artist: clean(name, 100) });
+        return [];
+      }
+      seen.artists.push(name);
+      if (matchedArtists.includes(artist.title)) return [];
       matchedArtists.push(artist.title);
       let items = await s.popularTracks(sec, artist.ratingKey, 8).catch(() => []);
       if (items.length < 4) {
@@ -747,7 +803,15 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt) {
     }),
     mapLimit(asList(plan.tracks).slice(0, 15), 4, async (song) => {
       const m = await findSong(song, signal);
-      return m ? [cand(m, 'song', 'a close match for the request')] : [];
+      if (m) {
+        seen.songs.push(song);
+        return [cand(m, 'song', 'a close match for the request')];
+      }
+      const title = clean(song?.title, 120);
+      if (trackMissing && title && !(await songInLibrary(song, signal, { searched: true }))) {
+        lacking({ kind: 'track', artist: clean(song?.artist, 100), title });
+      }
+      return [];
     }),
   ]);
   if (signal?.aborted) throw new AIError('aborted', 'Stopped.');
@@ -779,11 +843,23 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt) {
       }
     }
   }
-  return { pool, basedOn: { tags: [...genres, ...styles, ...moods, ...decades].map((t) => t.title), artists: matchedArtists } };
+  return { pool, basedOn: { tags: [...genres, ...styles, ...moods, ...decades].map((t) => t.title), artists: matchedArtists }, missing, seen };
 }
 
-// steps reported through onStep: 'plan' → 'search' → 'order'
-export async function generatePlaylist({ prompt, length = 25, signal, onStep }) {
+// One of each missing song or artist.
+function oneOfEach(list) {
+  const out = new Map();
+  for (const m of list) {
+    const key = `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
+    if (!out.has(key)) out.set(key, m);
+  }
+  return [...out.values()];
+}
+
+// steps reported through onStep: 'plan' → 'search' → 'order'.
+// trackMissing: also say which suggested songs and artists aren't in the
+// library (`missing`), and which are (`seen`).
+export async function generatePlaylist({ prompt, length = 25, signal, onStep, trackMissing = aiSettings().missing === true }) {
   const started = performance.now();
   const notes = aiSettings().notes.trim();
   onStep?.('plan');
@@ -799,9 +875,17 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep }) 
   const focus = focusOf(plan, prompt);
 
   onStep?.('search');
-  const { pool, basedOn, only } = await findCandidates(plan, vocab, length, signal, focus, prompt);
+  let found;
+  try {
+    found = await findCandidates(plan, vocab, length, signal, focus, prompt, trackMissing);
+  } catch (err) {
+    if (err?.missing) err.missing = oneOfEach(err.missing);
+    throw err;
+  }
+  const { pool, basedOn, only, seen } = found;
+  const missing = oneOfEach(found.missing);
   if (!pool.length) {
-    throw new AIError('no-matches', `Nothing in ${app.source.sectionTitle} matched. Try describing the playlist another way.`);
+    throw new AIError('no-matches', `Nothing in ${app.source.sectionTitle} matched. Try describing the playlist another way.`, { missing, seen });
   }
 
   let title = clean(plan.title, 60) || 'AI playlist';
@@ -844,6 +928,8 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep }) 
     note: only && pool.length < length ? `That’s every track by ${basedOn.artists.join(' and ')} in ${app.source.sectionTitle}.` : '',
     model: planned.model,
     seconds: Math.round((performance.now() - started) / 1000),
+    missing,
+    seen,
   };
 }
 

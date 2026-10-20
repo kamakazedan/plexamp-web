@@ -3119,16 +3119,44 @@ body.bare #toasts {
   line-height: 1.4;
 }
 
+.edit-bar {
+  flex-wrap: wrap;
+}
+
 .edit-bar-text {
-  flex: 1;
+  flex: 1 1 220px;
   min-width: 0;
   color: rgba(255, 255, 255, 0.86);
+}
+
+.edit-bar.busy .edit-bar-text {
+  font-variant-numeric: tabular-nums;
+}
+
+.edit-bar-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .edit-bar .btn {
   flex: none;
   height: 36px;
   padding: 0 18px;
+}
+
+.edit-bar .edit-sort {
+  gap: 6px;
+  padding: 0 14px 0 12px;
+}
+
+/* While a new order is saved, the list waits. */
+.tracks.sorting,
+.rows.sorting {
+  pointer-events: none;
+  opacity: 0.55;
+  transition: opacity 0.2s;
 }
 
 /* Unlocked, rows don't play when tapped: only the handle, the remove
@@ -4259,4 +4287,138 @@ body.in-together .pb-art::after {
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ---------- Appears in (the playlists and collections a track is in) ---------- */
+
+.appears-track {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 6px var(--gutter) 0;
+}
+
+.appears-track > .art {
+  flex: none;
+  width: 64px;
+  border-radius: 8px;
+}
+
+.appears-track-text {
+  min-width: 0;
+}
+
+.appears-track-title {
+  font-size: calc(18px * var(--fs, 1));
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.appears-track-sub {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+}
+
+.appears-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 22px var(--gutter) 0;
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+.appears-status .spinner {
+  padding: 0;
+}
+
+.appears-status .spinner span {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+
+.appears-status.warn {
+  color: #ffb4a8;
+}
+
+.appears-note {
+  margin-top: 18px;
+}
+
+.appears-actions {
+  margin-top: 26px;
+}
+
+
+/* ---------- missing tracks (AI playlists) ---------- */
+
+.ai-missing {
+  margin: 18px var(--gutter) 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.07);
+  font-size: calc(14px * var(--fs, 1));
+}
+
+.ai-error .ai-missing {
+  margin: 0;
+  width: 100%;
+  text-align: left;
+}
+
+.ai-missing summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ai-missing summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-missing[open] summary {
+  color: var(--text);
+}
+
+.ai-missing-list {
+  margin: 10px 0 4px;
+  padding-left: 22px;
+  color: rgba(255, 255, 255, 0.86);
+  line-height: 1.55;
+}
+
+.ai-missing-all {
+  padding-bottom: 2px;
+  text-decoration: none;
+}
+
+.missing-actions {
+  margin-top: 16px;
+}
+
+.missing-status:empty {
+  display: none;
+}
+
+.missing-row .row-sub {
+  white-space: normal;
+}
+
+.missing-clear {
+  margin-top: 18px;
+}
+
+.link-btn.danger {
+  color: #ff8a7e;
+}
+
+.link-btn.danger:hover {
+  color: #ffb4a8;
 }

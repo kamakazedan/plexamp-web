@@ -1,10 +1,12 @@
-import { app, saveSettings, setSource, signOut, proxyUri } from '../state.js';
+import { app, on, saveSettings, setSource, signOut, proxyUri } from '../state.js';
 import { APP_INFO, PlexServer, listServers, pickConnection, clientId, canPlayCodec, canPlayHlsNatively } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
+import { missingTracksView } from './missingtracks.js';
+import { missingCount } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 
@@ -55,6 +57,7 @@ export async function settingsPageView(ctx) {
     home: homeEditorView,
     playback: playbackView,
     ai: aiView,
+    missing: missingTracksView,
     debug: debugView,
     about: aboutView,
   };
@@ -498,16 +501,50 @@ function aiSummary() {
 
 function saveAI(patch) {
   saveSettings({ ai: { ...aiSettings(), ...patch } });
-  dropCached((p) => p === '/ai-playlist' || p === '/search' || p === '/settings');
+  dropCached((p) => p === '/ai-playlist' || p === '/search' || p === '/settings' || p === '/settings/missing');
+}
+
+// Show missing tracks: on or off, and the list (shown while it's on, or
+// while there's anything on it).
+function missingSection(onDispose) {
+  const count = h('span.row-value');
+  const listRow = row({ href: '/settings/missing', title: 'Missing tracks', subtitle: 'See them, export them, or check again', right: count, chevron: true, cls: 'missing-link' });
+  const paint = () => {
+    const n = missingCount();
+    count.textContent = n ? fmt.number(n) : '';
+    listRow.hidden = !aiSettings().missing && !n;
+  };
+  paint();
+  // An AI playlist made meanwhile can add to it.
+  onDispose?.(on('missing', paint));
+  return h(
+    'div.ai-missing-settings',
+    null,
+    h('div.section-head', null, h('h2', null, 'Missing tracks')),
+    h(
+      'div.rows',
+      null,
+      toggleRow({
+        title: 'Show missing tracks',
+        subtitle: 'List the songs and artists AI playlists suggest that aren’t in your library, so you can export the list and go looking.',
+        checked: aiSettings().missing === true,
+        onChange: (v) => {
+          saveAI({ missing: v });
+          paint();
+        },
+      }),
+      listRow,
+    ),
+  );
 }
 
 const gb = (bytes) => (bytes ? `${(bytes / 1e9).toFixed(1)} GB` : '');
 
-function aiView({ el }) {
+function aiView({ el, onDispose }) {
   el.append(backHeader('AI', { fallback: '/settings' }));
   // A model shared by this player is the only one used: its name and whether
   // it's ready are all that's shown of the AI server.
-  if (sharedAI()) return sharedAIView(el);
+  if (sharedAI()) return sharedAIView(el, onDispose);
   const settings = aiSettings();
   const effective = settings.mode === 'custom' ? 'custom' : 'off';
   const options = [
@@ -529,6 +566,7 @@ function aiView({ el }) {
     customBox,
     modelBox,
     notesSection(),
+    missingSection(onDispose),
   );
   render();
 
@@ -617,7 +655,7 @@ function aiView({ el }) {
 
 // The shared model: its name, whether it's ready, a test, and AI on or off
 // on this device. Which model is used is up to whoever runs this player.
-function sharedAIView(el) {
+function sharedAIView(el, onDispose) {
   const on = aiSettings().mode !== 'off';
   const name = h('span', null, sharedAI().model || '…');
   const status = h('p.hint.pad', { role: 'status' });
@@ -633,6 +671,8 @@ function sharedAIView(el) {
   );
   const notes = notesSection();
   notes.hidden = !on;
+  const missing = missingSection(onDispose);
+  missing.hidden = !on && !missingCount();
   el.append(
     h('p.lede', null, 'AI playlists and the AI DJ use an AI model this player shares, running on its owner’s hardware through Ollama.'),
     h(
@@ -646,12 +686,14 @@ function sharedAIView(el) {
           saveAI({ mode: v ? 'auto' : 'off' });
           box.hidden = !v;
           notes.hidden = !v;
+          missing.hidden = !v && !missingCount();
           if (v) check();
         },
       }),
     ),
     box,
     notes,
+    missing,
   );
   if (on) check();
 

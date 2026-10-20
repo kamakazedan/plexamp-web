@@ -3,6 +3,42 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.10.0 - 2026-10-20
+
+### Added
+
+- **Appears in.** Every track's menu (in a list, Up next or Now Playing) has
+  Appears in…, which shows the playlists the track is in (and how many times,
+  if more than once) and the collections it's in, its album's or its
+  artist's included. Each opens with a tap. Plex can't be asked this, so
+  your playlists and collections are read, then kept until they change, so
+  looking again is quick. Very long smart playlists (a whole library) are
+  skipped, and the page says so.
+- **Sorting playlists and collections.** Unlocked for editing, a playlist has
+  Sort: by artist (each artist's albums by year, in track order), track
+  name, album or year, or reversed. A collection sorts the same way, as fits
+  what it holds (albums by artist, album name or year; artists by name). The
+  new order is saved to Plex with as few moves as possible, with progress, a
+  Stop button and Undo.
+- **Missing tracks from AI playlists.** With Settings › AI › Show missing
+  tracks on, an AI playlist lists the songs and artists it suggested that
+  your library doesn't have, and Settings › AI › Missing tracks collects
+  them (how often, and for what), to download as a spreadsheet (CSV), copy
+  or share. Check again takes off what's in the library now. Kept on the
+  device.
+- **Proxmox VE install with one command**, in the manner of the community
+  helper scripts: it makes an unprivileged Debian container and installs the
+  player in it (no Docker). Default settings with one key, or each one
+  chosen; `plexamp-web-settings` and `update-plexamp-web` in the container.
+  It installs from the `stable` branch, which CI moves to each commit that
+  passed every test.
+- Images are also tagged with their version (`ghcr.io/kamakazedan/plexamp-web:0.10.0`).
+
+### Changed
+
+- Moving tracks in a playlist or collection doesn't download Plex's answer,
+  which can be the whole list.
+
 ## 0.9.1 - 2026-10-17
 
 ### Added

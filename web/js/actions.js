@@ -210,6 +210,7 @@ export function trackMenu(track, { queueIndex, extra = [] } = {}) {
         label: 'Add to collection…',
         onSelect: () => addToCollection({ kind: 'track', what: track.title, load: async () => [track] }),
       },
+      /^\d+$/.test(String(track.id)) && { icon: 'appears', label: 'Appears in…', onSelect: () => navigate(`/appears/${track.id}`) },
       track.albumId && { icon: 'disc', label: 'Go to album', onSelect: () => navigate(`/album/${track.albumId}`) },
       track.artistId && { icon: 'mic', label: 'Go to artist', onSelect: () => navigate(`/artist/${track.artistId}`) },
     ],
