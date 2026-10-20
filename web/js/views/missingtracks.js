@@ -3,23 +3,7 @@
 import { app, on } from '../state.js';
 import { describeError } from '../router.js';
 import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction } from '../ui.js';
-import {
-  missingList,
-  forgetMissing,
-  clearMissing,
-  checkMissingAgain,
-  missingCsv,
-  missingText,
-  download,
-  copyText,
-  fileDate,
-  mbOffered,
-  mbOn,
-  mbHidden,
-  mbUnchecked,
-  mbChecking,
-  checkOnMusicBrainz,
-} from '../missing.js';
+import { missingList, forgetMissing, clearMissing, checkMissingAgain, missingCsv, missingText, download, copyText, fileDate, mbOn } from '../missing.js';
 import { aiSettings } from '../ai.js';
 
 export function missingTracksView({ el, onDispose }) {
@@ -28,80 +12,24 @@ export function missingTracksView({ el, onDispose }) {
     h(
       'p.lede',
       null,
-      'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI models sometimes suggest songs that don’t exist, so check before you go looking.',
+      mbOn()
+        ? 'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up).'
+        : 'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI models sometimes suggest songs that don’t exist, so check before you go looking.',
     ),
   );
   const actions = h('div.pad.button-row.missing-actions');
   const status = h('p.hint.pad.missing-status', { role: 'status' });
-  // What MusicBrainz said, or that it could say.
-  const mbNote = h('p.hint.pad.missing-mb');
   const body = h('div.missing-body');
-  el.append(actions, status, mbNote, body);
+  el.append(actions, status, body);
 
   let checking = null;
-  let showUnknown = false;
-  let mbProgress = '';
-  let mbProblem = '';
 
   function button(name, label, onClick, cls = '') {
     return h(`button.btn.btn-secondary${cls}`, { type: 'button', onclick: onClick }, icon(name, 20), h('span', null, label));
   }
 
-  function paintMB() {
-    const kids = [];
-    if (mbOn()) {
-      const hidden = mbHidden();
-      const unchecked = mbUnchecked();
-      if (mbProblem) kids.push(mbProblem);
-      else if (mbProgress) kids.push(mbProgress);
-      else if (mbChecking()) kids.push('Checking them on MusicBrainz…');
-      else if (unchecked) {
-        kids.push(`${fmt.count(unchecked, 'suggestion isn’t', 'suggestions aren’t')} checked on MusicBrainz yet. `, h('button.link-btn.missing-mb-check', { type: 'button', onclick: () => checkMB() }, 'Check now'));
-      } else kids.push('Checked on MusicBrainz.');
-      if (hidden) {
-        kids.push(
-          ` ${fmt.count(hidden, 'suggestion', 'suggestions')} it doesn’t know (most likely made up by the AI) ${showUnknown ? 'are shown, marked.' : hidden === 1 ? 'is hidden.' : 'are hidden.'} `,
-          h(
-            'button.link-btn.missing-show-unknown',
-            {
-              type: 'button',
-              onclick: () => {
-                showUnknown = !showUnknown;
-                render();
-              },
-            },
-            showUnknown ? 'Hide them' : 'Show them',
-          ),
-        );
-      }
-    } else if (mbOffered()) {
-      kids.push('To leave out the songs and artists the AI made up, turn on Check them on MusicBrainz in Settings › AI.');
-    }
-    mbNote.replaceChildren(...kids);
-    mbNote.hidden = !kids.length;
-    mbNote.classList.toggle('warn', !!mbProblem);
-  }
-
-  // (Or waits for the check under way, from turning it on, say.)
-  async function checkMB() {
-    if (!mbOn() || (!mbUnchecked() && !mbChecking())) return;
-    mbProblem = '';
-    mbProgress = mbChecking() ? '' : `Checking ${fmt.count(mbUnchecked(), 'suggestion', 'suggestions')} on MusicBrainz…`;
-    paintMB();
-    try {
-      await checkOnMusicBrainz({ onProgress: (n, of) => ((mbProgress = `Checking on MusicBrainz… ${n} of ${of}`), paintMB()) });
-    } catch (err) {
-      mbProblem = `They couldn’t all be checked on MusicBrainz: ${err.message}`;
-    } finally {
-      mbProgress = '';
-      render();
-    }
-  }
-
   function render() {
-    const list = missingList({ all: showUnknown });
-    paintMB();
-    const unknown = (m) => (showUnknown && m.mb === 'unknown' ? ' · not on MusicBrainz' : '');
+    const list = missingList();
     const artists = list.filter((m) => m.kind === 'artist');
     const tracks = list.filter((m) => m.kind === 'track');
     const libraries = new Set(list.map((m) => m.library));
@@ -140,7 +68,7 @@ export function missingTracksView({ el, onDispose }) {
           h(
             'div.rows.missing-rows',
             null,
-            artists.map((m) => row({ lead: lead('mic'), title: m.artist, subtitle: `None of their music · ${times(m)}${fmt.ago(m.last)}${where(m)}${unknown(m)}`, right: remove(m), cls: `missing-row${m.mb === 'unknown' ? ' unknown' : ''}` })),
+            artists.map((m) => row({ lead: lead('mic'), title: m.artist, subtitle: `None of their music · ${times(m)}${fmt.ago(m.last)}${where(m)}`, right: remove(m), cls: 'missing-row' })),
           ),
         ),
       );
@@ -158,9 +86,9 @@ export function missingTracksView({ el, onDispose }) {
               row({
                 lead: lead('note'),
                 title: m.title,
-                subtitle: `${m.artist || 'Unknown artist'} · ${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}${where(m)}${unknown(m)}`,
+                subtitle: `${m.artist || 'Unknown artist'} · ${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}${where(m)}`,
                 right: remove(m),
-                cls: `missing-row${m.mb === 'unknown' ? ' unknown' : ''}`,
+                cls: 'missing-row',
               }),
             ),
           ),
@@ -223,8 +151,6 @@ export function missingTracksView({ el, onDispose }) {
   }
 
   render();
-  // Any not checked on MusicBrainz yet (from before it was turned on, say).
-  checkMB();
   // An AI playlist made meanwhile may add to it.
   onDispose?.(on('missing', render));
   onDispose?.(() => checking?.abort());

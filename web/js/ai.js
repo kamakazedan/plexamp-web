@@ -34,10 +34,10 @@ export class AIError extends Error {
 // ---------- configuration ----------
 
 // missing: keep a list of the songs and artists AI playlists suggest that
-// aren't in the library (Settings › AI › Show missing tracks), musicbrainz:
-// and check them there. wait: minutes to wait for the model to start
-// answering.
-const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '', missing: false, musicbrainz: false, wait: 5 };
+// aren't in the library (Settings › AI › Show missing tracks); musicbrainz:
+// check them on MusicBrainz first, where the player has one to ask (see
+// missing.js). wait: minutes to wait for the model to start answering.
+const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '', missing: false, musicbrainz: true, wait: 5 };
 
 export const aiSettings = () => ({ ...DEFAULTS, ...(app.settings.ai || {}) });
 export const WAIT_CHOICES = [2, 5, 10, 15, 30];
@@ -1072,23 +1072,27 @@ const DJ_SCHEMA = {
   required: ['pick', 'intro'],
 };
 
-export async function djPick({ current, recent, candidates, signal }) {
+// The AI DJ's next song, from `candidates` (by other artists than the one
+// playing: dj.js sees to that); `popular`: the ids of those that are their
+// artist's best known; `genre`: the station's.
+export async function djPick({ current, recent, candidates, popular = new Set(), genre = '', signal }) {
   const notes = aiSettings().notes.trim();
   const messages = [
     {
       role: 'system',
       content:
-        'You are the DJ of a personal radio station built from the listener’s own music library. Choose the next song so the music flows naturally from what is playing, with some variety. Answer with JSON only.',
+        'You are the DJ of a personal radio station built from the listener’s own music library. Choose the next song so the music flows naturally from what is playing, with variety: a different artist each time, and well-known songs rather than obscure ones. Answer with JSON only.',
     },
     {
       role: 'user',
       content: lines(
         `Now playing: ${describeTrack(current)}`,
         recent.length ? `Played before that:\n${recent.map((t) => `- ${describeTrack(t)}`).join('\n')}` : null,
+        genre ? `The station plays ${genre}: keep to it.` : null,
         notes ? `About the listener: ${notes}` : null,
         '',
-        'Choose the next song from this list:',
-        ...candidates.map((t, i) => `${i + 1}. ${describeTrack(t)}`),
+        'Choose the next song from this list. Songs marked “popular” are their artist’s best known.',
+        ...candidates.map((t, i) => `${i + 1}. ${describeTrack(t)}${popular.has(t.id) ? ' (popular)' : ''}`),
         '',
         'Reply with "pick" (the number of the song) and "intro" (one short, friendly sentence a radio DJ might say before playing it, under 25 words).',
       ),

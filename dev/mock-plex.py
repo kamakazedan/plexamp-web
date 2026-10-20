@@ -24,12 +24,16 @@ Live notifications are sent over a WebSocket (/:/websockets/notifications)
 and an event stream (/:/eventsource/notifications), like a real server. For
 testing, these endpoints need no token:
 
-    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS&loved=smart|none
+    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS&loved=smart|none&nearest=N&copy=0|1
         ws=0 refuses WebSockets (as a blocking proxy would), sse=0 refuses the
         event stream, sse=silent accepts it but never sends anything; open=1
         accepts any token; delay=MS slows library listings down; loved=smart
         adds a smart ❤️ Tracks playlist (five-star tracks, like Plexamp's),
-        loved=none removes any ❤️ Tracks
+        loved=none removes any ❤️ Tracks; nearest=N gives no more than the N
+        nearest tracks (0: no limit), as a big library would, where a
+        track's nearest few hundred are a sliver of it; copy=1 adds a hi-res
+        copy of an album (Crate Digger: the same title, year and songs, as a
+        library with two editions has), copy=0 takes it away
     /__mock/add-album?title=...   adds an album and announces it
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
@@ -491,10 +495,11 @@ def public(it):
 def track_detail(t):
     d = public(t)
     d['Media'] = [dict(t['Media'][0])]
+    hires = t.get('_hires', int(t['ratingKey']) % 2 == 1)
     d['Media'][0]['Part'] = [dict(t['Media'][0]['Part'][0], Stream=[
         {'id': int(t['ratingKey']) * 10 + 1, 'streamType': 2, 'codec': 'flac',
-         'bitDepth': 24 if int(t['ratingKey']) % 2 else 16,
-         'samplingRate': 96000 if int(t['ratingKey']) % 2 else 44100, 'channels': 2,
+         'bitDepth': 24 if hires else 16,
+         'samplingRate': 96000 if hires else 44100, 'channels': 2,
          'loudness': -11.5, 'peak': 0.98}])]
     return d
 
@@ -696,7 +701,7 @@ def tone_wav(rk):
 
 # ---------------------------------------------------------------- notifications
 
-MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0}
+MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False}
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
 listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
 listeners_lock = threading.Lock()
@@ -747,6 +752,38 @@ def activity(event, title):
                      'title': title, 'subtitle': '', 'progress': 0 if event == 'started' else 100,
                      'Context': {'librarySectionID': SECTION}},
     }])
+
+
+COPIES = []  # the hi-res copy of Crate Digger and its tracks (see set_copy)
+
+
+def set_copy(on):
+    """A second edition of an album, as libraries often have: the same
+    title, year and songs (a second or so longer), but hi-res FLAC."""
+    if not on:
+        for it in COPIES:
+            items.pop(it['ratingKey'], None)
+            (albums if it['type'] == 'album' else tracks).remove(it)
+        COPIES.clear()
+        MOCK['copy'] = False
+        return
+    if COPIES:
+        return
+    src = next(a for a in albums if a['title'] == 'Crate Digger')
+    k = key()
+    al = dict(src, ratingKey=k, key=f'/library/metadata/{k}/children', thumb=f'/library/metadata/{k}/thumb/1', addedAt=int(time.time()))
+    items[k] = al
+    albums.append(al)
+    COPIES.append(al)
+    for t in [t for t in tracks if t['parentRatingKey'] == src['ratingKey']]:
+        tk = key()
+        c = dict(t, ratingKey=tk, key=f'/library/metadata/{tk}', parentRatingKey=k, parentThumb=al['thumb'], duration=t['duration'] + 1000, _hires=True)
+        c['Media'] = [{'audioCodec': 'flac', 'container': 'flac', 'bitrate': 2900, 'Part': [
+            {'key': f'/library/parts/{tk}/0/file.flac', 'duration': c['duration'], 'container': 'flac'}]}]
+        items[tk] = c
+        tracks.append(c)
+        COPIES.append(c)
+    MOCK['copy'] = True
 
 
 def add_album(title):
@@ -1379,6 +1416,10 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['delay'] = max(0, int(q['delay'][0]))
             if 'loved' in q:
                 set_loved(q['loved'][0])
+            if 'nearest' in q:
+                MOCK['nearest'] = max(0, int(q['nearest'][0] or 0))
+            if 'copy' in q:
+                set_copy(q['copy'][0] in ('1', 'on', 'true'))
             return self.send_json(dict(MOCK, listeners=len(listeners)))
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
@@ -1527,6 +1568,10 @@ class Handler(BaseHTTPRequestHandler):
                 # Everything unless asked for a page, like Plex.
                 return self.page(c['_items'], {'X-Plex-Container-Size': ['500'], **q})
             return self.send_json({'size': 1, 'Metadata': [public(c)]})
+        if p.startswith('/library/metadata/') and ',' in parts[2] and len(parts) == 3:
+            # Several at once, as Plex gives them: those it has.
+            many = [items[i] for i in parts[2].split(',') if i in items]
+            return self.send_json({'size': len(many), 'Metadata': [track_detail(x) if x['type'] == 'track' else public(x) for x in many]})
         if p.startswith('/library/metadata/'):
             it = items.get(parts[2])
             if not it:
@@ -1550,6 +1595,8 @@ class Handler(BaseHTTPRequestHandler):
                 most = float(q.get('maxDistance', ['0.25'])[0])
                 near = sorted(((sonic_distance(it, t), t) for t in tracks if t is not it), key=lambda x: x[0])
                 found = [dict(t, distance=round(d, 4)) for d, t in near if d <= most][:n]
+                if MOCK['nearest']:
+                    found = found[:MOCK['nearest']]
                 return self.page(found, {'X-Plex-Container-Size': ['1000']})
             if sub in ('thumb', 'art'):
                 return self.send_bytes(cover_png(p, 600), 'image/png')

@@ -941,6 +941,70 @@ label.row:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* Numbered lists (playlists, collections, AI playlists, top tracks): each
+   row's place, counted by the browser, so the numbers follow the rows as
+   they're dragged, removed or added. --pos-digits (set from the list's
+   length) keeps the column one width. */
+.tracks.numbered {
+  counter-reset: track-pos;
+}
+
+.tracks.numbered > .track {
+  counter-increment: track-pos;
+}
+
+.track-pos {
+  flex: none;
+  min-width: calc(var(--pos-digits, 2) * 1ch);
+  margin-right: -4px;
+  text-align: right;
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+.track-pos::before {
+  content: counter(track-pos);
+}
+
+.track.is-current .track-pos {
+  color: var(--tint-hi);
+}
+
+/* The album, in a column of its own where the list is wide enough (on a
+   phone it's under the title, if anywhere). */
+.tracks.with-album {
+  container: tracks / inline-size;
+}
+
+.track-album {
+  display: none;
+}
+
+@container tracks (min-width: 640px) {
+  .track-album {
+    display: block;
+    flex: 0 1 32%;
+    min-width: 0;
+    padding: 0 12px;
+    color: var(--muted);
+    font-size: calc(14px * var(--fs, 1));
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  a.track-album:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+
+  .track-sub-album {
+    display: none;
+  }
+}
+
 .track-text {
   flex: 1;
   min-width: 0;
@@ -3355,6 +3419,26 @@ body.bare #toasts {
   color: #ffb35c;
 }
 
+/* A track's format, before its artist (search). */
+.track-codec {
+  display: inline-block;
+  margin-right: 7px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: calc(11px * var(--fs, 1));
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
+}
+
+.track-codec.hires {
+  border-color: rgba(232, 194, 91, 0.6);
+  color: #ffd977;
+}
+
 .codec-badge {
   display: inline-block;
   margin-left: 8px;
@@ -4545,6 +4629,44 @@ body.in-together .pb-art::after {
   line-height: 1.55;
 }
 
+/* Left out, after a check on MusicBrainz: what, and why. */
+.ai-missing-group {
+  margin-top: 12px;
+}
+
+.ai-missing-why {
+  margin: 0;
+  color: var(--muted);
+}
+
+.ai-missing-list.out {
+  margin-top: 4px;
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 255, 255, 0.35);
+}
+
+.ai-missing-mb {
+  margin: 10px 0 6px;
+  color: var(--faint);
+  font-size: calc(13px * var(--fs, 1));
+}
+
+.ai-missing-mb.warn {
+  color: #ffcf8a;
+}
+
+.ai-missing.checking summary::after {
+  content: '';
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border: 2px solid var(--line);
+  border-top-color: var(--tint-hi);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
 .ai-missing-all {
   padding-bottom: 2px;
   text-decoration: none;
@@ -4556,16 +4678,6 @@ body.in-together .pb-art::after {
 
 .missing-status:empty {
   display: none;
-}
-
-.missing-mb {
-  margin-top: 4px;
-}
-
-.missing-row.unknown .row-title {
-  color: var(--muted);
-  text-decoration: line-through;
-  text-decoration-color: rgba(255, 255, 255, 0.35);
 }
 
 .missing-row .row-sub {

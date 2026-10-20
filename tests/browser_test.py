@@ -496,7 +496,18 @@ with sync_playwright() as pw:
               wait_for(lambda: page.locator('.np-dj:not([hidden])').count() == 1, 10) and page.locator('.np-dj').inner_text().startswith('AI DJ:'))
         shot(page, 'dj-02-note')
         check('dj: AI DJ keeps going', wait_for(lambda: nxt() == 'ai', 20), str(nxt()))
-        js(page, "() => import('./js/dj.js').then(m => m.guestDJ.set(null))")
+        # Another artist each time: other artists' best-known songs, in the
+        # genre of the track it started with.
+        with urllib.request.urlopen(f'{OLLAMA}/__mock/config', timeout=20) as r:
+            asked = json.loads(r.read()).get('dj_prompt', '')
+        playing = (re.search(r'^Now playing: (.*?) — ', asked, re.M) or [None, None])[1]
+        offered = [x.split('. ', 1)[1] for x in asked.splitlines() if re.match(r'^\d+\. ', x)]
+        q = player(page, '({ cur: p.current.artist, next: p.queue[p.index + 1] && p.queue[p.index + 1].artist })')
+        check('dj: ...never the artist playing', q['next'] and q['next'] != q['cur'], str(q))
+        check('dj: ...choosing from other artists\' popular songs, in the station\'s genre',
+              playing and offered and not any(o.startswith(f'{playing} — ') for o in offered) and '(popular)' in asked and 'The station plays ' in asked, asked[-700:])
+        undone = js(page, "() => import('./js/dj.js').then(m => m.guestDJ.set(null))")
+        check('dj: turned off, its pick comes out of the queue', not nxt() and undone['removed'] == 1, f'{nxt()} {undone}')
         page.keyboard.press('Escape')
     ctx.close()
 
@@ -554,20 +565,23 @@ with sync_playwright() as pw:
         nxt = wait_for(picked, 15)
         check('djs: DJ Echo doesn\'t follow a song with another version of it', nxt and song(nxt['artist'], nxt['title']) != song('Glass Harbour', 'Signal Fires'), str(nxt))
 
-        # DJ Bridge: a journey as long as the two tracks are apart, each step
-        # further along.
+        # DJ Bridge: one track between two, the middle of the path Plex finds
+        # from one to the other, however far apart they sound.
         gh, ns = by_artist('Glass Harbour'), by_artist('Northbound Static')
         page.reload()
         page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
-        start([gh[0]['ratingKey'], ns[0]['ratingKey']], 'bridge')
+        start([gh[0]['ratingKey'], ns[0]['ratingKey'], gh[3]['ratingKey']], 'bridge')
         wait_for(picked, 15)
         page.wait_for_timeout(300)
         q = queue()
         steps = [t['id'] for t in q['queue'] if t['dj'] == 'bridge']
-        path = [m['ratingKey'] for m in mc(f"/library/sections/1/computePath?startID={gh[0]['ratingKey']}&endID={ns[0]['ratingKey']}")['Metadata']]
-        check('djs: DJ Bridge plays more steps between tracks that sound far apart', len(steps) == 4 and q['queue'][-1]['id'] == ns[0]['ratingKey'], str(q['queue']))
-        at = [path.index(i) for i in steps if i in path]
-        check('djs: ...spread along the path between them, in its order', len(at) == 4 and at == sorted(at) and at[0] <= 3 and at[-1] >= len(path) - 4, f'{at} of {len(path)}')
+        path = [m['ratingKey'] for m in mc(f"/library/sections/1/computePath?startID={gh[0]['ratingKey']}&endID={ns[0]['ratingKey']}")['Metadata']][1:-1]
+        check('djs: DJ Bridge plays one track between two that sound far apart', len(steps) == 1 and [t['id'] for t in q['queue']][2] == ns[0]['ratingKey'], str(q['queue']))
+        check('djs: ...from the middle of the path between them', steps and steps[0] in path and abs(path.index(steps[0]) - (len(path) - 1) / 2) <= 1, f'{steps} in {path}')
+        # Turned off, its picks come out of what's to come.
+        undone = js(page, "() => import('./js/dj.js').then((m) => m.guestDJ.set(null))")
+        check('djs: turning a DJ off takes its picks out of the queue, leaving it as it was',
+              [t['id'] for t in queue()['queue']] == [gh[0]['ratingKey'], ns[0]['ratingKey'], gh[3]['ratingKey']] and undone == {'removed': 1, 'back': 0}, f'{queue()} {undone}')
         start([gh[0]['ratingKey'], gh[2]['ratingKey']], 'bridge')
         wait_for(picked, 15)
         page.wait_for_timeout(300)
@@ -588,7 +602,8 @@ with sync_playwright() as pw:
             ahead = [t for t in q['queue'][q['index'] + 1:q['index'] + 41] if not t['dj']]
             d = apart_from(next(t for t in library if t['ratingKey'] == cur['id']))
             best = min(ahead, key=lambda t: d.get(t['id'], 9))
-            right.append(q['queue'][q['index'] + 1]['id'] == best['id'] or d.get(q['queue'][q['index'] + 1]['id'], 9) == d.get(best['id'], 9))
+            # (Left where it is if the next one is as good, near enough.)
+            right.append(q['queue'][q['index'] + 1]['id'] == best['id'] or d.get(q['queue'][q['index'] + 1]['id'], 9) <= d.get(best['id'], 9) + 0.05)
             player(page, 'p.next()')
         q = queue()
         check('djs: Queue Echo plays next the queued track that sounds most like the one playing', all(right), str(right))
@@ -617,9 +632,45 @@ with sync_playwright() as pw:
         page.click('.pb-main')
         page.wait_for_selector('.np.open')
         check('djs: ...as does Now Playing, when it plays', wait_for(lambda: 'Queue Bridge moved this up: it bridges the gap to' in (page.locator('.np-dj').inner_text() if page.locator('.np-dj:not([hidden])').count() else ''), 10))
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(400)
+
+        # A big library: Plex gives a track's nearest few hundred, a sliver
+        # of it, so for most of a queue it says nothing about how far apart
+        # they sound. Then the queue DJs go by what it knows of their albums
+        # (genres, styles, moods, years) and artists.
+        mc('/__mock/config?nearest=3')
+        by_album = lambda name: [t for t in library if t['parentTitle'] == name and not t['title'].startswith('Signal Fires')]
+        tl, buoy, inter, hearth = by_album('Tidal Lines'), by_album('Buoy'), by_album('Interference'), by_album('Hearthstone')
+        try:
+            page.reload()
+            page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+            mine = [tl[0]['ratingKey'], inter[0]['ratingKey'], hearth[0]['ratingKey'], buoy[0]['ratingKey'], tl[2]['ratingKey']]
+            start(mine, 'queue-bridge')
+            wait_for(lambda: queue()['queue'][1]['moved'], 15)
+            order = [t['id'] for t in queue()['queue']]
+            told = page.locator('.toast').all_inner_texts()
+            check('djs: in a big library, Queue Bridge goes by genres, styles, moods and years: an Electronic EP with a Downtempo album\'s style, between Electronic and Rock',
+                  order == [tl[0]['ratingKey'], buoy[0]['ratingKey'], inter[0]['ratingKey'], hearth[0]['ratingKey'], tl[2]['ratingKey']], str(order))
+            check('djs: ...saying what it did, when it\'s first turned on', any(t.startswith('Queue Bridge moved') and 'bridges the gap' in t for t in told), str(told))
+            undone = js(page, "() => import('./js/dj.js').then((m) => m.guestDJ.set(null))")
+            check('djs: turning a queue DJ off puts what it moved back where it was', [t['id'] for t in queue()['queue']] == mine and undone == {'removed': 0, 'back': 1},
+                  f"{[t['id'] for t in queue()['queue']]} {undone}")
+            page.reload()
+            page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+            start(mine, 'queue-echo')
+            wait_for(lambda: queue()['queue'][1]['moved'], 15)
+            moved_up = queue()['queue'][1]
+            check('djs: ...and Queue Echo, the queued track most like this one (the same album here)', moved_up['id'] == tl[2]['ratingKey'], str(moved_up))
+            js(page, "() => import('./js/dj.js').then((m) => m.guestDJ.set(null))")
+        finally:
+            mc('/__mock/config?nearest=0')
 
         # The sheet: the "your queue" DJs under their own heading, and no row
         # running into the next.
+        if not page.locator('.np.open').count():
+            page.click('.pb-main')
+            page.wait_for_selector('.np.open')
         page.click('.np-tool[data-tool=dj]')
         page.wait_for_selector('.sheet.dialog.open')
         page.wait_for_timeout(500)
@@ -975,6 +1026,37 @@ with sync_playwright() as pw:
         page.press('.search-box input', 'Escape')
         page.wait_for_timeout(300)
 
+        # Two editions of an album (Crate Digger, and a hi-res copy): one of
+        # each song and album shows, the best-sounding, with its format.
+        mock('/__mock/config?copy=1')
+        try:
+            crate = [a for a in mock('/library/sections/1/all?type=9&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata'] if a['title'] == 'Crate Digger']
+            hires_album = max(crate, key=lambda a: int(a['ratingKey']))['ratingKey']
+            hires = {t['ratingKey'] for t in mock(f'/library/metadata/{hires_album}/children?X-Plex-Token=t')['MediaContainer']['Metadata']}
+            page.fill('.search-box input', 'kilo meridian')
+            wait_for(lambda: page.locator('.search-tracks .track-codec').count() > 0, 8)
+            page.wait_for_timeout(800)
+            rows = page.locator('.search-tracks .track').evaluate_all('rs => rs.map((r) => [r.dataset.trackId, r.querySelector(".track-title").textContent, r.querySelector(".track-codec")?.textContent || "", !!r.querySelector(".track-codec.hires")])')
+            shot(page, 'library-01c-editions')
+            check('library: search shows one of each song, not each copy', len(rows) == len({r[1] for r in rows}) and len(rows) >= 3, str(rows))
+            check('library: ...the best-sounding copy, with its format (FLAC 24/96, marked hi-res)', all(r[0] in hires and r[2] == 'FLAC 24/96' and r[3] for r in rows), str(rows))
+            page.fill('.search-box input', 'crate digger')
+            wait_for(lambda: 'ALBUMS' in heads(), 8)
+            page.wait_for_timeout(500)
+            albums = page.locator('.block .rows a.row').evaluate_all('rs => rs.map((r) => [r.getAttribute("href"), r.querySelector(".row-title").textContent])')
+            crates = [a for a in albums if a[1] == 'Crate Digger']
+            check('library: ...and one of each album, the best-sounding edition', len(crates) == 1 and crates[0][0].endswith(f'/album/{hires_album}'), str(albums))
+            settings(page, {'searchCodecs': False})
+            page.fill('.search-box input', 'kilo meridian')
+            wait_for(lambda: page.locator('.search-tracks .track').count() > 0, 8)
+            page.wait_for_timeout(500)
+            check('library: formats in search can be turned off (Settings › Experience)', page.locator('.search-tracks .track-codec').count() == 0)
+            settings(page, {'searchCodecs': True})
+            page.press('.search-box input', 'Escape')
+            page.wait_for_timeout(300)
+        finally:
+            mock('/__mock/config?copy=0')
+
         # Words kept as tags narrow a search: everything shown matches them all.
         page.fill('.search-box input', 'glass')
         page.press('.search-box input', 'Enter')
@@ -982,7 +1064,8 @@ with sync_playwright() as pw:
         page.fill('.search-box input', 'engine')
         narrowed = wait_for(lambda: page.locator('.search-body .track').count() > 0 and page.locator('.search-body .section-head h2').all_inner_texts() == ['TRACKS'], 8)
         titles = page.locator('.search-body .track .track-title').all_inner_texts()
-        subs = page.locator('.search-body .track .track-sub').all_inner_texts()
+        # (The subtitle without the track's format before it.)
+        subs = page.locator('.search-body .track .track-sub').evaluate_all('ss => ss.map((s) => [...s.childNodes].filter((n) => !n.classList?.contains("track-codec")).map((n) => n.textContent).join(""))')
         check('library: Enter keeps a word as a tag, and the next words narrow the search', narrowed
               and page.locator('.search-tags .filter-chip').all_inner_texts() == ['glass'] and titles and all('engine' in t.lower() for t in titles)
               and all(x.startswith('Glass Harbour') for x in subs), f'{titles} {subs}')
@@ -1565,10 +1648,28 @@ with sync_playwright() as pw:
         part = [m['playlistItemID'] for m in entries()]
         check('lists: a sort can be stopped part way, saying how far it got', part not in (reversed_pids, by_artist_pids)
               and page.locator('.edit-bar:not(.busy) .edit-sort').count() == 1, f'{progress} {part}')
+        check('lists: ...counting moves, and saying how many are in place already (moves aren\'t tracks)',
+              re.search(r'\d+ of 13 moved \(1 already in place\)', progress), progress)
         page.unroute('**/move**')
         page.click('.toast-action:has-text("Undo")')
         page.wait_for_selector('.toast:has-text("Put back")', timeout=30000)
         check('lists: ...and Undo puts it back', [m['playlistItemID'] for m in entries()] == reversed_pids)
+
+        # Numbered, as Spotify numbers a playlist, with the album in a column
+        # of its own where there's room.
+        page.goto(APP + f'#/playlist/{rk}')
+        page.wait_for_selector('.view .tracks.numbered > .track .track-pos')
+        all_numbered = page.locator('.view .tracks.numbered > .track').count() == page.locator('.view .tracks.numbered > .track .track-pos').count() == len(entries())
+        narrow = page.locator('.view .tracks .track-album').first.evaluate('e => getComputedStyle(e).display')
+        page.set_viewport_size({'width': 1280, 'height': 860})
+        page.wait_for_timeout(500)
+        wide = page.locator('.view .tracks .track-album').first.evaluate('e => [getComputedStyle(e).display, e.textContent]')
+        shot(page, 'lists-04-numbered-wide')
+        page.set_viewport_size(MOBILE['viewport'])
+        page.wait_for_timeout(300)
+        check('lists: a playlist\'s tracks are numbered', all_numbered)
+        check('lists: ...with each one\'s album in a column of its own on a wide screen, not on a phone',
+              narrow == 'none' and wide == ['block', entries()[0]['parentTitle']], f'{narrow} {wide}')
 
         # Collections (the server's owner): they switch to a custom order.
         def collection(title):
@@ -1799,7 +1900,12 @@ with sync_playwright() as pw:
         page.goto(APP + '#/settings/ai')
         page.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
         check('missing: Settings › AI has Show missing tracks (and no list yet)', page.locator('a.missing-link').is_hidden())
+        mb_row = page.locator('label.toggle-row', has_text='Check suggestions on MusicBrainz')
+        check('missing: ...and, the player having a MusicBrainz to ask (its own), checking suggestions there, on to begin with',
+              mb_row.count() == 1 and mb_row.locator('input').is_checked() and 'the player’s own MusicBrainz server' in mb_row.inner_text(), mb_row.inner_text() if mb_row.count() else '')
         toggle(page, 'Show missing tracks', True)
+        # First without MusicBrainz: everything suggested and missing is listed.
+        toggle(page, 'Check suggestions on MusicBrainz', False)
         page.wait_for_timeout(200)
         check('missing: ...and once it\'s on, the list', page.locator('a.missing-link').is_visible())
         shot(page, 'missing-01-settings')
@@ -1865,43 +1971,54 @@ with sync_playwright() as pw:
         left = page.locator('.missing-row .row-title').all_inner_texts()
         check('missing: Check again lets go of what\'s in the library now', real['title'] not in left and len(left) == 6
               and page.locator('.missing-status').inner_text().startswith('1 is in your library now'), f"{page.locator('.missing-status').inner_text()} {left}")
-        mb_note = page.locator('.missing-mb').inner_text()
-        check('missing: the list says MusicBrainz can leave out the made-up ones', 'Check them on MusicBrainz' in mb_note, mb_note)
+        check('missing: the list has nothing about MusicBrainz: AI playlists check what they suggest before it goes on it',
+              page.locator('.missing-mb, .missing-show-unknown, .missing-mb-check, .missing-row.unknown').count() == 0)
 
-        # Checked on MusicBrainz: an album goes, made-up ones are hidden.
+        # With MusicBrainz: an AI playlist checks its suggestions before it
+        # lists them, and says what it left out, and why.
         mb_before = mock('/__mock/musicbrainz')['MediaContainer']['requests']
         page.goto(APP + '#/settings/ai')
-        page.wait_for_selector('label.toggle-row:has-text("Check them on MusicBrainz")')
-        toggle(page, 'Check them on MusicBrainz', True)
-        page.goto(APP + '#/settings/missing')
-        page.wait_for_selector('.missing-row')
-        settled = wait_for(lambda: page.locator('.missing-mb').inner_text().startswith('Checked on MusicBrainz'), 45)
-        shown = page.locator('.missing-row .row-title').all_inner_texts()
-        note = page.locator('.missing-mb').inner_text()
+        page.wait_for_selector('label.toggle-row:has-text("Check suggestions on MusicBrainz")')
+        toggle(page, 'Check suggestions on MusicBrainz', True)
+        make('Late night drive')
+        page.wait_for_selector('.ai-missing')
+        page.click('.ai-missing summary')
+        settled = wait_for(lambda: page.locator('.ai-missing:not(.checking)').count() == 1, 45)
+        lines = page.locator('.ai-missing > .ai-missing-list li').all_inner_texts()
+        out = page.locator('.ai-missing-group').evaluate_all('gs => gs.map((g) => [g.querySelector(".ai-missing-why").textContent, [...g.querySelectorAll("li")].map((li) => li.textContent)])')
+        label = page.locator('.ai-missing summary').inner_text()
+        note = page.locator('.ai-missing-mb').inner_text()
         shot(page, 'missing-04-musicbrainz')
-        check('missing: checked on MusicBrainz, the made-up ones are hidden, and an album isn\'t a missing song',
-              settled and shown == ['Real Missing Band', 'Lantern Song'] and '3 suggestions it doesn’t know' in note
-              and [m['mb'] for m in stored() if m['title'] == 'Sea Glass'] == ['album'], f'{shown} {note}')
+        check('missing: checked on MusicBrainz, an AI playlist lists only what it knows',
+              settled and lines == ['Real Missing Band (no music by them)', 'Glass Harbour — Lantern Song'] and label.endswith('3 suggestions left out'), f'{lines} {label}')
+        check('missing: ...and says what it left out, and why: made up, or an album',
+              len(out) == 2 and 'doesn’t know them' in out[0][0] and out[0][1] == ['Not A Real Band (no music by them)', 'Imaginary Act — Made Up Song']
+              and 'album, not a song' in out[1][0] and out[1][1] == ['Glass Harbour — Sea Glass'], json.dumps(out))
+        check('missing: ...and where it asked', note.startswith('Checked on the player’s own MusicBrainz server.'), note)
+        kept = sorted((m['kind'], m['title'] or m['artist']) for m in stored())
+        check('missing: ...and only those it knows go on the list (what it doesn\'t know comes off it, from before)',
+              kept == [('artist', 'Real Missing Band'), ('track', 'A Song They Never Made'), ('track', 'Lantern Song')], str(kept))
         seen_mb = mock('/__mock/musicbrainz')['MediaContainer']
         # (The player keeps answers for a week: run again against the same
         # one, and these are known already, so nothing new is asked.)
         check('missing: ...asked through the player, saying what it is', (seen_mb['requests'] > mb_before or mb_before > 0)
-              and any(a.startswith('plexamp-web (') for a in seen_mb['agents']), f"{seen_mb['requests']} {seen_mb['agents']}")
-        page.click('.missing-show-unknown')
-        page.wait_for_timeout(300)
-        check('missing: ...and can be shown, marked', page.locator('.missing-row.unknown').count() == 3 and 'not on MusicBrainz' in page.locator('.missing-row.unknown .row-sub').first.inner_text())
-        page.click('.missing-show-unknown')
-        csv_text = js(page, "() => import('./js/missing.js').then((m) => m.missingCsv())")
-        check('missing: ...and aren\'t exported', 'Lantern Song' in csv_text and 'Made Up Song' not in csv_text, csv_text[-300:])
+              and any(re.match(r'^plexamp-web/[0-9.]+ \( https://github\.com/', a) for a in seen_mb['agents']), f"{seen_mb['requests']} {seen_mb['agents']}")
         before = mock('/__mock/musicbrainz')['MediaContainer']['requests']
         make('Late night drive')
-        wait_for(lambda: 'checking' not in page.locator('.ai-missing summary').inner_text(), 20)
-        page.click('.ai-missing summary')
-        lines = page.locator('.ai-missing-list li').all_inner_texts()
-        label = page.locator('.ai-missing summary').inner_text()
-        shot(page, 'missing-05-result-checked')
-        check('missing: an AI playlist then lists only what MusicBrainz knows (asked once for each)', lines == ['Real Missing Band (no music by them)', 'Glass Harbour — Lantern Song']
-              and 'left out' in label and mock('/__mock/musicbrainz')['MediaContainer']['requests'] == before, f'{lines} {label}')
+        page.wait_for_selector('.ai-missing:not(.checking)', timeout=20000)
+        check('missing: ...once for each (it keeps the answers)', mock('/__mock/musicbrainz')['MediaContainer']['requests'] == before)
+        csv_text = js(page, "() => import('./js/missing.js').then((m) => m.missingCsv())")
+        check('missing: ...and what was left out isn\'t exported', 'Lantern Song' in csv_text and 'Made Up Song' not in csv_text and 'Sea Glass' not in csv_text, csv_text[-300:])
+        # What 0.12.0 kept hidden (unknown to MusicBrainz, or an album) goes.
+        js(page, """() => { const l = JSON.parse(localStorage.getItem('pw.aiMissing'));
+            l.push(Object.assign({}, l[0], { kind: 'track', artist: 'Old', title: 'Hidden One', mb: 'unknown' }));
+            localStorage.setItem('pw.aiMissing', JSON.stringify(l)); }""")
+        page.reload()
+        page.wait_for_selector('.view')
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
+        check('missing: what 0.12.0 kept hidden is let go', 'Hidden One' not in page.locator('.missing-row .row-title').all_inner_texts()
+              and not any(m.get('mb') == 'unknown' for m in stored()), str(stored()))
         page.goto(APP + '#/settings/missing')
         page.wait_for_selector('.missing-row')
         page.click('button:has-text("Clear the list")')

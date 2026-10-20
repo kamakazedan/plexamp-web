@@ -55,6 +55,7 @@ STATE = {
     'loaded': [],  # what's in memory: "model|context size"
     'loads': 0,  # loads finished
     'cancelled': 0,  # loads given up because the request went away
+    'dj_prompt': '',  # what the AI DJ was asked last
 }
 LOCK = threading.Lock()
 
@@ -81,6 +82,7 @@ def reply_for(body):
     if 'ok' in props or 'Reply with {"ok": true}' in text:
         return {'ok': True}
     if 'pick' in props or 'Choose the next song' in text:
+        STATE['dj_prompt'] = text[-6000:]  # what the AI DJ was asked last (for tests)
         options = numbered(text)
         n, line = rnd.choice(options) if options else (1, 'a song')
         song = line.split(' — ', 1)[-1].split(' (')[0]

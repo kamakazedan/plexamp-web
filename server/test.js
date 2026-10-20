@@ -7,7 +7,7 @@ import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
 import { isPlexDirectCert, plexServerIdentity, certProblem } from './plex.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS } from './ai.js';
-import { MusicBrainz, MusicBrainzError } from './musicbrainz.js';
+import { MusicBrainz, MusicBrainzError, isPublic } from './musicbrainz.js';
 import { createServer } from 'node:http';
 
 const dan = { id: 1, title: 'Dan', thumb: null };
@@ -539,6 +539,30 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
     gapMs: 0,
   });
   assert.deepEqual(await tiring.check([{ kind: 'artist', artist: 'A' }, { kind: 'artist', artist: 'B' }, { kind: 'artist', artist: 'C' }]), ['real', null, null]);
+});
+
+test('MusicBrainz: musicbrainz.org once a second, your own server as fast as it answers, saying which version asks', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push({ host: new URL(url).host, at: Date.now(), agent: init.headers['User-Agent'] });
+    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+  };
+  const items = ['A', 'B', 'C'].map((artist) => ({ kind: 'artist', artist }));
+  assert.ok(isPublic('https://musicbrainz.org') && isPublic('https://beta.musicbrainz.org/') && !isPublic('http://192.168.1.30:5000') && !isPublic('https://musicbrainz.org.example.com'));
+  const own = new MusicBrainz({ base: 'http://192.168.1.30:5000', version: '0.13.0', fetchImpl });
+  let t0 = Date.now();
+  await own.check(items);
+  assert.ok(Date.now() - t0 < 500, `${Date.now() - t0} ms`);
+  assert.ok(seen.every((s) => s.host === '192.168.1.30:5000' && s.agent === 'plexamp-web/0.13.0 ( https://github.com/kamakazedan/plexamp-web )'), JSON.stringify(seen[0]));
+  seen.length = 0;
+  const pub = new MusicBrainz({ base: 'https://musicbrainz.org', version: 'not a version', fetchImpl });
+  t0 = Date.now();
+  await pub.check(items);
+  assert.ok(seen.slice(1).every((s, i) => s.at - seen[i].at >= 1000), seen.map((s) => s.at - t0).join(','));
+  assert.equal(seen[0].agent, 'plexamp-web ( https://github.com/kamakazedan/plexamp-web )');
+  // Your own server failing a search: most likely its search indexes.
+  const noIndexes = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+  await assert.rejects(noIndexes.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502 && /search indexes/.test(e.message));
 });
 
 test('MusicBrainz: a check stops when whoever asked has gone, or its time is up', async () => {

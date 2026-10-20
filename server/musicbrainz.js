@@ -1,11 +1,13 @@
-// Checking songs and artists against MusicBrainz (musicbrainz.org), for the
-// app's list of missing tracks: AI models make up songs (and take albums for
-// songs), and MusicBrainz knows which are real. Only names are sent: an
-// artist, and a song's title. It's asked at most once a second (its limit,
-// for everyone using this player together), with a User-Agent that says what's
-// asking, as it asks; and what it says is kept for a week.
+// Checking songs and artists against MusicBrainz, for AI playlists: models
+// make up songs (and take albums for songs), and MusicBrainz knows which
+// are real. Which MusicBrainz is the container's choice (MUSICBRAINZ_URL):
+// musicbrainz.org, or a server of your own (a mirror, with its search
+// indexes). Only names are sent: an artist, and a song's title. One request
+// at a time for everyone using the player; musicbrainz.org at most once a
+// second (its rule for each address), with a User-Agent saying what's
+// asking, as it asks. What it says is kept for a week.
 export const MB_LIMITS = {
-  gapMs: 1100, // between requests to MusicBrainz
+  gapMs: 1100, // between requests to musicbrainz.org (your own: none)
   keepMs: 7 * 24 * 3600 * 1000,
   kept: 5000, // answers kept
   perRequest: 10, // names checked in one request from the app
@@ -63,11 +65,24 @@ export function sameTitle(a, b) {
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
 }
 
+// musicbrainz.org itself (or one of its own names), as opposed to a server
+// of your own.
+export const isPublic = (base) => {
+  try {
+    const host = new URL(base).hostname.toLowerCase();
+    return host === 'musicbrainz.org' || host.endsWith('.musicbrainz.org');
+  } catch {
+    return false;
+  }
+};
+
 export class MusicBrainz {
-  constructor({ base = 'https://musicbrainz.org', fetchImpl = globalThis.fetch, gapMs = MB_LIMITS.gapMs, log } = {}) {
+  constructor({ base = 'https://musicbrainz.org', version = '', fetchImpl = globalThis.fetch, gapMs, log } = {}) {
     this.base = String(base).replace(/\/+$/, '');
     this.fetch = fetchImpl;
-    this.gapMs = gapMs;
+    this.public = isPublic(this.base);
+    this.gapMs = gapMs ?? (this.public ? MB_LIMITS.gapMs : 0);
+    this.agent = `plexamp-web${/^[0-9][0-9.]*$/.test(version) ? `/${version}` : ''} ( https://github.com/kamakazedan/plexamp-web )`;
     this.log = log;
     this.kept = new Map(); // key -> { answer, at }
     this.queue = Promise.resolve();
@@ -90,16 +105,17 @@ export class MusicBrainz {
       signal?.addEventListener('abort', stop, { once: true });
       try {
         const res = await this.fetch(url, {
-          headers: { Accept: 'application/json', 'User-Agent': 'plexamp-web ( https://github.com/kamakazedan/plexamp-web )' },
+          headers: { Accept: 'application/json', 'User-Agent': this.agent },
           signal: ctrl.signal,
         });
-        if (res.status === 503) throw new MusicBrainzError(503, 'MusicBrainz is busy right now. Try again in a minute.');
-        if (!res.ok) throw new MusicBrainzError(502, `MusicBrainz answered ${res.status}.`);
+        if (this.public && res.status === 503) throw new MusicBrainzError(503, 'MusicBrainz is busy right now. Try again in a minute.');
+        // (A server of your own needs its search indexes for these.)
+        if (!res.ok) throw new MusicBrainzError(502, this.public ? `MusicBrainz answered ${res.status}.` : `The player’s MusicBrainz server answered ${res.status}. Searching it needs its search indexes.`);
         return await res.json();
       } catch (err) {
         if (err instanceof MusicBrainzError) throw err;
         if (signal?.aborted) throw new Gone();
-        throw new MusicBrainzError(502, 'MusicBrainz couldn’t be reached from this player.');
+        throw new MusicBrainzError(502, this.public ? 'MusicBrainz couldn’t be reached from this player.' : 'The player’s MusicBrainz server couldn’t be reached.');
       } finally {
         clearTimeout(timer);
         signal?.removeEventListener('abort', stop);

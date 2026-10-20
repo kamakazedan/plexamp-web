@@ -1,13 +1,13 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
 import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError, norm } from '../ai.js';
-import { noteMissing, missingCount, missingList, mbOn, mbChecking, checkOnMusicBrainz } from '../missing.js';
-import { on } from '../state.js';
+import { noteMissing, missingCount, mbOn, mbWhere, checkSuggestions } from '../missing.js';
+import { on, emit } from '../state.js';
 import { playList } from '../actions.js';
 import { player } from '../player.js';
 import { navigate } from '../router.js';
 import { h, icon, backHeader, iconButton, toast, fmt } from '../ui.js';
-import { trackRow } from '../components.js';
+import { trackRow, numberedList } from '../components.js';
 import { addToPlaylist, addToCollection, isAdminNow } from '../editing.js';
 
 const SUGGESTIONS = [
@@ -81,24 +81,57 @@ function startJob(prompt) {
 }
 
 // Settings › AI › Show missing tracks: what wasn't found goes on the list
-// (and what was found comes off it).
+// (and what was found comes off it). With a MusicBrainz to ask, the
+// suggestions are looked up there first: those it doesn't know (mostly
+// made up) and albums taken for songs are left out, and the playlist's
+// page says so. found.mb follows the check: { state: 'checking', 'done' or
+// 'failed', done, of, verdicts (see checkSuggestions), error }.
 function keepMissing(found, prompt) {
   if (!found?.missing && !found?.seen) return;
   if (!aiSettings().missing && !missingCount()) return;
-  noteMissing(aiSettings().missing ? found.missing || [] : [], found.seen || {}, prompt);
-  // Then, if asked for, which of them are real (in the background).
-  if (aiSettings().missing && found.missing?.length && mbOn()) {
-    checkOnMusicBrainz().catch((err) => toast(`The missing tracks couldn’t be checked on MusicBrainz. ${err.message}`, { timeout: 6000 }));
+  const missing = aiSettings().missing ? found.missing || [] : [];
+  if (!missing.length || !mbOn()) {
+    noteMissing(missing, found.seen || {}, prompt);
+    return;
   }
+  const mb = (found.mb = { state: 'checking', done: 0, of: missing.length, verdicts: [] });
+  const told = () => emit('ai-mb', found);
+  told();
+  checkSuggestions(missing, {
+    onProgress: (n, of) => {
+      mb.done = n;
+      mb.of = of;
+      told();
+    },
+  })
+    .then((verdicts) => {
+      mb.verdicts = verdicts;
+      mb.state = 'done';
+    })
+    .catch((err) => {
+      mb.verdicts = err.verdicts || [];
+      mb.state = 'failed';
+      mb.error = err.message;
+    })
+    .finally(() => {
+      noteMissing(
+        missing.filter((_, i) => !leftOut(mb.verdicts[i])),
+        found.seen || {},
+        prompt,
+        { drop: missing.filter((_, i) => leftOut(mb.verdicts[i])) },
+      );
+      told();
+    });
 }
 
+const leftOut = (verdict) => verdict === 'unknown' || verdict === 'album';
 const missingLine = (m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`);
 
 // Under a playlist, with Show missing tracks on: the songs and artists it
 // suggested that aren't in the library, or that they all are.
 function missingNote(found, onDispose) {
   if (!aiSettings().missing) return null;
-  if (found?.missing?.length) return missingBlock(found.missing, onDispose);
+  if (found?.missing?.length) return missingBlock(found, onDispose);
   const one = (list, key) => new Set((list || []).map(key).filter(Boolean)).size;
   const artists = one(found?.seen?.artists, (a) => norm(a));
   const songs = one(found?.seen?.songs, (t) => `${norm(t?.artist)}|${norm(t?.title)}`);
@@ -112,44 +145,60 @@ function missingNote(found, onDispose) {
   );
 }
 
-// (Checked on MusicBrainz, it changes as the answers come: albums go, as do
-// ones MusicBrainz doesn't know.)
-const missingKey = (m) => `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
-
-function missingBlock(missing, onDispose) {
+// What's missing, and (checked on MusicBrainz) what was left out and why,
+// changing as the answers come.
+function missingBlock(found, onDispose) {
+  const missing = found.missing;
   const label = h('span');
   const list = h('ul.ai-missing-list');
+  const left = h('div.ai-missing-left');
+  const note = h('p.ai-missing-mb');
   const el = h(
     'details.ai-missing',
     null,
     h('summary', null, icon('appears', 20), label),
     list,
+    left,
+    note,
     h('a.link-btn.ai-missing-all', { href: '#/settings/missing' }, 'All missing tracks, to export'),
   );
+  const group = (why, items) => h('div.ai-missing-group', null, h('p.ai-missing-why', null, why), h('ul.ai-missing-list.out', null, items.map((m) => h('li', null, missingLine(m)))));
   const paint = () => {
-    const checked = mbOn();
-    const stored = new Map(missingList({ all: true }).map((m) => [missingKey(m), m]));
-    // Pending: not answered yet. Gone: an album, or unknown to MusicBrainz.
-    const state = (m) => {
-      if (!checked) return 'shown';
-      const kept = stored.get(missingKey(m));
-      if (!kept || kept.mb === 'unknown' || kept.mb === 'album') return 'gone';
-      return kept.mb ? 'shown' : 'pending';
-    };
-    const shown = missing.filter((m) => state(m) !== 'gone');
-    const left = missing.length - shown.length;
-    const pending = checked && mbChecking() && missing.some((m) => state(m) === 'pending');
+    const mb = found.mb;
+    const verdict = (i) => mb?.verdicts?.[i] ?? null;
+    const shown = missing.filter((_, i) => !leftOut(verdict(i)));
+    const madeUp = missing.filter((_, i) => verdict(i) === 'unknown');
+    const albums = missing.filter((_, i) => verdict(i) === 'album');
+    const out = madeUp.length + albums.length;
+    const checking = mb?.state === 'checking';
     const tracks = shown.filter((m) => m.kind === 'track').length;
     const artists = shown.length - tracks;
     const what = [tracks && fmt.count(tracks, 'track', 'tracks'), artists && fmt.count(artists, 'artist', 'artists')].filter(Boolean).join(' and ');
-    const notes = [pending ? 'checking them on MusicBrainz…' : '', !pending && left ? `${fmt.count(left, 'suggestion', 'suggestions')} MusicBrainz doesn’t know (or albums) left out` : ''].filter(Boolean);
-    label.textContent = shown.length ? `Not in your library: ${what}${notes.length ? ` · ${notes.join(' · ')}` : ''}` : `Nothing missing that MusicBrainz knows of: ${fmt.count(left, 'suggestion', 'suggestions')} left out`;
+    const after = checking ? ' · checking them on MusicBrainz…' : out ? ` · ${fmt.count(out, 'suggestion', 'suggestions')} left out` : '';
+    label.textContent = shown.length ? `Not in your library: ${what}${after}` : `Nothing missing that MusicBrainz knows of: ${fmt.count(out, 'suggestion', 'suggestions')} left out`;
     list.replaceChildren(...shown.map((m) => h('li', null, missingLine(m))));
-    el.classList.toggle('checking', pending);
+    list.hidden = !shown.length;
+    const it = (n) => (n === 1 ? 'it' : 'them');
+    left.replaceChildren(
+      ...[
+        madeUp.length ? group(`Left out, as MusicBrainz doesn’t know ${it(madeUp.length)}: the AI most likely made ${it(madeUp.length)} up.`, madeUp) : null,
+        albums.length ? group(`Left out, as ${albums.length === 1 ? 'it’s an album' : 'they’re albums'}, not ${albums.length === 1 ? 'a song' : 'songs'}.`, albums) : null,
+      ].filter(Boolean),
+    );
+    left.hidden = !out;
+    note.textContent = !mb
+      ? ''
+      : checking
+        ? `Checking them on ${mbWhere()}… ${fmt.number(mb.done)} of ${fmt.number(mb.of)}`
+        : mb.state === 'failed'
+          ? `Not all could be checked on ${mbWhere()}: ${mb.error} Those that weren’t are listed as they are.`
+          : `Checked on ${mbWhere()}. Only those it knows go on your list of missing tracks.`;
+    note.hidden = !note.textContent;
+    note.classList.toggle('warn', mb?.state === 'failed');
+    el.classList.toggle('checking', checking);
   };
   paint();
-  const off = on('missing', paint);
-  onDispose?.(off);
+  onDispose?.(on('ai-mb', (f) => f === found && paint()));
   return el;
 }
 
@@ -371,8 +420,8 @@ export async function aiPlaylistView({ el, onDispose }) {
       icon('addQueue', 20),
       h('span', null, 'Add to queue'),
     );
-    const list = h('div.tracks');
-    tracks.forEach((t, i) => list.append(trackRow(t, { showArt: true, subtitle: t.artist, onPlay: () => playList(tracks, i, context) })));
+    const list = numberedList({ total: tracks.length, album: true });
+    tracks.forEach((t, i) => list.append(trackRow(t, { showArt: true, position: true, album: true, subtitle: t.artist, onPlay: () => playList(tracks, i, context) })));
     const based = [...result.basedOn.tags, ...result.basedOn.artists];
     // (Children that may be left out are filtered: replaceChildren would
     // show null as the word "null".)

@@ -36,9 +36,10 @@ function loadConfig() {
     debug: env.PW_SERVICE_DEBUG ? env.PW_SERVICE_DEBUG === 'true' : !!cfg.debug,
     together: env.PW_SERVICE_TOGETHER ? env.PW_SERVICE_TOGETHER === 'true' : cfg.together !== false,
     cast: env.PW_SERVICE_CAST ? env.PW_SERVICE_CAST === 'true' : cfg.cast !== false,
-    // Checking missing tracks on MusicBrainz (MUSICBRAINZ), and where.
-    musicbrainz: env.PW_SERVICE_MUSICBRAINZ ? env.PW_SERVICE_MUSICBRAINZ === 'true' : cfg.musicbrainz !== false,
-    musicbrainzUrl: env.PW_SERVICE_MUSICBRAINZ_URL || cfg.musicbrainzUrl || 'https://musicbrainz.org',
+    // Checking AI playlists' suggestions on MusicBrainz (MUSICBRAINZ_URL):
+    // where, if anywhere.
+    musicbrainzUrl: env.PW_SERVICE_MUSICBRAINZ_URL ?? (cfg.musicbrainz === false ? '' : cfg.musicbrainzUrl) ?? '',
+    version: cfg.version || env.PW_SERVICE_VERSION || '',
     devices: env.PW_SERVICE_DEVICES ? env.PW_SERVICE_DEVICES === 'true' : cfg.devices !== false,
     // Development only: players at 127.0.0.1 (the mock player).
     castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
@@ -68,7 +69,7 @@ const cast = new Cast({ auth, loopback: config.castLoopback });
 const devices = new Devices();
 setInterval(() => devices.sweep(), 15000).unref();
 const sharedModel = config.ollamaUrl ? new SharedModel({ url: config.ollamaUrl, key: config.ollamaKey, model: config.ollamaModel, log }) : null;
-const musicbrainz = config.musicbrainz ? new MusicBrainz({ base: config.musicbrainzUrl, log }) : null;
+const musicbrainz = config.musicbrainzUrl ? new MusicBrainz({ base: config.musicbrainzUrl, version: config.version, log }) : null;
 
 // ---------- rate limits ----------
 

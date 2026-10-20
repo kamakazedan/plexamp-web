@@ -94,7 +94,7 @@ wait_http pw-web http://pw-web/
 wait_service pw-web
 W=http://pw-web
 
-contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true, cast: true' "$(cb $W/config.js)"
+contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true, cast: true, musicbrainz: "own"' "$(cb $W/config.js)"
 expect "app is served" 200 "$(c $W/)"
 expect "hls.js is bundled" 200 "$(c $W/vendor/hls.min.js)"
 # The service starts as root to make its socket, then gives up root and
@@ -209,8 +209,8 @@ lacks "no tokens in the log" "X-Plex-Token=t" "$LOG"
 docker run -d --name pw-web2 --network "$NET" "$IMAGE" >/dev/null
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
-expect "defaults: Play Together, Play on, MusicBrainz checks and your devices, nothing else" "window.PW_CONFIG = { together: true, cast: true, musicbrainz: true, devices: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
-expect "defaults: MusicBrainz checks need a sign-in" 401 "$(c -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
+expect "defaults: Play Together, Play on and your devices, nothing else" "window.PW_CONFIG = { together: true, cast: true, devices: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
 expect "defaults: Play Together needs a sign-in" 401 "$(c http://pw-web2/api/together/me)"
@@ -275,17 +275,18 @@ lacks "debug: no API key in the log" "sk-test-secret-123" "$LOG"
 expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content-Type: application/json' -X POST -d '{"entries":[]}' http://pw-web/api/debug/log)"
 
 # ---------- 7. Play Together off ----------
-docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false "$IMAGE" >/dev/null
+docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js" "window.PW_CONFIG = { cast: true, musicbrainz: true, devices: true };" "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org)" 'window.PW_CONFIG = { cast: true, musicbrainz: "public", devices: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7b. Playing on other Plex players off ----------
-docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false "$IMAGE" >/dev/null
+docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false and MUSICBRAINZ=false: not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false and MUSICBRAINZ=false (MUSICBRAINZ_URL set too): not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
 
@@ -345,6 +346,8 @@ bad "rejects an unclear PLAY_TOGETHER" "PLAY_TOGETHER: expected true or false" -
 bad "rejects an unclear CASTING" "CASTING: expected true or false" -e CASTING=sometimes
 bad "rejects an unknown OLLAMA_AUTH" "OLLAMA_AUTH must be plex or off" -e OLLAMA_URL=http://x:11434 -e OLLAMA_AUTH=sometimes
 bad "rejects an address with odd characters" "invalid path" -e 'OLLAMA_URL=http://x:11434/;evil'
+bad "rejects a MusicBrainz address without http://" "MUSICBRAINZ_URL must start with http://" -e MUSICBRAINZ_URL=musicbrainz.org
+bad "rejects a MusicBrainz address with a password in it" "MUSICBRAINZ_URL has an invalid host or port" -e 'MUSICBRAINZ_URL=http://me:secret@mb.box:5000'
 docker rm -f pw-bad >/dev/null 2>&1 || true
 docker run -d --name pw-bad -e 'PLEX_SERVER_URL=http://user:hunter2@plex.box:32400' "$IMAGE" >/dev/null
 sleep 3

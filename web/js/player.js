@@ -1152,6 +1152,25 @@ class Player extends EventTarget {
     this.persist();
   }
 
+  // An upcoming track goes back after another one still to come (undoing a
+  // Guest DJ's move, dj.js). Here only: not on another player.
+  putAfter(t, after) {
+    if (this.remote || this.cast) return false;
+    const i = this.queue.indexOf(t);
+    const j = this.queue.indexOf(after);
+    if (i <= this.index || j <= this.index || i === j + 1) return false;
+    this.queue.splice(i, 1);
+    this.queue.splice(this.queue.indexOf(after) + 1, 0, t);
+    if (this.original?.includes(t) && this.original.includes(after)) {
+      this.original.splice(this.original.indexOf(t), 1);
+      this.original.splice(this.original.indexOf(after) + 1, 0, t);
+    }
+    this.queueChanged();
+    this.emit('queue');
+    this.persist();
+    return true;
+  }
+
   jump(i) {
     if (this.cast) return this.cast.jump(i);
     if (this.remote) {

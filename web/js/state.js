@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS = {
   listRatings: true, // ratings in track lists too
   lovedPlaylist: true, // five-star / thumbs-up tracks kept in ❤️ Tracks
   codecBadges: true,
+  searchCodecs: true, // each track's format in search results
   popularTracks: true,
   topListSize: 25,
   previewButtons: false,

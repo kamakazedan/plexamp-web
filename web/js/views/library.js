@@ -3,7 +3,7 @@ import { normTrack } from '../plex.js';
 import { navigate, parseHash } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, iconTile, emptyState, debounce, fmt } from '../ui.js';
 import { mapLimit, norm } from '../ai.js';
-import { albumCard, artistRow, playlistCard, collectionCard, trackRow } from '../components.js';
+import { albumCard, artistRow, playlistCard, collectionCard, trackRow, numberedList } from '../components.js';
 import { playList } from '../actions.js';
 import { isLovedTitle } from '../ratings.js';
 
@@ -200,7 +200,10 @@ export async function browseView({ el, params, query, onDispose }) {
     pageSize: r.pageSize,
     fetchPage: (start, size) => s.list(sec, type, { sort, start, size, filters: plexFilters(filters) }),
     render: r.render,
-    onTotal: (n) => (countEl.textContent = fmt.count(n, r.unit[0], r.unit[1])),
+    onTotal: (n) => {
+      countEl.textContent = fmt.count(n, r.unit[0], r.unit[1]);
+      container.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
+    },
     empty: 'Nothing matches.',
     onDispose,
   });
@@ -339,13 +342,16 @@ function renderer(type, title) {
   if (t === 9) return { wrap: () => grid([], { centered: true }), render: (m) => albumCard(m), pageSize: 60, unit: ['album', 'albums'] };
   if (t === 10) {
     return {
-      wrap: () => h('div.tracks'),
+      wrap: () => numberedList({ album: true }),
       pageSize: 100,
       unit: ['track', 'tracks'],
       render: (m, i, all) =>
         trackRow(normTrack(m), {
           showArt: true,
-          subtitle: [m.originalTitle || m.grandparentTitle, m.parentTitle].filter(Boolean).join(' — '),
+          position: true,
+          album: true,
+          subAlbum: true,
+          subtitle: m.originalTitle || m.grandparentTitle || '',
           onPlay: () => playList(all.map(normTrack), i, { title, href: null }),
         }),
     };
@@ -427,7 +433,10 @@ export async function itemsView({ el, query, onDispose }) {
     pageSize: r.pageSize,
     fetchPage: (start, size) => app.server.byPath(query.path, { start, size }),
     render: r.render,
-    onTotal: (n) => (countEl.textContent = fmt.count(n, r.unit[0], r.unit[1])),
+    onTotal: (n) => {
+      countEl.textContent = fmt.count(n, r.unit[0], r.unit[1]);
+      container.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
+    },
     onDispose,
   });
 }

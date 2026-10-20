@@ -12,7 +12,7 @@
 #
 #   CTID CT_HOSTNAME CORES RAM_MB DISK_GB STORAGE TEMPLATE_STORAGE BRIDGE
 #   IP (dhcp, or an address like 192.168.1.50/24) GATEWAY
-#   PLEX_SERVER_URL OLLAMA_URL OLLAMA_MODEL
+#   PLEX_SERVER_URL OLLAMA_URL OLLAMA_MODEL MUSICBRAINZ_URL
 #
 # The container is unprivileged, starts with the node, and runs nginx and
 # Node.js from Debian (no Docker). Inside it, `update-plexamp-web` updates
@@ -169,6 +169,8 @@ if [ -n "$OLLAMA_URL" ]; then
 fi
 OLLAMA_MODEL="${OLLAMA_MODEL:-}"
 valid OLLAMA_MODEL "The model" '^[A-Za-z0-9._:/@+-]*$'
+ask MUSICBRAINZ_URL "A MusicBrainz to check AI playlists' suggestions with: https://musicbrainz.org, or your own (Enter to skip)" ""
+valid MUSICBRAINZ_URL "The MusicBrainz address" "$URL_RE"
 
 cpus="$CORES cores"
 [ "$CORES" != 1 ] || cpus="1 core"
@@ -186,6 +188,7 @@ item "Size" "$cpus, $RAM_MB MB memory, $DISK_GB GB disk on $STORAGE"
 item "Network" "$network on $BRIDGE"
 item "Plex server" "${PLEX_SERVER_URL:-not set (it can be set later)}"
 item "AI (Ollama)" "${OLLAMA_URL:-not set}${OLLAMA_MODEL:+, $OLLAMA_MODEL}"
+[ -z "$MUSICBRAINZ_URL" ] || item "MusicBrainz" "$MUSICBRAINZ_URL"
 echo
 if [ "$tty" = true ]; then
     read -r -p "  Make it? [Y/n] " go </dev/tty || go=n
@@ -261,7 +264,7 @@ OLLAMA_API_KEY=
 OLLAMA_AUTH=plex
 PLAY_TOGETHER=true
 CASTING=true
-MUSICBRAINZ=true
+MUSICBRAINZ_URL=$MUSICBRAINZ_URL
 DEBUG=
 ENV
 pct exec "$CTID" -- mkdir -p /etc/plexamp-web

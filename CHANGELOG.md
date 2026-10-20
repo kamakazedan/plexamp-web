@@ -3,6 +3,69 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.13.0 - 2026-10-20
+
+### Added
+
+- **Numbered track lists.** Playlists, collections, AI playlists, top
+  tracks and the library's track lists number their tracks, and, where the
+  screen is wide enough, show each one's album in a column of its own (a
+  tap opens it). The numbers follow the tracks as you drag, sort or remove
+  them.
+- **One of each in search.** A song or album your library has more than
+  once (an album and its hi-res edition, a song on its album and on a
+  best-of) shows once, as the best-sounding copy: lossless over lossy, then
+  the higher bitrate. A radio edit, a few seconds shorter or more, still
+  shows on its own.
+- **Formats in search**: each track's format before its artist (FLAC
+  24/96, MP3 320), hi-res marked. Settings › Experience › Show formats in
+  search turns them off.
+
+### Changed
+
+- **MusicBrainz is the container's choice.** `MUSICBRAINZ_URL` says which
+  MusicBrainz to check AI playlists' suggestions with: musicbrainz.org, or a
+  server of your own (a MusicBrainz Docker mirror, with its search
+  indexes), so names needn't leave your network. Not set, nothing is
+  checked and nothing goes to MusicBrainz; in 0.12.0 musicbrainz.org was
+  offered unless `MUSICBRAINZ=false` (`MUSICBRAINZ=true` alone still means
+  musicbrainz.org). Your own server is asked as fast as it answers, one
+  request at a time; musicbrainz.org once a second at most. MusicBrainz
+  needs no API key.
+- **Suggestions are checked as the AI playlist is made**, not on the
+  Missing tracks list: Not in your library says which were left out, as
+  MusicBrainz doesn't know them (most likely made up) or they're albums, and
+  only the rest go on the list. The list has no MusicBrainz controls any
+  more, and what 0.12.0 kept on it hidden goes. Checking is on to begin
+  with, where the container has a MusicBrainz to ask.
+- **DJ Bridge plays one track** between each of yours and the next: the
+  one in the middle of the path Plex finds between them. 0.12.0 played up
+  to four, and in a big library nearly always four, as Plex rarely says how
+  far apart two tracks are.
+- **The AI DJ varies its artists**: never the artist playing or the last
+  few, their best-known songs (Plex's popular tracks) where it has them,
+  from artists who sound like what's playing, who Plex says are similar, or
+  who share the genre of the track it started on, and it's asked to keep to
+  that genre.
+- **Turning a DJ off puts your queue back as it was**: its picks still to
+  come are taken out (all of them: DJ Bridge's too), and what the queue DJs
+  moved goes back where it was. Choosing another DJ does the same.
+- **Sorting a playlist says what it's counting**: "211 of 458 moved (42
+  already in place)", as only the tracks out of place move. Once done, it
+  checks the order Plex has, and puts right anything that didn't land where
+  it should.
+
+### Fixed
+
+- **Queue Bridge did nothing** in a big library, and Queue Echo went by
+  little more than artists and years: Plex only gives the distance between
+  a track and its nearest few hundred. Both now go by what Plex knows of the
+  albums and artists in your queue when it doesn't say (genres and styles,
+  moods, years, similar artists), and say what they did, or why nothing
+  needed moving, the first time after they're turned on.
+- Sorting a playlist read it 500 tracks at a time, and would have missed
+  some from a server giving fewer at a time.
+
 ## 0.12.0 - 2026-10-20
 
 ### Added

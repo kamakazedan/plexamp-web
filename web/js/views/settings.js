@@ -6,7 +6,7 @@ import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { missingTracksView } from './missingtracks.js';
-import { missingCount, mbOffered, checkOnMusicBrainz } from '../missing.js';
+import { missingCount, mbOffered, mbWhere } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 
@@ -536,12 +536,11 @@ function missingSection(onDispose) {
       // AI models make songs up: MusicBrainz knows which are real.
       mbOffered()
         ? toggleRow({
-            title: 'Check them on MusicBrainz',
-            subtitle: 'Leaves out songs and artists MusicBrainz doesn’t know (mostly ones the AI made up), and albums taken for songs. Their names go to musicbrainz.org, from this player.',
-            checked: aiSettings().musicbrainz === true,
+            title: 'Check suggestions on MusicBrainz',
+            subtitle: `Before an AI playlist lists what’s missing, each song and artist is looked up on ${mbWhere()}, and what it doesn’t know (mostly made up by the AI) is left out, as are albums taken for songs. Only their names go to it, from this player.`,
+            checked: aiSettings().musicbrainz !== false,
             onChange: (v) => {
               saveAI({ musicbrainz: v });
-              if (v) checkOnMusicBrainz().catch(() => {});
               paint();
             },
           })

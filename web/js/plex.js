@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.12.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.13.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -273,6 +273,13 @@ export function normTrack(m) {
   };
 }
 
+// Lossless formats, and how good a copy sounds, to choose between two of
+// one recording (an album and its hi-res edition, say): lossless first, then
+// the higher bitrate.
+const LOSSLESS = new Set(['flac', 'alac', 'wav', 'aiff', 'aif', 'pcm', 'dsd', 'dsf', 'dff', 'ape', 'wv', 'wavpack', 'tta', 'mlp']);
+export const isLossless = (codec) => LOSSLESS.has(String(codec || '').toLowerCase());
+export const audioQuality = (t) => (isLossless(t?.codec) ? 100000 : 0) + (Number(t?.bitrate) || 0);
+
 // Plex's four corner colours for artwork, checked to be hex colours (they
 // end up in CSS).
 const HEX = /^#?[0-9a-f]{6}$/i;
@@ -488,6 +495,54 @@ export class PlexServer {
 
   trackDetail(id) {
     return this.memo(`track:${id}`, () => this.metadata(id), 10 * 60000);
+  }
+
+  // Several items' full details in one request (Plex takes a list of ids):
+  // ids must be numbers, as everywhere they go into an address.
+  async metadataMany(ids) {
+    const out = [];
+    const clean = [...new Set(ids.map(String))].filter((id) => /^\d+$/.test(id));
+    for (const part of chunks(clean, 40)) out.push(...asArray((await this.get(`/library/metadata/${part.join(',')}`)).Metadata));
+    return out;
+  }
+
+  // Several items' details, kept as memo() keeps them (under `kind:id`, for
+  // `ttl`): those not asked about lately in one request. In the same order
+  // as `ids`, null for any Plex didn't give.
+  async manyKept(kind, ids, ttl) {
+    const want = ids.map(String);
+    const fresh = (id) => {
+      const hit = this.cache.get(`${kind}:${id}`);
+      return hit && Date.now() - hit.at < ttl;
+    };
+    const ask = [...new Set(want.filter((id) => !fresh(id)))];
+    if (ask.length) {
+      const got = await this.metadataMany(ask);
+      for (const m of got) this.cache.set(`${kind}:${m.ratingKey}`, { at: Date.now(), value: Promise.resolve(m) });
+      while (this.cache.size > MEMO_LIMIT) this.cache.delete(this.cache.keys().next().value);
+    }
+    return Promise.all(want.map((id) => (fresh(id) ? this.cache.get(`${kind}:${id}`).value : Promise.resolve(null)).catch(() => null)));
+  }
+
+  // Tracks' full details (their streams' formats included), as trackDetail
+  // gives them.
+  tracksDetail(ids) {
+    return this.manyKept('track', ids, 10 * 60000);
+  }
+
+  // Albums and artists, as albumMeta gives albums: their genres, styles,
+  // moods and (artists) similar artists.
+  albumsMeta(ids) {
+    return this.manyKept('album', ids, 30 * 60000);
+  }
+
+  artistsMeta(ids) {
+    return this.manyKept('artist', ids, 30 * 60000);
+  }
+
+  // How good an album's copy sounds (see audioQuality): its best track.
+  albumQuality(id) {
+    return this.memo(`albumq:${id}`, async () => Math.max(0, ...(await this.children(id)).filter((m) => m.type === 'track').map((m) => audioQuality(normTrack(m)))), 10 * 60000);
   }
 
   // Loudness over the length of a track (dB values), used to draw the

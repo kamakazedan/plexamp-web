@@ -133,3 +133,28 @@ export async function applyMoves(moves, move, { signal, onProgress } = {}) {
   }
   return done;
 }
+
+// Puts a list in Plex in the order wanted: the fewest moves, then a look at
+// the order Plex has, and another go at anything that didn't end up where
+// it should (twice at most), so the result is right whatever the server
+// does with a move. read() gives the entries as Plex has them now, idOf()
+// an entry's id, target(entries) the ids in the order wanted. onProgress(n,
+// of, { total, checking }): n of the `of` that need moving are moved, of
+// `total` entries; `checking` for a second go. Resolves to { total, moved,
+// stopped, before } (`moved` from the first go; `before`: the ids as they
+// were, for Undo).
+export async function saveOrder({ read, idOf, target, move, signal, onProgress }) {
+  let entries = await read();
+  const before = entries.map(idOf);
+  const total = entries.length;
+  let moved = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    const moves = planMoves(entries.map(idOf), target(entries));
+    if (pass === 0) moved = moves.length;
+    if (!moves.length) break;
+    await applyMoves(moves, move, { signal, onProgress: (n, of) => onProgress?.(n, of, { total, checking: pass > 0 }) });
+    if (signal?.aborted) return { total, moved, stopped: true, before };
+    entries = await read();
+  }
+  return { total, moved, stopped: false, before };
+}

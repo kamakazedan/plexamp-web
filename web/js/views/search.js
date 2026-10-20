@@ -1,8 +1,8 @@
 import { app, searchScope } from '../state.js';
-import { normTrack } from '../plex.js';
+import { normTrack, isLossless, audioQuality } from '../plex.js';
 import { replaceQuery } from '../router.js';
 import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, debounce, fmt } from '../ui.js';
-import { artistRow, albumRow, playlistRow, trackRow } from '../components.js';
+import { artistRow, albumRow, playlistRow, trackRow, numberedList } from '../components.js';
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
 import { aiReady, aiEvents, norm } from '../ai.js';
 import { libraryTiles } from './library.js';
@@ -165,7 +165,9 @@ export async function searchView({ el, query, onDispose }) {
         if (mine.signal.aborted) return;
         popular = popular.filter((m) => matchesAll('track', m, terms.filter((t) => fold(t) !== fold(artist.title))));
       }
-      body.replaceChildren(results(res, terms, popular));
+      const shown = await oneOfEach(res, popular);
+      if (mine.signal.aborted) return;
+      body.replaceChildren(results(shown, terms));
     } catch (err) {
       if (!err.aborted && !mine.signal.aborted) body.replaceChildren(emptyState("Search didn't work. Check your connection and try again."));
     }
@@ -208,7 +210,86 @@ function artistSearched(artists, terms) {
     : null;
 }
 
-function results(res, terms, popular = []) {
+// ---------- one of each ----------
+
+// Search turns up every copy: an album and its hi-res edition, a song on
+// its album and on a best-of. Shown is one of each recording (the same
+// title by the same artist, no more than a few seconds longer or shorter:
+// a radio edit stays), and one of each album (the same title, artist and
+// year), the best-sounding copy, where the first one was.
+const SAME_LENGTH = 5000; // ms
+
+function oneTrackEach(tracks, popular = new Set()) {
+  const groups = [];
+  const byName = new Map();
+  for (const t of tracks) {
+    const name = `${norm(t.artist)}|${fold(t.title)}`;
+    const same = (byName.get(name) || []).find((g) => !g.length || !t.duration || Math.abs(g.length - t.duration) <= SAME_LENGTH);
+    if (same) {
+      same.popular ||= popular.has(t.id);
+      if (audioQuality(t) > audioQuality(same.track)) same.track = t;
+      continue;
+    }
+    const g = { track: t, length: t.duration || 0, popular: popular.has(t.id) };
+    groups.push(g);
+    byName.set(name, [...(byName.get(name) || []), g]);
+  }
+  return groups;
+}
+
+async function oneAlbumEach(albums, known) {
+  const groups = new Map();
+  for (const a of albums) {
+    const name = `${norm(a.parentTitle)}|${fold(a.title)}|${a.year || ''}`;
+    groups.set(name, [...(groups.get(name) || []), a]);
+  }
+  // How each copy sounds: from its tracks found, or else asked (only for
+  // albums with another copy).
+  const quality = new Map();
+  await Promise.all(
+    [...groups.values()]
+      .filter((g) => g.length > 1)
+      .flat()
+      .map(async (a) => quality.set(String(a.ratingKey), known.get(String(a.ratingKey)) ?? (await app.server.albumQuality(a.ratingKey).catch(() => 0)))),
+  );
+  return [...groups.values()].map((g) => g.reduce((best, a) => ((quality.get(String(a.ratingKey)) || 0) > (quality.get(String(best.ratingKey)) || 0) ? a : best)));
+}
+
+// The search's results, one of each: tracks as [{ track, popular }]
+// (an artist's popular ones first), albums as Plex gave them.
+async function oneOfEach(res, popular = []) {
+  const seen = new Set();
+  const found = [...popular, ...res.track].filter((m) => !seen.has(String(m.ratingKey)) && seen.add(String(m.ratingKey))).map(normTrack);
+  const top = new Set(popular.map((m) => String(m.ratingKey)));
+  const known = new Map();
+  for (const t of found) if (t.albumId) known.set(t.albumId, Math.max(known.get(t.albumId) || 0, audioQuality(t)));
+  return { ...res, tracks: oneTrackEach(found, top).slice(0, 40), album: await oneAlbumEach(res.album, known) };
+}
+
+// A track's format, before its artist: "FLAC 24/96" (once its streams have
+// been asked about: one request for them all), "MP3 320".
+const kHz = (hz) => (hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
+function formatBadge(t) {
+  if (app.settings.searchCodecs === false || !t.codec) return null;
+  return h('span.track-codec', null, !isLossless(t.codec) && t.bitrate ? `${fmt.codec(t.codec)} ${Math.round(t.bitrate)}` : fmt.codec(t.codec));
+}
+
+async function fillFormats(rows) {
+  const lossless = rows.filter(({ t, badge }) => badge && isLossless(t.codec));
+  if (!lossless.length) return;
+  const details = await app.server.tracksDetail(lossless.map(({ t }) => t.id)).catch(() => []);
+  lossless.forEach(({ t, badge }, i) => {
+    const a = (details[i]?.Media?.[0]?.Part?.[0]?.Stream || []).find((x) => x.streamType === 2);
+    if (!a?.bitDepth || !a.samplingRate) return;
+    badge.textContent = `${fmt.codec(t.codec)} ${a.bitDepth}/${kHz(a.samplingRate)}`;
+    if (a.bitDepth > 16 || a.samplingRate > 48000) {
+      badge.classList.add('hires');
+      badge.title = 'High resolution';
+    }
+  });
+}
+
+function results(res, terms) {
   const frag = h('div');
   const add = (title, items, render) => {
     if (!items.length) return;
@@ -218,22 +299,23 @@ function results(res, terms, popular = []) {
   add('Artists', res.artist.slice(0, 6), (m) => artistRow(m));
   // Tracks before albums: an artist's popular ones first (with the
   // "popular" badge, unless that's turned off), then the rest.
-  const seen = new Set();
-  const found = [...popular, ...res.track].filter((m) => !seen.has(String(m.ratingKey)) && seen.add(String(m.ratingKey)));
-  if (found.length) {
-    const tracks = found.slice(0, 40).map(normTrack);
-    const top = new Set(app.settings.popularTracks === false ? [] : popular.map((m) => String(m.ratingKey)));
+  if (res.tracks.length) {
+    const tracks = res.tracks.map((g) => g.track);
     const list = h('div.tracks');
-    tracks.forEach((t, i) => {
+    const rows = res.tracks.map(({ track: t, popular }, i) => {
+      const badge = formatBadge(t);
       list.append(
         trackRow(t, {
           showArt: true,
           subtitle: [t.artist, t.album].filter(Boolean).join(' — '),
-          popular: top.has(t.id),
+          popular: popular && app.settings.popularTracks !== false,
+          badge,
           onPlay: () => playList(tracks, i, { title: `Search: ${terms.join(' ')}`, href: null }),
         }),
       );
+      return { t, badge };
     });
+    fillFormats(rows);
     frag.append(h('section.block.search-tracks', null, sectionHeader('Tracks'), list));
   }
   add('Albums', res.album.slice(0, 8), (m) => albumRow(m));
@@ -302,11 +384,13 @@ export async function topView({ el, params }) {
   }
   if (cfg.type === 10) {
     const tracks = played.map(normTrack);
-    const list = h('div.tracks');
+    const list = numberedList({ total: tracks.length, album: true });
     tracks.forEach((t, i) =>
       list.append(
         trackRow(t, {
           showArt: true,
+          position: true,
+          album: true,
           subtitle: t.artist,
           plays: played[i].viewCount,
           onPlay: () => playList(tracks, i, { title: 'Top tracks', href: '/top/tracks' }),

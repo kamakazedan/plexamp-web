@@ -86,7 +86,7 @@ esac
 calls | grep -q '^pveam download local debian-13-standard_13.1-2_amd64.tar.zst$' && pass "downloads the newest Debian template" || fail "template download: $(calls | grep pveam)"
 expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'"'"'s (see "Container' '# settings" in the README). Change them with: plexamp-web-settings' \
     'PLEX_SERVER_URL=http://192.168.1.10:32400' 'DISABLE_WEBSOCKETS=' 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b' \
-    'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'MUSICBRAINZ=true' 'DEBUG=')"
+    'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'MUSICBRAINZ_URL=' 'DEBUG=')"
 [ "$(cat "$T/pushed/plexamp-web.env" 2>/dev/null)" = "$expected" ] && pass "writes the settings" || fail "settings: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
 calls | grep -q -- '^pct push 123 .*/plexamp-web.env /etc/plexamp-web/plexamp-web.env --perms 600$' && pass "settings readable by root only" || fail "settings permissions: $(calls | grep push)"
 cmp -s "$T/pushed/install-plexamp-web.sh" "$ROOT/proxmox/install.sh" && pass "copies in the installer" || fail "the installer wasn't copied in"
@@ -111,7 +111,7 @@ calls | grep -q '^pveam download' && fail "downloaded a template it had" || pass
 # Declining the defaults asks about each setting; Enter keeps a suggestion.
 reset
 if command -v script >/dev/null 2>&1; then
-    printf 'n\n\nmusic\ntank\n2\n\n\n\n192.168.1.60/24\n192.168.1.1\nhttp://192.168.1.10:32400\n\n\n' |
+    printf 'n\n\nmusic\ntank\n2\n\n\n\n192.168.1.60/24\n192.168.1.1\nhttp://192.168.1.10:32400\n\nhttps://musicbrainz.org\n\n' |
         env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" TERM=dumb PW_INSTALL_SCRIPT="$ROOT/proxmox/install.sh" \
             script -qec "bash $(printf '%q' "$SCRIPT")" /dev/null >"$T/out" 2>&1 || true
     create="$(calls | grep '^pct create' || true)"
@@ -120,6 +120,8 @@ if command -v script >/dev/null 2>&1; then
             pass "asks about each setting when the defaults are declined" ;;
         *) fail "asking: $create $(tail -5 "$T/out" | tr -d '\r')" ;;
     esac
+    grep -qx 'MUSICBRAINZ_URL=https://musicbrainz.org' "$T/pushed/plexamp-web.env" 2>/dev/null && pass "a MusicBrainz address given when asked reaches the settings" ||
+        fail "asked MusicBrainz: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
     grep -qx 'PLEX_SERVER_URL=http://192.168.1.10:32400' "$T/pushed/plexamp-web.env" 2>/dev/null && pass "a Plex address given when asked reaches the settings" ||
         fail "asked settings: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
     reset

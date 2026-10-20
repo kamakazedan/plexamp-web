@@ -24,7 +24,7 @@ import {
   learned,
   sheet,
 } from '../ui.js';
-import { albumCard, artistCard, trackRow, collectionCard, playlistArt } from '../components.js';
+import { albumCard, artistCard, trackRow, numberedList, collectionCard, playlistArt } from '../components.js';
 import {
   playAlbum,
   playArtist,
@@ -39,7 +39,7 @@ import {
   trackMenu,
 } from '../actions.js';
 import { isAdmin } from '../editing.js';
-import { sortChoices, sortedOrder, planMoves, restoreOrder, applyMoves } from '../sorting.js';
+import { sortChoices, sortedOrder, restoreOrder, saveOrder } from '../sorting.js';
 
 function actionButtons(buttons) {
   return h(
@@ -230,10 +230,10 @@ export async function artistView({ el, params }) {
   const popularP = s.popularTracks(sec, artist.ratingKey, 20).then((items) => {
     const tracks = items.map(normTrack);
     if (!tracks.length) return;
-    const list = h('div.tracks');
+    const list = numberedList({ total: tracks.length });
     const context = { title: `${artist.title}: popular`, href: `/artist/${artist.ratingKey}` };
     tracks.forEach((t, i) => {
-      const r = trackRow(t, { showArt: true, subtitle: t.album, onPlay: () => playList(tracks, i, context) });
+      const r = trackRow(t, { showArt: true, position: true, subtitle: t.album, onPlay: () => playList(tracks, i, context) });
       if (i >= 5) r.hidden = true;
       list.append(r);
     });
@@ -341,6 +341,15 @@ function chooseSort(kind, title, onPick) {
 // What a sort says while it's saved, and after.
 const sortWords = (by, label) =>
   by === 'reverse' ? ['Reversing the order', 'Reversed'] : [`Sorting by ${label.toLowerCase()}`, `Sorted by ${label.toLowerCase()}`];
+
+// While it's saved: how many of those that need moving have moved, and how
+// many were in place already ("458" is moves, not tracks: the other 42 of
+// a list of 500 stay where they are).
+const movedWords = (doing, n, of, { total, checking }) =>
+  checking ? `Making sure it’s all in order… ${fmt.number(n)} of ${fmt.number(of)} moved` : `${doing}… ${fmt.number(n)} of ${fmt.number(of)} moved${total > of ? ` (${fmt.number(total - of)} already in place)` : ''}`;
+
+// And after: "Sorted by artist: 458 of 500 tracks moved".
+const doneWords = (done, { moved, total }, one, many) => `${done}: ${fmt.number(moved)} of ${fmt.count(total, one, many)} moved`;
 
 const SORT_LIMIT = 5000; // entries; longer lists aren't sorted here
 
@@ -562,7 +571,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   collapseWhenHidden(head, title);
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
-  const list = h('div.tracks');
+  const list = numberedList({ total, album: true });
   const bar = editBar('Drag a track to move it, or remove it, and tap the picture to change it. Changes are saved to Plex as you go; the tracks stay in your library.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort('track', pl.title, (by, label) => sortBy(by, label)),
@@ -574,6 +583,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     total = Math.max(0, n);
     pl.leafCount = total;
     countEl.textContent = fmt.count(total, 'track', 'tracks');
+    list.style.setProperty('--pos-digits', String(Math.max(2, String(total).length)));
   };
   const changed = () => dropCached((p) => p === '/' || p === '/playlists' || p === '/library/playlists');
 
@@ -598,6 +608,8 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     const t = normTrack(m);
     const r = trackRow(t, {
       showArt: true,
+      position: true,
+      album: true,
       onPlay: () => playPlaylist(pl, { start: Math.max(0, rows().indexOf(r)) }),
       onMenu: () => trackMenu(t, { extra: editActions(r) }),
     });
@@ -740,13 +752,14 @@ export async function playlistView({ el, params, onDispose, onHide }) {
 
   let sorting = null;
 
+  // Every entry, page by page (as many as the server gives at a time).
   async function allEntries() {
     const out = [];
-    for (let start = 0; ; start += 500) {
-      const { items, total: t } = await s.playlistItems(pl.ratingKey, { start, size: 500 });
+    for (;;) {
+      const { items, total: t } = await s.playlistItems(pl.ratingKey, { start: out.length, size: 500 });
       out.push(...items);
       if (out.length > SORT_LIMIT) throw Object.assign(new Error(`Playlists of more than ${fmt.number(SORT_LIMIT)} tracks can’t be sorted here.`), { tooLong: true });
-      if (!items.length || start + items.length >= t) break;
+      if (!items.length || out.length >= t) break;
     }
     return out;
   }
@@ -759,26 +772,28 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     sorting = ctrl;
     busy(true);
     bar.working(`${doing}…`, () => ctrl.abort());
-    let before = null;
+    let result = null;
     try {
-      const entries = await allEntries();
-      before = entries.map((m) => String(m.playlistItemID));
-      const moves = planMoves(before, makeTarget(entries));
-      if (!moves.length) {
+      result = await saveOrder({
+        read: allEntries,
+        idOf: (m) => String(m.playlistItemID),
+        target: makeTarget,
+        move: (id, after) => s.movePlaylistItem(pl.ratingKey, id, after),
+        signal: ctrl.signal,
+        onProgress: (n, of, p) => bar.say(movedWords(doing, n, of, p)),
+      });
+      if (!result.moved) {
         toast('It’s in that order already.');
         return;
       }
-      const made = await applyMoves(moves, (id, after) => s.movePlaylistItem(pl.ratingKey, id, after), {
-        signal: ctrl.signal,
-        onProgress: (n, of) => bar.say(`${doing}… ${n} of ${of} moved`),
-      });
       changed();
       reload();
+      const before = result.before;
       const undo = { action: 'Undo', onAction: () => reorder((now) => restoreOrder(now.map((m) => String(m.playlistItemID)), before), ['Putting it back', 'Put back']), timeout: 8000 };
-      toast(made < moves.length ? 'Stopped, part way through.' : done, undo);
+      toast(result.stopped ? 'Stopped, part way through.' : doneWords(done, result, 'track', 'tracks'), undo);
     } catch (err) {
       toast(err?.tooLong ? err.message : failMessage(err, 'playlist'));
-      if (before) reload();
+      if (!err?.tooLong) reload(); // (some may have moved)
     } finally {
       sorting = null;
       busy(false);
@@ -879,12 +894,14 @@ export async function collectionView({ el, params, onHide }) {
     const tracks = items.filter((m) => m.type === 'track').map(normTrack);
     const kids = [];
     if (tracks.length) {
-      const list = h('div.tracks');
+      const list = numberedList({ total: tracks.length, album: true });
       const unlock = [{ icon: 'unlock', label: 'Edit collection', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }];
       tracks.forEach((t, i) =>
         list.append(
           trackRow(t, {
             showArt: true,
+            position: true,
+            album: true,
             onPlay: () => playList(tracks, i, { title: meta.title, href: `/collection/${params.id}` }),
             onMenu: editable ? () => trackMenu(t, { extra: unlock }) : undefined,
           }),
@@ -1038,7 +1055,6 @@ export async function collectionView({ el, params, onHide }) {
     sorting = ctrl;
     busy(true);
     bar.working(`${doing}…`, () => ctrl.abort());
-    let before = null;
     try {
       // A collection keeps an order of its own only when sorted "custom".
       // Its custom order can differ from the one it was showing, so the
@@ -1047,25 +1063,31 @@ export async function collectionView({ el, params, onHide }) {
         await s.customOrder(meta.ratingKey);
         meta.collectionSort = 2;
       }
-      const { items: now } = await s.collection(meta.ratingKey);
-      if (now.length > SORT_LIMIT) throw Object.assign(new Error(`Collections of more than ${fmt.number(SORT_LIMIT)} items can’t be sorted here.`), { tooLong: true });
-      before = now.map((m) => String(m.ratingKey));
-      const target = makeTarget(now);
-      const moves = planMoves(before, target);
-      if (moves.length) {
-        const made = await applyMoves(moves, (id, after) => s.moveCollectionItem(meta.ratingKey, id, after), {
-          signal: ctrl.signal,
-          onProgress: (n, of) => bar.say(`${doing}… ${n} of ${of} moved`),
-        });
+      const result = await saveOrder({
+        read: async () => {
+          const { items: now } = await s.collection(meta.ratingKey);
+          if (now.length > SORT_LIMIT) throw Object.assign(new Error(`Collections of more than ${fmt.number(SORT_LIMIT)} items can’t be sorted here.`), { tooLong: true });
+          return now;
+        },
+        idOf: (m) => String(m.ratingKey),
+        target: makeTarget,
+        move: (id, after) => s.moveCollectionItem(meta.ratingKey, id, after),
+        signal: ctrl.signal,
+        onProgress: (n, of, p) => bar.say(movedWords(doing, n, of, p)),
+      });
+      if (result.moved) {
         changed();
+        const before = result.before;
         const undo = { action: 'Undo', onAction: () => reorder((list2) => restoreOrder(list2.map((m) => String(m.ratingKey)), before), ['Putting it back', 'Put back']), timeout: 8000 };
-        toast(made < moves.length ? 'Stopped, part way through.' : done, undo);
+        toast(result.stopped ? 'Stopped, part way through.' : doneWords(done, result, 'item', 'items'), undo);
       } else {
         toast('It’s in that order already.');
       }
       items = (await s.collection(meta.ratingKey)).items;
     } catch (err) {
       toast(err?.tooLong ? err.message : failMessage(err, 'collection'));
+      // (Some may have moved.)
+      if (!err?.tooLong) items = (await s.collection(meta.ratingKey).catch(() => null))?.items || items;
     } finally {
       sorting = null;
       busy(false);

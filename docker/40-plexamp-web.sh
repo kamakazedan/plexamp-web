@@ -16,9 +16,11 @@
 #   PLAY_TOGETHER       "false" turns off Play Together (on by default)
 #   CASTING             "false" turns off playing on other Plex players from
 #                       the app (on by default)
-#   MUSICBRAINZ         "false" turns off checking AI playlists' missing tracks
-#                       on musicbrainz.org (offered by default; each device
-#                       chooses, and it's off until someone turns it on)
+#   MUSICBRAINZ_URL     the MusicBrainz server AI playlists check their
+#                       suggestions with: https://musicbrainz.org, or your
+#                       own (http://192.168.1.30:5000, say). Not set: no
+#                       checks. (MUSICBRAINZ, from 0.12.0: "false" still
+#                       turns them off; "true" alone means musicbrainz.org.)
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
 set -eu
@@ -32,6 +34,8 @@ SERVICE_DIR="${SERVICE_DIR:-/opt/plexamp-web/server}"
 RUN_DIR="${RUN_DIR:-/run/plexamp-web}"
 SERVICE_SOCKET="$RUN_DIR/service.sock"
 NGINX_LOG_PORT="${NGINX_LOG_PORT:-5140}"
+# The app's version, for the service to say who's asking (at MusicBrainz).
+APP_VERSION="$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" "$HTML_DIR/js/plex.js" 2>/dev/null | head -n 1 || true)"
 
 fail() {
     echo "plexamp-web: $*" >&2
@@ -155,14 +159,26 @@ TOGETHER=true
 if ! truthy PLAY_TOGETHER "${PLAY_TOGETHER:-}" true; then TOGETHER=false; fi
 CAST=true
 if ! truthy CASTING "${CASTING:-}" true; then CAST=false; fi
-MB=true
-if ! truthy MUSICBRAINZ "${MUSICBRAINZ:-}" true; then MB=false; fi
-# For tests: another MusicBrainz (the mock Plex server has one).
-MB_URL="${MUSICBRAINZ_URL:-https://musicbrainz.org}"
-case "$MB_URL" in
-    http://* | https://*) ;;
-    *) fail "MUSICBRAINZ_URL must start with http:// or https:// (got: $(safe_url "$MB_URL"))" ;;
-esac
+
+# ---------- MusicBrainz ----------
+
+# Which MusicBrainz AI playlists check their suggestions with: the public
+# one (musicbrainz.org, asked once a second at most, its rule) or your own.
+MB_URL="${MUSICBRAINZ_URL:-}"
+if [ -n "${MUSICBRAINZ:-}" ]; then
+    if truthy MUSICBRAINZ "$MUSICBRAINZ"; then MB_URL="${MB_URL:-https://musicbrainz.org}"; else MB_URL=""; fi
+fi
+MB=false
+MB_KIND=""
+if [ -n "$MB_URL" ]; then
+    prepare_upstream MUSICBRAINZ_URL "$MB_URL"
+    MB_URL="${MB_URL%/}"
+    MB=true
+    case "$(lower "$UP_NAME")" in
+        musicbrainz.org | *.musicbrainz.org) MB_KIND=public ;;
+        *) MB_KIND=own ;;
+    esac
+fi
 
 PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
 case "$PLEX_TV" in
@@ -350,7 +366,7 @@ location /api/ {
 CONF
     if [ "$TOGETHER" = true ]; then add_config 'together: true'; fi
     if [ "$CAST" = true ]; then add_config 'cast: true'; fi
-    if [ "$MB" = true ]; then add_config 'musicbrainz: true'; fi
+    if [ "$MB" = true ]; then add_config "musicbrainz: \"$MB_KIND\""; fi
     add_config 'devices: true'
     if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
 else
@@ -361,6 +377,9 @@ else
     MB=false
 fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
+if [ "$MB" = true ]; then
+    say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
+fi
 
 printf 'window.PW_CONFIG = { %s };\n' "$CONFIG" >"$HTML_DIR/config.js"
 
@@ -375,7 +394,8 @@ if [ "$SERVICE" = true ]; then
   "together": $TOGETHER,
   "cast": $CAST,
   "musicbrainz": $MB,
-  "musicbrainzUrl": "$(json "${MB_URL%/}")",
+  "musicbrainzUrl": "$(json "$MB_URL")",
+  "version": "$(json "$APP_VERSION")",
   "devices": $SERVICE,
   "debug": $DEBUG_ON,
   "aiAuth": "$AI_AUTH",
@@ -432,7 +452,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ=$MB  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.

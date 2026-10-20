@@ -100,13 +100,26 @@ function tapTrack(track, onPlay, inQueue) {
 // starting from this row). `popular` marks one of the album's best-known
 // tracks. `onMenu` replaces the usual menu (pages add their own actions).
 // `rating`: the track's rating control (as Settings › Experience says), on
-// by default except in the queue.
-export function trackRow(track, { number, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false, onMenu, rating } = {}) {
+// by default except in the queue. In a numbered list (numberedList), `position`
+// puts its place in the list before it, and `album` its album in a column
+// of its own where there's room; `subAlbum` adds the album to the subtitle
+// where there isn't. `badge`: something before the subtitle (search's
+// formats), where a long title doesn't hide it.
+export function trackRow(
+  track,
+  { number, position = false, album = false, subAlbum = false, showArt = false, subtitle, onPlay, queueIndex, plays, popular = false, onMenu, rating, badge = null } = {},
+) {
   const lead = showArt
     ? h('div.track-lead.track-art', null, art(track.thumb, { size: 48, fallback: 'note' }))
     : h('div.track-lead.track-num', null, h('span.num', null, number ?? ''));
-  const sub = subtitle !== undefined ? subtitle : track.artist;
+  const text = subtitle !== undefined ? subtitle : track.artist;
+  const sub = subAlbum && track.album ? [text, h('span.track-sub-album', null, `${text ? ' — ' : ''}${track.album}`)] : text;
   const right = plays !== undefined ? fmt.count(plays, 'play', 'plays') : track.duration ? fmt.clock(track.duration / 1000) : '';
+  const albumCol = !album
+    ? null
+    : track.album && track.albumId
+      ? h('a.track-album', { href: `#/album/${track.albumId}`, title: track.album }, track.album)
+      : h('span.track-album', null, track.album || '');
   const inQueue = queueIndex !== undefined;
   const preview =
     app.settings.previewButtons && !inQueue && track.partKey
@@ -122,14 +135,16 @@ export function trackRow(track, { number, showArt = false, subtitle, onPlay, que
     h(
       'button.track-main',
       { type: 'button', onclick: () => tapTrack(track, onPlay, inQueue), 'aria-label': `Play ${track.title}` },
+      position ? h('span.track-pos') : null,
       lead,
       h(
         'div.track-text',
         null,
         h('div.track-title', null, track.title, popular ? h('span.popular-badge', { title: 'Popular', 'aria-label': 'Popular' }, icon('flame', 15)) : null),
-        sub ? h('div.track-sub', null, sub) : null,
+        sub || badge ? h('div.track-sub', null, badge, sub) : null,
       ),
     ),
+    albumCol,
     (rating ?? !inQueue) ? rowRating(track) : null,
     h('span.track-dur', null, right),
     preview,
@@ -141,6 +156,17 @@ export function trackRow(track, { number, showArt = false, subtitle, onPlay, que
   );
   markRow(el);
   return el;
+}
+
+// A list of tracks numbered from 1, as playlists are (the rows given
+// `position`): the numbers come from the rows' order, so they stay right as
+// rows are dragged, removed or added. `total`, if known, sizes the number
+// column; `album`: room for an album column, shown where the list is wide
+// enough (a phone shows the album under the title, if anywhere).
+export function numberedList({ total = 0, album = false, cls = '' } = {}) {
+  const list = h(`div.tracks.numbered${album ? '.with-album' : ''}${cls}`);
+  list.style.setProperty('--pos-digits', String(Math.max(2, String(Math.max(0, Math.floor(total))).length)));
+  return list;
 }
 
 // The playing bars are only added to the row that's playing: a list can

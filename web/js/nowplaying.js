@@ -622,8 +622,8 @@ function openDJSheet() {
         label: 'Turn off Guest DJ',
         description: `${active.name} is choosing tracks now.`,
         onSelect: () => {
-          guestDJ.set(null);
-          toast('Guest DJ off');
+          const { removed, back } = guestDJ.set(null);
+          toast(removed || back ? 'Guest DJ off. What’s to come is as it was before.' : 'Guest DJ off');
         },
       },
       // The AI DJ only where AI can be used; the "your queue" DJs after a
