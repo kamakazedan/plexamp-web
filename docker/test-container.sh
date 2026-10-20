@@ -158,7 +158,9 @@ expect "MusicBrainz: needs a sign-in" 401 "$(c -H "$JSON" -X POST -d "$MBQ" $W/a
 expect "MusicBrainz: Plex account without access to the server refused" 403 "$(c -H 'X-Plex-Token: t3' -H "$JSON" -X POST -d "$MBQ" $W/api/musicbrainz/check)"
 expect "MusicBrainz: only POST" 405 "$(c -H 'X-Plex-Token: t2' $W/api/musicbrainz/check)"
 contains "MusicBrainz: says which are real, unknown, or albums" '{"results":["real","unknown","album"]}' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d "$MBQ" $W/api/musicbrainz/check)"
-contains "MusicBrainz: asks as this app" 'plexamp-web ( https://github.com/' "$(cb 'http://pw-plex:32400/__mock/musicbrainz?X-Plex-Token=t')"
+MB_SEEN="$(cb 'http://pw-plex:32400/__mock/musicbrainz?X-Plex-Token=t')"
+contains "MusicBrainz: asks as this app, with its version" '"plexamp-web/' "$MB_SEEN"
+contains "MusicBrainz: ...and where to find it" ' ( https://github.com/kamakazedan/plexamp-web )' "$MB_SEEN"
 
 contains "service: health" '"together":true,"cast":true,"devices":true' "$(cb $W/api/health)"
 expect "service: internal checks can't be called from outside" 404 "$(c -H 'X-Plex-Token: t' $W/api/internal/ai-auth)"

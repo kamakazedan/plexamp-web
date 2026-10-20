@@ -1659,7 +1659,10 @@ with sync_playwright() as pw:
         # of its own where there's room.
         page.goto(APP + f'#/playlist/{rk}')
         page.wait_for_selector('.view .tracks.numbered > .track .track-pos')
-        all_numbered = page.locator('.view .tracks.numbered > .track').count() == page.locator('.view .tracks.numbered > .track .track-pos').count() == len(entries())
+        want_n = len(entries())
+        counts = lambda: (page.locator('.view .tracks.numbered > .track').count(), page.locator('.view .tracks.numbered > .track .track-pos').count())
+        # (Waiting out a reload of the list, after the Undo above.)
+        all_numbered = wait_for(lambda: counts() == (want_n, want_n), 10)
         narrow = page.locator('.view .tracks .track-album').first.evaluate('e => getComputedStyle(e).display')
         page.set_viewport_size({'width': 1280, 'height': 860})
         page.wait_for_timeout(500)
@@ -1667,7 +1670,7 @@ with sync_playwright() as pw:
         shot(page, 'lists-04-numbered-wide')
         page.set_viewport_size(MOBILE['viewport'])
         page.wait_for_timeout(300)
-        check('lists: a playlist\'s tracks are numbered', all_numbered)
+        check('lists: a playlist\'s tracks are numbered', all_numbered, f'{counts()} of {want_n}')
         check('lists: ...with each one\'s album in a column of its own on a wide screen, not on a phone',
               narrow == 'none' and wide == ['block', entries()[0]['parentTitle']], f'{narrow} {wide}')
 
