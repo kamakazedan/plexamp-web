@@ -595,8 +595,12 @@ with sync_playwright() as pw:
         mixed = random.Random(3).sample([t for t in library if who(t) != 'Various Artists' and not t['title'].startswith('Signal Fires')], 14)
         start([t['ratingKey'] for t in mixed], 'queue-echo')
         right = []
+        # (Once the DJ has looked at the queue for the track playing: it asks
+        # Plex a few things first, slower on some machines than others.)
+        arranged = lambda: js(page, "() => Promise.all([import('./js/dj.js'), import('./js/player.js')]).then(([d, p]) => !d.guestDJ.busy && d.guestDJ.arranged === p.player.current?.qid)")
         for _ in range(5):
-            page.wait_for_timeout(1500)
+            wait_for(arranged, 15)
+            page.wait_for_timeout(300)
             q = queue()
             cur = q['queue'][q['index']]
             ahead = [t for t in q['queue'][q['index'] + 1:q['index'] + 41] if not t['dj']]
