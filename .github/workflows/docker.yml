@@ -45,10 +45,14 @@ jobs:
           python3 -m py_compile dev/mock-plex.py dev/mock-ollama.py tests/browser_test.py
       - name: Check the Proxmox scripts
         run: |
-          shellcheck --version | head -n 2
-          shellcheck proxmox/plexamp-web.sh proxmox/install.sh tests/proxmox-install-test.sh docker/40-plexamp-web.sh
-          shellcheck --severity=warning tests/proxmox-test.sh docker/test-container.sh
-          bash tests/proxmox-test.sh
+          echo "::notice title=shellcheck::$(shellcheck --version | sed -n 2p)"
+          # What shellcheck finds is also an annotation on the run's summary page.
+          lint() { shellcheck -f gcc "$@" | sed -E 's/^([^:]+):([0-9]+):([0-9]+): ([a-z]+): (.*)$/::error file=\1,line=\2,col=\3::\4: \5/'; }
+          status=0
+          lint proxmox/plexamp-web.sh proxmox/install.sh tests/proxmox-install-test.sh docker/40-plexamp-web.sh || status=1
+          lint --severity=warning tests/proxmox-test.sh docker/test-container.sh || status=1
+          bash tests/proxmox-test.sh || status=1
+          exit "$status"
       - name: Test the Proxmox install (in Debian 12 and 13)
         run: bash tests/proxmox-install-test.sh
       - name: Build the image
