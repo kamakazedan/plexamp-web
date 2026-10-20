@@ -73,6 +73,20 @@ def reply_for(body):
     if 'genres' in props or 'Tags used in the library' in text:
         asked = re.search(r'^Playlist request: (.*)$', text, re.M)
         best = re.match(r'(?i)\s*best of (.+?)(?: playlist)?\s*$', asked.group(1) if asked else '')
+        if re.search(r'(?i)already have', asked.group(1) if asked else ''):
+            # Only artists and songs that are in the library.
+            return {
+                'title': 'Already Yours',
+                'summary': 'Calm songs from your own shelves.',
+                'focus_artists': [],
+                'artist_scope': 'any',
+                'genres': tag_line(text, 'Genres')[:1],
+                'styles': [],
+                'moods': tag_line(text, 'Moods')[:1],
+                'decades': [],
+                'artists': ['Glass Harbour', 'Marisol Vega'],
+                'tracks': [{'artist': 'Glass Harbour', 'title': 'Signal Fires'}],
+            }
         if best:
             # Like a small model that names the artist, and similar ones, but
             # doesn't say the playlist is only about them: the app has to

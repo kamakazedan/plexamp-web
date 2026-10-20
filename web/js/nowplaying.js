@@ -788,7 +788,7 @@ function buildNowPlaying() {
     if (t.dj) djNote.replaceChildren(icon('dj', 16), h('span', null, t.djNote ? `${djName(t.dj)}: ${t.djNote}` : `Added by ${djName(t.dj)}`));
     const c = player.context;
     const href = c?.href || (t.albumId ? `/album/${t.albumId}` : null);
-    queueFrom.replaceChildren('Playing from ', href ? h('a', { href: `#${href}` }, c?.title || t.album) : c?.title || t.album);
+    queueFrom.replaceChildren('Playing from ', href ? h('a', { href: `#${href}` }, c?.title || t.album) : c?.title || t.album || '');
     loadDetail(t);
     wave.update();
   }

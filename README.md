@@ -119,7 +119,7 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 - **Playlists tab**: all your music playlists, with ❤️ Tracks first.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
 - **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, appears in, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
-- **Appears in**: from any track's menu (in a list, Up next or Now Playing), the playlists and collections it's in, including collections of its album or its artist. Each opens with a tap.
+- **Appears in**: from any track's menu (in a list, Up next or Now Playing), the albums the song is on (its own, and others with the same song by the same artist, such as a compilation, a soundtrack or a live album, each with what that version is called), the playlists it's in, and the collections it's in, including collections of its album or its artist. Each opens with a tap. A smart playlist of a whole library (one with no rules but the library) counts as having every track without being read; other very long smart playlists are left out, and the page says which.
 - **❤️ Tracks**: tracks you give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out when they lose that rating, as in Plexamp. If yours is Plexamp's own (a smart playlist), Plex keeps it up to date itself.
 - **Now Playing**: big artwork, a seek bar drawn from your server's loudness analysis, ratings that save to Plex, the file format and quality, an Up next queue (with **Move to top**), Guest DJ, shuffle, repeat and a sleep timer. A volume slider with a percentage and marks at 25, 50 and 75%. Optional playback speed and skip buttons.
 - **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, sort (by artist, track name, album or year, or reversed, with Undo), remove, rename, delete. A playlist's, collection's or artist's menu can also play it next or add it to the queue. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
@@ -294,7 +294,7 @@ Every request asks the model to keep to what you asked for, and to be creative w
 
 A playlist carries on being made while you use the rest of the app, which says when it's ready. A finished playlist can be played, shuffled, added to the queue, or saved to Plex: as a new playlist, into one of yours, or (for the server's owner) into a collection.
 
-**Missing tracks.** Turn on **Settings → AI → Show missing tracks**, and each AI playlist also lists the songs and artists the model suggested that your library doesn't have (a song is looked for by its title and among its artist's tracks, so a slightly different title still counts as there). They're collected in **Settings → AI → Missing tracks**, with how often each was suggested and for what, to download as a spreadsheet (CSV), copy or share, so whoever looks after the server can go and find them. **Check again**, after adding music, takes off what's in the library now. The list is kept on that device. Models sometimes suggest songs that don't exist, so check before you go looking.
+**Missing tracks.** Turn on **Settings → AI → Show missing tracks** (it's off to begin with, and only playlists made while it's on are checked), and under each AI playlist is a list of the songs and artists the model suggested that your library doesn't have, or a line saying they're all there (a song is looked for by its title and among its artist's tracks, so a slightly different title still counts as there). They're collected in **Settings → AI → Missing tracks**, with how often each was suggested and for what, to download as a spreadsheet (CSV), copy or share, so whoever looks after the server can go and find them. **Check again**, after adding music, takes off what's in the library now. The list is kept on that device. Models sometimes suggest songs that don't exist, so check before you go looking.
 
 There are two ways to connect.
 
@@ -399,7 +399,7 @@ web/
   js/cast.js             Play on: Plex players through the service, AirPlay and Cast
   js/editing.js          adding to playlists and collections, and who may edit collections
   js/sorting.js          sorting playlists and collections with the fewest moves
-  js/membership.js       which playlists and collections a track is in (Appears in)
+  js/membership.js       Appears in: the albums a song is on, and the playlists and collections it's in
   js/missing.js          missing tracks from AI playlists, and exporting them
   js/ratings.js          ratings in the player and in track lists, and keeping ❤️ Tracks
   js/live.js             live updates: WebSocket, event stream or polling

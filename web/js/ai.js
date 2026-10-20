@@ -490,9 +490,9 @@ async function findSong(song, signal) {
   return tracks.find((m) => norm(m.title) === title && byArtist(m)) || tracks.find((m) => norm(m.title).startsWith(title) && byArtist(m)) || null;
 }
 
-// Titles that are the same song, near enough: "Out of Space" and "Out Of
-// Space (Remastered)", or a letter or two different.
-function sameTitle(a, b) {
+// Titles (normalised, see norm) that are the same song, near enough: "Out
+// of Space" and "Out Of Space (Remastered)", or a letter or two different.
+export function sameTitle(a, b) {
   if (!a || !b) return false;
   if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
@@ -808,8 +808,9 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt, trackM
         return [cand(m, 'song', 'a close match for the request')];
       }
       const title = clean(song?.title, 120);
-      if (trackMissing && title && !(await songInLibrary(song, signal, { searched: true }))) {
-        lacking({ kind: 'track', artist: clean(song?.artist, 100), title });
+      if (trackMissing && title) {
+        if (await songInLibrary(song, signal, { searched: true })) seen.songs.push(song);
+        else lacking({ kind: 'track', artist: clean(song?.artist, 100), title });
       }
       return [];
     }),

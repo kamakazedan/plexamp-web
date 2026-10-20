@@ -222,12 +222,14 @@ if [ "$systemd" = true ]; then
     systemctl restart plexamp-web-config.service
     systemctl restart plexamp-web.service
     systemctl restart nginx.service
+    # Until the service is up, nginx answers its address with an error
+    # (502), so the checks are quiet, and only the outcome is told.
     for _ in $(seq 1 30); do
-        curl -fsS -o /dev/null http://127.0.0.1/api/health && break
+        curl -fs -o /dev/null http://127.0.0.1/api/health && break
         sleep 0.5
     done
-    curl -fsS -o /dev/null http://127.0.0.1/ || fail "plexamp-web didn't start. See: journalctl -u plexamp-web-config -u plexamp-web -u nginx"
-    curl -fsS -o /dev/null http://127.0.0.1/api/health || note "Its service (Play Together, Play on, your devices) isn't answering yet: journalctl -u plexamp-web"
+    curl -fs -o /dev/null http://127.0.0.1/ || fail "plexamp-web didn't start. See: journalctl -u plexamp-web-config -u plexamp-web -u nginx"
+    curl -fs -o /dev/null http://127.0.0.1/api/health || note "Its service (Play Together, Play on, your devices) isn't answering yet: journalctl -u plexamp-web"
     say "plexamp-web ${version:-} is running"
 else
     say "Installed. systemd isn't running here, so start it yourself."

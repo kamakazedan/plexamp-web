@@ -1,6 +1,6 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
-import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError, norm } from '../ai.js';
 import { noteMissing, missingCount } from '../missing.js';
 import { playList } from '../actions.js';
 import { player } from '../player.js';
@@ -85,7 +85,24 @@ function keepMissing(found, prompt) {
 
 const missingLine = (m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`);
 
-// Under a playlist: the suggested songs and artists it couldn't have.
+// Under a playlist, with Show missing tracks on: the songs and artists it
+// suggested that aren't in the library, or that they all are.
+function missingNote(found) {
+  if (!aiSettings().missing) return null;
+  if (found?.missing?.length) return missingBlock(found.missing);
+  const one = (list, key) => new Set((list || []).map(key).filter(Boolean)).size;
+  const artists = one(found?.seen?.artists, (a) => norm(a));
+  const songs = one(found?.seen?.songs, (t) => `${norm(t?.artist)}|${norm(t?.title)}`);
+  if (!artists && !songs) return null;
+  const what = [artists && fmt.count(artists, 'artist', 'artists'), songs && fmt.count(songs, 'song', 'songs')].filter(Boolean).join(' and ');
+  return h(
+    'p.ai-missing-none',
+    null,
+    icon('check', 18),
+    h('span', null, `Nothing missing: the ${what} it suggested ${artists + songs === 1 ? 'is' : 'are'} all in your library.`),
+  );
+}
+
 function missingBlock(missing) {
   const tracks = missing.filter((m) => m.kind === 'track').length;
   const artists = missing.length - tracks;
@@ -264,7 +281,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         'div.ai-error',
         { role: 'alert' },
         h('p', null, describeAIError(err)),
-        aiSettings().missing && err?.missing?.length ? missingBlock(err.missing) : null,
+        err?.missing?.length ? missingNote(err) : null,
         h(
           'div.button-row',
           null,
@@ -317,7 +334,9 @@ export async function aiPlaylistView({ el, onDispose }) {
     const list = h('div.tracks');
     tracks.forEach((t, i) => list.append(trackRow(t, { showArt: true, subtitle: t.artist, onPlay: () => playList(tracks, i, context) })));
     const based = [...result.basedOn.tags, ...result.basedOn.artists];
-    body.replaceChildren(
+    // (Children that may be left out are filtered: replaceChildren would
+    // show null as the word "null".)
+    const parts = [
       h(
         'section.ai-result',
         null,
@@ -339,7 +358,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         ),
       ),
       list,
-      aiSettings().missing && result.missing?.length ? missingBlock(result.missing) : null,
+      missingNote(result),
       h('p.ai-based', { hidden: !based.length }, `Based on ${based.slice(0, 12).join(', ')}`),
       h(
         'div.pad',
@@ -359,7 +378,8 @@ export async function aiPlaylistView({ el, onDispose }) {
           h('span', null, 'Make another playlist'),
         ),
       ),
-    );
+    ];
+    body.replaceChildren(...parts.filter(Boolean));
   }
 }
 

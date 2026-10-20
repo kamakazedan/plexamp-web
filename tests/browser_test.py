@@ -101,9 +101,37 @@ def attach(page, tag, expected=()):
     page.on('pageerror', lambda e: errors.append(f'[{tag}] page error: {e}'))
 
 
+# Words that only show up when code puts a value where text should be: a
+# left-out part handed to the page as null ("null"), "undefined", "NaN",
+# "[object Object]". Every screenshot's page is checked, and what's found
+# is one check at the end.
+STRAY_TEXT = r"""() => {
+    const out = [];
+    const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+        const text = n.nodeValue.trim();
+        const el = n.parentElement;
+        if (!text || !el || el.closest('script, style, template')) continue;
+        if (/^(null|undefined|NaN)$/.test(text) || /\bundefined\b|\bNaN\b|\[object Object\]/.test(text)) {
+            const cls = typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/).join('.') : '';
+            out.push(JSON.stringify(text.slice(0, 40)) + ' in ' + el.tagName.toLowerCase() + cls);
+        }
+    }
+    return out;
+}"""
+stray = []
+screens = [0]
+
+
 def shot(page, name):
     page.wait_for_timeout(400)
     page.screenshot(path=os.path.join(OUT, f'{name}.png'))
+    try:
+        found = page.evaluate(STRAY_TEXT)
+    except Exception:  # noqa: BLE001 - a page that's going away
+        found = []
+    screens[0] += 1
+    stray.extend(f'{name}: {f}' for f in found)
 
 
 def login(page, app, token='t'):
@@ -962,7 +990,8 @@ with sync_playwright() as pw:
         page.locator('.view .tracks .track .track-more').first.click()
         page.wait_for_selector('.sheet.open')
         labels = page.locator('.sheet.open .sheet-action-label').all_text_contents()
-        check('edit: ...and a track\'s menu there offers to unlock it', 'Edit playlist' in labels and 'Remove from playlist' not in labels and page.locator('.hint-bubble').count() == 0, str(labels))
+        # (The hint fades out over a quarter of a second, so it's checked as no longer shown.)
+        check('edit: ...and a track\'s menu there offers to unlock it', 'Edit playlist' in labels and 'Remove from playlist' not in labels and page.locator('.hint-bubble.shown').count() == 0, str(labels))
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
         locked = page.locator('.view .tracks .track .drag-handle, .tracks .track .row-remove').count()
@@ -1172,6 +1201,31 @@ with sync_playwright() as pw:
         page.wait_for_timeout(800)
         check('lists: an address that isn\'t a track\'s goes nowhere', nowhere and page.locator('.error-state').count() == 1 and page.locator('.appears-track').count() == 0)
 
+        # The albums a song is on: its own first, then the others, oldest
+        # first; not another artist's song of the same name.
+        library = mc('/library/sections/1/all?type=10&X-Plex-Container-Size=5000')['Metadata']
+        signal = {m['parentTitle']: m for m in library if m['title'].startswith('Signal Fires')}
+        page.goto(APP + f"#/appears/{signal['Tidal Lines']['ratingKey']}")
+        done_looking()
+        shot(page, 'lists-01b-albums')
+        on_albums = page.locator('.appears-albums .row-title').all_inner_texts()
+        album_subs = dict(zip(on_albums, page.locator('.appears-albums .row-sub').all_inner_texts()))
+        check('lists: Appears in lists the albums the song is on: its own first, then oldest first', on_albums == ['Tidal Lines', 'Night Drive Vol. 1', 'Buoy'], str(on_albums))
+        check('lists: ...not another artist\'s song of the same name', 'Interference' not in on_albums)
+        check('lists: ...saying which one this track is, and what other versions are called',
+              'this track' in album_subs.get('Tidal Lines', '') and '“Signal Fires (Extended Mix)”' in album_subs.get('Buoy', '')
+              and '“Signal Fires - Radio Edit”' in album_subs.get('Night Drive Vol. 1', '') and 'Various Artists' in album_subs.get('Night Drive Vol. 1', ''),
+              str(album_subs))
+        said = page.locator('.appears-status').inner_text()
+        check('lists: ...and how many there are', said.startswith('On 3 albums'), said)
+        page.locator('.appears-albums a.row', has_text='Buoy').click()
+        page.wait_for_timeout(500)
+        check('lists: an album opens', js(page, '() => location.hash') == f"#/album/{signal['Buoy']['parentRatingKey']}")
+        page.goto(APP + f"#/appears/{signal['Night Drive Vol. 1']['ratingKey']}")
+        done_looking()
+        from_compilation = page.locator('.appears-albums .row-title').all_inner_texts()
+        check('lists: from a compilation, the artist\'s own albums are found', from_compilation == ['Night Drive Vol. 1', 'Tidal Lines', 'Buoy'], str(from_compilation))
+
         # The fewest moves: checked against every order of a few lists, made
         # move by move as Plex makes them.
         planned = js(page, """() => import('./js/sorting.js').then(({ planMoves }) => {
@@ -1332,19 +1386,51 @@ with sync_playwright() as pw:
         sort_by('Album name')
         names = [m['title'] for m in children(road['ratingKey'])]
         check('lists: sorting an album collection by album name', names == sorted(names, key=bare), str(names))
+
+        # A smart playlist's rules, as Plex keeps them (its content).
+        rules = js(page, """() => import('./js/membership.js').then(({ smartRules }) => {
+            const enc = (q) => 'library://9f1c/directory/' + encodeURIComponent('/library/sections/1/all?' + q);
+            return [
+                smartRules(enc('type=10')),
+                smartRules(enc('type=10&sort=titleSort&includeGuids=1')),
+                smartRules(enc('type=10&push=1&userRating' + encodeURIComponent('>>') + '=8&pop=1')),
+                smartRules(enc('type=10&title==Intro')),
+                smartRules(enc('type=10&limit=100')),
+                smartRules(enc('type=9')),
+                smartRules('library://9f1c/directory//library/sections/3/all?type=10'),
+                smartRules(''),
+                smartRules('%E0%A4%A'),
+            ]; })""")
+        check('lists: a smart playlist\'s rules are read: its library, and whether anything narrows it',
+              [r and (r['section'], r['type'], r['narrowed']) for r in rules] ==
+              [('1', '10', False), ('1', '10', False), ('1', '10', True), ('1', '10', True), ('1', '10', True), ('1', '9', False), ('3', '10', False), None, None], str(rules))
+        terms = js(page, """() => import('./js/membership.js').then(({ searchTerm }) =>
+            ['Don’t Stop Me Now', 'Born Slippy .NUXX', 'Signal Fires - Radio Edit', 'Your Woman (Remastered 2011)', 'Song [Live] – 2015 Remaster', 'I Will Survive'].map(searchTerm))""")
+        check('lists: a song is looked for by its name, without what marks a version of it',
+              terms == ['Stop Me Now', 'Born Slippy', 'Signal Fires', 'Your Woman', 'Song', 'Will Survive'], str(terms))
         ctx.close()
 
-        # A big smart playlist (all of a big library) isn't read.
+        # Very long smart playlists aren't read: one of the whole library (by
+        # its rules) has every track; any other is left out, and it says so.
         if APP_BIG and MOCK_BIG:
             ctx = browser.new_context(**MOBILE)
             page = ctx.new_page()
             attach(page, 'lists-big')
             login(page, APP_BIG)
+            big_lists = {p['title']: p for p in mc('/playlists?X-Plex-Container-Size=500', base=MOCK_BIG)['Metadata']}
+            long_reads = []
+            page.on('request', lambda r: long_reads.append(r.url) if any(f"/playlists/{big_lists[n]['ratingKey']}/items" in r.url for n in ('Everything', 'Long smart mix')) else None)
             first = mc('/library/sections/1/all?type=10&X-Plex-Container-Size=1', base=MOCK_BIG)['Metadata'][0]
             page.goto(APP_BIG + f"#/appears/{first['ratingKey']}")
             done_looking()
+            shot(page, 'lists-01c-long-smart')
             note = page.locator('.appears-note').inner_text() if page.locator('.appears-note:not([hidden])').count() else ''
-            check('lists: very long smart playlists aren\'t looked through, and it says so', 'Everything' in note, note)
+            got = page.locator('.appears-playlists .row-title').all_inner_texts()
+            subs = dict(zip(got, page.locator('.appears-playlists .row-sub').all_inner_texts()))
+            check('lists: a very long smart playlist of the whole library has every track, by its rules',
+                  'every track in Music [Hi-Res]' in subs.get('Everything', ''), str(subs))
+            check('lists: ...any other is left out, and it says so', note.startswith('Long smart mix, a smart playlist of 2,500 tracks, is too long to look through'), note)
+            check('lists: ...and neither is read', not long_reads, str(long_reads[:3]))
             ctx.close()
 
     # ---------- missing: songs and artists AI playlists suggest that aren't here ----------
@@ -1367,9 +1453,12 @@ with sync_playwright() as pw:
         def stored():
             return js(page, "() => JSON.parse(localStorage.getItem('pw.aiMissing') || '[]')")
 
-        # Off (the default): nothing shown or kept.
+        # Off (the default): nothing shown or kept, and no stray word where
+        # it would go (0.10.0 showed "null" there).
         make('Late night drive')
-        check('missing: off by default, so nothing is shown or kept', page.locator('.ai-missing').count() == 0 and stored() == [])
+        shot(page, 'missing-00-off')
+        check('missing: off by default, so nothing is shown or kept', page.locator('.ai-missing, .ai-missing-none').count() == 0 and stored() == [])
+        check('missing: ...and nothing is left in its place', 'null' not in page.locator('.ai-body').inner_text().split('\n'))
 
         page.goto(APP + '#/settings/ai')
         page.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
@@ -1388,6 +1477,11 @@ with sync_playwright() as pw:
         check('missing: an AI playlist lists the songs and artists it suggested that aren\'t in the library',
               'Not A Real Band (no music by them)' in lines and 'Imaginary Act — Made Up Song' in lines, str(lines))
         check('missing: ...not ones that are there', not any(a in ' '.join(lines) for a in ('Juniper & Ash', 'Glass Harbour (no music')), str(lines))
+        make('Calm songs I already have')
+        none = page.locator('.ai-missing-none').inner_text() if page.locator('.ai-missing-none').count() else ''
+        shot(page, 'missing-02b-nothing-missing')
+        check('missing: when everything suggested is there, it says so', none == 'Nothing missing: the 2 artists and 1 song it suggested are all in your library.'
+              and page.locator('.ai-missing').count() == 0, none)
         make('Best of Glass Harbour')
         make('Best of Glass Harbour')
         kept = {(m['kind'], m['artist'], m['title']): m for m in stored()}
@@ -2413,6 +2507,7 @@ with sync_playwright() as pw:
 
     browser.close()
 
+check(f'pages: no stray "null", "undefined" or "NaN" on any page ({screens[0]} looked at)', not stray, '; '.join(stray[:8]))
 failed = [name for name, ok in results if not ok]
 print(f'\n{len(results) - len(failed)}/{len(results)} checks passed')
 if errors:

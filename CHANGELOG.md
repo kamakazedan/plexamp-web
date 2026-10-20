@@ -3,6 +3,39 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.11.0 - 2026-10-20
+
+### Added
+
+- **Appears in lists the albums the song is on**: the track's own album
+  first, then any other with the same song by the same artist (a
+  compilation, a soundtrack, a best-of, a live album), oldest first, each
+  saying what the song is called there if it's another version ("Radio
+  Edit", "Extended Mix"). Another artist's song of the same name isn't
+  counted. The page now starts with how many albums, playlists and
+  collections it's on and in.
+- With Show missing tracks on, an AI playlist where everything the model
+  suggested is in the library now says so ("Nothing missing: the 8 artists
+  and 12 songs it suggested are all in your library"), rather than showing
+  nothing.
+
+### Changed
+
+- **A smart playlist of a whole library** (such as an "All Music" of every
+  track) is no longer reported as too long to look through: its rules say
+  every track is in it, so Appears in lists it without reading it. Other
+  very long smart playlists are still left out, and the page now says why
+  more plainly.
+
+### Fixed
+
+- A stray word "null" under AI playlists (with Show missing tracks off, or
+  nothing missing). Every page the browser tests visit is now checked for
+  words like this.
+- The Proxmox install printed "curl: (22) The requested URL returned error:
+  502" while the app was starting. Its checks are now quiet; only the
+  outcome is told.
+
 ## 0.10.0 - 2026-10-20
 
 ### Added

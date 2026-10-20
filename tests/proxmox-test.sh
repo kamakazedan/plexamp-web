@@ -179,5 +179,16 @@ else
     fail "an install that fails: $(tail -3 "$T/out")"
 fi
 
+# ---------- the installer ----------
+
+# While the service starts, nginx answers its address with 502: the
+# installer's checks of the container's own address must keep curl quiet
+# (0.10.0 printed "curl: (22) ... 502" in the middle of the install).
+if grep -nE 'curl -[A-Za-z]*S[A-Za-z]* [^|;]*127\.0\.0\.1' "$ROOT/proxmox/install.sh" >"$T/loud"; then
+    fail "the installer's start-up checks print curl's errors: $(cat "$T/loud")"
+else
+    pass "the installer's start-up checks are quiet"
+fi
+
 [ "$FAILED" = 0 ] && echo "ALL PROXMOX SCRIPT TESTS PASSED"
 exit "$FAILED"

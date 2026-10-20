@@ -72,7 +72,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -219,6 +219,21 @@ for ai, (artist_idx, title, year, pal, sub, fmt) in enumerate(ALBUMS):
         tracks.append(t)
     al['leafCount'] = n
 
+# One song on several albums, for "Appears in": the original, an extended
+# mix on the same artist's EP, a radio edit on a compilation, and another
+# artist's song of the same name (which isn't the same song).
+def nth_track(album_title, i):
+    al = next(a for a in albums if a['title'] == album_title)
+    return [t for t in tracks if t['parentRatingKey'] == al['ratingKey']][i]
+
+
+for album_title, song, credit in [('Tidal Lines', 'Signal Fires', None), ('Buoy', 'Signal Fires (Extended Mix)', None),
+                                  ('Night Drive Vol. 1', 'Signal Fires - Radio Edit', 'Glass Harbour'),
+                                  ('Interference', 'Signal Fires', None)]:
+    nth_track(album_title, 1)['title'] = song
+    if credit:
+        nth_track(album_title, 1)['originalTitle'] = credit
+
 # Some listening history so "recent" and "top" lists have content.
 for i, t in enumerate(random.sample(tracks, 25)):
     t['viewCount'] = random.randint(1, 40)
@@ -246,9 +261,17 @@ def entry_id():
     return next_entry[0]
 
 
-def make_playlist(title, members, smart=False, viewed=None, section=SECTION, poster=False):
+def smart_rules(query, section=SECTION):
+    """A smart playlist's rules as Plex keeps them (its `content`): the
+    library query it follows, escaped."""
+    return 'library://mock-music/directory/' + quote(f'/library/sections/{section}/all?{query}', safe='')
+
+
+def make_playlist(title, members, smart=False, viewed=None, section=SECTION, poster=False, rules='type=10'):
     """A playlist; `poster`: with a picture of its own, set in Plex (its
-    thumb), as well as the mosaic Plex makes (its composite)."""
+    thumb), as well as the mosaic Plex makes (its composite). A smart one
+    has `rules` (a library query), given out on its own page only (Plex's
+    list of playlists may leave them out)."""
     k = key()
     p = {
         'ratingKey': k, 'key': f'/playlists/{k}/items', 'type': 'playlist', 'playlistType': 'audio',
@@ -257,6 +280,8 @@ def make_playlist(title, members, smart=False, viewed=None, section=SECTION, pos
         'addedAt': NOW - 86400 * 40, 'updatedAt': NOW - 86400 * 3, '_items': list(members),
         '_pids': [entry_id() for _ in members], '_section': section,
     }
+    if smart:
+        p['_content'] = smart_rules(rules, section)
     if viewed:
         p['lastViewedAt'] = viewed
     if poster:
@@ -284,7 +309,7 @@ def set_loved(mode):
         playlists.remove(pl)
         items.pop(pl['ratingKey'], None)
     if mode == 'smart':
-        pl = make_playlist('❤️ Tracks', [], smart=True)
+        pl = make_playlist('❤️ Tracks', [], smart=True, rules='type=10&userRating%3E%3E=10')
         pl['_rule'] = 'loved'
         playlists.append(follow_rule(pl))
 
@@ -309,6 +334,9 @@ playlists = [
     make_playlist('Workout', random.sample(tracks, 11)),
     make_playlist('Bedtime stories', random.sample(tracks, 4), section='3'),
 ]
+if BIG:
+    # Too long to read, and not of everything: left out of "Appears in".
+    playlists.append(make_playlist('Long smart mix', tracks[:2500], smart=True, rules='type=10&genre=electronic'))
 
 COLLECTION_TYPES = {8: 'artist', 9: 'album', 10: 'track'}
 collections = []
@@ -1365,7 +1393,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.playlist_page(pl, q)
             if len(parts) > 2 and parts[2] == 'composite':
                 return self.send_bytes(cover_png(p, 600), 'image/png')
-            return self.send_json({'size': 1, 'Metadata': [public(pl)]})
+            detail = public(pl)
+            if pl.get('_content'):
+                detail['content'] = pl['_content']
+            return self.send_json({'size': 1, 'Metadata': [detail]})
         if p == '/photo/:/transcode':
             return self.send_bytes(cover_png(q.get('url', ['/x/x/0'])[0].split('?')[0], q.get('width', ['300'])[0]), 'image/png')
         if p == '/services/ultrablur/colors':
