@@ -20,6 +20,7 @@ import { Together, TogetherError } from './together.js';
 import { Cast, CastError } from './cast.js';
 import { Devices, DevicesError } from './devices.js';
 import { SharedModel, AIRequestError, cleanChat, AI_LIMITS } from './ai.js';
+import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
 import { listenForNginx } from './syslog.js';
 
 // ---------- settings ----------
@@ -35,6 +36,9 @@ function loadConfig() {
     debug: env.PW_SERVICE_DEBUG ? env.PW_SERVICE_DEBUG === 'true' : !!cfg.debug,
     together: env.PW_SERVICE_TOGETHER ? env.PW_SERVICE_TOGETHER === 'true' : cfg.together !== false,
     cast: env.PW_SERVICE_CAST ? env.PW_SERVICE_CAST === 'true' : cfg.cast !== false,
+    // Checking missing tracks on MusicBrainz (MUSICBRAINZ), and where.
+    musicbrainz: env.PW_SERVICE_MUSICBRAINZ ? env.PW_SERVICE_MUSICBRAINZ === 'true' : cfg.musicbrainz !== false,
+    musicbrainzUrl: env.PW_SERVICE_MUSICBRAINZ_URL || cfg.musicbrainzUrl || 'https://musicbrainz.org',
     devices: env.PW_SERVICE_DEVICES ? env.PW_SERVICE_DEVICES === 'true' : cfg.devices !== false,
     // Development only: players at 127.0.0.1 (the mock player).
     castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
@@ -64,6 +68,7 @@ const cast = new Cast({ auth, loopback: config.castLoopback });
 const devices = new Devices();
 setInterval(() => devices.sweep(), 15000).unref();
 const sharedModel = config.ollamaUrl ? new SharedModel({ url: config.ollamaUrl, key: config.ollamaKey, model: config.ollamaModel, log }) : null;
+const musicbrainz = config.musicbrainz ? new MusicBrainz({ base: config.musicbrainzUrl, log }) : null;
 
 // ---------- rate limits ----------
 
@@ -143,36 +148,48 @@ async function signedIn(req) {
 
 // ---------- the shared AI model ----------
 
-// Who may use the shared model (OLLAMA_AUTH): people signed in to Plex who
-// can use the Plex server at PLEX_SERVER_URL (anyone signed in to Plex when
-// it isn't set), or, with OLLAMA_AUTH=off, anyone who can open the app.
-// Resolves with a key for limits; throws for anyone else, with a message
-// that says why.
-async function aiAllowed(req) {
-  if (config.aiAuth === 'off') return { key: `ip|${req.headers['x-real-ip'] || 'local'}` };
+// People signed in to Plex who can use the Plex server at PLEX_SERVER_URL
+// (anyone signed in to Plex when it isn't set): who the shared model and
+// MusicBrainz checks are for. Resolves with a key for limits; throws for
+// anyone else, with a message that says why (`noAccess` for an account
+// that can't use the server, `signIn` for no sign-in at all). `what` names
+// it in the log, and refused(reason, user) hears why someone was turned away.
+async function plexAllowed(req, { what, signIn, noAccess, refused = () => {} }) {
   const pick = (v) => (validToken(v) ? v : null);
   const token = pick(req.headers['x-plex-token']);
   const serverToken = pick(req.headers['x-plex-server-token']);
   if (!token && !serverToken) {
-    aiRefused('a request without a Plex sign-in');
-    throw new HttpError(401, 'Sign in to Plex to use the AI model.');
+    refused('a request without a Plex sign-in');
+    throw new HttpError(401, signIn);
   }
   let verdict;
   try {
     verdict = await aiVerdict(token, serverToken);
   } catch (err) {
-    log.warn(`couldn't check a sign-in for the shared AI model: ${err.message}`);
+    log.warn(`couldn't check a sign-in for ${what}: ${err.message}`);
     throw new HttpError(503, 'Your Plex sign-in couldn’t be checked right now (plex.tv or the Plex server didn’t answer). Try again in a minute.');
   }
   if (verdict.status === 401) {
-    aiRefused('a Plex sign-in that plex.tv and the Plex server didn’t accept');
+    refused('a Plex sign-in that plex.tv and the Plex server didn’t accept');
     throw new HttpError(401, 'Plex didn’t accept your sign-in. Sign out and in again.');
   }
   if (verdict.status === 403) {
-    aiRefused('a Plex account that can’t use the Plex server at PLEX_SERVER_URL', verdict.user);
-    throw new HttpError(403, 'The AI model on this player is for people who can use its Plex server, and your Plex account can’t.');
+    refused('a Plex account that can’t use the Plex server at PLEX_SERVER_URL', verdict.user);
+    throw new HttpError(403, noAccess);
   }
   return { key: verdict.user ? `user|${verdict.user.id}` : `token|${createHash('sha256').update(String(token || serverToken)).digest('hex').slice(0, 16)}` };
+}
+
+// Who may use the shared model (OLLAMA_AUTH): as above, or, with
+// OLLAMA_AUTH=off, anyone who can open the app.
+async function aiAllowed(req) {
+  if (config.aiAuth === 'off') return { key: `ip|${req.headers['x-real-ip'] || 'local'}` };
+  return plexAllowed(req, {
+    what: 'the shared AI model',
+    signIn: 'Sign in to Plex to use the AI model.',
+    noAccess: 'The AI model on this player is for people who can use its Plex server, and your Plex account can’t.',
+    refused: aiRefused,
+  });
 }
 
 // Refusals are logged (at most once a minute for each reason), so whoever
@@ -225,30 +242,130 @@ async function aiChat(req, res, who) {
     if (n > 0) aiBusy.set(who.key, n);
     else aiBusy.delete(who.key);
   };
-  // Someone who stops waiting (Stop, or the page closed) stops the model too.
+  // Someone who stops waiting (Stop, or the page closed) stops the model
+  // answering, but not the model loading (see SharedModel.load).
   const ctrl = new AbortController();
+  let beat = null;
   res.on('close', () => {
+    clearInterval(beat);
     if (!res.writableFinished) ctrl.abort();
     finish();
   });
-  let upstream;
-  try {
-    upstream = await sharedModel.request('/api/chat', { method: 'POST', body: chat, signal: ctrl.signal, idleMs: AI_LIMITS.idleMs });
-  } catch (err) {
-    finish();
-    if (ctrl.signal.aborted) return undefined;
-    log.warn(`shared AI: couldn't reach the AI server: ${err.message}`);
-    throw new HttpError(502, 'The AI server didn’t answer. Check that Ollama is running.');
-  }
-  res.writeHead(upstream.statusCode || 502, {
-    'Content-Type': String(upstream.headers['content-type'] || 'application/json'),
+  // The answer starts at once, as lines of JSON (Ollama's own). Until the
+  // model answers, a blank line every few seconds keeps proxies on the way
+  // (this player's nginx, and any in front of it) from giving up on a quiet
+  // connection, while a model loads; {"pw":"loading"} says one is loading.
+  // Problems after this point come as a line: {"error", "status"}.
+  res.writeHead(200, {
+    'Content-Type': 'application/x-ndjson',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
     'X-Accel-Buffering': 'no',
   });
+  res.flushHeaders();
+  let atLineEnd = true; // a blank line can only go between lines
+  const line = (obj) => res.write(`${JSON.stringify(obj)}\n`);
+  beat = setInterval(() => atLineEnd && res.write('\n'), AI_LIMITS.heartbeatMs);
+  const fail = (status, message) => {
+    clearInterval(beat);
+    line({ error: message, status });
+    res.end();
+  };
+
+  // Loaded the way this chat asks for it (a moment if it is already).
+  let said = false;
+  const saying = setTimeout(() => {
+    said = true;
+    line({ pw: 'loading' });
+  }, AI_LIMITS.sayLoadingMs);
+  try {
+    await sharedModel.load(chat.model, { numCtx: chat.options?.num_ctx, keepAlive: chat.keep_alive });
+  } catch (err) {
+    clearTimeout(saying);
+    if (ctrl.signal.aborted) return undefined;
+    log.warn(`shared AI: couldn't load the model: ${err.message}`);
+    return fail(err.status || 502, err.status === 404 ? err.message : 'The AI server didn’t answer. Check that Ollama is running.');
+  }
+  clearTimeout(saying);
+  if (ctrl.signal.aborted) return undefined; // (gone; the model is loaded for next time)
+  if (said) line({ pw: 'loaded' });
+
+  let upstream;
+  try {
+    upstream = await sharedModel.request('/api/chat', { method: 'POST', body: chat, signal: ctrl.signal, idleMs: AI_LIMITS.idleMs });
+  } catch (err) {
+    if (ctrl.signal.aborted) return undefined;
+    log.warn(`shared AI: couldn't reach the AI server: ${err.message}`);
+    return fail(502, 'The AI server didn’t answer. Check that Ollama is running.');
+  }
+  if (upstream.statusCode !== 200) {
+    // Ollama's own error, with its status (400 for an option the model
+    // doesn't take, 404 for a model that isn't there).
+    let text = '';
+    upstream.on('data', (c) => (text.length < 65536 ? (text += c) : null));
+    upstream.on('end', () => {
+      let message = '';
+      try {
+        message = String(JSON.parse(text).error || '');
+      } catch {
+        message = '';
+      }
+      fail(upstream.statusCode || 502, message.slice(0, 300) || `The AI server answered ${upstream.statusCode}.`);
+    });
+    upstream.on('error', () => res.destroy());
+    return undefined;
+  }
+  upstream.on('data', (chunk) => (atLineEnd = chunk[chunk.length - 1] === 0x0a));
+  upstream.on('end', () => clearInterval(beat));
   upstream.on('error', () => res.destroy());
   upstream.pipe(res);
   return undefined;
+}
+
+// ---------- MusicBrainz ----------
+
+// POST /api/musicbrainz/check { items: [{ kind: 'artist' | 'track', artist,
+// title }] } -> { results: ['real' | 'album' | 'unknown' | null, ...] }:
+// which of an AI playlist's missing songs and artists are real (null: not
+// checked this time). For people who can use the Plex server, as the shared
+// model is; names only go to MusicBrainz (see musicbrainz.js). MusicBrainz
+// is asked once a second for everyone, so a few checks run at a time, each
+// for a limited time, and one stops when whoever asked has gone.
+const mbBusy = new Map(); // limit key -> checks under way
+let mbChecks = 0;
+
+async function musicbrainzRoute(req, res, parts) {
+  if (!musicbrainz) throw new HttpError(404, 'Checking on MusicBrainz is turned off on this player.');
+  if (parts[0] !== 'check' || parts.length > 1) throw new HttpError(404, 'Not found.');
+  if (req.method !== 'POST') throw new HttpError(405, 'Not allowed.');
+  const { key } = await plexAllowed(req, {
+    what: 'MusicBrainz checks',
+    signIn: 'Sign in to Plex first.',
+    noAccess: 'Checking on MusicBrainz is for people who can use this player’s Plex server, and your Plex account can’t.',
+  });
+  if (!allow(`mb|${key}`, 30)) throw new HttpError(429, 'Too many checks in a short time. Wait a minute and try again.');
+  const body = await readBody(req, 64 * 1024);
+  const items = (Array.isArray(body.items) ? body.items : []).slice(0, MB_LIMITS.perRequest).map((it) => ({
+    kind: it?.kind === 'artist' ? 'artist' : 'track',
+    artist: String(it?.artist || '').slice(0, 200),
+    title: String(it?.title || '').slice(0, 200),
+  }));
+  const mine = mbBusy.get(key) || 0;
+  if (mine >= MB_LIMITS.perUser || mbChecks >= MB_LIMITS.checks) {
+    throw new HttpError(429, 'MusicBrainz is being asked about other tracks right now. Try again in a minute.');
+  }
+  mbBusy.set(key, mine + 1);
+  mbChecks += 1;
+  const ctrl = new AbortController();
+  res.on('close', () => !res.writableFinished && ctrl.abort());
+  try {
+    return send(res, 200, { results: await musicbrainz.check(items, { signal: ctrl.signal, until: Date.now() + MB_LIMITS.checkMs }) });
+  } finally {
+    mbChecks -= 1;
+    const n = (mbBusy.get(key) || 1) - 1;
+    if (n > 0) mbBusy.set(key, n);
+    else mbBusy.delete(key);
+  }
 }
 
 // Without PLEX_SERVER_URL, anyone signed in to Plex may use the shared
@@ -616,9 +733,10 @@ async function handle(req, res) {
     if (area === 'cast') return await castRoute(req, res, rest);
     if (area === 'devices') return await devicesRoute(req, res, rest, url);
     if (area === 'ai') return await aiRoute(req, res, rest);
+    if (area === 'musicbrainz') return await musicbrainzRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
-    const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError;
+    const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError || err instanceof MusicBrainzError;
     if (!known) log.error(`${req.method} ${url.pathname}: ${err.stack || err.message}`);
     if (!res.headersSent) send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.' });
   } finally {

@@ -1,6 +1,6 @@
 import { app } from '../state.js';
 import { normTrack } from '../plex.js';
-import { back, dropCached, describeError, refresh } from '../router.js';
+import { back, dropCached, describeError, refresh, popOverlay } from '../router.js';
 import {
   h,
   art,
@@ -360,6 +360,151 @@ function removeEditControls(r) {
 
 const failMessage = (err, what) => (err?.status === 401 || err?.status === 403 ? `You can’t change this ${what}.` : describeError(err));
 
+// ---------- a playlist's or collection's picture ----------
+
+// Pictures are made smaller in the browser before they go to Plex: this many
+// pixels across at most, as a JPEG.
+const PICTURE_SIZE = 1200;
+
+async function shrinkPicture(file) {
+  let source;
+  try {
+    source = await createImageBitmap(file);
+  } catch {
+    // (Safari before 17 can't make one from some files: an <img> can.)
+    source = await new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(Object.assign(new Error('Not a picture'), { badImage: true }));
+      img.src = url;
+    });
+  }
+  const w = source.width || source.naturalWidth;
+  const ht = source.height || source.naturalHeight;
+  if (!w || !ht) throw Object.assign(new Error('Not a picture'), { badImage: true });
+  const scale = Math.min(1, PICTURE_SIZE / Math.max(w, ht));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(ht * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#16171b'; // under any see-through parts
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  source.close?.();
+  if (source.src?.startsWith('blob:')) URL.revokeObjectURL(source.src);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+  if (!blob) throw Object.assign(new Error('Not a picture'), { badImage: true });
+  return blob.arrayBuffer();
+}
+
+// The artwork at the top of a playlist or collection. While it's unlocked
+// a pencil sits over it (on a computer, when the pointer is over it), which
+// opens the choice of picture: upload one, go back to one it had, or to the
+// one Plex makes. `load` fetches the item again once its picture changes.
+function pictureBox(path, { what, id, title, load, onChanged }) {
+  let current = art(path, { size: 480, cls: 'hero-art', fallback: 'list' });
+  // (Its click, from the sheet, mustn't reach the box: that would open the
+  // sheet again.)
+  const input = h('input.picture-input', { type: 'file', accept: 'image/*', tabindex: '-1', 'aria-hidden': 'true', onclick: (e) => e.stopPropagation() });
+  const pencil = h('button.hero-art-edit', { type: 'button', 'aria-label': `Change the ${what}’s picture`, title: 'Change the picture', onclick: (e) => (e.stopPropagation(), choose()) }, icon('edit', 28));
+  const box = h('div.hero-art-box', { onclick: () => box.classList.contains('editable') && choose() }, current, pencil, input);
+  let busy = false;
+
+  const setBusy = (on) => {
+    busy = on;
+    box.classList.toggle('busy', on);
+    pencil.replaceChildren(on ? h('span.picture-spinner', { 'aria-hidden': 'true' }) : icon('edit', 28));
+    pencil.setAttribute('aria-label', on ? 'Changing the picture…' : `Change the ${what}’s picture`);
+  };
+
+  async function refresh() {
+    const fresh = await load().catch(() => null);
+    const next = fresh ? fresh.thumb || fresh.composite : null;
+    if (fresh) onChanged?.(fresh);
+    const el = art(next, { size: 480, cls: 'hero-art', fallback: 'list' });
+    current.replaceWith(el);
+    current = el;
+  }
+
+  async function change(job, done) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await job();
+      await refresh();
+      toast(done);
+    } catch (err) {
+      toast(err?.badImage ? 'That picture couldn’t be read. Try a JPEG or PNG.' : failMessage(err, what));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    if (file.type && !file.type.startsWith('image/')) return toast('That isn’t a picture.');
+    change(async () => app.server.uploadPoster(id, await shrinkPicture(file)), 'Picture changed');
+  });
+
+  async function choose() {
+    if (busy) return;
+    const posters = await app.server.posters(id).catch(() => []);
+    const earlier = posters.filter((p) => !p.selected).slice(0, 12);
+    const custom = posters.some((p) => p.selected && /^upload:\/\//.test(p.id));
+    const grid = earlier.length
+      ? h(
+          'div.picture-choices',
+          null,
+          h('div.picture-choices-label', null, 'Pictures it’s had'),
+          h(
+            'div.picture-grid',
+            null,
+            earlier.map((p, i) =>
+              h(
+                'button.picture-choice',
+                {
+                  type: 'button',
+                  'aria-label': `Use picture ${i + 1}`,
+                  onclick: async () => {
+                    await popOverlay();
+                    change(() => app.server.selectPoster(id, p.id), 'Picture changed');
+                  },
+                },
+                art(p.thumb, { size: 120, fallback: 'list' }),
+              ),
+            ),
+          ),
+        )
+      : null;
+    sheet({
+      title: 'Picture',
+      subtitle: `For “${title()}”`,
+      content: grid,
+      actions: [
+        // (The file picker opens straight from the tap: browsers want that.)
+        { icon: 'image', label: 'Upload a picture…', description: 'From this device. It’s made smaller for Plex.', now: true, onSelect: () => input.click() },
+        custom && {
+          icon: 'refresh',
+          label: what === 'playlist' ? 'Use its tracks’ covers' : 'Remove this picture',
+          description: what === 'playlist' ? 'Back to the covers Plex puts together' : 'Back to the picture Plex gives it',
+          onSelect: () => change(() => app.server.removePoster(id), what === 'playlist' ? 'Back to its tracks’ covers' : 'Picture removed'),
+        },
+      ],
+    });
+  }
+
+  return {
+    el: box,
+    open: choose,
+    setEditing(on) {
+      box.classList.toggle('editable', on);
+    },
+  };
+}
+
 // ---------- Playlist ----------
 
 export async function playlistView({ el, params, onDispose, onHide }) {
@@ -375,9 +520,22 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   const lock = editable ? lockButton('playlist', () => setEditing(!editing)) : null;
   lock?.set(false);
   // Until the lock has been used, a reminder of what it's for.
-  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder or remove tracks.', { key: 'lock' }) : () => {};
+  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder, sort or remove tracks, or change the picture.', { key: 'lock' }) : () => {};
+  const picture = pictureBox(playlistArt(pl), {
+    what: 'playlist',
+    id: pl.ratingKey,
+    title: () => pl.title,
+    load: () => s.playlist(pl.ratingKey),
+    onChanged: (fresh) => {
+      pl.thumb = fresh.thumb;
+      pl.composite = fresh.composite;
+      dropCached((p) => p === '/' || p === '/playlists' || p === '/library/playlists');
+    },
+  });
+  // A smart playlist can't be unlocked (its rules decide what's in it), but
+  // its picture can still change, from its menu.
   const menu = iconButton('more', 'More options', () =>
-    playlistMenu(pl, { edit: editing ? { onRename: rename, onDelete: remove } : null }),
+    playlistMenu(pl, { edit: editing ? { onRename: rename, onDelete: remove } : null, picture: editing || pl.smart ? () => picture.open() : null }),
   );
   const head = backHeader(pl.title, { collapse: true, fallback: '/playlists', actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, pl.title);
@@ -387,7 +545,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     h(
       'section.hero.hero-album',
       null,
-      art(playlistArt(pl), { size: 480, cls: 'hero-art', fallback: 'list' }),
+      picture.el,
       h(
         'div.hero-info',
         null,
@@ -405,7 +563,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
   const list = h('div.tracks');
-  const bar = editBar('Drag a track to move it, or remove it. Changes are saved to Plex as you go; the tracks stay in your library.', {
+  const bar = editBar('Drag a track to move it, or remove it, and tap the picture to change it. Changes are saved to Plex as you go; the tracks stay in your library.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort('track', pl.title, (by, label) => sortBy(by, label)),
   });
@@ -455,6 +613,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     list.classList.toggle('editing', on);
     bar.el.hidden = !on;
     lock?.set(on);
+    picture.setEditing(on);
     rows().forEach(controls);
     if (on) {
       learned('lock');
@@ -675,8 +834,21 @@ export async function collectionView({ el, params, onHide }) {
 
   const lock = editable ? lockButton('collection', () => setEditing(!editing)) : null;
   lock?.set(false);
-  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder or remove what’s in it.', { key: 'lock' }) : () => {};
-  const menu = iconButton('more', 'More options', () => collectionMenu(meta, { edit: editing ? { onRename: rename, onDelete: remove } : null }));
+  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder, sort or remove what’s in it, or change the picture.', { key: 'lock' }) : () => {};
+  const picture = pictureBox(meta.thumb || meta.composite, {
+    what: 'collection',
+    id: meta.ratingKey,
+    title: () => meta.title,
+    load: async () => (await s.collection(meta.ratingKey)).meta,
+    onChanged: (fresh) => {
+      meta.thumb = fresh.thumb;
+      meta.composite = fresh.composite;
+      dropCached((p) => p === '/' || p === '/search' || p.startsWith('/browse/collections'));
+    },
+  });
+  const menu = iconButton('more', 'More options', () =>
+    collectionMenu(meta, { edit: editing ? { onRename: rename, onDelete: remove } : null, picture: editing ? () => picture.open() : null }),
+  );
   const head = backHeader(meta.title, { collapse: true, actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, meta.title);
   const countEl = h('div.hero-meta', null, fmt.count(items.length, 'item', 'items'));
@@ -686,10 +858,10 @@ export async function collectionView({ el, params, onHide }) {
   ]);
   el.append(
     head,
-    h('section.hero.hero-album', null, art(meta.thumb || meta.composite, { size: 480, cls: 'hero-art', fallback: 'list' }), h('div.hero-info', null, title, countEl, buttons)),
+    h('section.hero.hero-album', null, picture.el, h('div.hero-info', null, title, countEl, buttons)),
   );
   collapseWhenHidden(head, title);
-  const bar = editBar('Drag to change the order, or remove what doesn’t belong. Changes are saved to Plex as you go; nothing leaves your library.', {
+  const bar = editBar('Drag to change the order, or remove what doesn’t belong, and tap the picture to change it. Changes are saved to Plex as you go; nothing leaves your library.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort(meta.subtype || 'album', meta.title, (by, label) => sortBy(by, label)),
   });
@@ -750,6 +922,7 @@ export async function collectionView({ el, params, onHide }) {
     el.classList.toggle('is-editing', on);
     bar.el.hidden = !on;
     lock?.set(on);
+    picture.setEditing(on);
     if (on) {
       learned('lock');
       hint();

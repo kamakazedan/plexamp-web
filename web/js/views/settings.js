@@ -3,10 +3,10 @@ import { APP_INFO, PlexServer, listServers, pickConnection, clientId, canPlayCod
 import { navigate, clearViewCache, describeError, dropCached } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
-import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError } from '../ai.js';
+import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { missingTracksView } from './missingtracks.js';
-import { missingCount } from '../missing.js';
+import { missingCount, mbOffered, checkOnMusicBrainz } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 
@@ -533,8 +533,36 @@ function missingSection(onDispose) {
           paint();
         },
       }),
+      // AI models make songs up: MusicBrainz knows which are real.
+      mbOffered()
+        ? toggleRow({
+            title: 'Check them on MusicBrainz',
+            subtitle: 'Leaves out songs and artists MusicBrainz doesn’t know (mostly ones the AI made up), and albums taken for songs. Their names go to musicbrainz.org, from this player.',
+            checked: aiSettings().musicbrainz === true,
+            onChange: (v) => {
+              saveAI({ musicbrainz: v });
+              if (v) checkOnMusicBrainz().catch(() => {});
+              paint();
+            },
+          })
+        : null,
       listRow,
     ),
+  );
+}
+
+// How long to wait for the model to start answering.
+function waitRow() {
+  return h(
+    'div.rows.ai-wait',
+    null,
+    choiceRow({
+      title: 'Wait for the model',
+      subtitle: 'How long to wait for it to start answering, loading it into memory included (after Ollama starts, that can take minutes). If that runs out, it carries on loading for next time.',
+      options: WAIT_CHOICES.map((m) => [m, `${m} minutes`]),
+      value: WAIT_CHOICES.includes(aiWaitMinutes()) ? aiWaitMinutes() : 5,
+      onChange: (v) => saveAI({ wait: v }),
+    }),
   );
 }
 
@@ -554,6 +582,7 @@ function aiView({ el, onDispose }) {
 
   const customBox = h('div.ai-custom');
   const modelBox = h('div.ai-models');
+  const waitBox = waitRow();
 
   el.append(
     h('p.lede', null, 'AI playlists and the AI DJ use a model running on your own hardware through Ollama. These settings apply to this device.'),
@@ -565,6 +594,7 @@ function aiView({ el, onDispose }) {
     h('p.hint.pad', null, 'This player has no shared model. Whoever runs it can add one with the OLLAMA_URL setting.'),
     customBox,
     modelBox,
+    waitBox,
     notesSection(),
     missingSection(onDispose),
   );
@@ -575,6 +605,7 @@ function aiView({ el, onDispose }) {
     const mode = s.mode === 'custom' ? 'custom' : '';
     customBox.replaceChildren(...(mode === 'custom' ? customForm(s) : []));
     modelBox.replaceChildren();
+    waitBox.hidden = mode !== 'custom';
     if (mode === 'custom' && s.url) loadModels();
   }
 
@@ -668,6 +699,7 @@ function sharedAIView(el, onDispose) {
     status,
     testButton(test),
     test,
+    waitRow(),
   );
   const notes = notesSection();
   notes.hidden = !on;
@@ -703,7 +735,9 @@ function sharedAIView(el, onDispose) {
     try {
       const st = await sharedStatus();
       if (st?.model) name.textContent = st.model;
-      if (st?.ready) status.textContent = 'Ready.';
+      if (st?.ready && st.loading) status.textContent = 'Ready, and loading into memory now.';
+      else if (st?.ready && st.loaded === false) status.textContent = 'Ready. It isn’t in memory right now, so the next request loads it first, which can take a few minutes.';
+      else if (st?.ready) status.textContent = 'Ready.';
       else if (st?.problem === 'not-installed') status.textContent = `“${st.model}” isn’t installed on the AI server yet.`;
       else if (st?.problem === 'no-model') status.textContent = 'The AI server has no models installed yet.';
       else status.textContent = 'The AI server isn’t answering right now.';
@@ -728,13 +762,15 @@ function testButton(out) {
           btn.disabled = true;
           out.classList.remove('warn');
           const model = aiTarget()?.model;
-          out.textContent = `Asking ${model || 'the model'}… The first request can take a while as the model loads.`;
+          const asking = `Asking ${model || 'the model'}…`;
+          out.textContent = asking;
           try {
             const r = await chat({
               messages: [{ role: 'user', content: 'Reply with {"ok": true} and nothing else.' }],
               schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
               temperature: 0,
               maxTokens: 20,
+              onLoading: (on) => (out.textContent = on ? `Loading ${model || 'the model'} into memory. After Ollama starts, this can take a few minutes…` : asking),
             });
             parseReply(r.content);
             out.textContent = `It works. ${r.model} answered in ${r.seconds.toFixed(1)} s.`;

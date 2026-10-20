@@ -120,6 +120,7 @@ OLLAMA_API_KEY=
 OLLAMA_AUTH=plex
 PLAY_TOGETHER=true
 CASTING=true
+MUSICBRAINZ=true
 DEBUG=
 ENV
 fi
@@ -172,6 +173,13 @@ else
 fi
 SETTINGS
 chmod 755 /usr/local/bin/plexamp-web-settings
+
+# Both are linked from /usr/bin too: `pct exec <ID> -- update-plexamp-web`
+# runs it with Proxmox's own search path (PATH=/sbin:/bin:/usr/sbin:/usr/bin,
+# which pct sets for itself), which leaves out /usr/local/bin.
+for cmd in update-plexamp-web plexamp-web-settings; do
+    ln -sfn "/usr/local/bin/$cmd" "/usr/bin/$cmd"
+done
 
 # The start-up script the Docker image runs writes nginx's settings and the
 # app's (plexamp-web-config), then the service starts, then nginx. The

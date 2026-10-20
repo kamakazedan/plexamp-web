@@ -1089,6 +1089,120 @@ label.row:hover {
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
 }
 
+/* A playlist's or collection's picture, and its pencil while unlocked. */
+.hero-art-box {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+}
+
+.hero-art-box > .art {
+  grid-area: 1 / 1;
+  transition: filter 0.18s;
+}
+
+.hero-art-box.editable {
+  cursor: pointer;
+}
+
+.hero-art-edit {
+  display: none;
+  grid-area: 1 / 1;
+  place-items: center;
+  width: 68px;
+  height: 68px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(10, 11, 14, 0.62);
+  color: #fff;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  transition:
+    opacity 0.18s,
+    transform 0.18s;
+}
+
+.hero-art-box.editable .hero-art-edit,
+.hero-art-box.busy .hero-art-edit {
+  display: grid;
+}
+
+.hero-art-edit:active {
+  transform: scale(0.94);
+}
+
+/* With a mouse, the pencil shows when the pointer is over the picture. */
+@media (hover: hover) {
+  .hero-art-box.editable:not(.busy) .hero-art-edit {
+    opacity: 0;
+  }
+
+  .hero-art-box.editable:hover .hero-art-edit,
+  .hero-art-box.editable .hero-art-edit:focus-visible {
+    opacity: 1;
+  }
+
+  .hero-art-box.editable:hover > .art {
+    filter: brightness(0.72);
+  }
+}
+
+.hero-art-box.busy > .art {
+  filter: brightness(0.6);
+}
+
+.picture-input {
+  display: none;
+}
+
+.picture-spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* The pictures a playlist or collection has had, in the picture sheet. */
+.picture-choices {
+  padding: 4px 22px 12px;
+}
+
+.picture-choices-label {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: calc(13px * var(--fs, 1));
+  font-weight: 600;
+}
+
+.picture-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 10px;
+}
+
+.picture-choice {
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  overflow: hidden;
+}
+
+.picture-choice .art {
+  width: 100%;
+  border-radius: 8px;
+}
+
+.picture-choice:hover .art,
+.picture-choice:focus-visible .art {
+  outline: 2px solid var(--tint-hi);
+  outline-offset: 2px;
+}
+
 .hero-info {
   display: flex;
   flex-direction: column;
@@ -2262,6 +2376,9 @@ body.np-open #toasts {
 
 .sheet-action {
   display: flex;
+  /* Rows keep their height and a long list scrolls (in a dialog, a column
+     of rows otherwise squeezes them, and their text runs into the next). */
+  flex: none;
   align-items: center;
   gap: 18px;
   min-height: 54px;
@@ -2282,6 +2399,18 @@ body.np-open #toasts {
 
 .sheet-action.danger {
   color: var(--danger);
+}
+
+/* A heading over some of a sheet's actions. */
+.sheet-heading {
+  flex: none;
+  margin: 10px 22px 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: calc(13px * var(--fs, 1));
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .sheet-spacer {
@@ -2710,6 +2839,13 @@ body.np-open #toasts {
   margin: 6px 0 0;
   font-size: calc(14px * var(--fs, 1));
   color: var(--muted);
+}
+
+/* While the model loads into memory, under the steps. */
+.ai-loading {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
 }
 
 .ai-based {
@@ -4420,6 +4556,16 @@ body.in-together .pb-art::after {
 
 .missing-status:empty {
   display: none;
+}
+
+.missing-mb {
+  margin-top: 4px;
+}
+
+.missing-row.unknown .row-title {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 255, 255, 0.35);
 }
 
 .missing-row .row-sub {

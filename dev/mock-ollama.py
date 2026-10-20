@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """A fake Ollama server for working on the AI features without a model.
 
-Implements /api/version, /api/tags and /api/chat (streamed or not), and
-behaves like Ollama for cross-origin requests: browsers on other sites are
-refused unless allowed with --origins. Replies are built from the prompt, so
-the app's parsing and library matching run as they would with a real model.
+Implements /api/version, /api/tags, /api/ps, /api/generate (loading a
+model) and /api/chat (streamed or not), and behaves like Ollama for
+cross-origin requests: browsers on other sites are refused unless allowed
+with --origins. Replies are built from the prompt, so the app's parsing and
+library matching run as they would with a real model.
+
+For tests, /__mock/config?load=6 makes loading a model take 6 seconds (as
+after Ollama starts), &unload=1 empties its memory and &reset=1 its counts;
+like Ollama, a load stops when the request that asked for it goes away.
 
     python3 dev/mock-ollama.py                 # http://127.0.0.1:11434
     python3 dev/mock-ollama.py --origins '*'   # allow any website
@@ -19,7 +24,10 @@ import argparse
 import json
 import random
 import re
+import select
+import socket
 import sys
+import threading
 import time
 from fnmatch import fnmatch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,7 +49,14 @@ MODELS = [
 ORIGINS = ['http://localhost', 'https://localhost', 'http://localhost:*', 'https://localhost:*', 'http://127.0.0.1',
            'https://127.0.0.1', 'http://127.0.0.1:*', 'https://127.0.0.1:*', 'http://0.0.0.0', 'http://0.0.0.0:*']
 ORIGINS += [o.strip() for o in ARGS.origins.split(',') if o.strip()]
-STATE = {'think': 0.0}  # seconds before each answer starts (/__mock/config?think=)
+STATE = {
+    'think': 0.0,  # seconds before each answer starts (/__mock/config?think=)
+    'load': 0.0,  # seconds to load a model that isn't in memory (/__mock/config?load=)
+    'loaded': [],  # what's in memory: "model|context size"
+    'loads': 0,  # loads finished
+    'cancelled': 0,  # loads given up because the request went away
+}
+LOCK = threading.Lock()
 
 
 def origin_allowed(origin):
@@ -114,8 +129,13 @@ def reply_for(body):
             'styles': tag_line(text, 'Styles')[:2],
             'moods': tag_line(text, 'Moods')[:1],
             'decades': [],
-            'artists': ['Glass Harbour', 'Juniper & Ash', 'Not A Real Band'],
-            'tracks': [{'artist': 'Glass Harbour', 'title': 'Engine'}, {'artist': 'Imaginary Act', 'title': 'Made Up Song'}],
+            # Real artists and songs, some not in the library, and some made
+            # up, as models do; and albums named as if they were songs (one
+            # in the library, one not: MusicBrainz knows it).
+            'artists': ['Glass Harbour', 'Juniper & Ash', 'Not A Real Band', 'Real Missing Band'],
+            'tracks': [{'artist': 'Glass Harbour', 'title': 'Engine'}, {'artist': 'Imaginary Act', 'title': 'Made Up Song'},
+                       {'artist': 'Glass Harbour', 'title': 'Tidal Lines'}, {'artist': 'Glass Harbour', 'title': 'Lantern Song'},
+                       {'artist': 'Glass Harbour', 'title': 'Sea Glass'}],
         }
     # Choosing and ordering tracks.
     options = [n for n, _ in numbered(text)]
@@ -155,6 +175,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def client_gone(self):
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and self.connection.recv(1, socket.MSG_PEEK) == b''
+        except OSError:
+            return True
+
+    def ensure_loaded(self, model, ctx):
+        """Loads the model (if --load and it isn't in memory), as long as the
+        request is still there; False if it went away first."""
+        key = f'{model}|{ctx}'
+        if not STATE['load'] or key in STATE['loaded']:
+            return True
+        end = time.time() + STATE['load']
+        while time.time() < end:
+            if self.client_gone():
+                with LOCK:
+                    STATE['cancelled'] += 1
+                return False
+            time.sleep(0.1)
+        with LOCK:
+            STATE['loaded'] = [k for k in STATE['loaded'] if not k.startswith(f'{model}|')] + [key]
+            STATE['loads'] += 1
+        return True
+
     def do_OPTIONS(self):
         if self.refuse_origin():
             return
@@ -171,6 +216,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'version': '0.12.0-mock'})
         if self.path == '/api/tags':
             return self.send_json({'models': [dict(m, model=m['name'], modified_at='2026-10-01T10:00:00Z', digest='0' * 64) for m in MODELS]})
+        if self.path == '/api/ps':
+            names = sorted({k.split('|')[0] for k in STATE['loaded']})
+            return self.send_json({'models': [{'name': n, 'model': n} for n in names]})
         if self.path == '/':
             return self.send_json({'status': 'Ollama is running'})
         if self.path.startswith('/__mock/config'):
@@ -178,6 +226,13 @@ class Handler(BaseHTTPRequestHandler):
             m = re.search(r'[?&]think=([0-9.]+)', self.path)
             if m:
                 STATE['think'] = float(m.group(1))
+            m = re.search(r'[?&]load=([0-9.]+)', self.path)
+            if m:
+                STATE['load'] = float(m.group(1))
+            if re.search(r'[?&]unload=1', self.path):
+                STATE['loaded'] = []
+            if re.search(r'[?&]reset=1', self.path):
+                STATE['loads'] = STATE['cancelled'] = 0
             return self.send_json(STATE)
         return self.send_json({'error': 'not found'}, 404)
 
@@ -194,13 +249,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'error': 'invalid JSON'}, 400)
         if self.path in ('/api/pull', '/api/delete', '/api/create', '/api/copy', '/api/push'):
             return self.send_json({'status': 'success'})  # so a proxy test can tell it got through
-        if self.path != '/api/chat':
+        if self.path not in ('/api/chat', '/api/generate'):
             return self.send_json({'error': 'not found'}, 404)
         model = body.get('model', '')
         if model not in [m['name'] for m in MODELS]:
             return self.send_json({'error': f'model "{model}" not found, try pulling it first'}, 404)
+        ctx = (body.get('options') or {}).get('num_ctx') or 2048
+        if self.path == '/api/generate':  # only loading is needed here: no prompt
+            if not self.ensure_loaded(model, ctx):
+                return None
+            return self.send_json({'model': model, 'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'), 'response': '', 'done': True, 'done_reason': 'load'})
         if ARGS.reject_think and 'think' in body:
             return self.send_json({'error': f'"{model}" does not support thinking'}, 400)
+        if not self.ensure_loaded(model, ctx):
+            return None
 
         content = json.dumps(reply_for(body))
         if STATE['think']:

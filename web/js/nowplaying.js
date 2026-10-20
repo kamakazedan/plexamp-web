@@ -626,17 +626,21 @@ function openDJSheet() {
           toast('Guest DJ off');
         },
       },
-      // The AI DJ only where AI can be used.
-      ...DJS.filter((d) => !d.needsAI || ai).map((d) => ({
-        icon: 'dj',
-        label: d.name,
-        description: d.description,
-        checked: active?.id === d.id,
-        onSelect: () => {
-          guestDJ.set(d.id);
-          toast(`${d.name} is on`);
+      // The AI DJ only where AI can be used; the "your queue" DJs after a
+      // heading.
+      ...DJS.filter((d) => !d.needsAI || ai).flatMap((d, i, all) => [
+        d.kind === 'reorder' && all[i - 1]?.kind !== 'reorder' ? { heading: 'Only what’s in your queue: these add nothing new' } : null,
+        {
+          icon: 'dj',
+          label: d.name,
+          description: d.description,
+          checked: active?.id === d.id,
+          onSelect: () => {
+            guestDJ.set(d.id);
+            toast(`${d.name} is on`);
+          },
         },
-      })),
+      ]),
     ],
   });
 }
@@ -784,8 +788,10 @@ function buildNowPlaying() {
     album.textContent = t.year && app.settings.showAlbumYear !== false ? `${t.album} (${t.year})` : t.album;
     if (t.albumId) album.setAttribute('href', `#/album/${t.albumId}`);
     else album.removeAttribute('href');
-    djNote.hidden = !t.dj;
+    // A DJ's pick, or a track a "your queue" DJ moved up.
+    djNote.hidden = !t.dj && !t.djMoved;
     if (t.dj) djNote.replaceChildren(icon('dj', 16), h('span', null, t.djNote ? `${djName(t.dj)}: ${t.djNote}` : `Added by ${djName(t.dj)}`));
+    else if (t.djMoved) djNote.replaceChildren(icon('dj', 16), h('span', null, `${djName(t.djMoved)} moved this up${t.djNote ? `: ${t.djNote}` : ''}`));
     const c = player.context;
     const href = c?.href || (t.albumId ? `/album/${t.albumId}` : null);
     queueFrom.replaceChildren('Playing from ', href ? h('a', { href: `#${href}` }, c?.title || t.album) : c?.title || t.album || '');
@@ -863,7 +869,7 @@ function buildNowPlaying() {
         trackRow(t, {
           showArt: true,
           queueIndex: from + i,
-          subtitle: [t.artist, t.dj ? djName(t.dj) : added(t)].filter(Boolean).join(' · '),
+          subtitle: [t.artist, t.dj ? djName(t.dj) : t.djMoved ? `moved up by ${djName(t.djMoved)}` : added(t)].filter(Boolean).join(' · '),
           onPlay: () => player.jump(from + i),
         }),
       ),

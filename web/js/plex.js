@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.11.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.12.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -116,7 +116,9 @@ const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 // `discard`: the answer isn't needed, so it isn't read (Plex can answer a
 // change with the whole list it changed: sorting a long playlist makes
 // hundreds of changes).
-async function request(url, { method = 'GET', timeout = 20000, signal, discard = false } = {}) {
+// `body`: bytes to send (a picture); they go without a Content-Type, as
+// Plex works out what they are, so the request needs no CORS preflight.
+async function request(url, { method = 'GET', timeout = 20000, signal, discard = false, body } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const onAbort = () => ctrl.abort();
@@ -124,7 +126,7 @@ async function request(url, { method = 'GET', timeout = 20000, signal, discard =
   try {
     let res;
     try {
-      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal, credentials: 'omit' });
+      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal, credentials: 'omit', ...(body ? { body } : {}) });
     } catch (cause) {
       const err = new Error(signal?.aborted ? 'aborted' : 'network');
       err.network = !signal?.aborted;
@@ -518,9 +520,43 @@ export class PlexServer {
     return `server://${await this.machineId()}/com.plexapp.plugins.library/library/metadata/${ids.join(',')}`;
   }
 
-  async send(method, path, params, { discard = false } = {}) {
-    const data = await request(this.url(path, params), { method, discard });
+  async send(method, path, params, { discard = false, body, timeout } = {}) {
+    const data = await request(this.url(path, params), { method, discard, body, ...(timeout ? { timeout } : {}) });
     return data?.MediaContainer || {};
+  }
+
+  // ---------- a playlist's or collection's picture ----------
+  // (Plex calls them posters.) Only pictures on the server itself are
+  // offered: ones uploaded to it, not addresses elsewhere.
+
+  async posters(id) {
+    const mc = await this.get(`/library/metadata/${id}/posters`);
+    return [...asArray(mc.Metadata), ...asArray(mc.Photo)]
+      .filter((p) => typeof p.key === 'string' && p.key.startsWith('/') && !p.key.startsWith('//') && typeof p.ratingKey === 'string')
+      .map((p) => ({ id: p.ratingKey, key: p.key, thumb: typeof p.thumb === 'string' && p.thumb.startsWith('/') && !p.thumb.startsWith('//') ? p.thumb : p.key, selected: !!Number(p.selected) || p.selected === true }));
+  }
+
+  // A picture (its bytes) becomes the item's.
+  async uploadPoster(id, bytes) {
+    await this.send('POST', `/library/metadata/${id}/posters`, {}, { body: bytes, discard: true, timeout: 90000 });
+    this.forgetPictures(id);
+  }
+
+  // One the item had before (from posters()).
+  async selectPoster(id, poster) {
+    await this.send('PUT', `/library/metadata/${id}/poster`, { url: poster }, { discard: true });
+    this.forgetPictures(id);
+  }
+
+  // Back to the picture Plex makes (for a playlist, its tracks' covers).
+  async removePoster(id) {
+    await this.send('DELETE', `/library/metadata/${id}/thumb`, {}, { discard: true });
+    this.forgetPictures(id);
+  }
+
+  forgetPictures() {
+    this.forgetPlaylists();
+    for (const k of this.cache.keys()) if (k.startsWith('collections:')) this.cache.delete(k);
   }
 
   async createPlaylist(title, ids) {

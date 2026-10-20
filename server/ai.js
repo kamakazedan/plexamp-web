@@ -13,7 +13,10 @@ export const AI_LIMITS = {
   chars: 1500000, // all of a request's messages together
   perUser: 2, // chats at once
   total: 6,
-  idleMs: 300000, // Ollama silent this long (loading a model can take a while)
+  idleMs: 900000, // Ollama silent this long during a chat (a long prompt on a slow machine)
+  loadMs: 1800000, // or while loading the model (Ollama has its own limit too, 5 minutes by default)
+  heartbeatMs: 10000, // a blank line this often while waiting, so proxies keep the answer open
+  sayLoadingMs: 1500, // loading for longer than this is said to the app
 };
 
 export class AIRequestError extends Error {
@@ -95,6 +98,15 @@ function readAll(res, limit) {
   });
 }
 
+// Ollama's error message, from an error answer.
+function errorText(text) {
+  try {
+    return String(JSON.parse(text).error || '').slice(0, 300);
+  } catch {
+    return '';
+  }
+}
+
 export class SharedModel {
   constructor({ url, key = '', model = '', log }) {
     this.base = new URL(`${String(url).replace(/\/+$/, '')}/`);
@@ -104,6 +116,8 @@ export class SharedModel {
     this.list = null; // { names, at }
     this.listing = null;
     this.pickedSaid = null;
+    this.loads = new Map(); // `${model}|${num_ctx}` -> the load under way
+    this.ps = null; // { names, at }: the models in memory
   }
 
   // A request to Ollama; resolves with the response once its headers are in.
@@ -165,8 +179,55 @@ export class SharedModel {
     return names[0];
   }
 
-  // For the app: the model's name, and whether it's ready to use. Nothing
-  // else about the AI server.
+  // Whether the model is in memory now (Ollama's /api/ps, asked at most every
+  // five seconds); null if that couldn't be told.
+  async loaded(model) {
+    try {
+      if (!this.ps || Date.now() - this.ps.at > 5000) {
+        const res = await this.request('/api/ps', { idleMs: 10000 });
+        const text = await readAll(res, 1024 * 1024);
+        if (res.statusCode !== 200) return null;
+        this.ps = { names: (JSON.parse(text).models || []).map((m) => String(m.name || m.model || '')), at: Date.now() };
+      }
+      return this.ps.names.some((n) => sameModel(n, model));
+    } catch {
+      return null;
+    }
+  }
+
+  // Loads the model (a moment if it's in memory already), the way a chat
+  // asks for it, in a request this service makes for itself: Ollama stops
+  // loading a model when the request that asked for it goes, and someone who
+  // gives up waiting (or a proxy along the way) mustn't stop it, so the next
+  // request finds it ready. One load at a time of each.
+  load(model, { numCtx, keepAlive } = {}) {
+    const key = `${model}|${numCtx || ''}`;
+    if (this.loads.has(key)) return this.loads.get(key);
+    const started = Date.now();
+    const body = { model, keep_alive: keepAlive || '15m' };
+    if (numCtx) body.options = { num_ctx: numCtx };
+    const job = (async () => {
+      let res;
+      try {
+        res = await this.request('/api/generate', { method: 'POST', body, idleMs: AI_LIMITS.loadMs });
+      } catch (err) {
+        throw new AIRequestError(502, `The AI server didn’t answer (${err.message}). Check that Ollama is running.`);
+      }
+      const text = await readAll(res, 1024 * 1024);
+      if (res.statusCode !== 200) {
+        // (As Ollama said it: "model 'x' not found" is a 404.)
+        throw new AIRequestError(res.statusCode === 404 ? 404 : 502, errorText(text) || `the AI server answered ${res.statusCode}`);
+      }
+      const seconds = (Date.now() - started) / 1000;
+      if (seconds > 2) this.log?.info(`shared AI: loaded ${model} in ${Math.round(seconds)} s`);
+      this.ps = null;
+    })().finally(() => this.loads.delete(key));
+    this.loads.set(key, job);
+    return job;
+  }
+
+  // For the app: the model's name, whether it's ready to use, and whether
+  // it's in memory. Nothing else about the AI server.
   async status() {
     let names;
     try {
@@ -177,6 +238,7 @@ export class SharedModel {
     const model = this.configured || names[0] || null;
     if (!model) return { model: null, ready: false, problem: 'no-model' };
     const ready = names.some((n) => sameModel(n, model));
-    return { model, ready, problem: ready ? null : 'not-installed' };
+    const loading = [...this.loads.keys()].some((k) => k.startsWith(`${model}|`));
+    return { model, ready, problem: ready ? null : 'not-installed', loaded: ready ? (loading ? false : await this.loaded(model)) : false, loading };
   }
 }

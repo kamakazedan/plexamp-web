@@ -99,6 +99,7 @@ const ICONS = {
   smile: S('<circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.2a4.2 4.2 0 0 0 6.8 0"/><circle cx="9" cy="10" r=".9" fill="currentColor"/><circle cx="15" cy="10" r=".9" fill="currentColor"/>'),
   stack: S('<rect x="6.5" y="6.5" width="13" height="13" rx="2"/><path d="M4 16.5V5.8A1.8 1.8 0 0 1 5.8 4h10.7"/>'),
   edit: S('<path d="M4.5 19.5l1-4.1L15.8 5.1a2 2 0 0 1 2.9 0l.2.2a2 2 0 0 1 0 2.9L8.6 18.5z"/><path d="M13.8 7.1l3.1 3.1"/>'),
+  image: S('<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="9.5" r="1.6"/><path d="m4.5 17.5 5-5 3.5 3.5 2.5-2.5 4 4"/>'),
   trash: S('<path d="M4.5 6.5h15M9.5 6.5V4.8a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.7M6.5 6.5l.9 12.2a1.5 1.5 0 0 0 1.5 1.3h6.2a1.5 1.5 0 0 0 1.5-1.3l.9-12.2M10.2 10.5v6M13.8 10.5v6"/>'),
   remove: S('<circle cx="12" cy="12" r="8.5"/><path d="M8 12h8"/>'),
   playlistAdd: S('<path d="M4 6.5h11M4 11.5h11M4 16.5h7M17.5 13v7M14 16.5h7"/>'),
@@ -501,12 +502,20 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
           'div.sheet-actions',
           null,
           list.map((a) =>
-            h(
+            // { heading }: a heading over the actions after it.
+            a.heading ? h('div.sheet-heading', { role: 'presentation' }, a.heading) : h(
               `button.sheet-action${a.danger ? '.danger' : ''}${a.description ? '.has-desc' : ''}${a.muted ? '.muted' : ''}`,
               {
                 type: 'button',
                 'aria-pressed': a.checked === undefined ? null : String(!!a.checked),
+                // `now`: run straight from the tap, before the sheet goes
+                // (a file picker only opens from a tap).
                 onclick: async () => {
+                  if (a.now) {
+                    a.onSelect?.();
+                    popOverlay();
+                    return;
+                  }
                   await popOverlay();
                   a.onSelect?.();
                 },

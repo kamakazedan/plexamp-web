@@ -261,6 +261,7 @@ OLLAMA_API_KEY=
 OLLAMA_AUTH=plex
 PLAY_TOGETHER=true
 CASTING=true
+MUSICBRAINZ=true
 DEBUG=
 ENV
 pct exec "$CTID" -- mkdir -p /etc/plexamp-web

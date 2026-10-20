@@ -1,7 +1,8 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
 import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError, norm } from '../ai.js';
-import { noteMissing, missingCount } from '../missing.js';
+import { noteMissing, missingCount, missingList, mbOn, mbChecking, checkOnMusicBrainz } from '../missing.js';
+import { on } from '../state.js';
 import { playList } from '../actions.js';
 import { player } from '../player.js';
 import { navigate } from '../router.js';
@@ -50,6 +51,10 @@ function startJob(prompt) {
       j.step = id;
       emit();
     },
+    onLoading: (on) => {
+      j.loading = on;
+      emit();
+    },
   })
     .then((result) => {
       j.result = result;
@@ -81,15 +86,19 @@ function keepMissing(found, prompt) {
   if (!found?.missing && !found?.seen) return;
   if (!aiSettings().missing && !missingCount()) return;
   noteMissing(aiSettings().missing ? found.missing || [] : [], found.seen || {}, prompt);
+  // Then, if asked for, which of them are real (in the background).
+  if (aiSettings().missing && found.missing?.length && mbOn()) {
+    checkOnMusicBrainz().catch((err) => toast(`The missing tracks couldn’t be checked on MusicBrainz. ${err.message}`, { timeout: 6000 }));
+  }
 }
 
 const missingLine = (m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`);
 
 // Under a playlist, with Show missing tracks on: the songs and artists it
 // suggested that aren't in the library, or that they all are.
-function missingNote(found) {
+function missingNote(found, onDispose) {
   if (!aiSettings().missing) return null;
-  if (found?.missing?.length) return missingBlock(found.missing);
+  if (found?.missing?.length) return missingBlock(found.missing, onDispose);
   const one = (list, key) => new Set((list || []).map(key).filter(Boolean)).size;
   const artists = one(found?.seen?.artists, (a) => norm(a));
   const songs = one(found?.seen?.songs, (t) => `${norm(t?.artist)}|${norm(t?.title)}`);
@@ -103,17 +112,45 @@ function missingNote(found) {
   );
 }
 
-function missingBlock(missing) {
-  const tracks = missing.filter((m) => m.kind === 'track').length;
-  const artists = missing.length - tracks;
-  const what = [tracks && fmt.count(tracks, 'track', 'tracks'), artists && fmt.count(artists, 'artist', 'artists')].filter(Boolean).join(' and ');
-  return h(
+// (Checked on MusicBrainz, it changes as the answers come: albums go, as do
+// ones MusicBrainz doesn't know.)
+const missingKey = (m) => `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
+
+function missingBlock(missing, onDispose) {
+  const label = h('span');
+  const list = h('ul.ai-missing-list');
+  const el = h(
     'details.ai-missing',
     null,
-    h('summary', null, icon('appears', 20), h('span', null, `Not in your library: ${what}`)),
-    h('ul.ai-missing-list', null, missing.map((m) => h('li', null, missingLine(m)))),
+    h('summary', null, icon('appears', 20), label),
+    list,
     h('a.link-btn.ai-missing-all', { href: '#/settings/missing' }, 'All missing tracks, to export'),
   );
+  const paint = () => {
+    const checked = mbOn();
+    const stored = new Map(missingList({ all: true }).map((m) => [missingKey(m), m]));
+    // Pending: not answered yet. Gone: an album, or unknown to MusicBrainz.
+    const state = (m) => {
+      if (!checked) return 'shown';
+      const kept = stored.get(missingKey(m));
+      if (!kept || kept.mb === 'unknown' || kept.mb === 'album') return 'gone';
+      return kept.mb ? 'shown' : 'pending';
+    };
+    const shown = missing.filter((m) => state(m) !== 'gone');
+    const left = missing.length - shown.length;
+    const pending = checked && mbChecking() && missing.some((m) => state(m) === 'pending');
+    const tracks = shown.filter((m) => m.kind === 'track').length;
+    const artists = shown.length - tracks;
+    const what = [tracks && fmt.count(tracks, 'track', 'tracks'), artists && fmt.count(artists, 'artist', 'artists')].filter(Boolean).join(' and ');
+    const notes = [pending ? 'checking them on MusicBrainz…' : '', !pending && left ? `${fmt.count(left, 'suggestion', 'suggestions')} MusicBrainz doesn’t know (or albums) left out` : ''].filter(Boolean);
+    label.textContent = shown.length ? `Not in your library: ${what}${notes.length ? ` · ${notes.join(' · ')}` : ''}` : `Nothing missing that MusicBrainz knows of: ${fmt.count(left, 'suggestion', 'suggestions')} left out`;
+    list.replaceChildren(...shown.map((m) => h('li', null, missingLine(m))));
+    el.classList.toggle('checking', pending);
+  };
+  paint();
+  const off = on('missing', paint);
+  onDispose?.(off);
+  return el;
 }
 
 export async function aiPlaylistView({ el, onDispose }) {
@@ -238,11 +275,13 @@ export async function aiPlaylistView({ el, onDispose }) {
     const time = () => (elapsed.textContent = `${Math.round((Date.now() - j.started) / 1000)} s`);
     time();
     const tick = setInterval(time, 1000);
+    const loadingNote = h('p.ai-loading', { hidden: true }, 'Loading the AI model into memory. After Ollama starts, this can take a few minutes.');
     body.replaceChildren(
       h(
         'div.ai-progress',
         { role: 'status' },
         h('ol.ai-steps', null, steps.map((s) => s.el)),
+        loadingNote,
         h(
           'div.ai-progress-foot',
           null,
@@ -254,6 +293,7 @@ export async function aiPlaylistView({ el, onDispose }) {
     const update = () => {
       if (disposed) return stop();
       if (!j.done) {
+        loadingNote.hidden = !j.loading;
         const at = steps.findIndex((s) => s.id === j.step);
         steps.forEach((s, i) => {
           s.el.classList.toggle('done', i < at);
@@ -281,12 +321,12 @@ export async function aiPlaylistView({ el, onDispose }) {
         'div.ai-error',
         { role: 'alert' },
         h('p', null, describeAIError(err)),
-        err?.missing?.length ? missingNote(err) : null,
+        err?.missing?.length ? missingNote(err, onDispose) : null,
         h(
           'div.button-row',
           null,
           h('button.btn.btn-secondary', { type: 'button', onclick: () => start(prompt) }, 'Try again'),
-          err?.code === 'not-configured' || err?.code === 'no-model' || err?.status === 404 ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings') : null,
+          err?.code === 'not-configured' || err?.code === 'no-model' || err?.code === 'timeout' || err?.status === 404 ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings') : null,
         ),
       ),
     );
@@ -358,7 +398,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         ),
       ),
       list,
-      missingNote(result),
+      missingNote(result, onDispose),
       h('p.ai-based', { hidden: !based.length }, `Based on ${based.slice(0, 12).join(', ')}`),
       h(
         'div.pad',

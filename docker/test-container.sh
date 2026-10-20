@@ -88,7 +88,8 @@ OLLAMA_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}
 # ---------- 1. Everything on; Ollama reached by a name from /etc/hosts ----------
 docker run -d --name pw-web --network "$NET" --add-host "ollama.box:$OLLAMA_IP" -e "$TV" \
     -e PLEX_SERVER_URL=http://pw-plex:32400 -e DISABLE_WEBSOCKETS=true \
-    -e OLLAMA_URL=http://ollama.box:11434 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
+    -e OLLAMA_URL=http://ollama.box:11434 -e OLLAMA_MODEL=llama3.1:8b \
+    -e MUSICBRAINZ_URL=http://pw-plex:32400 "$IMAGE" >/dev/null
 wait_http pw-web http://pw-web/
 wait_service pw-web
 W=http://pw-web
@@ -149,6 +150,16 @@ codes="$(docker run --rm --network "$NET" --entrypoint sh "$CURL" -c \
     "for i in \$(seq 1 30); do curl -s -o /dev/null -w '%{http_code} ' -H 'X-Plex-Token: ratelimit' $W/ollama/api/status; done" || true)"
 contains "AI: rate limited per user" "429" "$codes"
 
+# MusicBrainz checks (the mock Plex server has a small MusicBrainz): for
+# people who can use the server, as the shared model is.
+MBQ='{"items":[{"kind":"artist","artist":"Real Missing Band"},{"kind":"artist","artist":"Not A Real Band"},{"kind":"track","artist":"Glass Harbour","title":"Sea Glass"}]}'
+JSON='Content-Type: application/json'
+expect "MusicBrainz: needs a sign-in" 401 "$(c -H "$JSON" -X POST -d "$MBQ" $W/api/musicbrainz/check)"
+expect "MusicBrainz: Plex account without access to the server refused" 403 "$(c -H 'X-Plex-Token: t3' -H "$JSON" -X POST -d "$MBQ" $W/api/musicbrainz/check)"
+expect "MusicBrainz: only POST" 405 "$(c -H 'X-Plex-Token: t2' $W/api/musicbrainz/check)"
+contains "MusicBrainz: says which are real, unknown, or albums" '{"results":["real","unknown","album"]}' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d "$MBQ" $W/api/musicbrainz/check)"
+contains "MusicBrainz: asks as this app" 'plexamp-web ( https://github.com/' "$(cb 'http://pw-plex:32400/__mock/musicbrainz?X-Plex-Token=t')"
+
 contains "service: health" '"together":true,"cast":true,"devices":true' "$(cb $W/api/health)"
 expect "service: internal checks can't be called from outside" 404 "$(c -H 'X-Plex-Token: t' $W/api/internal/ai-auth)"
 expect "Play Together: needs a sign-in" 401 "$(c $W/api/together/me)"
@@ -198,7 +209,8 @@ lacks "no tokens in the log" "X-Plex-Token=t" "$LOG"
 docker run -d --name pw-web2 --network "$NET" "$IMAGE" >/dev/null
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
-expect "defaults: Play Together, Play on and your devices, nothing else" "window.PW_CONFIG = { together: true, cast: true, devices: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together, Play on, MusicBrainz checks and your devices, nothing else" "window.PW_CONFIG = { together: true, cast: true, musicbrainz: true, devices: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: MusicBrainz checks need a sign-in" 401 "$(c -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
 expect "defaults: Play Together needs a sign-in" 401 "$(c http://pw-web2/api/together/me)"
@@ -266,15 +278,16 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js" "window.PW_CONFIG = { cast: true, devices: true };" "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js" "window.PW_CONFIG = { cast: true, musicbrainz: true, devices: true };" "$(cb http://pw-web7/config.js | tr -d '\n')"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7b. Playing on other Plex players off ----------
-docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false "$IMAGE" >/dev/null
+docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false: not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false and MUSICBRAINZ=false: not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
+expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
 
 # ---------- 7c. A Plex server reached over HTTPS at its address ----------
 # A Plex server's certificate is for its plex.direct name, so at an address

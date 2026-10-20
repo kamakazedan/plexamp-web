@@ -4,7 +4,7 @@ import { replaceQuery } from '../router.js';
 import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, debounce, fmt } from '../ui.js';
 import { artistRow, albumRow, playlistRow, trackRow } from '../components.js';
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
-import { aiReady, aiEvents } from '../ai.js';
+import { aiReady, aiEvents, norm } from '../ai.js';
 import { libraryTiles } from './library.js';
 
 // Recent searches were kept until 0.9.1; what was stored goes.
@@ -156,7 +156,16 @@ export async function searchView({ el, query, onDispose }) {
         }
       }
       if (mine.signal.aborted) return;
-      body.replaceChildren(results(res, terms));
+      // Looking for an artist: their popular tracks come first.
+      const artist = artistSearched(res.artist, terms);
+      let popular = [];
+      if (artist) {
+        const section = artist.librarySectionID ?? app.source.sectionKey;
+        popular = await app.server.popularTracks(section, artist.ratingKey, 10).catch(() => []);
+        if (mine.signal.aborted) return;
+        popular = popular.filter((m) => matchesAll('track', m, terms.filter((t) => fold(t) !== fold(artist.title))));
+      }
+      body.replaceChildren(results(res, terms, popular));
     } catch (err) {
       if (!err.aborted && !mine.signal.aborted) body.replaceChildren(emptyState("Search didn't work. Check your connection and try again."));
     }
@@ -184,7 +193,22 @@ export async function searchView({ el, query, onDispose }) {
   await run();
 }
 
-function results(res, terms) {
+// The artist a search is for, if it's one: the top artist found, when the
+// words name them ("groove armada", "prodigy" for The Prodigy), rather than
+// just turning up in their name.
+function artistSearched(artists, terms) {
+  const top = artists?.[0];
+  if (!top) return null;
+  const name = norm(top.title);
+  return terms.some((t) => {
+    const asked = norm(t);
+    return asked && (asked === name || (asked.length >= 4 && name.startsWith(asked) && asked.length >= name.length * 0.6));
+  })
+    ? top
+    : null;
+}
+
+function results(res, terms, popular = []) {
   const frag = h('div');
   const add = (title, items, render) => {
     if (!items.length) return;
@@ -192,21 +216,27 @@ function results(res, terms) {
   };
   const asked = terms.map((t) => `“${t}”`).join(' and ');
   add('Artists', res.artist.slice(0, 6), (m) => artistRow(m));
-  add('Albums', res.album.slice(0, 8), (m) => albumRow(m));
-  if (res.track.length) {
-    const tracks = res.track.slice(0, 40).map(normTrack);
+  // Tracks before albums: an artist's popular ones first (with the
+  // "popular" badge, unless that's turned off), then the rest.
+  const seen = new Set();
+  const found = [...popular, ...res.track].filter((m) => !seen.has(String(m.ratingKey)) && seen.add(String(m.ratingKey)));
+  if (found.length) {
+    const tracks = found.slice(0, 40).map(normTrack);
+    const top = new Set(app.settings.popularTracks === false ? [] : popular.map((m) => String(m.ratingKey)));
     const list = h('div.tracks');
     tracks.forEach((t, i) => {
       list.append(
         trackRow(t, {
           showArt: true,
           subtitle: [t.artist, t.album].filter(Boolean).join(' — '),
+          popular: top.has(t.id),
           onPlay: () => playList(tracks, i, { title: `Search: ${terms.join(' ')}`, href: null }),
         }),
       );
     });
-    frag.append(h('section.block', null, sectionHeader('Tracks'), list));
+    frag.append(h('section.block.search-tracks', null, sectionHeader('Tracks'), list));
   }
+  add('Albums', res.album.slice(0, 8), (m) => albumRow(m));
   add('Playlists', res.playlist.slice(0, 6), (m) => playlistRow(m));
   if (!frag.children.length) frag.append(emptyState(`Nothing in ${searchScope() ? app.source.sectionTitle : 'your libraries'} matches ${asked}.`));
   return frag;

@@ -75,6 +75,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
 try:
+    # (MOCK_NO_PILLOW=1: as in CI, where the mock runs without it.)
+    if __import__('os').environ.get('MOCK_NO_PILLOW'):
+        raise ImportError('Pillow left out')
     from PIL import Image, ImageDraw, ImageFont, ImageOps
 except ImportError:  # pragma: no cover
     Image = ImageDraw = ImageFont = ImageOps = None
@@ -233,6 +236,63 @@ for album_title, song, credit in [('Tidal Lines', 'Signal Fires', None), ('Buoy'
     nth_track(album_title, 1)['title'] = song
     if credit:
         nth_track(album_title, 1)['originalTitle'] = credit
+
+# ---------------------------------------------------------------- sound
+
+# Where each track sits in a made-up sonic space, for nearest and
+# computePath: an artist's tracks close together, genres apart (Hip-Hop
+# between Electronic and Rock, so there's something to bridge them with),
+# and the versions of one song by one artist (Signal Fires on three albums)
+# on top of each other. Distances run from 0 (the same) to about 1, as
+# Plex's do.
+GENRE_AT = {'Electronic': (0.0, 0.0, 0.0), 'Hip-Hop': (0.35, 0.0, 0.0), 'Rock': (0.7, 0.0, 0.0),
+            'Indie': (0.35, 0.35, 0.0), 'Folk': (0.35, 0.7, 0.0), 'Jazz': (0.0, 0.45, 0.45), 'Latin': (0.0, 0.45, 0.45)}
+GENRE_OF = {name: genres[0] for name, genres, _ in ARTISTS}
+_sound = {}
+
+
+def stable_rng(text):
+    return random.Random(int(hashlib.sha1(text.encode()).hexdigest()[:12], 16))
+
+
+def song_key(t):
+    """One song, whatever album it's on: its artist and its title without
+    "(Extended Mix)" or "- Radio Edit"."""
+    artist = t.get('originalTitle') or t['grandparentTitle']
+    core = re.sub(r'\s*[([][^)\]]*[)\]]|\s+-\s+.*$', '', t['title']).strip().lower()
+    return f'{artist.lower()}|{core}'
+
+
+def sound(t):
+    rk = t['ratingKey']
+    if rk not in _sound:
+        artist = t.get('originalTitle') or t['grandparentTitle']
+        a = stable_rng('artist|' + artist)
+        centre = [c + a.uniform(-0.06, 0.06) for c in GENRE_AT.get(GENRE_OF.get(artist, ''), (0.5, 0.5, 0.5))]
+        song = stable_rng('song|' + song_key(t))
+        jitter = random.Random(int(rk))
+        _sound[rk] = tuple(c + song.uniform(-0.07, 0.07) + jitter.uniform(-0.003, 0.003) for c in centre)
+    return _sound[rk]
+
+
+def sonic_distance(a, b):
+    return math.dist(sound(a), sound(b))
+
+
+def sonic_path(a, b):
+    """Like Plex's computePath: a, then tracks a step apart, then b; the
+    further apart a and b sound, the more steps."""
+    steps = max(1, min(12, round(sonic_distance(a, b) / 0.1)))
+    used = {a['ratingKey'], b['ratingKey']}
+    path = [a]
+    for i in range(1, steps + 1):
+        f = i / (steps + 1)
+        at = [x + (y - x) * f for x, y in zip(sound(a), sound(b))]
+        best = min((t for t in tracks if t['ratingKey'] not in used), key=lambda t: math.dist(sound(t), at))
+        used.add(best['ratingKey'])
+        path.append(best)
+    return path + [b]
+
 
 # Some listening history so "recent" and "top" lists have content.
 for i, t in enumerate(random.sample(tracks, 25)):
@@ -492,6 +552,69 @@ image_cache = {}
 
 
 BLANK_PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==')
+
+
+# Songs, albums and artists the mock MusicBrainz knows that the library
+# doesn't have (see Handler.musicbrainz), and what it was asked.
+MB_EXTRA = {
+    'artists': ['Real Missing Band'],
+    'songs': [('Glass Harbour', 'Lantern Song'), ('Real Missing Band', 'Somewhere Real')],
+    'albums': [('Glass Harbour', 'Sea Glass')],
+}
+MB_SEEN = {'requests': 0, 'agents': [], 'last': ''}
+
+# Pictures uploaded to playlists and collections (Plex calls them posters),
+# by the SHA-1 of their bytes.
+PICTURES = {}
+
+
+def picture_info(data):
+    """(format, width, height) of a JPEG or PNG, without Pillow (CI's mock
+    runs without it); (None, 0, 0) for anything else."""
+    if data[:8] == b'\x89PNG\r\n\x1a\n' and len(data) >= 24:
+        return ('PNG', *struct.unpack('>II', data[16:24]))
+    if data[:3] == b'\xff\xd8\xff':
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                height, width = struct.unpack('>HH', data[i + 5:i + 9])
+                return ('JPEG', width, height)
+            if marker in (0xD8, 0x01, 0xFF) or 0xD0 <= marker <= 0xD7:
+                i += 1 if marker == 0xFF else 2
+                continue
+            i += 2 + struct.unpack('>H', data[i + 2:i + 4])[0]
+        return ('JPEG', 0, 0)
+    return (None, 0, 0)
+
+
+def picture_bytes(data, size):
+    """An uploaded picture at about this size, and its type (as it is,
+    without Pillow)."""
+    if Image is None:
+        return data, 'image/png' if picture_info(data)[0] == 'PNG' else 'image/jpeg'
+    img = Image.open(io.BytesIO(data)).convert('RGB')
+    size = max(32, min(int(size or 300), 1024))
+    img.thumbnail((size, size))
+    out = io.BytesIO()
+    img.save(out, 'PNG')
+    return out.getvalue(), 'image/png'
+
+
+def uploaded_picture(url):
+    """The uploaded picture an artwork address leads to, if any: a poster's
+    own address, or the thumb of an item that shows one."""
+    m = re.search(r'upload(?::|%3A)(?:/|%2F){2}posters(?:/|%2F)([0-9a-f]{40})', url, re.I)
+    if m:
+        return PICTURES.get(m.group(1))
+    m = re.match(r'/library/metadata/(\d+)/thumb/\d+', url)
+    it = items.get(m.group(1)) if m else None
+    if it and it.get('_poster') and (it.get('thumb') or '').startswith(m.group(0).rsplit('/', 1)[0] + '/'):
+        return PICTURES.get(it['_poster'])
+    return None
 
 
 def cover_png(thumb, size):
@@ -1002,6 +1125,89 @@ class Handler(BaseHTTPRequestHandler):
         playlist_changed(pl)
         return self.send_json({})
 
+    def musicbrainz(self, p, q):
+        query = q.get('query', [''])[0]
+        field = lambda name: (re.search(name + r':"([^"]*)"', query) or [None, ''])[1].strip().lower()
+        MB_SEEN['requests'] += 1
+        MB_SEEN['agents'] = sorted(set(MB_SEEN['agents']) | {self.headers.get('User-Agent', '')})
+        MB_SEEN['last'] = query
+        artists_ = {a['title'].lower() for a in artists} | {a.lower() for a in MB_EXTRA['artists']}
+        if p == '/ws/2/artist':
+            name = field('artist')
+            hit = name in artists_ or f'the {name}' in artists_
+            return self.send_json_plain({'artists': [{'name': field('artist').title(), 'score': 100}] if hit else [{'name': 'Someone Else', 'score': 41}]})
+        who_, what = field('artist'), field('recording') or field('releasegroup')
+        if p == '/ws/2/recording':
+            songs = {((t.get('originalTitle') or t['grandparentTitle']).lower(), t['title'].lower()) for t in tracks} | {(a.lower(), t.lower()) for a, t in MB_EXTRA['songs']}
+            hit = (who_, what) in songs
+            return self.send_json_plain({'recordings': [{'title': what.title(), 'score': 100, 'artist-credit': [{'name': who_.title()}]}] if hit else []})
+        if p == '/ws/2/release-group':
+            albums_ = {(al['parentTitle'].lower(), al['title'].lower()) for al in albums} | {(a.lower(), t.lower()) for a, t in MB_EXTRA['albums']}
+            hit = (who_, what) in albums_
+            return self.send_json_plain({'release-groups': [{'title': what.title(), 'score': 100, 'primary-type': 'Album', 'artist-credit': [{'name': who_.title()}]}] if hit else []})
+        return self.not_found()
+
+    def send_json_plain(self, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def pictures(self, it, sub, q, token):
+        """A playlist's or collection's pictures, as Plex keeps them: the list
+        (GET posters), a new one (POST posters, the picture as the body),
+        choosing one (PUT poster?url=) and going back to Plex's own (DELETE
+        thumb). Collections are the server's owner's to change; playlists
+        their owner's (here, anyone with access)."""
+        rk = it['ratingKey']
+        if it['type'] not in ('playlist', 'collection'):
+            return self.send_json({'error': 'Not supported here'}, 400)
+        changing = self.command != 'GET'
+        if changing and (not pms_token_ok(token) or (it['type'] == 'collection' and not is_admin(token))):
+            return self.send_json({'error': 'Forbidden'}, 403)
+
+        def shows(pid):
+            it['_poster'] = pid
+            it['thumb'] = f'/library/metadata/{rk}/thumb/{int(time.time() * 1000)}'
+            it['updatedAt'] = int(time.time())
+
+        if sub == 'posters' and self.command == 'POST':
+            n = int(self.headers.get('Content-Length') or 0)
+            data = self.rfile.read(n) if 0 < n <= 20 * 1024 * 1024 else b''
+            if not picture_info(data)[0]:
+                return self.send_json({'error': 'Not a picture'}, 400)
+            pid = hashlib.sha1(data).hexdigest()
+            PICTURES[pid] = data
+            it.setdefault('_posters', [])
+            if pid not in it['_posters']:
+                it['_posters'].append(pid)
+            it['_uploads'] = it.get('_uploads', 0) + 1
+            shows(pid)
+            return self.send_json({'size': 0})
+        if sub == 'poster' and self.command == 'PUT':
+            m = re.fullmatch(r'upload://posters/([0-9a-f]{40})', q.get('url', [''])[0])
+            if not m or m.group(1) not in it.get('_posters', []):
+                return self.send_json({'error': 'Bad request'}, 400)
+            shows(m.group(1))
+            return self.send_json({'size': 0})
+        if sub == 'thumb':  # DELETE
+            it.pop('_poster', None)
+            if it['type'] == 'playlist':
+                it.pop('thumb', None)
+            else:
+                first = (it.get('_items') or [{}])[0]
+                it['thumb'] = first.get('thumb') or first.get('parentThumb')
+            it['updatedAt'] = int(time.time())
+            return self.send_json({'size': 0})
+        if sub == 'posters':
+            found = [{'type': 'photo', 'key': f'/library/metadata/{rk}/file?url=upload%3A%2F%2Fposters%2F{pid}',
+                      'ratingKey': f'upload://posters/{pid}', 'thumb': f'/library/metadata/{rk}/file?url=upload%3A%2F%2Fposters%2F{pid}',
+                      'selected': pid == it.get('_poster'), 'provider': 'local'} for pid in it.get('_posters', [])]
+            return self.send_json({'size': len(found), 'Metadata': found})
+        return self.send_json({'error': 'Bad request'}, 400)
+
     def edit_collection(self, c, parts, q, token):
         """PUT/DELETE on /library/collections/{id}[/items[/{id}[/move]]|/prefs]: the server's admin only."""
         if not is_admin(token):
@@ -1186,6 +1392,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({'state': PLAYER['state'] if t else 'stopped', 'time': pos, 'ratingKey': t and t['ratingKey'],
                                        'playQueueID': PLAYER['pq'] and PLAYER['pq']['id'], 'queue': [x['ratingKey'] for x, _ in (PLAYER['pq'] or {}).get('items', [])],
                                        'volume': PLAYER['volume'], 'log': PLAYER['log']})
+        # A little MusicBrainz (the service is pointed here in tests): the
+        # library's artists, songs and albums are real, and so are a few
+        # that aren't in it.
+        if p.startswith('/ws/2/'):
+            return self.musicbrainz(p, q)
+        if p == '/__mock/musicbrainz':
+            return self.send_json(dict(MB_SEEN))
+        if p == '/__mock/picture':  # what was uploaded as an item's picture, if anything
+            it = items.get(q.get('id', [''])[0]) or {}
+            data = PICTURES.get(it.get('_poster') or '')
+            if not data:
+                return self.send_json({'picture': None, 'uploads': it.get('_uploads', 0)})
+            fmt_, w, h = picture_info(data)
+            return self.send_json({'picture': {'bytes': len(data), 'uploads': it.get('_uploads', 0), 'format': fmt_, 'width': w, 'height': h}})
         if p == '/__mock/tracks':
             return self.send_json({'size': len(tracks), 'Metadata': [
                 {'ratingKey': t['ratingKey'], 'title': t['title'], 'album': t['parentRatingKey'], 'index': t['index'],
@@ -1279,9 +1499,10 @@ class Handler(BaseHTTPRequestHandler):
             if sub == 'collections':
                 return self.page(sort_items(collections, q.get('sort', [None])[0]), q)
             if sub == 'computePath':
-                a, b = q.get('startID', [''])[0], q.get('endID', [''])[0]
-                path = [items[a]] + random.sample(tracks, 8) + [items[b]]
-                return self.page(path, {'X-Plex-Container-Size': ['100']})
+                a, b = items.get(q.get('startID', [''])[0]), items.get(q.get('endID', [''])[0])
+                if not a or not b or a['type'] != 'track' or b['type'] != 'track':
+                    return self.send_json({'error': 'Bad request'}, 400)
+                return self.page(sonic_path(a, b), {'X-Plex-Container-Size': ['100']})
         if p == '/library/collections' and self.command == 'POST':
             if not is_admin(token):
                 return self.send_json({'error': 'Forbidden'}, 403)
@@ -1311,6 +1532,8 @@ class Handler(BaseHTTPRequestHandler):
             if not it:
                 return self.not_found()
             sub = parts[3] if len(parts) > 3 else ''
+            if sub in ('posters', 'poster') or (sub == 'thumb' and self.command == 'DELETE'):
+                return self.pictures(it, sub, q, token)
             if sub == 'children':
                 kids = [a for a in albums if a['parentRatingKey'] == it['ratingKey']] if it['type'] == 'artist' else \
                     [t for t in tracks if t['parentRatingKey'] == it['ratingKey']]
@@ -1318,10 +1541,16 @@ class Handler(BaseHTTPRequestHandler):
             if sub == 'allLeaves':
                 return self.page([t for t in tracks if t['grandparentRatingKey'] == it['ratingKey']], {'X-Plex-Container-Size': ['500']})
             if sub == 'nearest':
-                pool = [a for a in artists if a is not it and a['title'] != 'Various Artists'] if it['type'] == 'artist' else \
-                    [t for t in tracks if t is not it]
                 n = int(q.get('limit', ['20'])[0])
-                return self.page(random.Random(it['ratingKey']).sample(pool, min(n, len(pool))), {'X-Plex-Container-Size': ['500']})
+                if it['type'] == 'artist':
+                    pool = [a for a in artists if a is not it and a['title'] != 'Various Artists']
+                    return self.page(random.Random(it['ratingKey']).sample(pool, min(n, len(pool))), {'X-Plex-Container-Size': ['500']})
+                # The tracks that sound most like it, nearest first, each with
+                # its distance, as far as maxDistance.
+                most = float(q.get('maxDistance', ['0.25'])[0])
+                near = sorted(((sonic_distance(it, t), t) for t in tracks if t is not it), key=lambda x: x[0])
+                found = [dict(t, distance=round(d, 4)) for d, t in near if d <= most][:n]
+                return self.page(found, {'X-Plex-Container-Size': ['1000']})
             if sub in ('thumb', 'art'):
                 return self.send_bytes(cover_png(p, 600), 'image/png')
             return self.send_json({'size': 1, 'Metadata': [track_detail(it) if it['type'] == 'track' else public(it)]})
@@ -1398,7 +1627,11 @@ class Handler(BaseHTTPRequestHandler):
                 detail['content'] = pl['_content']
             return self.send_json({'size': 1, 'Metadata': [detail]})
         if p == '/photo/:/transcode':
-            return self.send_bytes(cover_png(q.get('url', ['/x/x/0'])[0].split('?')[0], q.get('width', ['300'])[0]), 'image/png')
+            url_ = q.get('url', ['/x/x/0'])[0]
+            pic = uploaded_picture(url_)
+            if pic:
+                return self.send_bytes(*picture_bytes(pic, q.get('width', ['300'])[0]))
+            return self.send_bytes(cover_png(url_.split('?')[0], q.get('width', ['300'])[0]), 'image/png')
         if p == '/services/ultrablur/colors':
             return self.send_json({'size': 1, 'UltraBlurColors': [{'topLeft': '2a2440', 'topRight': '5b4a8a', 'bottomRight': '332a52', 'bottomLeft': '15121f'}]})
         if p.startswith('/library/streams/') and p.endswith('/levels'):

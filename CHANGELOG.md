@@ -3,6 +3,69 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.12.0 - 2026-10-20
+
+### Added
+
+- **Pictures for playlists and collections.** Unlocked, a playlist (or, for
+  the server's owner, a collection) has a pencil over its artwork (on a
+  computer, when the pointer's over it): upload a picture from the device,
+  go back to one it had, or to the covers Plex puts together. Pictures are
+  made smaller in the browser first, so only the picture goes to Plex, not
+  where a photo was taken. Smart playlists, which can't be unlocked, have
+  Change picture… in their menu.
+- **Two DJs that only use your queue**, and add nothing to it. **Queue
+  Echo** plays next whichever of your next 40 tracks sounds most like the
+  one playing. **Queue Bridge**, when your next track sounds far from this
+  one, first plays one from later in your queue that sits between them.
+- **Wait for the model** (Settings › AI): how long to wait for the AI model
+  to start answering, from 2 to 30 minutes (5 to begin with). The app says
+  while the model is loading, and if the wait runs out, the model carries on
+  loading, so trying again is quick. Before, after 4 minutes the app gave up,
+  and Ollama stopped loading the model with it.
+- **Check them on MusicBrainz** (Settings › AI, under Show missing tracks):
+  each missing song and artist is looked up on musicbrainz.org. The ones it
+  doesn't know, mostly ones the AI made up, are left out of the list (Show
+  brings them back), and albums taken for songs are dropped. Off until you
+  turn it on. Only the names are sent, by the container, never your token;
+  `MUSICBRAINZ=false` takes the option away. See the security report.
+
+### Changed
+
+- **DJ Bridge** fits the journey to the gap: one track between two that
+  sound alike, up to four when they're far apart, spread along the path
+  Plex finds between them so each step is a small one. It always played
+  two, from the middle of the path, so the first step could still be a big
+  jump.
+- **No more loops with DJ Steady**, or any DJ: none adds a song you've
+  played since opening the player, and another version of a song (on a
+  compilation, a live album, a remaster) counts as the same song. Versions
+  sound alike, so they were always "the most similar", and Steady played
+  the same few songs again and again. Steady also mixes in other artists
+  where they sound as close.
+- **Search for an artist** ("groove armada") and Tracks, now straight after
+  Artists and above Albums, starts with their best-known tracks.
+- **Fewer made-up songs in AI playlists.** The model is asked only for
+  songs it's sure of, with their titles as released, never an album's, and
+  for fewer rather than a guess. A suggestion that's one of the artist's
+  albums is no longer looked for as a song (or listed as missing), and a
+  playlist takes no more than an eighth of its tracks (at least two) from
+  any one album where the library allows, so "best of" an artist isn't one
+  album from start to finish. Compilations are the exception.
+- The shared AI model is loaded by the container itself, once, however many
+  people are waiting for it, and nobody giving up stops it.
+
+### Fixed
+
+- **On Proxmox, `pct exec <ID> -- update-plexamp-web` couldn't find the
+  command** (nor `plexamp-web-settings`): `pct exec` doesn't look in
+  `/usr/local/bin`. Both are now linked from `/usr/bin` too. A container
+  installed with 0.10.0 or 0.11.0 needs
+  `pct exec <ID> -- /usr/local/bin/update-plexamp-web` once.
+- A wrong `PLEX_TV_URL` (a setting for tests) was printed in full in the
+  start-up error, a password in it included. It's hidden now, as in every
+  other address the container prints.
+
 ## 0.11.0 - 2026-10-20
 
 ### Added

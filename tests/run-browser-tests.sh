@@ -7,9 +7,10 @@
 #   docker build -t plexamp-web:test . && sh tests/run-browser-tests.sh plexamp-web:test [screenshot-dir]
 #
 # Four copies of the app run: one with a shared AI model and WebSockets
-# allowed (port 8081), one with DISABLE_WEBSOCKETS=true and no shared model
-# (port 8082), one with DEBUG=true (port 8083), and one on a second mock
-# server with a big library, for the memory tests (port 8084). All reach
+# allowed, checking on the mock's MusicBrainz (port 8081), one with DISABLE_WEBSOCKETS=true and no shared model
+# (port 8082), one with DEBUG=true and a shared model that won't take
+# "think" (port 8083), and one on a second mock server with a big library,
+# for the memory tests (port 8084). All reach
 # their mock Plex server through their /pms proxy, and their service uses
 # the mock for plex.tv too (its accounts are needed for Play Together).
 set -eu
@@ -60,11 +61,13 @@ mock pwb-ollama 11434 mock-ollama.py --port 11434 --quiet
 mock pwb-ollama2 11435 mock-ollama.py --port 11435 --reject-think --quiet
 TV=PLEX_TV_URL=http://pwb-plex:32400
 docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" \
-    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e OLLAMA_URL=http://pwb-ollama:11434 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
+    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e OLLAMA_URL=http://pwb-ollama:11434 -e OLLAMA_MODEL=llama3.1:8b \
+    -e MUSICBRAINZ_URL=http://pwb-plex:32400 "$IMAGE" >/dev/null
 docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 -e "$TV" \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 docker run -d --name pwb-web3 --network "$NET" -p 127.0.0.1:8083:80 -e "$TV" \
-    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DEBUG=true "$IMAGE" >/dev/null
+    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DEBUG=true \
+    -e OLLAMA_URL=http://pwb-ollama2:11435 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
 docker run -d --name pwb-web4 --network "$NET" -p 127.0.0.1:8084:80 -e PLEX_TV_URL=http://pwb-plex-big:32401 \
     -e PLEX_SERVER_URL=http://pwb-plex-big:32401 "$IMAGE" >/dev/null
 

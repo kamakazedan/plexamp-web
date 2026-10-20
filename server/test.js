@@ -7,6 +7,7 @@ import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
 import { isPlexDirectCert, plexServerIdentity, certProblem } from './plex.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS } from './ai.js';
+import { MusicBrainz, MusicBrainzError } from './musicbrainz.js';
 import { createServer } from 'node:http';
 
 const dan = { id: 1, title: 'Dan', thumb: null };
@@ -416,29 +417,162 @@ test('the shared AI model: only the one model, and only what the app sends', () 
   assert.throws(() => cleanChat({ messages: Array.from({ length: AI_LIMITS.messages + 1 }, () => ({ role: 'user', content: 'x' })) }, 'm'), (e) => e.status === 400);
 });
 
-test('the shared AI model: its name and whether it is ready, nothing else', async () => {
+test('the shared AI model: its name, whether it is ready and loaded, nothing else', async () => {
   const seen = [];
   const ollama = createServer((req, res) => {
     seen.push(`${req.method} ${req.url} ${req.headers.authorization || ''}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ models: [{ name: 'qwen2.5:7b', size: 1 }, { name: 'nomic-embed-text:latest', details: { families: ['nomic-bert'] } }, { name: 'llama3.1:8b' }] }));
+    if (req.url === '/api/ps') return res.end(JSON.stringify({ models: [{ name: 'llama3.1:8b' }] }));
+    return res.end(JSON.stringify({ models: [{ name: 'qwen2.5:7b', size: 1 }, { name: 'nomic-embed-text:latest', details: { families: ['nomic-bert'] } }, { name: 'llama3.1:8b' }] }));
   });
   await new Promise((r) => ollama.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${ollama.address().port}`;
   try {
     const chosen = new SharedModel({ url, key: 'sk-1', model: 'llama3.1:8b' });
-    assert.deepEqual(await chosen.status(), { model: 'llama3.1:8b', ready: true, problem: null });
+    assert.deepEqual(await chosen.status(), { model: 'llama3.1:8b', ready: true, problem: null, loaded: true, loading: false });
     assert.equal(await chosen.model(), 'llama3.1:8b');
     const missing = new SharedModel({ url, model: 'mistral' });
-    assert.deepEqual(await missing.status(), { model: 'mistral', ready: false, problem: 'not-installed' });
+    assert.deepEqual(await missing.status(), { model: 'mistral', ready: false, problem: 'not-installed', loaded: false, loading: false });
+    // Not in memory: ready, but not loaded.
+    const asleep = new SharedModel({ url, model: 'qwen2.5:7b' });
+    assert.equal((await asleep.status()).loaded, false);
     // Not set: the first chat model installed (not an embedding model).
     const first = new SharedModel({ url, log: { info() {} } });
     assert.equal(await first.model(), 'llama3.1:8b');
-    assert.ok(seen.every((l) => l.startsWith('GET /api/tags')));
+    assert.ok(seen.every((l) => l.startsWith('GET /api/tags') || l.startsWith('GET /api/ps')), seen.join('; '));
     assert.ok(seen[0].endsWith('Bearer sk-1'));
   } finally {
     ollama.close();
   }
   const down = new SharedModel({ url: 'http://127.0.0.1:9', model: 'x' });
   assert.deepEqual(await down.status(), { model: 'x', ready: false, problem: 'unreachable' });
+});
+
+test('the shared AI model loads in a request of its own, once for everyone waiting', async () => {
+  const loads = [];
+  const ollama = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.url !== '/api/generate') {
+        res.writeHead(404);
+        return res.end();
+      }
+      const ask = JSON.parse(body);
+      loads.push(ask);
+      if (ask.model === 'nope') {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: "model 'nope' not found" }));
+      }
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ model: ask.model, done: true, done_reason: 'load' }));
+      }, 200);
+      return undefined;
+    });
+  });
+  await new Promise((r) => ollama.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${ollama.address().port}`;
+  try {
+    const m = new SharedModel({ url, model: 'llama3.1:8b', log: { info() {} } });
+    await Promise.all([m.load('llama3.1:8b', { numCtx: 8192, keepAlive: '900s' }), m.load('llama3.1:8b', { numCtx: 8192 })]);
+    assert.equal(loads.length, 1);
+    // As the chat will ask for it, so Ollama doesn't load it again for that.
+    assert.deepEqual(loads[0], { model: 'llama3.1:8b', keep_alive: '900s', options: { num_ctx: 8192 } });
+    await m.load('llama3.1:8b', { numCtx: 16384 });
+    assert.equal(loads.length, 2);
+    await assert.rejects(m.load('nope'), (e) => e instanceof AIRequestError && e.status === 404 && /not found/.test(e.message));
+  } finally {
+    ollama.close();
+  }
+});
+
+test('MusicBrainz: real songs and artists, albums taken for songs, and made-up ones', async () => {
+  const asked = [];
+  const known = {
+    artists: ['The Prodigy', 'Groove Armada'],
+    recordings: [['The Prodigy', 'Out of Space'], ['Groove Armada', 'At the River']],
+    albums: [['The Prodigy', 'The Fat of the Land']],
+  };
+  const answer = (path, query) => {
+    const field = (name) => (new RegExp(`${name}:"([^"]*)"`).exec(query) || [])[1] || '';
+    const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+    if (path === '/ws/2/artist') return { artists: known.artists.filter((n) => same(n, field('artist')) || same(n, `The ${field('artist')}`)).map((name) => ({ name, score: 100 })) };
+    if (path === '/ws/2/recording') {
+      return { recordings: known.recordings.filter(([a, t]) => same(a, field('artist')) && same(t, field('recording'))).map(([a, t]) => ({ title: `${t} (Remastered)`, score: 100, 'artist-credit': [{ name: a }] })) };
+    }
+    return { 'release-groups': known.albums.filter(([a, t]) => same(a, field('artist')) && same(t, field('releasegroup'))).map(([a, t]) => ({ title: t, score: 100, 'artist-credit': [{ name: a }] })) };
+  };
+  const fetchImpl = async (url, init) => {
+    const u = new URL(url);
+    asked.push({ path: u.pathname, query: u.searchParams.get('query'), fmt: u.searchParams.get('fmt'), agent: init.headers['User-Agent'], at: Date.now() });
+    return { ok: true, status: 200, json: async () => answer(u.pathname, u.searchParams.get('query')) };
+  };
+  const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 60 });
+  const results = await mb.check([
+    { kind: 'track', artist: 'The Prodigy', title: 'Out of Space' },
+    { kind: 'track', artist: 'The Prodigy', title: 'The Fat of the Land' },
+    { kind: 'track', artist: 'The Prodigy', title: 'A Song They Never Made' },
+    { kind: 'artist', artist: 'Prodigy' },
+    { kind: 'artist', artist: 'Not A Real Band' },
+  ]);
+  assert.deepEqual(results, ['real', 'album', 'unknown', 'real', 'unknown']);
+  assert.ok(asked.every((a) => a.fmt === 'json' && /^plexamp-web \( https:\/\/github\.com\//.test(a.agent)), JSON.stringify(asked[0]));
+  // One request at a time, spaced out (MusicBrainz asks for one a second).
+  assert.ok(asked.slice(1).every((a, i) => a.at - asked[i].at >= 55), asked.map((a) => a.at - asked[0].at).join(','));
+  // Answers are kept: asking again sends nothing.
+  const before = asked.length;
+  assert.deepEqual(await mb.check([{ kind: 'track', artist: 'the prodigy', title: 'Out Of Space' }, { kind: 'artist', artist: 'Not A Real Band' }]), ['real', 'unknown']);
+  assert.equal(asked.length, before);
+  // Quotes in a name can't end the search phrase.
+  await mb.check([{ kind: 'track', artist: 'Groove Armada', title: 'At "the" River' }]);
+  assert.ok(asked.filter((a) => a.query.includes('River')).every((a) => (a.query.match(/"/g) || []).length === 4), asked.map((a) => a.query).join(' | '));
+  // MusicBrainz busy, or unreachable: said so, not taken for "made up".
+  const busy = new MusicBrainz({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }), gapMs: 0 });
+  await assert.rejects(busy.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 503);
+  const down = new MusicBrainz({ fetchImpl: async () => { throw new Error('ECONNREFUSED'); }, gapMs: 0 });
+  await assert.rejects(down.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502);
+  // Busy part way: what it found so far, the rest unchecked (null).
+  let calls = 0;
+  const tiring = new MusicBrainz({
+    fetchImpl: async () => (++calls > 1 ? { ok: false, status: 503, json: async () => ({}) } : { ok: true, status: 200, json: async () => ({ artists: [{ name: 'A', score: 100 }] }) }),
+    gapMs: 0,
+  });
+  assert.deepEqual(await tiring.check([{ kind: 'artist', artist: 'A' }, { kind: 'artist', artist: 'B' }, { kind: 'artist', artist: 'C' }]), ['real', null, null]);
+});
+
+test('MusicBrainz: a check stops when whoever asked has gone, or its time is up', async () => {
+  const asked = [];
+  const fetchImpl = async (url) => {
+    asked.push(new URL(url).searchParams.get('query'));
+    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+  };
+  const items = ['A', 'B', 'C', 'D', 'E'].map((artist) => ({ kind: 'artist', artist }));
+  // Gone after the second request: nothing more is asked.
+  const mb = new MusicBrainz({ fetchImpl, gapMs: 40 });
+  const ctrl = new AbortController();
+  const check = mb.check(items, { signal: ctrl.signal });
+  await new Promise((r) => setTimeout(r, 60));
+  ctrl.abort();
+  const out = await check;
+  assert.ok(asked.length >= 1 && asked.length <= 3, String(asked.length));
+  assert.equal(out.filter(Boolean).length, asked.length);
+  assert.ok(out.slice(asked.length).every((a) => a === null));
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(asked.length <= 3, String(asked.length));
+  // Out of time: the rest come back unchecked, for another time.
+  asked.length = 0;
+  const slow = new MusicBrainz({ fetchImpl, gapMs: 50 });
+  const timed = await slow.check(items, { until: Date.now() + 120 });
+  assert.ok(timed.filter(Boolean).length >= 1 && timed.filter(Boolean).length < items.length, JSON.stringify(timed));
+  assert.equal(asked.length, timed.filter(Boolean).length);
+  // Someone else's turn isn't held up by a check that's been given up on.
+  const queued = new MusicBrainz({ fetchImpl, gapMs: 100 });
+  const gone = new AbortController();
+  const first = queued.check(items, { signal: gone.signal });
+  gone.abort();
+  const t0 = Date.now();
+  await queued.check([{ kind: 'artist', artist: 'Z' }]);
+  assert.ok(Date.now() - t0 < 350, `${Date.now() - t0} ms`);
+  await first;
 });

@@ -16,6 +16,9 @@
 #   PLAY_TOGETHER       "false" turns off Play Together (on by default)
 #   CASTING             "false" turns off playing on other Plex players from
 #                       the app (on by default)
+#   MUSICBRAINZ         "false" turns off checking AI playlists' missing tracks
+#                       on musicbrainz.org (offered by default; each device
+#                       chooses, and it's off until someone turns it on)
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
 set -eu
@@ -152,11 +155,19 @@ TOGETHER=true
 if ! truthy PLAY_TOGETHER "${PLAY_TOGETHER:-}" true; then TOGETHER=false; fi
 CAST=true
 if ! truthy CASTING "${CASTING:-}" true; then CAST=false; fi
+MB=true
+if ! truthy MUSICBRAINZ "${MUSICBRAINZ:-}" true; then MB=false; fi
+# For tests: another MusicBrainz (the mock Plex server has one).
+MB_URL="${MUSICBRAINZ_URL:-https://musicbrainz.org}"
+case "$MB_URL" in
+    http://* | https://*) ;;
+    *) fail "MUSICBRAINZ_URL must start with http:// or https:// (got: $(safe_url "$MB_URL"))" ;;
+esac
 
 PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
 case "$PLEX_TV" in
     http://* | https://*) ;;
-    *) fail "PLEX_TV_URL must start with http:// or https:// (got: $PLEX_TV)" ;;
+    *) fail "PLEX_TV_URL must start with http:// or https:// (got: $(safe_url "$PLEX_TV"))" ;;
 esac
 
 # ---------- the service (/api/) ----------
@@ -204,8 +215,9 @@ if [ -n "${PLEX_SERVER_URL:-}" ]; then
     proxy_hide_header Expires;
     proxy_read_timeout 1h;
     proxy_send_timeout 1h;
-    # The app only sends small requests to Plex.
-    client_max_body_size 1m;"
+    # The app sends Plex small requests, and pictures for playlists and
+    # collections (made smaller first, see detail.js: well under this).
+    client_max_body_size 10m;"
     cat >"$PMS_CONF" <<CONF
 location /pms/ {
     # Every request to Plex carries a token; refuse the rest here.
@@ -338,6 +350,7 @@ location /api/ {
 CONF
     if [ "$TOGETHER" = true ]; then add_config 'together: true'; fi
     if [ "$CAST" = true ]; then add_config 'cast: true'; fi
+    if [ "$MB" = true ]; then add_config 'musicbrainz: true'; fi
     add_config 'devices: true'
     if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
 else
@@ -345,6 +358,7 @@ else
     if [ "$TOGETHER" = true ]; then say "Play Together needs Node.js, which isn't installed here, so it's off"; fi
     TOGETHER=false
     CAST=false
+    MB=false
 fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
 
@@ -360,6 +374,8 @@ if [ "$SERVICE" = true ]; then
   "socket": "$(json "$SERVICE_SOCKET")",
   "together": $TOGETHER,
   "cast": $CAST,
+  "musicbrainz": $MB,
+  "musicbrainzUrl": "$(json "${MB_URL%/}")",
   "devices": $SERVICE,
   "debug": $DEBUG_ON,
   "aiAuth": "$AI_AUTH",
@@ -416,7 +432,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ=$MB  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.

@@ -259,7 +259,9 @@ export function artistMenu(artist) {
 }
 
 // `edit`: { onRename, onDelete } when the playlist is unlocked for editing.
-export function playlistMenu(pl, { edit = null } = {}) {
+// `edit`: rename and delete, while it's unlocked; `picture`: change its
+// picture (then too, or any time for a smart playlist).
+export function playlistMenu(pl, { edit = null, picture = null } = {}) {
   const tracks = () => tracksOf([pl]);
   sheet({
     title: pl.title,
@@ -276,13 +278,14 @@ export function playlistMenu(pl, { edit = null } = {}) {
         onSelect: () => addToCollection({ kind: 'track', what: pl.title, load: tracks, suggest: pl.title }),
       },
       edit && { icon: 'edit', label: 'Rename…', onSelect: edit.onRename },
+      picture && { icon: 'image', label: 'Change picture…', onSelect: picture },
       edit && { icon: 'trash', label: 'Delete playlist…', danger: true, onSelect: edit.onDelete },
     ],
   });
 }
 
 // `edit`: as for playlists, for the server's admin.
-export function collectionMenu(c, { edit = null } = {}) {
+export function collectionMenu(c, { edit = null, picture = null } = {}) {
   sheet({
     title: c.title,
     subtitle: c.childCount ? fmt.count(c.childCount, 'item', 'items') : null,
@@ -293,6 +296,7 @@ export function collectionMenu(c, { edit = null } = {}) {
       ...queueActions(() => tracksOf([c], { limit: PLAYLIST_PLAY_LIMIT })),
       { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: c.title, load: () => tracksOf([c]), suggest: c.title }) },
       edit && { icon: 'edit', label: 'Rename…', onSelect: edit.onRename },
+      picture && { icon: 'image', label: 'Change picture…', onSelect: picture },
       edit && { icon: 'trash', label: 'Delete collection…', danger: true, onSelect: edit.onDelete },
     ],
   });

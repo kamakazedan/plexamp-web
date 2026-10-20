@@ -65,6 +65,11 @@ for release in "${releases[@]}"; do
         expect "the service'"'"'s own settings are its, and no one else'"'"'s" test "$(stat -c "%U %a" /run/plexamp-web/service.json)" = "www-data 600"
         expect "update-plexamp-web is there" test -x /usr/local/bin/update-plexamp-web
         expect "plexamp-web-settings is there" test -x /usr/local/bin/plexamp-web-settings
+        # pct exec runs commands with the search path Proxmox sets for itself,
+        # without /usr/local/bin (0.10.0 and 0.11.0 put them only there).
+        for cmd in update-plexamp-web plexamp-web-settings; do
+            expect "pct exec finds $cmd" env -i PATH=/sbin:/bin:/usr/sbin:/usr/bin sh -c "test -x \"\$(command -v $cmd)\""
+        done
         expect "systemd units are written" grep -q "SERVICE_START=false" "$config"
         service_ids() {
             local p

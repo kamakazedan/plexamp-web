@@ -18,8 +18,10 @@ A review of the code with one main question: **can any of it leak your data?** T
 - **Your Plex sign-in.** After you sign in, the browser keeps your Plex token (and, for servers shared with you, that server's access token) in its local storage. The token is sent only to plex.tv, to your Plex server (directly or through the container's `/pms/` proxy), and to the container's own service (to check who you are for Play Together, Play on, sharing playback between your devices and the shared AI model). When you use Play on with a Plex player, the service also sends it with each command to that player, one of your own devices, as Plex's own apps do.
 - **Your library and listening.** Requests go from your browser to your Plex server. Plays are reported back to Plex if **Sync recent plays** is on.
 - **Missing tracks.** With **Show missing tracks** on (Settings › AI), the songs and artists AI playlists suggest that your library doesn't have are kept in the browser's storage on that device, with the request each came from, until you clear them or sign out. They go nowhere else, unless you download, copy or share the list.
+- **MusicBrainz checks.** With **Check them on MusicBrainz** on too (off until you turn it on, on each device), the names on that list (artists, and songs with their artist) go to the container's service, which looks them up on musicbrainz.org. Only the names go: no token, nothing about you or the rest of your library. MusicBrainz sees the container's internet address, not your browser's. See [Safeguards in MusicBrainz checks](#safeguards-in-musicbrainz-checks).
+- **Pictures you upload** for a playlist or collection go to your Plex server, as edits do. The browser redraws them smaller first, so what a photo carries besides the picture (where it was taken, the camera) doesn't go with it.
 - **The container** has no database and writes nothing to disk except its start-up configuration. Play Together sessions, and what your devices are playing, are held in memory only. The service never stores tokens; it keeps short-lived SHA-256 hashes of them as cache keys, so it doesn't have to ask plex.tv on every request.
-- **No outside code or tracking.** No analytics and no third-party scripts. hls.js is bundled into the image, so nothing is loaded from a CDN. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and an Ollama server if you set one up.
+- **No outside code or tracking.** No analytics and no third-party scripts. hls.js is bundled into the image, so nothing is loaded from a CDN. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and an Ollama server if you set one up. Besides plex.tv, your Plex server and the shared Ollama, the container contacts only musicbrainz.org, and only for MusicBrainz checks.
 
 ### Fixed in this review
 
@@ -76,11 +78,24 @@ Changed in 0.9.0. Browsers reach the model only through the container's service 
 - checks every request's Plex sign-in: with `PLEX_SERVER_URL` set, only people who can use your Plex server get through;
 - passes on chats only, with the fields the app uses, each checked, and always on the model in `OLLAMA_MODEL`;
 - never shows the AI server's other models, its version or its settings;
-- keeps the API key (`OLLAMA_API_KEY`) to itself: it goes to Ollama only, never to browsers or the log.
+- keeps the API key (`OLLAMA_API_KEY`) to itself: it goes to Ollama only, never to browsers or the log;
+- since 0.12.0, loads the model itself when a chat needs it (once, however many are waiting, and with no prompt, so nothing is generated), and asks Ollama which models are in memory only to say whether yours is. Neither can be reached from browsers.
+
+### Safeguards in MusicBrainz checks
+
+Added in 0.12.0. Checking an AI playlist's missing tracks on MusicBrainz (see [AI playlists and the AI DJ](#ai-playlists-and-the-ai-dj)) means the container asks a website about them, so:
+
+- **Off until you turn it on**, on each device, and `MUSICBRAINZ=false` takes it away for everyone.
+- **Only names.** Artists' names, and songs' titles with their artist, from the missing tracks list. No tokens, no Plex account or server details, and nothing about the rest of your library. Browsers send them to the container, never to MusicBrainz, so musicbrainz.org sees the container's address and a User-Agent naming this app, as it asks apps to send.
+- **For people who can use your Plex server**, as the shared AI model is: with `PLEX_SERVER_URL` set, Plex accounts that can use that server; without it, anyone signed in to Plex.
+- **Searches it builds itself**, of MusicBrainz's artists, recordings and albums only, with each name quoted so it can't change the search, and answers reduced to "known", "an album" or "not known".
+- **Limited.** At most 10 names a request, 30 requests a minute each, two at a time each and four in all. A request stops after 40 seconds, or as soon as the browser that asked goes away. MusicBrainz is asked at most once a second, its own limit. Answers are kept in memory for a week (5,000 at most), so the same names aren't asked about again.
 
 ### Safeguards in editing playlists and collections
 
 Added in 0.6.0. Changes go to your Plex server with your own token, so Plex decides what you may change: your own playlists, and collections only if you own the server. The app only offers collection editing to the server's owner.
+
+Pictures (since 0.12.0) are redrawn in the browser before they go, as a JPEG of at most 1200 pixels, so nothing but the picture reaches Plex. They go to your Plex server only, like any other change, and the `/pms/` proxy accepts requests of up to 10 MB for them (1 MB before). A playlist's or collection's earlier pictures are only shown when your Plex server has them itself, so none are loaded from another site.
 
 Building this showed a gap in the `/pms/` proxy. If your Plex server lets the container in without signing in, it accepts any token from there and can treat requests as its owner's. Friends with access were let through, so they could have seen your view of the server and made changes (a new playlist, say) as you. In that situation the proxy now lets only the owner through.
 
@@ -105,7 +120,7 @@ These come with how the app works:
 - **Tokens appear in media addresses.** Plex needs the token in artwork and audio addresses. They go only to your Plex server and are never sent as a referrer to anyone else, but they can show up in the browser's developer tools, and in the browser's own cache on the device, which keeps artwork for a day. Artwork is marked private, so proxies and other shared caches don't keep it.
 - **The container serves plain HTTP.** On your home network that's the same as Plex's own `http://` addresses. If you use the player from outside, put it behind an HTTPS reverse proxy. Without HTTPS, tokens cross the network unencrypted.
 - **The proxy doesn't check an `https://` server's certificate.** With an `https://` `PLEX_SERVER_URL`, the connection from the container to Plex is encrypted, but the proxy (nginx) can't check the certificate: it's for the server's `plex.direct` name, never its address. So, as with `http://`, that hop relies on your home network. The container's own service, which checks sign-ins with the server, does check it, and only accepts a valid Plex certificate there.
-- **The shared AI model without `PLEX_SERVER_URL`** is open to anyone signed in to Plex, and Plex accounts are free. If the player can be reached from the internet, set `PLEX_SERVER_URL` so that only people with access to your server can use the model.
+- **The shared AI model without `PLEX_SERVER_URL`** is open to anyone signed in to Plex, and Plex accounts are free. If the player can be reached from the internet, set `PLEX_SERVER_URL` so that only people with access to your server can use the model. The same goes for MusicBrainz checks, though all they can do is ask MusicBrainz about names (or set `MUSICBRAINZ=false`).
 - **Play on without `PLEX_SERVER_URL`** works for anyone signed in to Plex, with the players on their own account. Someone who can open the player could add a made-up "player" to their account, at an address on your network, and learn whether something there answers on the Plex player ports. The service never sends them anything back from it beyond a player's state. If the player can be reached from the internet, set `PLEX_SERVER_URL`, or `CASTING=false`.
 - **Wide connection rules.** The content security policy has to allow connections, images and audio from any address, because Plex servers and Ollama can be anywhere.
 - **Whoever runs the container is trusted.** They control the code your browser runs, the service sees your token when it checks who you are, and, while your devices share playback, what you're playing. That's also true of any web app you open.
@@ -115,20 +130,20 @@ To report a security problem, open an issue on GitHub without posting tokens or 
 ## Features
 
 - **Home**: sections you choose and order for each library (see below), including **Collections**, shown just like Recent playlists. There's a quick library switcher too.
-- **Search**: live results, narrowed word by word: press Enter (or +) to keep a word as a tag, and what you type next only finds things that match every tag ("prodigy", then "fire"). One tap on × clears it all. Browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Any list can be searched within: in the 1990s, type "rock" to narrow it to rock albums from the 1990s, then "calm" for a mood, and take each filter off again with a tap. Also top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
+- **Search**: live results, narrowed word by word: press Enter (or +) to keep a word as a tag, and what you type next only finds things that match every tag ("prodigy", then "fire"). One tap on × clears it all. Search for an artist ("groove armada") and Tracks starts with their best-known ones, straight after Artists. Browsing the library: artists, albums, tracks, compilations, soundtracks, collections, genres, styles, moods and decades, with counts from your server. Any list can be searched within: in the 1990s, type "rock" to narrow it to rock albums from the 1990s, then "calm" for a mood, and take each filter off again with a tap. Also top artists, albums and tracks, AI playlists, Sonic path (a journey between two tracks) and Shuffle library.
 - **Playlists tab**: all your music playlists, with ❤️ Tracks first.
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
 - **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, appears in, go to album or artist). Albums show their format (e.g. FLAC 24/96) and mark their best-known tracks.
 - **Appears in**: from any track's menu (in a list, Up next or Now Playing), the albums the song is on (its own, and others with the same song by the same artist, such as a compilation, a soundtrack or a live album, each with what that version is called), the playlists it's in, and the collections it's in, including collections of its album or its artist. Each opens with a tap. A smart playlist of a whole library (one with no rules but the library) counts as having every track without being read; other very long smart playlists are left out, and the page says which.
 - **❤️ Tracks**: tracks you give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out when they lose that rating, as in Plexamp. If yours is Plexamp's own (a smart playlist), Plex keeps it up to date itself.
 - **Now Playing**: big artwork, a seek bar drawn from your server's loudness analysis, ratings that save to Plex, the file format and quality, an Up next queue (with **Move to top**), Guest DJ, shuffle, repeat and a sleep timer. A volume slider with a percentage and marks at 25, 50 and 75%. Optional playback speed and skip buttons.
-- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, sort (by artist, track name, album or year, or reversed, with Undo), remove, rename, delete. A playlist's, collection's or artist's menu can also play it next or add it to the queue. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
-- **Collections**, for the server's owner: the same editing and sorting, and adding tracks, albums or artists, including a playlist's tracks or the queue.
+- **Playlists**: make them, add to them from any track, album, artist or the queue, and edit them: reorder, sort (by artist, track name, album or year, or reversed, with Undo), remove, rename, delete, and change its picture: unlocked, a pencil over the artwork (on a computer, when the pointer's over it) uploads one from the device, goes back to one it had, or to the covers Plex puts together. A playlist's, collection's or artist's menu can also play it next or add it to the queue. A lock keeps them safe from accidental swipes and taps until you unlock one (the app points it out until you've used it).
+- **Collections**, for the server's owner: the same editing, sorting and pictures, and adding tracks, albums or artists, including a playlist's tracks or the queue.
 - **Play on**: play on another Plex player on your network (Plexamp on a Raspberry Pi, say) with this app as the remote, or on AirPlay and Google Cast speakers where the browser supports them. See [Play on](#play-on).
 - **Your devices**: open the player on your phone while your computer plays, and the phone shows what's playing and controls it. **Listen here** moves the music to the device in your hand, from the same spot. See [Your devices](#your-devices).
 - **Play Together**: listen in sync with Plex friends. Everyone hears the same track at the same moment, and anyone in the session can play, pause, skip, seek, and change the queue.
 - **AI playlists**: describe what you want to hear, and a model running on your own hardware (through [Ollama](https://ollama.com)) builds a playlist from your library, keeping to what you asked for ("best of The Prodigy" is just The Prodigy). Play it, add it to the queue, or save it to a playlist or collection in Plex. Optionally, it keeps a list of the songs and artists it suggested that your library doesn't have, to export and go looking for.
-- **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys). The AI DJ uses your Ollama model to pick each next track and introduce it.
+- **Guest DJ**: DJs that add tracks as you listen. Six follow fixed rules (similar sound, same artist, same era, sonic journeys), and the AI DJ uses your Ollama model to pick each next track and introduce it. Two more only use what's in your queue and add nothing: **Queue Echo** plays next whichever queued track sounds most like the one playing, and **Queue Bridge**, when your next track sounds far from this one, first plays one from later in your queue that sits between them. See [Guest DJ](#guest-dj).
 - **Live updates**: new music, playlist changes and ratings from other Plex apps appear without reloading. Works with or without WebSockets (see [Behind a work proxy](#behind-a-work-proxy)).
 - **Playback**: gapless playback, and crossfades like Plexamp's: **Smart** crossfade uses your server's loudness analysis to fade into the next track where the music really ends, so silence at the end of a track doesn't leave a gap, and plays tracks that follow each other on an album gaplessly (see [Good to know](#good-to-know) for the Plex setting it needs). Also lock-screen and media-key controls, and play reporting to Plex (play counts, recent plays, dashboard).
 - **Album-colour backgrounds** from Plex's own artwork colours, or a blurred copy of the cover.
@@ -181,7 +196,7 @@ CTID=120 PLEX_SERVER_URL=http://192.168.1.10:32400 YES=1 bash -c "$(curl -fsSL h
 Then, on the node (or inside the container, without `pct exec <ID> --`):
 
 - **Settings**: `pct exec <ID> -- plexamp-web-settings` opens them in an editor, with the same names as [Container settings](#container-settings), and restarts the player with them. They're kept in `/etc/plexamp-web/plexamp-web.env`.
-- **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version. Your settings are kept.
+- **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version. Your settings are kept. (A container installed with 0.10.0 or 0.11.0 says it can't find the command: run `pct exec <ID> -- /usr/local/bin/update-plexamp-web` once, and the short form works from then on.)
 - **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`.
 
 ## Container settings
@@ -198,6 +213,7 @@ All optional. Set them as environment variables on the container.
 | `OLLAMA_AUTH` | `plex` (default) or `off` | Who may use the shared model: `plex` means signed-in Plex users (see below), `off` means anyone who can open the app. |
 | `PLAY_TOGETHER` | `true` (default) or `false` | Play Together and its tab. |
 | `CASTING` | `true` (default) or `false` | Playing on other Plex players from the app (see [Play on](#play-on)). AirPlay and Cast, which are the browser's own, aren't affected. |
+| `MUSICBRAINZ` | `true` (default) or `false` | Whether devices can check AI playlists' missing tracks on MusicBrainz (see [AI playlists and the AI DJ](#ai-playlists-and-the-ai-dj)). Each device chooses, and it's off until someone turns it on. |
 | `DEBUG` | `true` | Writes extra detail to the container log for troubleshooting, with tokens removed (see [Debug mode](#debug-mode)). |
 
 The container stops with a clear message in its log if a value doesn't make sense, for example an address without `http://`.
@@ -240,6 +256,26 @@ The cast button next to Repeat (and in the desktop player bar) chooses where the
 - **Alexa (Echo) speakers can't be played on.** Amazon only lets its approved music services play on them, so no app can, Plexamp included. Pair the speaker with your phone or computer over Bluetooth instead.
 
 Plex doesn't fully document how its players are controlled, and Play on has been tested against a simulated player rather than every real one. If a player doesn't respond, please open an issue, with the [debug log](#debug-mode) (it leaves out tokens).
+
+## Guest DJ
+
+Choose a DJ with the DJ button in Now Playing. It plays along with your queue until you turn it off.
+
+| DJ | What it does |
+| --- | --- |
+| DJ Bridge | Plays a short sonic journey between each of your tracks and the next: one track when the two sound alike, up to four when they're far apart, spread along the path Plex finds between them so each step is a small one. |
+| DJ Echo | Follows each of your tracks with the one that sounds most like it. |
+| DJ Steady | Keeps the mood going with tracks that sound like the one playing, mixing in other artists where they sound as close. Your queue waits until you turn it off. |
+| DJ Double | Follows each of your tracks with another by the same artist. |
+| DJ Era | Keeps the mood going with tracks from the same era. |
+| DJ Superfan | Keeps queueing tracks by the same artist. |
+| AI DJ | Your AI model picks each next track from your library and says why (see [AI playlists and the AI DJ](#ai-playlists-and-the-ai-dj)). |
+| Queue Echo | Adds nothing. As each track starts, whichever of your next 40 sounds most like it moves up to play next. |
+| Queue Bridge | Adds nothing. When your next track sounds far from the one playing, one from later in your queue that sits between them plays first. |
+
+No DJ adds a song you've played since opening the player (the last 300), or one that's queued, and another version of a song (on a compilation, a live album or a remaster) counts as the same song: versions sound alike, so they'd always be the closest match. The queue DJs don't move up another version of the song playing or of the last ten played. Up next and Now Playing say which tracks a DJ added or moved, and why.
+
+The sound-based DJs need Plex's sonic analysis (see [Good to know](#good-to-know)). Without it, the ones that add tracks match on genre, and the queue DJs go by artist and year.
 
 ## Customise it
 
@@ -292,9 +328,15 @@ Playlists are built in two passes so they only contain music you have. First the
 
 Every request asks the model to keep to what you asked for, and to be creative within it. The app checks too, because small models drift: a playlist about particular artists ("best of The Prodigy", "Daft Punk deep cuts") is built only from those artists' tracks, best known first, and is shorter rather than padded with other artists if they don't have enough. "Music like The Prodigy" is mostly them, with similar artists. An era you name ("90s") holds for the artists' tracks too.
 
+**Songs, not albums.** Models sometimes make songs up, or give an album's title as if it were a song. The model is asked only for songs it's sure of, with their titles as released and never an album's, and fewer rather than a guess. A suggestion that turns out to be one of the artist's albums isn't used, so it can't fill the playlist with that album. And a playlist takes no more than an eighth of its tracks (at least two) from any one album where the library allows, so "best of" an artist isn't one of their albums from start to finish. Compilations (albums by Various Artists) are the exception.
+
 A playlist carries on being made while you use the rest of the app, which says when it's ready. A finished playlist can be played, shuffled, added to the queue, or saved to Plex: as a new playlist, into one of yours, or (for the server's owner) into a collection.
 
-**Missing tracks.** Turn on **Settings → AI → Show missing tracks** (it's off to begin with, and only playlists made while it's on are checked), and under each AI playlist is a list of the songs and artists the model suggested that your library doesn't have, or a line saying they're all there (a song is looked for by its title and among its artist's tracks, so a slightly different title still counts as there). They're collected in **Settings → AI → Missing tracks**, with how often each was suggested and for what, to download as a spreadsheet (CSV), copy or share, so whoever looks after the server can go and find them. **Check again**, after adding music, takes off what's in the library now. The list is kept on that device. Models sometimes suggest songs that don't exist, so check before you go looking.
+**Waiting for the model.** After Ollama starts, a model can take minutes to load into memory. The app waits up to 5 minutes for the model to start answering (**Settings → AI → Wait for the model** goes from 2 to 30 minutes) and says while it's loading. If the wait runs out, the model carries on loading, so trying again a little later is quick: the shared model is loaded by the container itself, so nobody giving up, or closing the page, stops it; your own Ollama is asked to load it separately from the request that gave up.
+
+**Missing tracks.** Turn on **Settings → AI → Show missing tracks** (it's off to begin with, and only playlists made while it's on are checked), and under each AI playlist is a list of the songs and artists the model suggested that your library doesn't have, or a line saying they're all there (a song is looked for by its title and among its artist's tracks, so a slightly different title still counts as there). They're collected in **Settings → AI → Missing tracks**, with how often each was suggested and for what, to download as a spreadsheet (CSV), copy or share, so whoever looks after the server can go and find them. **Check again**, after adding music, takes off what's in the library now. The list is kept on that device.
+
+Models sometimes suggest songs and artists that don't exist. Turn on **Check them on MusicBrainz** as well (under Show missing tracks), and each one on the list is looked up on [MusicBrainz](https://musicbrainz.org), the open music encyclopedia: ones it doesn't know (mostly ones the model made up) are left out of the list, with a count and **Show** to see them anyway, and albums taken for songs are dropped. Only the names are sent, by the container rather than your browser (see [Safeguards in MusicBrainz checks](#safeguards-in-musicbrainz-checks)). MusicBrainz is asked at most once a second, so a long list takes a few minutes the first time; answers are kept for a week. `MUSICBRAINZ=false` on the container takes the option away.
 
 There are two ways to connect.
 
@@ -329,7 +371,7 @@ Then install the model once: `docker compose exec ollama ollama pull llama3.1:8b
 
 Browsers only ever talk to the player's own address, so this works from anywhere the player does (a work network included), and Ollama needs no extra setup. Requests go through the container's own service, which checks each one:
 
-- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app: **Settings → AI** shows the model's name, whether it's ready, and a test button, and nothing else about the AI server. Each device can still turn AI features off, and then nothing about AI shows on it (nor for anyone the container doesn't let use the model).
+- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app: **Settings → AI** shows the model's name, whether it's ready (and in memory, or loading), and a test button, and nothing else about the AI server. Each device can still turn AI features off, and then nothing about AI shows on it (nor for anyone the container doesn't let use the model).
 - **People with access to your Plex server** (`OLLAMA_AUTH=plex`). Every request is checked with plex.tv. With `PLEX_SERVER_URL` set, Plex accounts that can use that server get through: you, and the friends you share it with. Without it, any signed-in Plex account is accepted. Anyone refused is told why in the app (the AI playlist page says so before they try), and the container log notes it, without names unless debug mode is on.
 - **Only chats** are passed on, with just the fields the app uses, each checked (the model's options within sensible limits). The AI server's other models, its version and its settings can't be reached through the player, and nothing can be downloaded, changed or deleted.
 - **Rate-limited** per user, at most two requests at a time each (six in all), and the browser's Plex token, cookies and origin aren't forwarded to Ollama. Closing the page or pressing **Stop** stops the model too.
@@ -369,9 +411,9 @@ python3 dev/mock-ollama.py         # fake Ollama on :11434
 python3 -m http.server 8080 -d web
 ```
 
-Open http://127.0.0.1:8080, choose **Use a server address and token instead**, and connect to `http://127.0.0.1:32400` with the token `t`. The mock serves an invented library with generated artwork and short test tones, live notifications over a WebSocket and an event stream, three made-up Plex accounts for Play Together (`t`, `t2` and `t3`), a Plex player called Living Room on port 32500 for Play on, and test switches (such as refusing WebSockets the way a proxy would) described at the top of the file. For AI features, choose **Settings → AI → My own Ollama server** and enter `http://127.0.0.1:11434`.
+Open http://127.0.0.1:8080, choose **Use a server address and token instead**, and connect to `http://127.0.0.1:32400` with the token `t`. The mock serves an invented library with generated artwork and short test tones, live notifications over a WebSocket and an event stream, three made-up Plex accounts for Play Together (`t`, `t2` and `t3`), a Plex player called Living Room on port 32500 for Play on, a small MusicBrainz (point the container's `MUSICBRAINZ_URL` at it), and test switches (such as refusing WebSockets the way a proxy would) described at the top of the file. For AI features, choose **Settings → AI → My own Ollama server** and enter `http://127.0.0.1:11434`.
 
-Served like this, without the container, there's no `/api/`, so Play Together, Play on with Plex players and the shared AI model are off. The full set runs in the container; for testing, `PLEX_TV_URL` points its service at the mock instead of plex.tv. To play converted tracks outside the container in browsers without built-in HLS, run `sh dev/fetch-hls.sh` once (it needs npm).
+Served like this, without the container, there's no `/api/`, so Play Together, Play on with Plex players and the shared AI model are off. The full set runs in the container; for testing, `PLEX_TV_URL` points its service at the mock instead of plex.tv, and `MUSICBRAINZ_URL` instead of musicbrainz.org. To play converted tracks outside the container in browsers without built-in HLS, run `sh dev/fetch-hls.sh` once (it needs npm).
 
 To use your own Plex server, enter its address and your [X-Plex-Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/), or sign in with Plex.
 
@@ -400,18 +442,18 @@ web/
   js/editing.js          adding to playlists and collections, and who may edit collections
   js/sorting.js          sorting playlists and collections with the fewest moves
   js/membership.js       Appears in: the albums a song is on, and the playlists and collections it's in
-  js/missing.js          missing tracks from AI playlists, and exporting them
+  js/missing.js          missing tracks from AI playlists, checking them on MusicBrainz, and exporting them
   js/ratings.js          ratings in the player and in track lists, and keeping ❤️ Tracks
   js/live.js             live updates: WebSocket, event stream or polling
   js/ai.js               Ollama client, AI playlists and the AI DJ's picks
-  js/dj.js               Guest DJ modes
+  js/dj.js               Guest DJ modes, the queue DJs included
   js/home-sections.js    Home screen sections and their layout per library
   js/debug.js            debug mode: browser problems sent to the container log
   js/backdrop.js         album-colour backgrounds
   js/router.js           hash routing, back-button handling, view cache
   js/ui.js, components.js, actions.js, preview.js
   js/views/              home, library, detail pages, search, Play Together, AI playlist, settings, sign-in
-server/                  the service behind /api/: Play Together, Play on, sign-in checks, debug log
+server/                  the service behind /api/: Play Together, Play on, your devices, the shared AI model, MusicBrainz checks, sign-in checks, debug log
 docker/                  nginx config, start-up script and container tests
 proxmox/                 the Proxmox VE script and the installer it runs in the container
 dev/                     fake Plex and Ollama servers for development
@@ -432,7 +474,9 @@ Start with [Debug mode](#debug-mode): most set-up problems show up in the contai
 - **A Plex player is listed but doesn't respond**: check that it's still on the same network and allows remote control, and turn on [Debug mode](#debug-mode) to see what the player answered.
 - **"Couldn't reach Ollama"** with your own server: check it's running, that this device can reach it, and that `OLLAMA_ORIGINS` includes the player's address.
 - **"The AI service couldn't confirm your Plex sign-in"**: sign out and in again. With `PLEX_SERVER_URL` set, only people with access to that server can use the shared model.
-- **AI answers are slow**: the first request loads the model, which can take a minute on modest hardware. The model then stays loaded for 15 minutes.
+- **AI answers are slow**: the first request loads the model, which can take a minute on modest hardware, and several after Ollama has just started. The model then stays loaded for 15 minutes.
+- **"The AI model was still loading after 5 minutes"**: it carries on loading, so try again in a minute or two. If it happens often (a big model, or a slow disk), give it longer in **Settings → AI → Wait for the model**.
+- **MusicBrainz checks say MusicBrainz is busy, or can't be reached**: it limits how often it's asked, from each internet address. Try again later; what's been checked so far is kept. The container needs to reach `musicbrainz.org` for this.
 - **Some tracks won't play**: check **Settings → Connection → Browser formats**. Unsupported formats need your server to convert them.
 - **Playback stops when the phone locks**: add the player to your home screen and check the browser isn't restricted by battery-saving settings.
 - **The browser uses a lot of memory**: update to 0.5.0 or later, which fixed several causes (see [CHANGELOG.md](CHANGELOG.md)). If it still climbs, open an issue saying which browser, how big your library is, and what you were doing; in Firefox, the numbers from `about:memory` (Measure) help most.

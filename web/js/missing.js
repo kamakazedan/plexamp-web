@@ -2,9 +2,16 @@
 // have (Settings › AI › Missing tracks), so whoever looks after the server
 // can go and find them. Kept on this device (until it's cleared, or you sign
 // out), and exported as a spreadsheet (CSV) or plain text.
+//
+// AI models make songs up, and take albums for songs. With Settings › AI ›
+// Check them on MusicBrainz, each is looked up on musicbrainz.org, through
+// the player's own service (see server/musicbrainz.js): an album taken for a
+// song is kept but not listed (so it isn't checked again), and one
+// MusicBrainz doesn't know is hidden (`mb`: 'real', 'album', 'unknown', or
+// not yet checked).
 import { store } from './plex.js';
 import { app, emit } from './state.js';
-import { norm, songInLibrary, artistInLibrary } from './ai.js';
+import { norm, songInLibrary, artistInLibrary, aiSettings } from './ai.js';
 
 const KEY = 'aiMissing';
 const LIMIT = 500;
@@ -23,13 +30,84 @@ function save(list) {
   emit('missing', list.length);
 }
 
-// Everything kept, artists first, then by artist and title.
-export function missingList() {
+// What's kept, artists first, then by artist and title: without those
+// MusicBrainz doesn't know (while it's used), unless `all`.
+export function missingList({ all = false } = {}) {
   const by = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
-  return load().sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
+  return load()
+    .filter((m) => all || !hiddenNow(m))
+    .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
 }
 
-export const missingCount = () => load().length;
+export const missingCount = () => load().filter((m) => !hiddenNow(m)).length;
+
+// ---------- MusicBrainz ----------
+
+// The player checks on MusicBrainz, and this device has asked it to.
+export const mbOffered = () => !!app.config.musicbrainz;
+export const mbOn = () => mbOffered() && aiSettings().musicbrainz === true;
+const hiddenNow = (m) => m.mb === 'album' || (mbOn() && m.mb === 'unknown');
+export const mbHidden = () => (mbOn() ? load().filter((m) => m.mb === 'unknown').length : 0);
+export const mbUnchecked = () => (mbOn() ? load().filter((m) => !m.mb).length : 0);
+
+const BATCH = 5;
+let checking = null;
+
+// Looks up what hasn't been checked yet, a few at a time, and keeps what
+// MusicBrainz said. Resolves to { checked, albums, unknown }; one check runs
+// at a time (later callers share it). onProgress(done, of).
+export function checkOnMusicBrainz({ onProgress } = {}) {
+  if (!mbOn()) return Promise.resolve({ checked: 0, albums: 0, unknown: 0 });
+  if (checking) return checking;
+  checking = (async () => {
+    const todo = load().filter((m) => !m.mb);
+    const tally = { checked: 0, albums: 0, unknown: 0 };
+    // Who's asking, checked by the player as for its shared AI model (people
+    // who can use its Plex server).
+    const headers = { 'Content-Type': 'application/json', 'X-Plex-Token': app.auth?.token || '' };
+    if (app.source?.token && app.source.token !== app.auth?.token) headers['X-Plex-Server-Token'] = app.source.token;
+    for (let i = 0; i < todo.length; i += BATCH) {
+      const batch = todo.slice(i, i + BATCH);
+      const res = await fetch('api/musicbrainz/check', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ items: batch.map((m) => ({ kind: m.kind, artist: m.artist, title: m.title })) }),
+        credentials: 'omit',
+      });
+      if (!res.ok) {
+        let message = '';
+        try {
+          message = (await res.json()).error || '';
+        } catch {
+          /* no explanation */
+        }
+        throw Object.assign(new Error(message || `MusicBrainz couldn’t be checked (HTTP ${res.status}).`), { status: res.status });
+      }
+      const { results = [] } = await res.json();
+      // (Kept as it is now: the list may have changed meanwhile.)
+      const now = load();
+      batch.forEach((m, j) => {
+        const answer = results[j];
+        if (!['real', 'album', 'unknown'].includes(answer)) return;
+        const at = now.findIndex((x) => keyOf(x) === keyOf(m) && x.server === m.server && x.section === m.section);
+        if (at < 0) return;
+        tally.checked += 1;
+        if (answer === 'album') tally.albums += 1; // an album, not a song: not missing
+        if (answer === 'unknown') tally.unknown += 1;
+        now[at].mb = answer;
+      });
+      save(now);
+      onProgress?.(Math.min(i + BATCH, todo.length), todo.length);
+    }
+    return tally;
+  })().finally(() => {
+    checking = null;
+    emit('missing', missingCount()); // (done, or stopped part way)
+  });
+  return checking;
+}
+
+export const mbChecking = () => !!checking;
 
 // What an AI playlist found missing (and found there), for the request
 // `prompt`: new ones are added, ones seen before counted again, and ones

@@ -15,9 +15,13 @@ import { app, on } from './state.js';
 import { normTrack } from './plex.js';
 import { debugLog } from './debug.js';
 
-const FIRST_TOKEN_TIMEOUT = 240000; // loading a model and reading a long prompt can take a while
+// How long to wait for the model to start answering (loading it, and
+// reading a long prompt, can take minutes) is a setting: Settings › AI ›
+// Wait for the model. Once it's answering, it mustn't go quiet for longer
+// than IDLE_TIMEOUT, nor take longer than the wait plus EXTRA_TIME in all.
 const IDLE_TIMEOUT = 120000;
-const TOTAL_TIMEOUT = 600000;
+const EXTRA_TIME = 600000;
+const SAY_LOADING = 1500; // loading for longer than this is shown
 
 export class AIError extends Error {
   constructor(code, message, extra = {}) {
@@ -30,10 +34,17 @@ export class AIError extends Error {
 // ---------- configuration ----------
 
 // missing: keep a list of the songs and artists AI playlists suggest that
-// aren't in the library (Settings › AI › Show missing tracks).
-const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '', missing: false };
+// aren't in the library (Settings › AI › Show missing tracks), musicbrainz:
+// and check them there. wait: minutes to wait for the model to start
+// answering.
+const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '', missing: false, musicbrainz: false, wait: 5 };
 
 export const aiSettings = () => ({ ...DEFAULTS, ...(app.settings.ai || {}) });
+export const WAIT_CHOICES = [2, 5, 10, 15, 30];
+export const aiWaitMinutes = () => {
+  const m = Number(aiSettings().wait);
+  return Number.isFinite(m) && m > 0 ? Math.min(30, m) : DEFAULTS.wait;
+};
 export const sharedAI = () => (app.config.ai?.proxy ? app.config.ai : null);
 
 // The shared model's name, once the container has said it (when it's the
@@ -108,7 +119,7 @@ export async function sharedStatus() {
   if (target?.kind !== 'shared') return null;
   const st = await simple(target, '/api/status');
   if (st?.model) sharedName = String(st.model);
-  return { model: st?.model || null, ready: !!st?.ready, problem: st?.problem || null };
+  return { model: st?.model || null, ready: !!st?.ready, problem: st?.problem || null, loaded: typeof st?.loaded === 'boolean' ? st.loaded : null, loading: !!st?.loading };
 }
 
 // The container checks the token for the Plex server it fronts. If this app
@@ -195,10 +206,39 @@ export async function listModels(target = aiTarget()) {
 
 const noThink = new Set(); // Ollama servers that rejected the "think" option
 
+// Loading a model on this device's own Ollama, in a request of its own: it
+// carries on if the chat that wanted it is stopped or gives up (Ollama stops
+// loading when the request for it goes away), so the next one finds the model
+// ready. (The shared model's loads are the container's: see server/ai.js.)
+const ownLoads = new Map();
+function ownLoad(target, body) {
+  const key = `${target.base}|${body.model}|${body.options?.num_ctx || ''}`;
+  if (!ownLoads.has(key)) {
+    const ask = { model: body.model, keep_alive: body.keep_alive, options: { num_ctx: body.options?.num_ctx } };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 30 * 60000);
+    const job = send(target, '/api/generate', requestInit(target, 'POST', ask, ctrl.signal))
+      .then(async (res) => {
+        if (res.ok) return true;
+        // Not found: the chat says so. Anything else (an Ollama too old for
+        // this, a proxy in the way): the chat loads it instead.
+        if (res.status === 404) throw await readError(res);
+        return false;
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        ownLoads.delete(key);
+      });
+    ownLoads.set(key, job);
+  }
+  return ownLoads.get(key);
+}
+
 // Send a chat and read the streamed reply. Streaming keeps bytes flowing
 // through proxies with idle timeouts; if a proxy buffers the stream instead,
 // the whole reply simply arrives at the end and is read the same way.
-export async function chat({ messages, schema, temperature = 0.6, signal, onProgress, maxTokens }) {
+// onLoading(true/false): the model is being loaded into memory.
+export async function chat({ messages, schema, temperature = 0.6, signal, onProgress, onLoading, maxTokens }) {
   const target = aiTarget();
   if (!target) throw new AIError('not-configured', 'No AI model is set up.');
   if (!target.model && target.kind !== 'shared') throw new AIError('no-model', 'Choose an AI model in Settings › AI.');
@@ -218,7 +258,7 @@ export async function chat({ messages, schema, temperature = 0.6, signal, onProg
 
   for (let attempt = 0; ; attempt++) {
     try {
-      return await streamChat(target, body, signal, onProgress);
+      return await streamChat(target, body, signal, onProgress, onLoading);
     } catch (err) {
       if (attempt >= 2 || err.status !== 400) throw err;
       if ('think' in body && /think/i.test(err.message)) {
@@ -233,10 +273,18 @@ export async function chat({ messages, schema, temperature = 0.6, signal, onProg
   }
 }
 
-async function streamChat(target, body, signal, onProgress) {
+async function streamChat(target, body, signal, onProgress, onLoading) {
   const ctrl = new AbortController();
+  const waitMs = aiWaitMinutes() * 60000;
   let timedOut = false;
   let idle = null;
+  let answering = false; // the model has started answering
+  let loading = false;
+  const setLoading = (on) => {
+    if (loading === on) return;
+    loading = on;
+    onLoading?.(on);
+  };
   const arm = (ms) => {
     clearTimeout(idle);
     idle = setTimeout(() => {
@@ -247,13 +295,13 @@ async function streamChat(target, body, signal, onProgress) {
   const total = setTimeout(() => {
     timedOut = true;
     ctrl.abort();
-  }, TOTAL_TIMEOUT);
+  }, waitMs + EXTRA_TIME);
   const relay = () => ctrl.abort();
   signal?.addEventListener('abort', relay);
   const started = performance.now();
   let content = '';
   let final = {};
-  arm(FIRST_TOKEN_TIMEOUT);
+  arm(waitMs); // until it starts answering (blank lines while it waits don't count)
 
   const handleLine = (line) => {
     if (!line.trim()) return;
@@ -263,8 +311,15 @@ async function streamChat(target, body, signal, onProgress) {
     } catch {
       return;
     }
-    if (obj.error) throw new AIError('http', String(obj.error), { status: 500 });
+    // (From the container: a model loading, or a problem it ran into.)
+    if (obj.pw === 'loading') setLoading(true);
+    if (obj.pw === 'loaded') setLoading(false);
+    if (obj.error) throw new AIError('http', String(obj.error), { status: Number(obj.status) || 500 });
     if (obj.message?.content) {
+      if (!answering) {
+        answering = true;
+        setLoading(false);
+      }
       content += obj.message.content;
       onProgress?.(content.length);
     }
@@ -273,6 +328,19 @@ async function streamChat(target, body, signal, onProgress) {
   };
 
   try {
+    // This device's own Ollama: the model loads first, in a request that
+    // isn't stopped with this one.
+    if (target.kind === 'custom') {
+      const say = setTimeout(() => setLoading(true), SAY_LOADING);
+      const gaveUp = new Promise((resolve) => ctrl.signal.addEventListener('abort', resolve, { once: true }));
+      try {
+        await Promise.race([ownLoad(target, body), gaveUp]);
+      } finally {
+        clearTimeout(say);
+      }
+      if (ctrl.signal.aborted) throw new Error('aborted');
+      setLoading(false);
+    }
     const res = await send(target, '/api/chat', requestInit(target, 'POST', body, ctrl.signal));
     if (!res.ok) throw await readError(res);
     if (res.body?.getReader) {
@@ -282,13 +350,13 @@ async function streamChat(target, body, signal, onProgress) {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
-        arm(IDLE_TIMEOUT);
         buf += decoder.decode(value, { stream: true });
         let nl;
         while ((nl = buf.indexOf('\n')) >= 0) {
           handleLine(buf.slice(0, nl));
           buf = buf.slice(nl + 1);
         }
+        if (answering) arm(IDLE_TIMEOUT);
       }
       handleLine(buf + decoder.decode());
     } else {
@@ -297,12 +365,20 @@ async function streamChat(target, body, signal, onProgress) {
   } catch (err) {
     if (err instanceof AIError) throw err;
     if (signal?.aborted) throw new AIError('aborted', 'Stopped.');
-    if (timedOut) throw new AIError('timeout', 'The AI model took too long to answer.');
+    if (timedOut) {
+      const mins = aiWaitMinutes();
+      const waited = mins >= 1 ? `${Math.round(mins)} minute${Math.round(mins) === 1 ? '' : 's'}` : `${Math.round(mins * 60)} seconds`;
+      if (loading) {
+        throw new AIError('timeout', `The AI model was still loading after ${waited}. It carries on loading, so try again in a minute or two (or wait longer in Settings › AI).`, { loading: true });
+      }
+      throw new AIError('timeout', answering ? 'The AI model took too long to answer.' : `The AI model didn’t start answering within ${waited}. You can wait longer in Settings › AI.`);
+    }
     throw new AIError('network', err.message || 'network error');
   } finally {
     clearTimeout(idle);
     clearTimeout(total);
     signal?.removeEventListener('abort', relay);
+    setLoading(false);
   }
   return { content, model: final.model || target.model, seconds: (performance.now() - started) / 1000 };
 }
@@ -480,14 +556,25 @@ async function findArtist(name, signal) {
   return artists.find((a) => norm(a.title) === target) || artists.find((a) => norm(a.title).startsWith(target) || target.startsWith(norm(a.title))) || null;
 }
 
-async function findSong(song, signal) {
+// A suggested song, looked for in the library: { track } if it's there, or
+// { album } if what was suggested is really an album of theirs (models mix
+// them up), or {}.
+async function lookSong(song, signal) {
   const title = norm(song?.title);
   const artist = norm(song?.artist);
-  if (!title) return null;
+  if (!title) return {};
   const res = await app.server.search(song.title, app.source.sectionKey, { signal, limit: 12 }).catch(() => null);
-  const byArtist = (m) => !artist || [m.grandparentTitle, m.originalTitle].some((a) => norm(a) === artist || (norm(a) && (norm(a).includes(artist) || artist.includes(norm(a)))));
+  const named = (a) => !artist || (norm(a) && (norm(a) === artist || norm(a).includes(artist) || artist.includes(norm(a))));
+  const byArtist = (m) => [m.grandparentTitle, m.originalTitle].some(named);
   const tracks = res?.track || [];
-  return tracks.find((m) => norm(m.title) === title && byArtist(m)) || tracks.find((m) => norm(m.title).startsWith(title) && byArtist(m)) || null;
+  const track = tracks.find((m) => norm(m.title) === title && byArtist(m)) || tracks.find((m) => norm(m.title).startsWith(title) && byArtist(m)) || null;
+  if (track) return { track };
+  const album = (res?.album || []).find((a) => norm(a.title) === title && named(a.parentTitle));
+  return album ? { album } : {};
+}
+
+async function findSong(song, signal) {
+  return (await lookSong(song, signal)).track || null;
 }
 
 // Titles (normalised, see norm) that are the same song, near enough: "Out
@@ -503,7 +590,10 @@ export function sameTitle(a, b) {
 // song with a common title isn't taken for missing. `searched`: looked for
 // by title already.
 export async function songInLibrary(song, signal, { searched = false } = {}) {
-  if (!searched && (await findSong(song, signal))) return true;
+  if (!searched) {
+    const { track, album } = await lookSong(song, signal);
+    if (track || album) return true; // (an album of theirs isn't a missing song)
+  }
   const want = norm(song?.title);
   if (!want) return true; // nothing to look for
   const artist = await findArtist(song.artist, signal);
@@ -582,8 +672,8 @@ function planMessages(prompt, notes, vocab, length) {
         '- "artist_scope": "only" if the playlist should have nothing but the focus artists (a best-of, greatest hits, "only", "just", deep cuts by them), "mostly" if it should be mainly them with a few similar artists, or "any" if it isn’t about particular artists',
         '- "genres", "styles", "moods": up to 4 each that fit the request, copied exactly from the lists above',
         '- "decades": up to 3 from the list above, or an empty list if any era fits',
-        '- "artists": up to 12 artists whose music fits the request, the focus artists first',
-        '- "tracks": up to 15 specific songs that fit, each as {"artist": "...", "title": "..."}',
+        '- "artists": up to 12 real artists whose music fits the request, the focus artists first',
+        '- "tracks": up to 10 well-known songs that fit, each as {"artist": "...", "title": "..."}. Only songs you are certain exist, by that artist, with the title exactly as released: a song, never an album or EP title. Fewer songs, or none, is better than a guess.',
       ),
     },
   ];
@@ -604,7 +694,7 @@ function orderMessages(prompt, notes, pool, length, focus) {
         notes ? `About the listener: ${notes}` : null,
         focus.scope === 'only' ? `Every track in the list is by ${names}, as the request asks. Tracks marked “popular” are their best known: a best-of should lean on them.` : null,
         focus.scope === 'mostly' ? `The request is mainly about ${names}: at least ${Math.ceil(length * 0.6)} of the tracks should be theirs.` : null,
-        `Choose ${length} tracks, with no repeats.${focus.scope === 'only' ? '' : ' Spread artists out rather than grouping them, unless the request asks otherwise.'}`,
+        `Choose ${length} tracks, with no repeats, and no more than ${perAlbum(length)} from any one album (compilations aside).${focus.scope === 'only' ? '' : ' Spread artists out rather than grouping them, unless the request asks otherwise.'}`,
         '',
         'Tracks:',
         ...list,
@@ -626,6 +716,39 @@ function dedupe(list, cap) {
     seen.add(key);
     out.push(c);
     if (out.length >= cap) break;
+  }
+  return out;
+}
+
+// An AI playlist isn't an album: at most this many tracks from any one
+// (unless there aren't enough albums to go round). Compilations aside.
+const perAlbum = (length) => Math.max(2, Math.ceil(length / 8));
+const albumOf = (t) => t.albumId || `${norm(t.album)}|${norm(t.albumArtist)}`;
+const compilation = (t) => /^various( artists)?$/i.test(String(t.albumArtist || '').trim());
+
+export function spreadAlbums(chosen, pool, length) {
+  const most = perAlbum(length);
+  const count = new Map();
+  const out = [];
+  const over = [];
+  const fits = (c) => compilation(c.track) || (count.get(albumOf(c.track)) || 0) < most;
+  const take = (c) => {
+    out.push(c);
+    count.set(albumOf(c.track), (count.get(albumOf(c.track)) || 0) + 1);
+  };
+  for (const c of chosen) (fits(c) ? take(c) : over.push(c));
+  const used = new Set([...out, ...over]);
+  for (const c of pool) {
+    if (out.length >= length) break;
+    if (!used.has(c) && fits(c)) {
+      used.add(c);
+      take(c);
+    }
+  }
+  // Too few albums for that: what was left out comes back.
+  for (const c of over) {
+    if (out.length >= length) break;
+    out.push(c);
   }
   return out;
 }
@@ -752,9 +875,11 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt, trackM
       if (trackMissing) {
         const theirs = focused.flat().map((c) => norm(c.track.title));
         const byFocus = (song) => !norm(song?.artist) || focus.artists.some((a) => norm(a) === norm(song.artist));
-        await mapLimit(asList(plan.tracks).slice(0, 15).filter(byFocus), 4, async (song) => {
+        await mapLimit(asList(plan.tracks).slice(0, 12).filter(byFocus), 4, async (song) => {
           const title = clean(song?.title, 120);
           if (!title) return;
+          // (songInLibrary counts one of their albums as there: it isn't a
+          // missing song.)
           const there = theirs.some((t) => sameTitle(t, norm(title))) || (await songInLibrary({ artist: song.artist || focus.artists[0], title }, signal));
           if (there) seen.songs.push({ artist: song.artist || focus.artists[0], title });
           else lacking({ kind: 'track', artist: clean(song.artist, 100) || focus.artists[0], title });
@@ -801,12 +926,14 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt, trackM
       }
       return items.map((m) => cand(m, 'artist'));
     }),
-    mapLimit(asList(plan.tracks).slice(0, 15), 4, async (song) => {
-      const m = await findSong(song, signal);
+    mapLimit(asList(plan.tracks).slice(0, 12), 4, async (song) => {
+      const { track: m, album } = await lookSong(song, signal);
       if (m) {
         seen.songs.push(song);
         return [cand(m, 'song', 'a close match for the request')];
       }
+      // An album, named as if it were a song: not one to play, nor missing.
+      if (album) return [];
       const title = clean(song?.title, 120);
       if (trackMissing && title) {
         if (await songInLibrary(song, signal, { searched: true })) seen.songs.push(song);
@@ -860,7 +987,8 @@ function oneOfEach(list) {
 // steps reported through onStep: 'plan' → 'search' → 'order'.
 // trackMissing: also say which suggested songs and artists aren't in the
 // library (`missing`), and which are (`seen`).
-export async function generatePlaylist({ prompt, length = 25, signal, onStep, trackMissing = aiSettings().missing === true }) {
+// onLoading(true/false): the model is being loaded into memory meanwhile.
+export async function generatePlaylist({ prompt, length = 25, signal, onStep, onLoading, trackMissing = aiSettings().missing === true }) {
   const started = performance.now();
   const notes = aiSettings().notes.trim();
   onStep?.('plan');
@@ -871,6 +999,7 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep, tr
     temperature: 0.5,
     signal,
     onProgress: (n) => onStep?.('plan', n),
+    onLoading,
   });
   const plan = parseReply(planned.content);
   const focus = focusOf(plan, prompt);
@@ -900,6 +1029,7 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep, tr
         temperature: 0.6,
         signal,
         onProgress: (n) => onStep?.('order', n),
+        onLoading,
       });
       const reply = parseReply(ordered.content);
       const used = new Set();
@@ -918,7 +1048,7 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep, tr
     }
   }
   if (!chosen.length) chosen = [...pool.filter((c) => c.source === 'song'), ...shuffled(pool.filter((c) => c.source !== 'song'))];
-  chosen = topUp(chosen, pool, Math.min(length, pool.length)).slice(0, length);
+  chosen = spreadAlbums(topUp(chosen, pool, Math.min(length, pool.length)).slice(0, length), pool, Math.min(length, pool.length));
 
   return {
     title,
