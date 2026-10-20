@@ -1420,11 +1420,19 @@ with sync_playwright() as pw:
         page.locator('.missing-row', has_text='+1').locator('button').click()
         page.wait_for_timeout(300)
         check('missing: one can be taken off the list', '+1' not in page.locator('.missing-row .row-title').all_inner_texts() and len(stored()) == 3)
-        mock('/__mock/add-album?title=A%20Song%20They%20Never%20Made')
+        # A song that's in the library now (as if it had been added since).
+        real = mock('/library/sections/1/all?type=10&X-Plex-Container-Size=1&X-Plex-Token=t')['MediaContainer']['Metadata'][0]
+        js(page, f"""() => {{ const l = JSON.parse(localStorage.getItem('pw.aiMissing'));
+            l.push(Object.assign({{}}, l[0], {{ kind: 'track', artist: {json.dumps(real.get('originalTitle') or real['grandparentTitle'])}, title: {json.dumps(real['title'])} }}));
+            localStorage.setItem('pw.aiMissing', JSON.stringify(l)); }}""")
+        page.goto(APP + '#/settings/ai')
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
         page.click('.missing-check')
         page.wait_for_selector('.missing-status:has-text("off the list"), .missing-status:has-text("yet")', timeout=30000)
-        check('missing: Check again lets go of what\'s in the library now', 'A Song They Never Made' not in page.locator('.missing-row .row-title').all_inner_texts()
-              and page.locator('.missing-status').inner_text().startswith('1 is in your library now'), page.locator('.missing-status').inner_text())
+        left = page.locator('.missing-row .row-title').all_inner_texts()
+        check('missing: Check again lets go of what\'s in the library now', real['title'] not in left and len(left) == 3
+              and page.locator('.missing-status').inner_text().startswith('1 is in your library now'), f"{page.locator('.missing-status').inner_text()} {left}")
         page.click('button:has-text("Clear the list")')
         page.wait_for_selector('.sheet.open .ask-form .btn-danger')
         page.click('.sheet.open .ask-form .btn-danger')

@@ -170,8 +170,8 @@ fi
 OLLAMA_MODEL="${OLLAMA_MODEL:-}"
 valid OLLAMA_MODEL "The model" '^[A-Za-z0-9._:/@+-]*$'
 
-cores="$CORES cores"
-[ "$CORES" != 1 ] || cores="1 core"
+cpus="$CORES cores"
+[ "$CORES" != 1 ] || cpus="1 core"
 network="DHCP"
 [ "$IP" = dhcp ] || network="$IP via $GATEWAY"
 which="Default"
@@ -182,7 +182,7 @@ if [ "$advanced" = true ]; then
 fi
 printf '  %s%s settings%s\n' "$BOLD" "$which" "$RESET"
 item "Container" "$CTID, named $CT_HOSTNAME (unprivileged Debian, starts with the node)"
-item "Size" "$cores, $RAM_MB MB memory, $DISK_GB GB disk on $STORAGE"
+item "Size" "$cpus, $RAM_MB MB memory, $DISK_GB GB disk on $STORAGE"
 item "Network" "$network on $BRIDGE"
 item "Plex server" "${PLEX_SERVER_URL:-not set (it can be set later)}"
 item "AI (Ollama)" "${OLLAMA_URL:-not set}${OLLAMA_MODEL:+, $OLLAMA_MODEL}"

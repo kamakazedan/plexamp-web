@@ -44,7 +44,15 @@ jobs:
           sh -n dev/fetch-hls.sh
           python3 -m py_compile dev/mock-plex.py dev/mock-ollama.py tests/browser_test.py
       - name: Check the Proxmox scripts
+        shell: bash # with pipefail, so shellcheck's findings fail the step
+        env:
+          SHELLCHECK_VERSION: v0.11.0
         run: |
+          # A known shellcheck rather than whichever the runner has (when it
+          # can be downloaded).
+          if curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz" | tar -xJ -C "$RUNNER_TEMP"; then
+            PATH="$RUNNER_TEMP/shellcheck-$SHELLCHECK_VERSION:$PATH"
+          fi
           echo "::notice title=shellcheck::$(shellcheck --version | sed -n 2p)"
           # What shellcheck finds is also an annotation on the run's summary page.
           lint() { shellcheck -f gcc "$@" | sed -E 's/^([^:]+):([0-9]+):([0-9]+): ([a-z]+): (.*)$/::error file=\1,line=\2,col=\3::\4: \5/'; }
