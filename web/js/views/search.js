@@ -1,6 +1,6 @@
 import { app, searchScope } from '../state.js';
 import { normTrack, isLossless, audioQuality } from '../plex.js';
-import { replaceQuery } from '../router.js';
+import { replaceQuery, keepState } from '../router.js';
 import { h, art, icon, pageHeader, backHeader, sectionHeader, row, iconTile, iconButton, spinner, emptyState, debounce, fmt } from '../ui.js';
 import { artistRow, albumRow, playlistRow, trackRow, numberedList } from '../components.js';
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
@@ -37,8 +37,12 @@ const matchesAll = (kind, m, terms) => {
 };
 const SEP = '|';
 
-export async function searchView({ el, query, onDispose }) {
-  const words = String(query.words || '')
+// What's searched for is kept with the page (for Back, and a reload), not
+// in its address: searches stay out of the browser's history. (An address
+// with ?q= in it, from before 0.16.0, still opens that search.)
+export async function searchView({ el, query, saved, key, onDispose }) {
+  const kept = saved?.search || query;
+  const words = String(kept.words || '')
     .split(SEP)
     .map((w) => w.trim())
     .filter(Boolean)
@@ -49,7 +53,7 @@ export async function searchView({ el, query, onDispose }) {
     'aria-label': 'Search your library',
     autocomplete: 'off',
     enterkeyhint: 'search',
-    value: query.q || '',
+    value: kept.q || '',
   });
   // Keeps what's typed as a tag, to add more words (Enter does too).
   const keep = iconButton('plus', 'Keep this word, and add more', () => keepWord(), { size: 22, cls: 'search-keep' });
@@ -124,10 +128,12 @@ export async function searchView({ el, query, onDispose }) {
     controller?.abort();
     const text = input.value.trim();
     const terms = [...words, text].filter(Boolean);
-    const q = new URLSearchParams();
-    if (input.value) q.set('q', input.value);
-    if (words.length) q.set('words', words.join(SEP));
-    replaceQuery(q.toString() ? `/search?${q}` : '/search');
+    // (Only while this page is the one on screen: a search that ran late,
+    // after a result was tapped, mustn't change the page it opened.)
+    if (el.isConnected) {
+      keepState(input.value || words.length ? { search: { q: input.value, words: words.join(SEP) } } : null, key);
+      if (location.hash.startsWith('#/search?')) replaceQuery('/search');
+    }
     if (!terms.length) {
       found.clear();
       body.replaceChildren(browseContent((r) => (aiRow = r)));

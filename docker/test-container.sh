@@ -123,8 +123,14 @@ headers() { docker run --rm --network "$NET" "$CURL" -sS -o /dev/null -D - --max
 contains "artwork can be kept by the browser for a day" "Cache-Control: private, max-age=86400" \
     "$(headers "$W/pms/photo/:/transcode?url=/library/metadata/120/thumb/1&width=100&height=100&X-Plex-Token=t")"
 lacks "...but not other answers from Plex" "max-age" "$(headers "$W/pms/library/sections?X-Plex-Token=t")"
-contains "...which are checked every time" "Cache-Control: no-cache" "$(headers "$W/pms/library/sections?X-Plex-Token=t")"
+contains "...which the browser doesn't keep at all (their addresses have tokens in them)" "Cache-Control: no-store" "$(headers "$W/pms/library/sections?X-Plex-Token=t")"
+contains "...nor the service's answers" "Cache-Control: no-store" "$(headers -H 'X-Plex-Token: t' "$W/api/together/me")"
+contains "the app's own files are checked every time" "Cache-Control: no-cache" "$(headers "$W/")"
+contains "signing out asks the browser to forget what it kept from here" 'Clear-Site-Data: "cache"' "$(headers "$W/signed-out")"
+lacks "...and only then" "Clear-Site-Data" "$(headers "$W/")"
+expect "nothing whose name starts with a dot is served" 404 "$(c "$W/.env")"
 expect "WebSocket upgrade through /pms" 101 "$(c -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' --max-time 3 "$W/pms/:/websockets/notifications?X-Plex-Token=t")"
+lacks "...but no other protocol is switched to" "101" "$(c -H 'Connection: Upgrade' -H 'Upgrade: h2c' --max-time 3 "$W/pms/identity?X-Plex-Token=t")"
 c "http://pw-plex:32400/__mock/config?ping=1" >/dev/null
 contains "event stream through /pms arrives unbuffered" 'event: ping' "$(cb -N --max-time 4 "$W/pms/:/eventsource/notifications?X-Plex-Token=t")"
 c "http://pw-plex:32400/__mock/config?ping=10" >/dev/null
@@ -142,6 +148,8 @@ expect "AI: the AI server's version isn't passed on" 404 "$(c -H 'X-Plex-Token: 
 contains "AI: only the shared model is used, whatever a request asks for" '"model": "llama3.1:8b"' "$(cb -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"model":"qwen2.5:7b","stream":false,"messages":[{"role":"user","content":"Reply with {\"ok\": true} and nothing else."}],"format":"json"}' $W/ollama/api/chat)"
 contains "AI: someone without access is told why" 'can use its Plex server' "$(cb -H 'X-Plex-Token: t3' $W/ollama/api/status)"
 expect "AI: the service's own AI path can't be called directly" 404 "$(c -H 'X-Plex-Token: t' $W/api/ai/status)"
+expect "AI: ...nor with a backslash in its path" 404 "$(c --path-as-is -H 'X-Plex-Token: t' "$W/api/\\ai/status")"
+expect "AI: ...nor saying it came the AI proxy's way" 404 "$(c -H 'X-Plex-Token: t' -H 'X-PW-Route: ai' "$W/api/together/../ai/status")"
 CHAT='{"model":"llama3.1:8b","stream":true,"messages":[{"role":"user","content":"Reply with {\"ok\": true} and nothing else."}],"format":"json"}'
 contains "AI: chat streams through the proxy (POST + sign-in check)" '"done": true' "$(cb -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d "$CHAT" $W/ollama/api/chat)"
 expect "AI: browser Origin isn't passed to Ollama" 200 "$(c -H 'X-Plex-Token: t' -H 'Origin: http://evil.example' $W/ollama/api/tags)"
@@ -152,6 +160,19 @@ expect "AI: other paths blocked" 404 "$(c -H 'X-Plex-Token: t' $W/ollama/)"
 codes="$(docker run --rm --network "$NET" --entrypoint sh "$CURL" -c \
     "for i in \$(seq 1 30); do curl -s -o /dev/null -w '%{http_code} ' -H 'X-Plex-Token: ratelimit' $W/ollama/api/status; done" || true)"
 contains "AI: rate limited per user" "429" "$codes"
+# What Ollama says when a chat fails (a crashed model, say) stays in the log:
+# it can say where the AI server is, and what's on it.
+c "http://pw-ollama:11434/__mock/config?fail=1" >/dev/null
+failed_chat="$(cb -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d "$CHAT" $W/ollama/api/chat)"
+c "http://pw-ollama:11434/__mock/config?fail=0" >/dev/null
+contains "AI: a chat that fails says so" "The AI server couldn’t answer" "$failed_chat"
+lacks "AI: ...without what Ollama said about the server" "llama runner" "$failed_chat"
+contains "AI: ...which is in the log" "llama runner process has terminated" "$(docker logs pw-web 2>&1)"
+c "http://pw-ollama:11434/__mock/config?fail=2" >/dev/null
+failed_chat="$(cb -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d "$CHAT" $W/ollama/api/chat)"
+c "http://pw-ollama:11434/__mock/config?fail=0" >/dev/null
+contains "AI: a chat that fails partway through says so too" "couldn’t finish the answer" "$failed_chat"
+lacks "AI: ...without what Ollama said" "llama runner" "$failed_chat"
 
 # MusicBrainz checks (the mock Plex server has a small MusicBrainz): for
 # people who can use the server, as the shared model is.
@@ -167,6 +188,14 @@ contains "MusicBrainz: ...and where to find it" ' ( https://github.com/kamakazed
 
 contains "service: health" '"together":true,"cast":true,"devices":true,"sharing":true' "$(cb $W/api/health)"
 expect "service: internal checks can't be called from outside" 404 "$(c -H 'X-Plex-Token: t' $W/api/internal/ai-auth)"
+expect "service: ...nor with a backslash in the path (read as / by the service)" 404 "$(c --path-as-is -H 'X-Plex-Token: t' "$W/api/\\internal/pms-auth")"
+expect "service: ...nor with dots in it" 404 "$(c --path-as-is -H 'X-Plex-Token: t' "$W/api/together/../internal/pms-auth")"
+# With PLEX_SERVER_URL set, the service is for people who can use that
+# server (Alex can't, though he has a server of his own).
+expect "Play Together: only on a server you can use" 403 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"server":{"id":"another-server","name":"x","section":"1"},"queue":[]}' $W/api/together/sessions)"
+expect "Play Together: not for someone who can't use this player's server, even on their own" 403 "$(c -H 'X-Plex-Token: t3' -H 'Content-Type: application/json' -X POST -d '{"server":{"id":"mock-server-2","name":"x","section":"1"},"queue":[]}' $W/api/together/sessions)"
+expect "Your devices: not for someone who can't use this player's server, even on their own" 403 "$(c -H 'X-Plex-Token: t3' "$W/api/devices?device=chk-device-9&name=Check&server=mock-server-2&wait=0")"
+expect "shares: not for someone who can't use this player's server, even on their own" 403 "$(c -H 'X-Plex-Token: t3' -H 'Content-Type: application/json' -X POST -d '{"server":"mock-server-2","playlist":"1","title":"x","tracks":["1"]}' $W/api/shares)"
 expect "Play Together: needs a sign-in" 401 "$(c $W/api/together/me)"
 expect "Play Together: refuses a bad token" 401 "$(c -H 'X-Plex-Token: bad' $W/api/together/me)"
 contains "Play Together: knows who you are" '"title":"Dan"' "$(cb -H 'X-Plex-Token: t' $W/api/together/me)"
@@ -230,6 +259,14 @@ root 600
 root 755" "$(docker exec pw-web stat -c "%U %a" /run/plexamp-web /run/plexamp-web/service.json /run/plexamp-web/socket)"
 lacks "shares: ...without anyone's sign-in" "token" "$(printf '%s' "$STORE" | tr '[:upper:]' '[:lower:]')"
 contains "shares: the log says /data isn't a volume (they'd go with the container)" "which isn't a volume" "$(docker logs pw-web 2>&1)"
+# A sign-in the service hasn't seen is checked with plex.tv: a few a minute
+# from each address, so made-up tokens can't keep plex.tv busy. (Last here:
+# the restart below starts the counts again.)
+codes="$(docker run --rm --network "$NET" --entrypoint sh "$CURL" -c \
+    "curl -s -o /dev/null -H 'X-Plex-Token: t' $W/api/together/me; for i in \$(seq 1 34); do curl -s -o /dev/null -w '%{http_code} ' -H \"X-Plex-Token: made-up-\$i-token\" $W/api/together/me; done; curl -s -o /dev/null -w 'known:%{http_code}' -H 'X-Plex-Token: t' $W/api/together/me" || true)"
+contains "sign-ins: made-up tokens are refused" "401" "$codes"
+contains "sign-ins: ...and only so many are checked a minute from one address" "429" "$codes"
+contains "sign-ins: ...while one seen before still works" "known:200" "$codes"
 docker restart pw-web >/dev/null
 wait_service pw-web
 contains "shares: still there after a restart" '"version":2,"count":3' "$(cb -H 'X-Plex-Token: t' "$W/api/shares?server=mock-server-1")"
@@ -243,7 +280,9 @@ docker run -d --name pw-web2 --network "$NET" -v "$DATA_VOLUME:/data" "$IMAGE" >
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
 lacks "defaults: with a volume at /data, nothing is said about it" "which isn't a volume" "$(docker logs pw-web2 2>&1)"
-expect "defaults: Play Together, Play on, your devices and shared playlists, nothing else" "window.PW_CONFIG = { together: true, cast: true, devices: true, sharing: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together, your devices and shared playlists, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+contains "defaults: Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner)" "Play on with Plex players needs PLEX_SERVER_URL" "$(docker logs pw-web2 2>&1)"
+expect "defaults: ...so the service has no players for anyone" 404 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/cast/players)"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
@@ -312,7 +351,7 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org)" 'window.PW_CONFIG = { cast: true, musicbrainz: "public", devices: true, sharing: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
@@ -324,6 +363,7 @@ expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too) and PLAYLIST_
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
 expect "PLAYLIST_SHARING=false: no shared playlists" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/shares?server=mock-server-1')"
+expect "without PLEX_SERVER_URL, anyone signed in to Plex can use the service, on a server of their own" 200 "$(c -H 'X-Plex-Token: t3' "http://pw-web8/api/devices?device=chk-device-9&name=Check&server=mock-server-2&wait=0")"
 
 # ---------- 7c. A Plex server reached over HTTPS at its address ----------
 # A Plex server's certificate is for its plex.direct name, so at an address
@@ -360,8 +400,13 @@ LOG="$(docker logs pw-web9 2>&1)"
 contains "HTTPS server: the service knows which server it is" "Plex server at PLEX_SERVER_URL is mock-server-1" "$LOG"
 contains "HTTPS server: the debug check reaches it" "check: Plex server (PLEX_SERVER_URL) answered with HTTP 200" "$LOG"
 contains "debug: the plex.tv check is answered" "check: plex.tv (for Play Together and sign-in checks) answered with HTTP 200" "$LOG"
-expect "self-signed HTTPS server: the proxy still reaches it" 200 "$(c "http://pw-web10/pms/identity?X-Plex-Token=t")"
-contains "self-signed HTTPS server: the log says why the service can't use it" "its certificate is self-signed" "$(docker logs pw-web10 2>&1)"
+# A server the service can't check (a self-signed certificate) might let
+# this container in without signing in, so /pms/ lets nobody through (where
+# it used to let everybody).
+expect "self-signed HTTPS server: refused at /pms/, as the service can't check it" 500 "$(c "http://pw-web10/pms/identity?X-Plex-Token=t")"
+contains "self-signed HTTPS server: the log says why" "its certificate is self-signed" "$(docker logs pw-web10 2>&1)"
+contains "at an https:// name, nginx checks the Plex server's certificate too" "proxy_ssl_verify on" "$(docker run --rm -e PLEX_SERVER_URL=https://plex.example.com:32400 --entrypoint sh "$IMAGE" -c '/docker-entrypoint.d/40-plexamp-web.sh >/dev/null 2>&1; cat /etc/nginx/conf.d/pms-proxy.inc')"
+lacks "...where at an address it can't (the service checks it's Plex's own)" "proxy_ssl_verify on" "$(docker exec pw-web9 cat /etc/nginx/conf.d/pms-proxy.inc)"
 
 # ---------- 8. Bad settings stop the container with a clear message ----------
 bad() { # name expected-message docker-run-args...
@@ -412,6 +457,9 @@ off "won't take over a folder with other files in it" "has other files in it (no
 expect "...and leaves it as it was" "root" "$(docker run --rm -v "$LINK_VOLUME:/data" --entrypoint stat "$IMAGE" -c %U /data/notes.txt)"
 bad "rejects an unknown OLLAMA_AUTH" "OLLAMA_AUTH must be plex or off" -e OLLAMA_URL=http://x:11434 -e OLLAMA_AUTH=sometimes
 bad "rejects an address with odd characters" "invalid path" -e 'OLLAMA_URL=http://x:11434/;evil'
+bad "rejects an address with a line break in it" "can't have spaces or line breaks" -e "PLEX_SERVER_URL=$(printf 'http://plex.box:32400\n;evil')"
+bad "rejects a model name with a line break in it (it goes into config.js)" "OLLAMA_MODEL has unexpected characters" -e OLLAMA_URL=http://x:11434 -e "OLLAMA_MODEL=$(printf 'llama3.1\n"};alert(1);//')"
+bad "rejects an NGINX_LOG_PORT that isn't a port" "NGINX_LOG_PORT must be a port number" -e 'NGINX_LOG_PORT=5140,"x":1'
 bad "rejects a MusicBrainz address without http://" "MUSICBRAINZ_URL must start with http://" -e MUSICBRAINZ_URL=musicbrainz.org
 bad "rejects a MusicBrainz address with a password in it" "MUSICBRAINZ_URL has an invalid host or port" -e 'MUSICBRAINZ_URL=http://me:secret@mb.box:5000'
 docker rm -f pw-bad >/dev/null 2>&1 || true

@@ -1,7 +1,9 @@
 // Songs and artists that AI playlists suggested but the library doesn't
 // have (Settings › AI › Missing tracks), so whoever looks after the server
 // can go and find them. Kept on this device (until it's cleared, or you sign
-// out), and exported as a spreadsheet (CSV) or plain text.
+// out), each with the Plex server and library it's missing from: the list
+// shows the server in use's (different servers have different music). It's
+// exported as a spreadsheet (CSV) or plain text.
 //
 // AI models make songs up, and take albums for songs. Where the player has
 // a MusicBrainz to ask (MUSICBRAINZ_URL) and Settings › AI › Check
@@ -18,7 +20,8 @@ const KEY = 'aiMissing';
 const LIMIT = 500;
 
 const keyOf = (m) => `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
-const sameLibrary = (m, src = app.source) => !!src && m.server === (src.serverId || src.uri) && String(m.section) === String(src.sectionKey);
+const sameServer = (m, src = app.source) => !!src && m.server === (src.serverId || src.uri);
+const sameLibrary = (m, src = app.source) => sameServer(m, src) && String(m.section) === String(src.sectionKey);
 const libraryName = (src = app.source) => (src ? `${src.sectionTitle} (${src.serverName})` : '');
 
 // (0.12.0 kept what MusicBrainz didn't know, and albums, hidden: they go.)
@@ -29,7 +32,7 @@ function load() {
 
 function save(list) {
   store.set(KEY, list);
-  emit('missing', list.length);
+  emit('missing', missingCount());
 }
 
 {
@@ -37,13 +40,16 @@ function save(list) {
   if (Array.isArray(kept) && kept.some((m) => m?.mb === 'unknown' || m?.mb === 'album')) store.set(KEY, load());
 }
 
-// What's kept, artists first, then by artist and title.
+// What's kept for the server in use, artists first, then by artist and
+// title.
 export function missingList() {
   const by = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
-  return load().sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
+  return load()
+    .filter((m) => sameServer(m))
+    .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
 }
 
-export const missingCount = () => load().length;
+export const missingCount = () => load().filter((m) => sameServer(m)).length;
 
 // ---------- MusicBrainz ----------
 
@@ -145,19 +151,22 @@ export function forgetMissing(entry) {
   save(load().filter((m) => !(keyOf(m) === k && m.server === entry.server && m.section === entry.section)));
 }
 
+// The server in use's list, cleared (other servers' stay).
 export function clearMissing() {
-  save([]);
+  save(load().filter((m) => !sameServer(m)));
 }
 
-// Looks for each one in this library again (after adding music), and lets
-// go of what's there now. Resolves to how many were found.
+// Looks for each of the server in use's again, in the library it was
+// missing from (after adding music), and lets go of what's there now.
+// Resolves to how many were found.
 export async function checkMissingAgain({ signal, onProgress } = {}) {
-  const todo = load().filter((m) => sameLibrary(m));
+  const todo = load().filter((m) => sameServer(m));
   const found = new Set();
   let n = 0;
   for (const m of todo) {
     if (signal?.aborted) break;
-    const there = m.kind === 'artist' ? await artistInLibrary(m.artist, signal) : await songInLibrary({ artist: m.artist, title: m.title }, signal);
+    const section = m.section || app.source.sectionKey;
+    const there = m.kind === 'artist' ? await artistInLibrary(m.artist, signal, section) : await songInLibrary({ artist: m.artist, title: m.title }, signal, { section });
     if (there) found.add(`${keyOf(m)}|${m.server}|${m.section}`);
     onProgress?.(++n, todo.length);
   }
@@ -176,7 +185,7 @@ const idOf = (m) => `${keyOf(m)}|${m.server}|${m.section}`;
 // be asked, what it said before that still counts, and it throws with
 // err.result set.
 export async function checkMissingOnMusicBrainz({ signal, onProgress } = {}) {
-  const todo = load().filter((m) => m.mb !== 'real');
+  const todo = load().filter((m) => sameServer(m) && m.mb !== 'real');
   let verdicts;
   let failed = null;
   try {
@@ -237,9 +246,11 @@ function cell(v) {
 // as UTF-8 ("—", "é").
 export const toCsv = (head, rows) => `\ufeff${[head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`;
 
+// What's shared with whoever finds the music: what's missing, not what you
+// asked the AI for (that's only shown here).
 export function missingCsv(list = missingList()) {
-  const head = ['Artist', 'Title', 'Missing', 'Times suggested', 'Last suggested', 'Library', 'Asked for'];
-  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', m.times || 1, day(m.last), m.library, m.prompt]));
+  const head = ['Artist', 'Title', 'Missing', 'Times suggested', 'Last suggested', 'Library'];
+  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', m.times || 1, day(m.last), m.library]));
 }
 
 export function missingText(list = missingList()) {

@@ -19,14 +19,16 @@ import {
 import { aiSettings } from '../ai.js';
 
 export function missingTracksView({ el, onDispose }) {
+  const server = app.source?.serverName || 'this server';
   el.append(
     backHeader('Missing tracks', { fallback: '/settings/ai' }),
     h(
       'p.lede',
       null,
-      mbOn()
-        ? 'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
-        : 'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI models sometimes suggest songs that don’t exist, so check before you go looking.',
+      `Songs and artists that AI playlists suggested but ${server} doesn’t have, kept on this device so you can go and find them (each server has a list of its own). ` +
+        (mbOn()
+          ? 'AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
+          : 'AI models sometimes suggest songs that don’t exist, so check before you go looking.'),
     ),
   );
   const actions = h('div.pad.button-row.missing-actions');
@@ -53,7 +55,8 @@ export function missingTracksView({ el, onDispose }) {
       ...(list.length
         ? [
             button('arrowDown', 'Download (CSV)', () => {
-              download(missingCsv(list), `missing-tracks-${fileDate()}.csv`, 'text/csv;charset=utf-8');
+              const name = server.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'server';
+              download(missingCsv(list), `missing-tracks-${name}-${fileDate()}.csv`, 'text/csv;charset=utf-8');
               toast('Downloaded, to open in a spreadsheet');
             }, '.missing-csv'),
             button('stack', 'Copy the list', async () => toast((await copyText(missingText(list))) ? 'Copied: artist — title, one to a line' : 'Couldn’t copy here. Download it instead.'), '.missing-copy'),
@@ -125,7 +128,7 @@ export function missingTracksView({ el, onDispose }) {
             {
               type: 'button',
               onclick: async () => {
-                const sure = await confirmAction({ title: 'Clear the list?', message: 'Everything on it is taken off. Nothing changes in your library.', confirm: 'Clear the list' });
+                const sure = await confirmAction({ title: 'Clear the list?', message: `Everything on ${server}’s list is taken off (other servers’ lists stay). Nothing changes in your library.`, confirm: 'Clear the list' });
                 if (!sure) return;
                 clearMissing();
                 render();
@@ -152,13 +155,13 @@ export function missingTracksView({ el, onDispose }) {
     checking = new AbortController();
     actions.querySelector('.missing-check')?.setAttribute('disabled', '');
     status.classList.remove('warn');
-    status.textContent = `Looking in ${app.source?.sectionTitle || 'your library'}…`;
+    status.textContent = `Looking on ${server}…`;
     try {
       const found = await checkMissingAgain({
         signal: checking.signal,
-        onProgress: (n, of) => (status.textContent = `Looking in ${app.source?.sectionTitle || 'your library'}… ${n} of ${of}`),
+        onProgress: (n, of) => (status.textContent = `Looking on ${server}… ${n} of ${of}`),
       });
-      status.textContent = found ? `${fmt.count(found, 'is', 'are')} in your library now, so ${found === 1 ? 'it’s' : 'they’re'} off the list.` : 'None of them are in your library yet.';
+      status.textContent = found ? `${fmt.count(found, 'is', 'are')} on ${server} now, so ${found === 1 ? 'it’s' : 'they’re'} off the list.` : `None of them are on ${server} yet.`;
       render();
     } catch (err) {
       status.textContent = describeError(err);

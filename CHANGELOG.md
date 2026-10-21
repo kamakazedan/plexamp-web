@@ -3,6 +3,91 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.16.0 - 2026-10-21
+
+A security and privacy review: what it found, and what changed, is in
+[SECURITY.md](SECURITY.md#0160).
+
+### Changed
+
+- **Routes are only tried when you test the connection.** Settings ›
+  Connection shows them after **Test connection**, rather than trying each
+  one whenever the page opens. Each is tried without your token now, and
+  only counts if it's your server that answers. Over the internet only a
+  server's `https://` addresses are used (a plain `http://` one would carry
+  your sign-in unencrypted), as in Plex's own apps: a server with secure
+  connections turned off is reached through Plex's relay instead.
+- **Missing tracks are kept for each Plex server.** Settings › AI ›
+  Missing tracks shows the list for the server in use, Check again looks in
+  that server's library, and clearing it leaves other servers' lists. The
+  spreadsheet, copy and share leave out what you asked the AI for.
+- **Signing out clears everything that's yours on the device**: the
+  queue and lists as before, and now anything for the AI (its address,
+  model and your notes), the player's name and Home layouts. How the app
+  looks and plays stays. The page loads afresh, other tabs signed in sign
+  out too, and the browser is asked to forget the artwork it kept from the
+  player (over HTTPS).
+- **Searches aren't in the page's address**, so they stay out of the
+  browser's history. Back and a reload still bring them back.
+- **Play on with Plex players needs `PLEX_SERVER_URL`**, and is for the
+  server's owner: without it, anyone signed in to Plex could have the
+  container send requests around its network. AirPlay and Cast aren't
+  affected, and are given the server's temporary token for the server in
+  use only (nothing is sent until there is one).
+- **With `PLEX_SERVER_URL` set, the container's service is for the people
+  who can use that server**: Play Together, your devices and shared
+  playlists too (on that server, or another of theirs), as the shared AI
+  model and MusicBrainz checks already were.
+- **A Plex server the container can't check** (a self-signed certificate,
+  say) lets nobody through `/pms/`, where it let everybody through, and at
+  an `https://` name nginx checks its certificate too.
+- **The shared AI model's errors are plain**: what Ollama says (which can
+  name the AI server's address and what's on it), when it turns a chat down
+  or stops partway through one, goes to the container's log. The container
+  also decides how much memory a chat takes (its context, and that the
+  model stays loaded 15 minutes), and asks Ollama again without `think`,
+  or with plain JSON, itself.
+- **The documentation is in [docs/](docs/)**: a short README with setting
+  it up first, then setup, configuration, features, AI, troubleshooting and
+  development guides, and [SECURITY.md](SECURITY.md). `docker-compose.yml`
+  has its notes in one header above the settings, and sets
+  `no-new-privileges`.
+- **The image is built on nginx 1.30**, its stable branch (1.27 no longer
+  gets security fixes), with Alpine's security fixes since.
+- **Proxmox VE**: the one-line install starts from the `stable` branch,
+  falls back to `main` only while there's no `stable` (never because a
+  download failed), and runs nothing unless all of it was downloaded, nor
+  does the installer it fetches, then or in `update-plexamp-web`. The
+  service can't gain capabilities.
+
+### Fixed
+
+- The service read a backslash in a path as `/`, where nginx doesn't, so
+  the paths nginx keeps from browsers (its sign-in checks for `/pms/`, the
+  AI model's own) could be reached directly. Only plain paths are
+  answered, and those only when nginx sent them.
+- Made-up tokens could each make the container ask plex.tv: new sign-ins
+  are checked a few a minute from each address, each token once however
+  many requests ask, and plex.tv's answers are capped, without following
+  redirects. Many addresses at once no longer reset everyone's rate
+  limits.
+- Debug mode's redaction could be made to take a very long time, and
+  missed tokens inside other addresses and in headers; browsers' lines are
+  limited per minute.
+- A setting with a line break in it passed the start-up checks (only its
+  first line was checked), so it could add to nginx's settings or the
+  app's `config.js`.
+- Converted streams' session ids, which are all their files are fetched by,
+  could be worked out from the device's id. They're random.
+- The browser could keep answers from Plex and the service, whose addresses
+  have tokens in them (artwork aside).
+- A shared playlist being brought up to date when you signed out could save
+  to the device, or say it changed, after signing out.
+- Plex can't set cookies for the player's address, only WebSocket upgrades
+  reach Plex, and nothing whose name starts with a dot is served.
+- CI: each job has only the permissions it needs, actions are pinned to
+  commits, and the shellcheck it downloads is checked.
+
 ## 0.15.0 - 2026-10-21
 
 ### Added
@@ -392,7 +477,7 @@ you're running is shown in **Settings › About**.
   and another device carries on from there. On by default: Settings ›
   Playback › Share playback with your devices turns it off for a device,
   which then plays on its own, so two devices can play at once. See
-  [Your devices](README.md#your-devices) in the README.
+  [Your devices](docs/features.md#your-devices).
 
 ### Fixed
 

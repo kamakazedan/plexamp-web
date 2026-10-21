@@ -1,0 +1,66 @@
+# AI playlists and the AI DJ
+
+- [What they do](#what-they-do)
+- [Setting up a shared model](#setting-up-a-shared-model)
+- [Your own Ollama, on one device](#your-own-ollama-on-one-device)
+- [Missing tracks](#missing-tracks)
+- [Checking suggestions on MusicBrainz](#checking-suggestions-on-musicbrainz)
+
+Both use a model on your own hardware through [Ollama](https://ollama.com); nothing is sent to a cloud service.
+
+## What they do
+
+**AI playlists**: describe what you want to hear, and the model builds a playlist from your library, keeping to what you asked for ("best of The Prodigy" is just The Prodigy; "music like The Prodigy" is mostly them, with similar artists). Play it, add it to the queue, or save it to Plex as a playlist (or, for the server's owner, a collection). A playlist carries on being made while you use the rest of the app.
+
+Playlists are built in two passes, so they only contain music you have: the model picks genres, styles, moods, artists and songs from the tags your library uses, the app finds matching tracks on your Plex server, and the model chooses and orders tracks from those. Models sometimes make songs up, or give an album's title as if it were a song: a suggestion that turns out to be an album isn't used, and no more than an eighth of a playlist comes from any one album where the library allows (compilations aside).
+
+**The AI DJ** (one of the [Guest DJs](features.md#guest-dj)) picks each next track from your library and says why: never by the artist playing or the last few, their best-known songs where Plex has them, from artists who sound like what's playing, who Plex says are similar, or who are in the genre you started with.
+
+**Notes for the AI**, in **Settings › AI**, are added to every request ("I love 90s trip-hop; skip live recordings").
+
+**Waiting for the model.** After Ollama starts, a model can take minutes to load into memory. The app waits up to 5 minutes for it to start answering (**Settings › AI › Wait for the model** goes from 2 to 30 minutes), and says while it's loading. The model carries on loading if the wait runs out, so trying again a little later is quick.
+
+An instruction-tuned model of about 7 to 9 billion parameters, such as `llama3.1:8b` or `qwen2.5:7b`, is a good place to start.
+
+## Setting up a shared model
+
+1. Install Ollama by its own guide: [ollama.com/download](https://ollama.com/download), or [its Docker image](https://docs.ollama.com/docker).
+2. Download a model on it: `ollama pull llama3.1:8b` (in Docker: `docker exec -it ollama ollama pull llama3.1:8b`).
+3. Make sure the player's container can reach it. Ollama only listens on its own machine to begin with: set `OLLAMA_HOST=0.0.0.0` where it runs (see [Ollama's FAQ](https://docs.ollama.com/faq)). On the same machine as Docker, the player can use `http://host.docker.internal:11434` (the bundled `docker-compose.yml` maps that name on Linux); in the same Compose file, the service's name (`http://ollama:11434`).
+4. Set `OLLAMA_URL` (and `OLLAMA_MODEL`) on the player's container, and restart it.
+
+**Settings › AI** in the app then shows the model's name, whether it's ready (and in memory, or loading), and a test button.
+
+### Who can use the shared model
+
+Browsers only ever talk to the player's own address, so this works from anywhere the player does, and Ollama needs no other setup. Requests go through the container's service, which checks each one:
+
+- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app, or see anything else about the AI server. Each device can still turn AI features off.
+- **People with access to your Plex server** (`OLLAMA_AUTH=plex`, the default). Every request is checked with plex.tv. With `PLEX_SERVER_URL` set, Plex accounts that can use that server get through: you, and the friends you share it with. Without it, any signed-in Plex account is accepted, so set it if the player can be reached from the internet. Anyone refused is told why in the app.
+- **Only chats** are passed on, with just the fields the app uses, each checked. The AI server's other models, its version and its settings can't be reached through the player, and nothing can be downloaded, changed or deleted.
+- **Rate-limited** per person and per address, and the browser's Plex token, cookies and origin aren't passed to Ollama. The container decides how much memory the model takes (how much context, and that it stays loaded for 15 minutes), not the request, and what Ollama says when something goes wrong goes to the container's log rather than the app, as it can say where the AI server is and what's on it. Closing the page or pressing **Stop** stops the model too.
+
+## Your own Ollama, on one device
+
+Without a shared model, each device can use its own: in **Settings › AI**, choose **My own Ollama server** and enter its address, such as `http://localhost:11434` for Ollama on the same computer. The browser connects to it directly, so Ollama has to allow the player's address: set `OLLAMA_ORIGINS` to it where Ollama runs (the settings page shows the exact value; see [Ollama's FAQ](https://docs.ollama.com/faq)), and restart Ollama.
+
+If the player is served over HTTPS, browsers block plain `http://` addresses other than `localhost`: use an HTTPS address, or the shared setup.
+
+## Missing tracks
+
+Turn on **Settings › AI › Show missing tracks** (it's off to begin with), and under each AI playlist is a list of the songs and artists the model suggested that your library doesn't have, or a line saying they're all there. They're collected in **Settings › AI › Missing tracks**, with how often each was suggested and for what. Download them as a spreadsheet (CSV), copy or share them, so whoever looks after the server can go and find them: that has each one's artist and title, its library, and how often and when it was suggested, but not what you asked for.
+
+- Each Plex server has a list of its own: the page shows the one for the server in use.
+- **Check again**, after adding music, takes off what's in the library now.
+- **Check on MusicBrainz**, with MusicBrainz set up (see below), looks up those listed before they were checked, and takes off what MusicBrainz doesn't know (most likely made up) and albums taken for songs, with Undo. Those it knows are marked **On MusicBrainz**.
+
+The list is kept in the browser, on that device, until you clear it or sign out.
+
+## Checking suggestions on MusicBrainz
+
+[MusicBrainz](https://musicbrainz.org), the open music encyclopedia, knows which songs and artists are real. Set `MUSICBRAINZ_URL` on the container, and an AI playlist (with Show missing tracks on) looks up what it suggested that your library doesn't have there before listing it: what MusicBrainz doesn't know, and albums taken for songs, are left out, and **Not in your library**, under the playlist, says which and why. Each device can turn this off: **Settings › AI › Check suggestions on MusicBrainz**.
+
+- **musicbrainz.org** (`MUSICBRAINZ_URL=https://musicbrainz.org`; `docker-compose.yml` has it, commented out): no account or API key is needed. The container asks about one name a second at most, MusicBrainz's rule, so checking a playlist's suggestions takes a few seconds, sometimes half a minute. Answers are kept for a week.
+- **Your own MusicBrainz**, so nothing leaves your network: a mirror made with [MusicBrainz Docker](https://github.com/metabrainz/musicbrainz-docker), at its address (port 5000 by default), such as `MUSICBRAINZ_URL=http://192.168.1.30:5000`. It needs its search indexes, which by MusicBrainz Docker's own guide take about 16 GB of memory and 350 GB of disk.
+
+Only the names go (artists, and songs' titles with their artist), from the container rather than your browser: no token, nothing about you or the rest of your library (see [SECURITY.md](../SECURITY.md#musicbrainz-checks)).

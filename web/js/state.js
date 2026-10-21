@@ -122,16 +122,49 @@ export function setSource(source) {
   emit('source', { source, serverChanged: !prev || !source || prev.serverId !== source.serverId });
 }
 
+// Signing out clears everything kept for you on this device: the sign-in,
+// the queue, lists, and the settings that are yours rather than the
+// device's (anything for the AI, the name this player goes by, Home
+// layouts). How the app looks and plays stays. Then the page loads afresh,
+// so nothing of yours is left in it either.
 export function signOut() {
-  // Settings stay with the device, except secrets: an AI API key belongs to
-  // whoever entered it.
-  if (app.settings.ai?.apiKey) saveSettings({ ai: { ...app.settings.ai, apiKey: '' } });
+  const { ai, playerName } = DEFAULT_SETTINGS;
+  saveSettings({ ai: { ...ai, mode: app.settings.ai?.mode === 'off' ? 'off' : ai.mode }, playerName, home: {} });
   store.clear(['clientId', 'settings']);
+  // Nothing more is kept from here on (what's playing, say, as the page goes).
+  store.freeze();
   app.auth = null;
   app.source = null;
   app.server = null;
   emit('signout');
+  // Pictures kept by the browser have the token in their address: the
+  // container asks it to forget what it kept from here (over HTTPS; best
+  // effort). A moment for that, and for leaving Play Together and the rest.
+  // (Sent the way a page's own requests are: browsers ignore the request
+  // for one that couldn't carry cookies, though this player sets none.)
+  const forget = fetch('signed-out', { cache: 'no-store', credentials: 'same-origin' }).catch(() => {});
+  Promise.race([forget, new Promise((r) => setTimeout(r, 1500))]).then(reloadClean);
 }
+
+// The page afresh, without this tab's history of pages (and searches) either.
+function reloadClean() {
+  try {
+    sessionStorage.clear();
+  } catch {
+    /* storage unavailable */
+  }
+  location.reload();
+}
+
+// Signed out (or in as someone else) in another tab: this one follows, so
+// nothing of the last account carries on here, and nothing it was doing is
+// kept as it goes.
+window.addEventListener('storage', (e) => {
+  if (e.key !== null && e.key !== 'pw.auth') return;
+  if ((store.get('auth')?.token || null) === (app.auth?.token || null)) return;
+  store.freeze();
+  reloadClean();
+});
 
 // The container can proxy one server at /pms (see docker/40-plexamp-web.sh),
 // which sidesteps mixed-content and DNS-rebinding problems on home networks.

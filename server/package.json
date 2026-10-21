@@ -2,5 +2,5 @@
   "name": "plexamp-web-service",
   "private": true,
   "type": "module",
-  "description": "The small service behind /api/ in the plexamp-web container (Play Together, sign-in checks, debug log). No dependencies."
+  "description": "The small service behind /api/ in the plexamp-web container: Play Together, Play on, your devices, shared playlists, the shared AI model, MusicBrainz checks, sign-in checks and the debug log. No dependencies."
 }

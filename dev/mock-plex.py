@@ -1425,6 +1425,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/v2/resources':
             base = f'http://{self.headers.get("Host") or f"127.0.0.1:{PORT}"}'
             res = [server_resource(token, base)] if token in SERVER_TOKENS else []
+            if token == 't3':
+                # Alex can't use Dan's server, but has one of his own, elsewhere.
+                res.append({'name': "Alex's Server", 'product': 'Plex Media Server', 'provides': 'server', 'clientIdentifier': 'mock-server-2',
+                            'owned': True, 'accessToken': 't3', 'connections': [{'protocol': 'http', 'address': '192.0.2.10', 'port': 32400,
+                                                                                 'uri': 'http://192.0.2.10:32400', 'local': False, 'relay': False}]})
             if token == 't':
                 res.append({'name': PLAYER['name'], 'product': 'Plexamp', 'platform': 'Linux', 'device': 'Raspberry Pi',
                             'provides': 'client,player,pubsub-player', 'clientIdentifier': PLAYER['id'], 'owned': True, 'presence': True,

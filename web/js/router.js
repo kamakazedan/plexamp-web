@@ -240,7 +240,27 @@ export function navigate(path, { replace = false } = {}) {
   render(replace ? replaceEntry(tab, hash) : pushEntry(tab, hash), false);
 }
 
-// Update the URL (e.g. a search query) without adding a history entry.
+// What a page wants back when it's shown again (what's being searched for,
+// say), kept with its place in this tab's history rather than in its
+// address: it stays out of the address bar and the browser's history list.
+// `key`: the page's own (its view's ctx.key); nothing's kept for a page
+// that isn't the one on screen any more.
+export function keepState(data, key) {
+  if (key !== currentKey) return;
+  const top = topOf(activeTab);
+  if (top && top.k === currentKey) {
+    top.saved = data;
+    save();
+  }
+  if (history.state?.k === currentKey) setHistory('replaceState', { ...history.state, saved: data }, location.hash);
+}
+
+function savedFor(k) {
+  for (const s of Object.values(stacks)) for (const e of s.entries) if (e.k === k) return e.saved || null;
+  return history.state?.k === k ? history.state.saved || null : null;
+}
+
+// Update the URL without adding a history entry.
 export function replaceQuery(path) {
   setHistory('replaceState', { ...(history.state || {}) }, hashOf(path));
   currentHash = location.hash;
@@ -545,6 +565,7 @@ async function render(k, useCache) {
     await m.view({
       params: m.params,
       query,
+      saved: savedFor(k),
       path,
       el,
       key: k,

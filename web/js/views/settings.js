@@ -85,7 +85,7 @@ function accountView({ el }) {
           onclick: () =>
             sheet({
               title: 'Sign out?',
-              subtitle: 'Your queue and settings on this device are cleared.',
+              subtitle: 'Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layouts. How the app looks and plays stays.',
               actions: [
                 {
                   icon: 'signOut',
@@ -463,6 +463,7 @@ function routeResult(r) {
   if (r.ok) return `${fmt.number(r.ms)} ms`;
   return {
     http: 'Can’t be used here: it’s a plain http address, and this page is https',
+    insecure: 'Not used: a plain http address over the internet would carry your sign-in unencrypted',
     timeout: 'No answer within 6 seconds',
     network: 'Didn’t answer this browser',
     status: `Answered with an error (${r.status})`,
@@ -499,9 +500,12 @@ function debugView({ el, onDispose }) {
   const kv = (k, v) => h('div.kv', null, h('div.kv-k', null, k), h('div.kv-v', null, v ?? '—'));
   const kinds = { local: 'Local network', remote: 'Remote', relay: 'Plex relay (limited speed)', manual: 'Address you entered', proxy: 'Through this container' };
   // Every route to the server, tried (a server of the account's only).
+  // Every route to the server, tried when the connection is tested (not
+  // each time the page opens).
   const routeList = h('div.rows.route-rows');
   const routeHint = h('p.hint.route-hint');
   const routes = h('div.routes', { hidden: true });
+  const routeChoice = h('div.route-choice', { hidden: true });
   const pickable = !app.auth?.manual && !!src.serverId && src.kind !== 'manual' && !(src.kind === 'proxy' && !src.connections?.length);
   const checkRoutes = async () => {
     if (!pickable) return;
@@ -539,24 +543,26 @@ function debugView({ el, onDispose }) {
     try {
       const srv = (await listServers(app.auth.token)).find((x) => x.id === src.serverId);
       const conn = srv && (await pickConnection(srv, { proxy: proxyUri(), prefer }));
+      const words = (kind) => (kind === 'proxy' ? 'through this container' : kind === 'local' ? 'on your network' : kind === 'remote' ? 'over the internet' : 'through Plex’s relay');
       if (conn && conn.uri !== app.source?.uri && app.source === src) {
         setSource({ ...src, uri: conn.uri, kind: conn.kind, token: srv.token, connections: srv.connections });
-        toast(`Now connected ${conn.kind === 'proxy' ? 'through this container' : conn.kind === 'local' ? 'on your network' : conn.kind === 'remote' ? 'over the internet' : 'through Plex’s relay'}`);
+        toast(`Now connected ${words(conn.kind)}`);
         refresh();
         return;
       }
+      if (conn) toast(`Still connected ${words(conn.kind)}: that’s the route for this choice`);
     } catch {
       /* the route stays as it is */
     }
-    checkRoutes();
   };
   if (pickable && proxyUri()) {
-    routes.append(
+    routeChoice.hidden = false;
+    routeChoice.append(
       h('div.section-head', null, h('h2', null, 'Route to the server')),
       radioRows('Route to the server', ROUTE_CHOICES, app.settings.route || 'best', useRoute),
     );
   }
-  routes.prepend(h('div.section-head', null, h('h2', null, 'Routes')), h('p.lede', null, `Each way this browser can reach ${src.serverName}, tried just now.`), routeList, routeHint);
+  routes.append(h('div.section-head', null, h('h2', null, 'Routes')), h('p.lede', null, `Each way this browser can reach ${src.serverName}, tried just now.`), routeList, routeHint);
   const support = ['flac', 'alac', 'mp3', 'aac', 'opus']
     .map((c) => `${fmt.codec(c)} ${canPlayCodec(c) ? 'yes' : 'no'}`)
     .concat(`HLS ${canPlayHlsNatively() ? 'built in' : 'via hls.js'}`)
@@ -613,6 +619,7 @@ function debugView({ el, onDispose }) {
       h('button.btn.btn-secondary', { type: 'button', onclick: () => navigate('/settings/source') }, icon('server', 20), h('span', null, 'Change server')),
     ),
     routes,
+    routeChoice,
     h('div.section-head', null, h('h2', null, 'Live updates')),
     h('p.lede', null, 'New music, playlist changes and ratings from other Plex apps show up here without reloading.'),
     radioRows('Live updates', liveOptions(), app.settings.liveUpdates, (v) => saveSettings({ liveUpdates: v })),
@@ -633,7 +640,6 @@ function debugView({ el, onDispose }) {
       ),
     ),
   );
-  checkRoutes();
 }
 
 // ---------- AI ----------

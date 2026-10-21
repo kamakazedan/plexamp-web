@@ -56,6 +56,10 @@ const CERT_PROBLEMS = {
 export const certProblem = (code) => CERT_PROBLEMS[code] || null;
 
 const MAX_PMS_ANSWER = 2 * 1024 * 1024;
+const MAX_PLEX_TV_ANSWER = 8 * 1024 * 1024; // a big account's friends, say
+const PLEX_TV_AT_ONCE = 16; // questions for plex.tv under way at once (the rest wait)
+const PLEX_TV_WAITING = 200; // waiting at most (any more are told plex.tv is busy)
+const PLEX_TV_WAIT_MS = 15000; // and each for this long at most
 const pmsAgents = { 'http:': new HttpAgent({ keepAlive: true, maxSockets: 8 }), 'https:': new HttpsAgent({ keepAlive: true, maxSockets: 8 }) };
 
 // GET from the Plex server, with its certificate checked as above.
@@ -78,6 +82,25 @@ function pmsGet(url, headers, timeout) {
     req.on('error', reject);
     req.end();
   });
+}
+
+// An answer's body, up to `max` bytes (more is an error, not cut short).
+export async function readCapped(res, max) {
+  const reader = res.body?.getReader?.();
+  if (!reader) return String((await res.text?.()) ?? '').slice(0, max);
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > max) {
+      reader.cancel().catch(() => {});
+      throw Object.assign(new Error('answer too long'), { code: 'TOO_LONG' });
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 // A small cache with expiry and a size cap.
@@ -128,6 +151,45 @@ export class PlexAuth {
     this.friendLists = new TTLCache(200);
     this.resourceLists = new TTLCache(500);
     this.serverId = null;
+    this.identifying = new Map(); // token hash -> its check under way (asked once, however many requests wait)
+    this.asking = 0; // questions for plex.tv under way
+    this.queue = []; // and those waiting for one to finish
+  }
+
+  // Whether this token has been checked lately (or is being checked now):
+  // asking again costs plex.tv nothing.
+  knows(token) {
+    if (!validToken(token)) return true;
+    const key = hash(token);
+    return this.users.get(key) !== undefined || this.denied.get(key) !== undefined || this.identifying.has(key);
+  }
+
+  // At most PLEX_TV_AT_ONCE questions for plex.tv at a time, and a limited
+  // number waiting, each for a limited time.
+  async plexTvTurn(fn) {
+    if (this.asking >= PLEX_TV_AT_ONCE) {
+      if (this.queue.length >= PLEX_TV_WAITING) throw Object.assign(new Error('too many questions for plex.tv at once'), { code: 'BUSY' });
+      await new Promise((go, giveUp) => {
+        const turn = {
+          go,
+          timer: setTimeout(() => {
+            this.queue.splice(this.queue.indexOf(turn), 1);
+            giveUp(Object.assign(new Error('waited too long to ask plex.tv'), { code: 'BUSY' }));
+          }, PLEX_TV_WAIT_MS),
+        };
+        this.queue.push(turn);
+      });
+    } else this.asking += 1;
+    try {
+      return await fn();
+    } finally {
+      // (The turn passes straight to whoever waited longest.)
+      const next = this.queue.shift();
+      if (next) {
+        clearTimeout(next.timer);
+        next.go();
+      } else this.asking -= 1;
+    }
   }
 
   async fetchJSON(url, token, { timeout = 10000, accept = 'application/json' } = {}) {
@@ -144,9 +206,11 @@ export class PlexAuth {
       if (this.pms && url.startsWith(`${this.pms}/`)) {
         ({ status, text } = await pmsGet(url, headers, timeout));
       } else {
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeout) });
-        status = res.status;
-        text = await res.text();
+        // Never followed elsewhere: the token goes to plex.tv and nowhere else.
+        ({ status, text } = await this.plexTvTurn(async () => {
+          const res = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(timeout) });
+          return { status: res.status, text: await readCapped(res, MAX_PLEX_TV_ANSWER) };
+        }));
       }
     } catch (err) {
       const code = err.cause?.code || err.code || err.name || 'network error';
@@ -178,7 +242,7 @@ export class PlexAuth {
           // Not going to fix itself: said once, whether or not debug mode is on.
           this.certWarned = true;
           log.warn(
-            `couldn't check the Plex server at PLEX_SERVER_URL: ${err.message}. Music still plays through /pms/, but sign-in checks for the shared AI model and Play on can't use the server. ` +
+            `couldn't check the Plex server at PLEX_SERVER_URL: ${err.message}. Until it can be, nothing goes through /pms/, and Play Together, your devices, shared playlists, the shared AI model, MusicBrainz checks and Play on can't be used. ` +
               'Use the server\'s http:// address in PLEX_SERVER_URL, or an address its certificate is for.',
           );
         } else {
@@ -200,22 +264,27 @@ export class PlexAuth {
     const hit = this.users.get(key);
     if (hit) return hit;
     if (this.denied.get(key)) throw new AuthError(401, 'Plex didn’t accept this sign-in.');
-    try {
-      const u = await this.fetchJSON(`${this.plexTv}/api/v2/user`, token);
-      if (!u || u.id == null) throw new AuthError(401, 'Plex didn’t accept this sign-in.');
-      const user = {
-        id: Number(u.id),
-        uuid: String(u.uuid || ''),
-        username: cleanName(u.username),
-        title: cleanName(u.friendlyName || u.title || u.username || 'Plex user'),
-        thumb: safeThumb(u.thumb),
-      };
-      this.users.set(key, user, 15 * 60000);
-      return user;
-    } catch (err) {
-      if (err instanceof AuthError) this.denied.set(key, true, 60000);
-      throw err;
-    }
+    if (this.identifying.has(key)) return this.identifying.get(key);
+    const job = (async () => {
+      try {
+        const u = await this.fetchJSON(`${this.plexTv}/api/v2/user`, token);
+        if (!u || u.id == null) throw new AuthError(401, 'Plex didn’t accept this sign-in.');
+        const user = {
+          id: Number(u.id),
+          uuid: String(u.uuid || ''),
+          username: cleanName(u.username),
+          title: cleanName(u.friendlyName || u.title || u.username || 'Plex user'),
+          thumb: safeThumb(u.thumb),
+        };
+        this.users.set(key, user, 15 * 60000);
+        return user;
+      } catch (err) {
+        if (err instanceof AuthError) this.denied.set(key, true, 60000);
+        throw err;
+      }
+    })().finally(() => this.identifying.delete(key));
+    this.identifying.set(key, job);
+    return job;
   }
 
   // Can this token use the Plex server with this machine ID, and does its

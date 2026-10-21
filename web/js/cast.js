@@ -78,9 +78,19 @@ class Cast extends EventTarget {
     this.failures = 0;
     this.volumeTimer = 0;
     this.volumeAt = 0;
-    this.token = null; // { value, at }
-    on('signout', () => this.stop({ here: false, quiet: true }));
-    on('source', ({ serverChanged }) => serverChanged && this.stop({ here: false, quiet: true }));
+    this.token = null; // { value, at, key }: for one server and account
+    this.tokenRefused = false; // the server wouldn't give one out
+    on('signout', () => {
+      this.token = null;
+      this.stop({ here: false, quiet: true });
+    });
+    on('source', ({ serverChanged }) => {
+      this.token = null;
+      if (serverChanged) this.stop({ here: false, quiet: true });
+      this.tokenRefused = false;
+      // Still on AirPlay or Cast: a temporary token for this server.
+      if (player.useMediaToken) fetchMediaToken();
+    });
   }
 
   get active() {
@@ -105,9 +115,13 @@ class Cast extends EventTarget {
   // A temporary token from the server, for whatever device plays: it never
   // gets the account's own.
   async temporaryToken() {
-    if (this.token && Date.now() - this.token.at < TOKEN_TTL) return this.token.value;
-    const value = await app.server.transientToken();
-    this.token = { value, at: Date.now() };
+    const server = app.server;
+    const key = `${server.id}|${server.token}`;
+    if (this.token?.key === key && Date.now() - this.token.at < TOKEN_TTL) return this.token.value;
+    const value = await server.transientToken();
+    // Signed out, or on another server, while it was being asked for: not kept.
+    if (app.server !== server) throw Object.assign(new CastError('The server changed while this was being set up.'), { aborted: true });
+    this.token = { value, at: Date.now(), key };
     return value;
   }
 
@@ -516,6 +530,22 @@ export function remotePlaybackSupported() {
   return !!el?.remote && typeof el.remote.prompt === 'function' && !el.disableRemotePlayback && (player.routed || available.get(el) === true);
 }
 
+// The server's temporary token, for AirPlay and Cast devices.
+function fetchMediaToken(then) {
+  if (!app.server) return;
+  cast.temporaryToken().then(
+    (t) => {
+      cast.tokenRefused = false;
+      player.setMediaToken(t);
+      then?.();
+    },
+    (err) => {
+      // Refused, or an answer that isn't a token (rather than no answer).
+      if (err?.status === 401 || err?.status === 403 || (!err?.status && !err?.network && !err?.aborted)) cast.tokenRefused = true;
+    },
+  );
+}
+
 // Opens the browser's own device picker for the element that's playing.
 function promptRemote() {
   const el = player.audio;
@@ -523,7 +553,15 @@ function promptRemote() {
     toast(cast.active ? `Playing on ${cast.target.name} now: choose This device first.` : 'Play something first, then choose where it plays.');
     return;
   }
-  player.prepareRemote();
+  // The device is only ever given the server's temporary token: without one, nothing's sent.
+  if (!player.prepareRemote()) {
+    if (cast.tokenRefused) toast('Your Plex server didn’t give out a token for other devices, so tracks can’t be sent to one from here.');
+    else {
+      toast('Getting ready to play on another device: try again in a moment.');
+      fetchMediaToken();
+    }
+    return;
+  }
   try {
     el.remote.prompt().then(
       () => {},
@@ -547,6 +585,13 @@ for (const d of player.decks) {
       // One element plays from now on: the other one isn't connected.
       player.cancelTransition();
       player.spare.reset();
+      // Connected from the browser's own controls rather than Play on: the
+      // track changes to the server's temporary token straight away (once
+      // there is one), so the device doesn't keep the account's own. (Not
+      // while it's connecting, which a new address could interrupt.)
+      if (!player.useMediaToken && d === player.deck && !player.prepareRemote()) {
+        fetchMediaToken(() => r.state === 'connected' && !player.useMediaToken && player.prepareRemote());
+      }
     } else if (r.state === 'disconnected' && !player.routed) {
       player.useMediaToken = false;
     }
@@ -582,7 +627,7 @@ const describe = (p) => [p.product, p.device].filter(Boolean).join(' · ') + (p.
 
 export function openCastSheet() {
   // Asked for straight away, so it's ready if AirPlay or Cast is picked.
-  if (app.server) cast.temporaryToken().then((t) => (player.mediaToken = t), () => {});
+  fetchMediaToken();
   const list = h('div.sheet-actions.cast-list');
   const elsewhere = devices.isRemote; // another of your devices plays
   const here = !cast.active && !player.routed && !elsewhere;

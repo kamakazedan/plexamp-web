@@ -188,7 +188,7 @@ async function syncOne(share, { force }) {
   } catch (err) {
     if (err?.status !== 404) throw err;
   }
-  if (!pl) return keyNow() === key ? copyGone(share, token) : { changed: false };
+  if (!pl) return keyNow() === key ? copyGone(share, token, key) : { changed: false };
   const seen = remembered(share.id);
   if (!force && seen && seen.v === share.version && seen.u === (pl.updatedAt || 0) && seen.n === (pl.leafCount || 0) && seen.t === pl.title) {
     return { changed: false };
@@ -253,9 +253,11 @@ async function syncOne(share, { force }) {
   leases.delete(share.id);
   quietUntil.set(String(share.copy), Date.now() + 4000);
   const now = changed ? await s.playlist(share.copy).catch(() => null) : pl;
+  // Signed out (or on another server) meanwhile: nothing's kept, or shown.
+  if (keyNow() !== key) return { changed: false };
   remember(share.id, { v: r.version, u: now?.updatedAt || 0, n: now?.leafCount || 0, t: now?.title || title });
   Object.assign(share, { version: r.version, at: done?.at ?? null, title: r.title || share.title, count: want.length });
-  if (changed && keyNow() === key) shownChanged(share.copy);
+  if (changed) shownChanged(share.copy);
   return { changed, undone: !!r.undone };
 }
 
@@ -288,8 +290,9 @@ async function tracksIn(id, server = app.server) {
 // Your copy was deleted (here or in another app): one shared with you
 // stops being shared with you; yours stops being shared (everyone else
 // keeps theirs).
-async function copyGone(share, token) {
+async function copyGone(share, token, key) {
   await api(share.role === 'owner' ? `/${share.id}` : `/${share.id}/leave`, { method: share.role === 'owner' ? 'DELETE' : 'POST', token }).catch(() => {});
+  if (keyNow() !== key) return { changed: false };
   remember(share.id, null);
   drop(share.id);
   return { gone: true };
@@ -330,7 +333,8 @@ export async function syncAll({ remoteOnly = false } = {}) {
     if (isBeingEdited(share.copy)) continue;
     if (remoteOnly && remembered(share.id)?.v === share.version) continue;
     try {
-      tell(share, await syncShare(share));
+      const r = await syncShare(share);
+      if (keyNow() === key) tell(share, r);
     } catch {
       /* next time */
     }

@@ -19,10 +19,11 @@ import { PlexAuth, AuthError, validToken } from './plex.js';
 import { Together, TogetherError } from './together.js';
 import { Cast, CastError } from './cast.js';
 import { Devices, DevicesError } from './devices.js';
-import { SharedModel, AIRequestError, cleanChat, AI_LIMITS } from './ai.js';
+import { SharedModel, AIRequestError, cleanChat, errorText, AI_LIMITS } from './ai.js';
 import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
 import { Shares, ShareError } from './shares.js';
 import { listenForNginx } from './syslog.js';
+import { plainPath, clientIp } from './paths.js';
 
 // ---------- settings ----------
 
@@ -81,19 +82,45 @@ let shares = null;
 
 // ---------- rate limits ----------
 
-const buckets = new Map();
+const buckets = new Map(); // key -> { at, n }, oldest first
+const MAX_BUCKETS = 20000;
+const everyone = new Map(); // limits for everyone together: never dropped
 const waiting = new Map(); // user id -> long-polls open
 const deviceWaits = new Map(); // `${user id}|${device id}` -> long-polls open
-function allow(key, perMinute) {
+// `n`: how many this counts for. Too many keys at once (many addresses or
+// accounts) drops the oldest minutes first, never everyone's.
+function allow(key, perMinute, n = 1, map = buckets) {
   const now = Date.now();
-  let b = buckets.get(key);
+  let b = map.get(key);
   if (!b || now - b.at > 60000) {
+    map.delete(key);
     b = { at: now, n: 0 };
-    buckets.set(key, b);
+    map.set(key, b);
   }
-  b.n += 1;
-  if (buckets.size > 20000) buckets.clear();
+  b.n += n;
+  if (map === buckets && buckets.size > MAX_BUCKETS) {
+    // (In the order they started, so the minutes that are over come first.)
+    for (const [k, old] of buckets) {
+      if (now - old.at <= 60000 && buckets.size <= MAX_BUCKETS) break;
+      buckets.delete(k);
+    }
+  }
   return b.n <= perMinute;
+}
+
+// A sign-in this service hasn't seen lately is checked with plex.tv. Made-up
+// tokens would each be another question for plex.tv, so each address gets
+// a few a minute: counted as each is checked (ones seen lately aren't).
+const NEW_SIGN_INS_PER_MINUTE = 30;
+function checkable(req, token) {
+  return !token || auth.knows(token) || allow(`sign-ins|${clientIp(req)}`, NEW_SIGN_INS_PER_MINUTE);
+}
+const TOO_MANY_SIGN_INS = 'Too many sign-ins checked from your network in a short time. Wait a minute and try again.';
+class TooManySignIns extends Error {}
+// identify, counted: throws TooManySignIns past the limit.
+function identifyFor(req, token) {
+  if (!checkable(req, token)) throw new TooManySignIns(TOO_MANY_SIGN_INS);
+  return auth.identify(token);
 }
 
 // ---------- HTTP helpers ----------
@@ -140,13 +167,28 @@ function readBody(req, limit = 256 * 1024) {
   });
 }
 
+// An answer from another server (Ollama's), up to `limit` bytes.
+function readAnswer(res, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    res.on('data', (c) => {
+      size += c.length;
+      if (size <= limit) chunks.push(c);
+    });
+    res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    res.on('error', reject);
+  });
+}
+
 // The account behind the request's Plex token (header only, never the URL).
 async function signedIn(req) {
   const token = req.headers['x-plex-token'];
   if (!validToken(token)) throw new HttpError(401, 'Sign in to Plex first.');
   try {
-    return { user: await auth.identify(token), token };
+    return { user: await identifyFor(req, token), token };
   } catch (err) {
+    if (err instanceof TooManySignIns) throw new HttpError(429, err.message);
     if (err instanceof AuthError) throw new HttpError(401, err.message);
     log.warn(`couldn't check a Plex sign-in: ${err.message}`);
     throw new HttpError(503, 'Plex sign-in couldn’t be checked right now (plex.tv didn’t answer). Try again in a minute.');
@@ -173,8 +215,9 @@ async function plexAllowed(req, { what, signIn, noAccess, refused = () => {} }) 
   }
   let verdict;
   try {
-    verdict = await aiVerdict(token, serverToken);
+    verdict = await aiVerdict(req, token, serverToken);
   } catch (err) {
+    if (err instanceof TooManySignIns) throw new HttpError(429, err.message);
     log.warn(`couldn't check a sign-in for ${what}: ${err.message}`);
     throw new HttpError(503, 'Your Plex sign-in couldn’t be checked right now (plex.tv or the Plex server didn’t answer). Try again in a minute.');
   }
@@ -192,7 +235,7 @@ async function plexAllowed(req, { what, signIn, noAccess, refused = () => {} }) 
 // Who may use the shared model (OLLAMA_AUTH): as above, or, with
 // OLLAMA_AUTH=off, anyone who can open the app.
 async function aiAllowed(req) {
-  if (config.aiAuth === 'off') return { key: `ip|${req.headers['x-real-ip'] || 'local'}` };
+  if (config.aiAuth === 'off') return { key: `ip|${clientIp(req)}` };
   return plexAllowed(req, {
     what: 'the shared AI model',
     signIn: 'Sign in to Plex to use the AI model.',
@@ -272,9 +315,9 @@ async function aiChat(req, res, who) {
     'X-Accel-Buffering': 'no',
   });
   res.flushHeaders();
-  let atLineEnd = true; // a blank line can only go between lines
+  // (Only whole lines are written, so a blank one can go at any time.)
   const line = (obj) => res.write(`${JSON.stringify(obj)}\n`);
-  beat = setInterval(() => atLineEnd && res.write('\n'), AI_LIMITS.heartbeatMs);
+  beat = setInterval(() => res.write('\n'), AI_LIMITS.heartbeatMs);
   const fail = (status, message) => {
     clearInterval(beat);
     line({ error: message, status });
@@ -292,42 +335,84 @@ async function aiChat(req, res, who) {
   } catch (err) {
     clearTimeout(saying);
     if (ctrl.signal.aborted) return undefined;
-    log.warn(`shared AI: couldn't load the model: ${err.message}`);
-    return fail(err.status || 502, err.status === 404 ? err.message : 'The AI server didn’t answer. Check that Ollama is running.');
+    log.warn(`shared AI: couldn't load the model: ${err.detail || err.message}`);
+    return fail(err.status === 404 ? 404 : 502, err instanceof AIRequestError ? err.message : 'The AI server didn’t answer. Check that Ollama is running.');
   }
   clearTimeout(saying);
   if (ctrl.signal.aborted) return undefined; // (gone; the model is loaded for next time)
   if (said) line({ pw: 'loaded' });
 
+  // What Ollama says when it turns a chat down stays here (in the log): it
+  // can say things about the AI server. Asked again without "think", or with
+  // plain JSON, when that's what it objected to.
   let upstream;
-  try {
-    upstream = await sharedModel.request('/api/chat', { method: 'POST', body: chat, signal: ctrl.signal, idleMs: AI_LIMITS.idleMs });
-  } catch (err) {
+  for (let attempt = 0; ; attempt++) {
+    const sent = sharedModel.adapt(chat);
+    try {
+      upstream = await sharedModel.request('/api/chat', { method: 'POST', body: sent, signal: ctrl.signal, idleMs: AI_LIMITS.idleMs });
+    } catch (err) {
+      if (ctrl.signal.aborted) return undefined;
+      log.warn(`shared AI: couldn't reach the AI server: ${err.message}`);
+      return fail(502, 'The AI server didn’t answer. Check that Ollama is running.');
+    }
+    if (upstream.statusCode === 200) break;
+    const status = upstream.statusCode || 502;
+    let message = '';
+    try {
+      message = errorText(await readAnswer(upstream, 65536));
+    } catch {
+      message = '';
+    }
     if (ctrl.signal.aborted) return undefined;
-    log.warn(`shared AI: couldn't reach the AI server: ${err.message}`);
-    return fail(502, 'The AI server didn’t answer. Check that Ollama is running.');
+    if (status === 400 && attempt < 2 && sharedModel.retryWithout(sent, message)) continue;
+    log.warn(`shared AI: the AI server turned a chat down (${status}${message ? `: ${message}` : ''})`);
+    if (status === 404) return fail(404, `The model "${chat.model}" isn’t installed on the AI server.`);
+    return fail(502, 'The AI server couldn’t answer. Whoever runs this player can see why in its log.');
   }
-  if (upstream.statusCode !== 200) {
-    // Ollama's own error, with its status (400 for an option the model
-    // doesn't take, 404 for a model that isn't there).
-    let text = '';
-    upstream.on('data', (c) => (text.length < 65536 ? (text += c) : null));
-    upstream.on('end', () => {
-      let message = '';
+  // The answer goes on a line at a time, as it comes. An error Ollama sends
+  // partway (a model that crashed, say) is said in the service's own words,
+  // and Ollama's go to the log, as above.
+  let rest = '';
+  let held = false; // waiting for the browser to take what's been written
+  const pass = (text) => {
+    if (text.includes('"error"')) {
+      let said = null;
       try {
-        message = String(JSON.parse(text).error || '');
+        const obj = JSON.parse(text);
+        if (obj && typeof obj.error === 'string' && !obj.message) said = obj.error;
       } catch {
-        message = '';
+        said = null;
       }
-      fail(upstream.statusCode || 502, message.slice(0, 300) || `The AI server answered ${upstream.statusCode}.`);
-    });
-    upstream.on('error', () => res.destroy());
-    return undefined;
-  }
-  upstream.on('data', (chunk) => (atLineEnd = chunk[chunk.length - 1] === 0x0a));
-  upstream.on('end', () => clearInterval(beat));
+      if (said !== null) {
+        log.warn(`shared AI: the AI server stopped partway through a chat: ${said}`);
+        text = JSON.stringify({ error: 'The AI server couldn’t finish the answer. Whoever runs this player can see why in its log.', status: 502 });
+      }
+    }
+    if (!res.write(`${text}\n`) && !held) {
+      held = true;
+      upstream.pause();
+      res.once('drain', () => {
+        held = false;
+        upstream.resume();
+      });
+    }
+  };
+  upstream.setEncoding('utf8');
+  upstream.on('data', (chunk) => {
+    rest += chunk;
+    for (let i = rest.indexOf('\n'); i >= 0; i = rest.indexOf('\n')) {
+      const text = rest.slice(0, i);
+      rest = rest.slice(i + 1);
+      if (text.trim()) pass(text);
+    }
+    if (rest.length > 4 * 1024 * 1024) upstream.destroy(new Error('a line too long'));
+  });
+  upstream.on('end', () => {
+    clearInterval(beat);
+    if (rest.trim()) pass(rest);
+    res.end();
+  });
   upstream.on('error', () => res.destroy());
-  upstream.pipe(res);
   return undefined;
 }
 
@@ -380,16 +465,17 @@ async function musicbrainzRoute(req, res, parts) {
 // Without PLEX_SERVER_URL, anyone signed in to Plex may use the shared
 // model. With it, only people who can use that Plex server: { status: 204
 // (yes), 401 (not signed in) or 403 (no access), user }.
-async function aiVerdict(token, serverToken) {
+async function aiVerdict(req, token, serverToken) {
   let user = null;
   let userToken = null;
   let plexTvError = null;
   for (const t of [token, serverToken]) {
     if (!t || user) continue;
     try {
-      user = await auth.identify(t);
+      user = await identifyFor(req, t);
       userToken = t;
     } catch (err) {
+      if (err instanceof TooManySignIns) throw err;
       if (!(err instanceof AuthError)) plexTvError = err;
     }
   }
@@ -446,35 +532,38 @@ function pmsToken(req) {
 // the Plex server lets this container in without signing in, it accepts
 // any token from here and can treat every request as its owner's: a friend
 // could see and change things as the owner. Then only the owner's own
-// sign-in gets through (checked with plex.tv).
+// sign-in gets through (checked with plex.tv). While it can't be told
+// whether the server does (it isn't answering the check, or its certificate
+// can't be checked), only the owner, if the server's id is known, and
+// otherwise nobody: never everyone.
 async function pmsAuth(req, res) {
   const token = pmsToken(req);
   if (!token) return send(res, 401);
-  // null: couldn't tell (the server didn't answer the check in time).
+  // null: couldn't tell.
   const open = await auth.serverIsOpen().catch(() => null);
   if (open === false) return send(res, 204);
   try {
-    await auth.identify(token);
+    await identifyFor(req, token);
     const serverId = await auth.loadServerId();
-    // Server unreachable and so unknown: the request will fail there anyway.
-    if (!serverId && open === null) return send(res, 204);
-    if (!serverId) return send(res, 403);
-    const access = await auth.serverAccess(token, serverId);
-    return send(res, access.owned ? 204 : 403);
+    const access = serverId ? await auth.serverAccess(token, serverId) : null;
+    if (access?.owned) return send(res, 204);
+    return send(res, open === true && serverId ? 403 : 503);
   } catch (err) {
+    if (err instanceof TooManySignIns) return send(res, 503);
     if (err instanceof AuthError) return send(res, 401);
     log.warn(`couldn't check a sign-in for /pms/ with plex.tv: ${err.message}`);
     return send(res, 503);
   }
 }
 
+// Debug mode only: lines from browsers, a limited number a minute from each
+// address (and from all of them together), so the log can't be flooded.
 async function browserLog(req, res) {
   if (!isDebug()) throw new HttpError(404, 'Not found.');
-  const ip = String(req.headers['x-real-ip'] || 'local');
-  if (!allow(`log|${ip}`, 120)) throw new HttpError(429, 'Slow down.');
   const body = await readBody(req, 32 * 1024);
   const client = String(body.client || '?');
   const entries = Array.isArray(body.entries) ? body.entries.slice(0, 40) : [];
+  if (!allow(`log|${clientIp(req)}`, 300, entries.length || 1) || !allow('log', 1200, entries.length || 1, everyone)) throw new HttpError(429, 'Slow down.');
   for (const e of entries) log.browser(client, e?.level || 'info', e?.area || 'app', e?.message || '');
   send(res, 204);
 }
@@ -485,6 +574,7 @@ async function browserLog(req, res) {
 // null), and that's checked when they join.
 async function friendsOf(user, token, serverId) {
   if (!allow(`friends|${user.id}`, 10)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
+  if (!(await serverAllowed(token, serverId))) throw new HttpError(403, 'You can’t play from that Plex server.');
   let list;
   let owned = false;
   try {
@@ -496,6 +586,19 @@ async function friendsOf(user, token, serverId) {
   return list
     .filter((f) => f.id !== user.id)
     .map((f) => ({ id: f.id, title: f.title, thumb: f.thumb, home: f.home, canPlay: owned ? f.servers.includes(serverId) : null }));
+}
+
+// Play Together, your devices and shared playlists, on a Plex server the
+// account can use. With PLEX_SERVER_URL set, only for people who can use
+// that server (on it, or another of theirs): this service is theirs, not
+// anyone's with a Plex account.
+async function serverAllowed(token, serverId) {
+  if (config.plexServerUrl) {
+    const id = await auth.loadServerId();
+    if (!id) throw new HttpError(503, 'This player’s Plex server isn’t answering. Try again in a minute.');
+    if (!(await auth.canUseServer(token, id).catch(() => false))) return false;
+  }
+  return auth.canUseServer(token, String(serverId || '')).catch(() => false);
 }
 
 function serverAccessMessage(server) {
@@ -524,7 +627,7 @@ async function togetherRoute(req, res, parts, url) {
     if (!allow(`create|${user.id}`, 6)) throw new HttpError(429, 'Too many new sessions. Wait a minute.');
     const body = await readBody(req);
     const serverId = String(body.server?.id || '');
-    if (!(await auth.canUseServer(token, serverId).catch(() => false))) throw new HttpError(403, 'You can’t play from that Plex server.');
+    if (!(await serverAllowed(token, serverId))) throw new HttpError(403, 'You can’t play from that Plex server.');
     // Only the host's own Plex friends can be invited.
     let friendIds = new Map();
     if (Array.isArray(body.invite) && body.invite.length) {
@@ -582,7 +685,7 @@ async function togetherRoute(req, res, parts, url) {
 
   if (action === 'join') {
     if (!together.roleOf(s, user.id)) throw new HttpError(403, 'You haven’t been invited to this session.');
-    if (s.host.id !== user.id && !(await auth.canUseServer(token, s.server.id).catch(() => false))) {
+    if (s.host.id !== user.id && !(await serverAllowed(token, s.server.id))) {
       throw new HttpError(403, serverAccessMessage(s.server));
     }
     together.join(s, user);
@@ -619,20 +722,21 @@ async function togetherRoute(req, res, parts, url) {
 //   POST /api/cast/players/{id}/play       { key, offset, playQueueID, serverId, token }
 //   POST /api/cast/players/{id}/command    { command, ... }
 //   GET  /api/cast/players/{id}/timeline
-// With PLEX_SERVER_URL set, only for the server's owner: the players this
-// can reach are on the home network, where the owner's are. (Friends'
-// players are on their own networks anyway.)
+// Only for the owner of the server at PLEX_SERVER_URL (and so only with it
+// set): the players this can reach are on the home network, where the
+// owner's are. (Friends' players are on their own networks anyway.) Anyone
+// else could have it send requests around the network it's on, to whatever
+// addresses they gave "players" of their own on plex.tv.
 async function castRoute(req, res, parts) {
   if (!config.cast) throw new HttpError(404, 'Playing on other devices is turned off on this player.');
+  if (!config.plexServerUrl) throw new HttpError(404, 'Playing on Plex players needs PLEX_SERVER_URL set on this player.');
   const { user, token } = await signedIn(req);
   if (!allow(`cast|${user.id}`, 300)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
-  if (config.plexServerUrl) {
-    const serverId = await auth.loadServerId();
-    if (!serverId) throw new HttpError(503, 'The Plex server isn’t answering. Try again in a minute.');
-    const access = await auth.serverAccess(token, serverId).catch(() => null);
-    if (!access) throw new HttpError(503, 'Plex couldn’t be asked about your players right now. Try again in a minute.');
-    if (!access.owned) throw new HttpError(403, 'Only the server’s owner can play on Plex players from here.');
-  }
+  const serverId = await auth.loadServerId();
+  if (!serverId) throw new HttpError(503, 'The Plex server isn’t answering. Try again in a minute.');
+  const access = await auth.serverAccess(token, serverId).catch(() => null);
+  if (!access) throw new HttpError(503, 'Plex couldn’t be asked about your players right now. Try again in a minute.');
+  if (!access.owned) throw new HttpError(403, 'Only the server’s owner can play on Plex players from here.');
   const [what, id, action] = parts;
   if (what !== 'players') throw new HttpError(404, 'Not found.');
   try {
@@ -667,7 +771,7 @@ async function devicesRoute(req, res, parts, url) {
   const body = method === 'POST' ? await readBody(req, 512 * 1024) : null;
   const q = url.searchParams;
   const serverId = String((body ? body.server : q.get('server')) || '');
-  if (!(await auth.canUseServer(token, serverId).catch(() => false))) throw new HttpError(403, 'You can’t play from that Plex server.');
+  if (!(await serverAllowed(token, serverId))) throw new HttpError(403, 'You can’t play from that Plex server.');
   const device = body ? body.device : { id: q.get('device'), name: q.get('name') };
   const deviceId = String(device?.id || '');
   try {
@@ -763,7 +867,7 @@ async function sharesRoute(req, res, parts, url) {
       .filter(({ f }) => f && f.id !== user.id && (!owned || f.servers.includes(serverId)))
       .map(({ f, role }) => ({ id: f.id, title: f.title, role }));
   };
-  const canUse = (serverId) => auth.canUseServer(token, serverId).catch(() => false);
+  const canUse = (serverId) => serverAllowed(token, serverId);
   try {
     if (!parts[0] && method === 'GET') {
       const server = String(url.searchParams.get('server') || '');
@@ -788,7 +892,7 @@ async function sharesRoute(req, res, parts, url) {
     const role = shares.roleOf(s, user.id);
     // Not shared with them: as if it weren't there.
     if (!role) throw new HttpError(404, 'That shared playlist isn’t shared any more.');
-    const access = await auth.serverAccess(token, s.server).catch(() => null);
+    const access = (await canUse(s.server)) ? await auth.serverAccess(token, s.server).catch(() => null) : null;
     if (!access?.ok) throw new HttpError(403, 'You can’t play from that playlist’s Plex server.');
     const ownerOnly = () => {
       if (role !== 'owner') throw new HttpError(403, 'Only whoever shared the playlist can do that.');
@@ -828,9 +932,16 @@ async function sharesRoute(req, res, parts, url) {
   throw new HttpError(404, 'Not found.');
 }
 
+// Which way nginx passed a request on (X-PW-Route, which it sets itself and
+// clears from everyone else's): its sign-in checks for /pms/ ("internal"),
+// the shared AI model at /ollama/ ("ai"), or neither.
+const routeOf = (req) => String(req.headers['x-pw-route'] || '');
+
 async function handle(req, res) {
   const started = Date.now();
-  const url = new URL(req.url, 'http://service.local');
+  // (Only plain paths: see paths.js.)
+  const raw = String(req.url || '').split('?')[0];
+  const url = new URL(plainPath(raw) ? req.url : '/', 'http://service.local');
   const parts = url.pathname.split('/').filter(Boolean);
   let status = 0;
   const done = res.end.bind(res);
@@ -841,13 +952,13 @@ async function handle(req, res) {
   try {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
-    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast, devices: config.devices, sharing: !!shares, debug: config.debug });
-    if (area === 'internal' && rest[0] === 'pms-auth') return await pmsAuth(req, res);
+    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast && !!config.plexServerUrl, devices: config.devices, sharing: !!shares, debug: config.debug });
+    if (area === 'internal' && rest[0] === 'pms-auth' && routeOf(req) === 'internal') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
     if (area === 'cast') return await castRoute(req, res, rest);
     if (area === 'devices') return await devicesRoute(req, res, rest, url);
-    if (area === 'ai') return await aiRoute(req, res, rest);
+    if (area === 'ai' && routeOf(req) === 'ai') return await aiRoute(req, res, rest);
     if (area === 'musicbrainz') return await musicbrainzRoute(req, res, rest);
     if (area === 'shares') return await sharesRoute(req, res, rest, url);
     throw new HttpError(404, 'Not found.');
@@ -888,8 +999,13 @@ server.headersTimeout = 15000;
 
 function started() {
   // Started as root by the container: hand the socket to nginx's user and
-  // stop being root.
-  const account = typeof process.getuid === 'function' && process.getuid() === 0 ? lookupUser(config.user) : null;
+  // stop being root. Never carries on as root.
+  const root = typeof process.getuid === 'function' && process.getuid() === 0;
+  const account = root ? lookupUser(config.user) : null;
+  if (root && (!account || account.uid === 0)) {
+    log.error(`won't run as root, and the ${config.user} user to run as instead isn't there`);
+    process.exit(1);
+  }
   try {
     if (account && !config.port) {
       chownSync(config.socket, account.uid, account.gid);

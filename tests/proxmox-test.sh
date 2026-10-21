@@ -84,7 +84,7 @@ case "$create" in
     *) fail "the container: $create" ;;
 esac
 calls | grep -q '^pveam download local debian-13-standard_13.1-2_amd64.tar.zst$' && pass "downloads the newest Debian template" || fail "template download: $(calls | grep pveam)"
-expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'"'"'s (see "Container' '# settings" in the README). Change them with: plexamp-web-settings' \
+expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'"'"'s (see' '# docs/configuration.md). Change them with: plexamp-web-settings' \
     'PLEX_SERVER_URL=http://192.168.1.10:32400' 'DISABLE_WEBSOCKETS=' 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b' \
     'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'PLAYLIST_SHARING=true' \
     '# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org' '# (the public service) or your own mirror. Empty: no checks.' \
@@ -166,10 +166,62 @@ refuses "an address with a password" "The Ollama address isn't right" 'OLLAMA_UR
 refuses "a model with odd characters" "The model isn't right" 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama;reboot'
 refuses "a bad name" "The name isn't right" 'CT_HOSTNAME=Not_A_Name!'
 refuses "a storage that can't hold containers" "nfs-backups can't hold containers" 'STORAGE=nfs-backups'
+refuses "a storage over two lines" "can't hold containers" "STORAGE=$(printf 'local-lvm\nnfs-backups')"
 refuses "a fixed address without a gateway" "The gateway isn't right" 'IP=192.168.1.50/24'
 refuses "an ID that's taken" "There's already a container or VM 123"
 refuses "to run without root" "Run this as root"
 refuses "Proxmox VE 7" "This needs Proxmox VE 8 or later"
+
+# ---------- a download that stopped partway ----------
+
+# Run as bash -c "$(curl …)", a script cut short runs as far as it got: this
+# one runs nothing unless all of it arrived.
+reset
+head -c "$(($(wc -c <"$SCRIPT") * 2 / 3))" "$SCRIPT" >"$T/partial.sh"
+if env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" YES=1 bash "$T/partial.sh" >"$T/out" 2>&1; then
+    fail "a script cut short ran"
+elif [ -n "$(calls)" ] || grep -q 'Proxmox VE' "$T/out"; then
+    fail "a script cut short did something: $(calls) $(tail -2 "$T/out")"
+else
+    pass "a script cut short runs nothing"
+fi
+
+# ---------- downloading the installer ----------
+
+# Run from a download (with no installer beside it), it fetches the
+# installer from GitHub: only when all of it arrived, and from main only
+# when there's no stable branch.
+mkdir -p "$T/alone"
+cp "$SCRIPT" "$T/alone/plexamp-web.sh"
+stub curl 'out=""; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; -w) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
+echo "curl $url" >>"$S/calls"
+case "$(cat "$S/curl-mode" 2>/dev/null)" in
+  partial) printf "#!/bin/bash\n" >"$out"; printf 200; exit 18 ;;
+  nostable) case "$url" in */stable/*) printf 404 ;; *) printf "#!/bin/bash\n" >"$out"; printf 200 ;; esac ;;
+esac'
+alone() { env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" HOSTNAME=pve-node-1 YES=1 bash "$T/alone/plexamp-web.sh" >"$T/out" 2>&1; }
+
+reset
+echo partial >"$T/curl-mode"
+if alone; then
+    fail "an installer cut short: it went ahead"
+elif calls | grep -q 'install-plexamp-web'; then
+    fail "an installer cut short was run: $(calls | grep install)"
+elif grep -q "Couldn't download the installer" "$T/out"; then
+    pass "an installer that stopped downloading partway isn't run"
+else
+    fail "an installer cut short: $(tail -2 "$T/out")"
+fi
+reset
+echo nostable >"$T/curl-mode"
+alone || true
+if calls | grep -qx 'curl https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/install.sh' && calls | grep -q 'bash /root/install-plexamp-web.sh'; then
+    pass "without a stable branch, the installer comes from main"
+else
+    fail "no stable branch: $(calls | grep -E 'curl|install')"
+fi
+rm -f "$T/curl-mode"
 
 # ---------- when the install fails ----------
 

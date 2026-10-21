@@ -10,7 +10,7 @@
 // is passed back.
 import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { attrs } from './plex.js';
+import { attrs, readCapped } from './plex.js';
 
 // Plex players listen on 32500 (Plexamp, the mobile apps) and older ones on
 // 3005 or 32433.
@@ -160,9 +160,12 @@ export class Cast {
     } catch {
       throw new CastError(502, `Couldn’t reach ${p.name}. Check it’s on, and on the same network as this player’s server.`);
     }
-    const text = await res.text().catch(() => '');
-    if (!res.ok) throw new CastError(502, `${p.name} didn’t take the command (it answered ${res.status}).`);
-    return text.slice(0, 64 * 1024);
+    if (!res.ok) {
+      res.body?.cancel?.().catch(() => {});
+      throw new CastError(502, `${p.name} didn’t take the command (it answered ${res.status}).`);
+    }
+    // (A player's answer is small: anything bigger isn't read.)
+    return readCapped(res, 64 * 1024).catch(() => '');
   }
 
   // Start playing a play queue the browser made on the Plex server. The

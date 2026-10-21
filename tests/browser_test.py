@@ -25,8 +25,8 @@ and t3 (Alex, a friend without access).
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
 Sections: core ws ai dj djs nows blocked poll custom desktop nav library edit
-lists pictures missing files sharing routes np cast ratings devices fades
-together settings home debug memory (default: all).
+lists pictures missing files sharing routes privacy np cast ratings devices
+fades together settings home debug memory (default: all).
 """
 
 import json
@@ -278,16 +278,21 @@ with sync_playwright() as pw:
         page.keyboard.press('Escape')
         page.wait_for_timeout(400)
         check('core: Escape closes Now Playing', not js(page, "document.querySelector('.np').classList.contains('open')"))
-        # Routes to a server: when its local address doesn't answer, this
-        # container's proxy comes before a remote address, if it leads there.
+        # Routes to a server: each is asked who it is, without the sign-in,
+        # and only counts if it's that very server. When its local address
+        # doesn't answer, this container's proxy comes next (if it leads
+        # there); a plain http address over the internet isn't used.
+        asked = []
+        page.on('request', lambda r: asked.append(r.url) if r.url.startswith(MOCK + '/identity') else None)
         routes = js(page, """() => Promise.all([import('./js/plex.js'), import('./js/state.js')]).then(async ([p, s]) => {
             const srv = { id: s.app.source.serverId, token: s.app.source.token, connections: [
                 { uri: 'http://127.0.0.1:9', local: true, relay: false, protocol: 'http' },
                 { uri: '%s', local: false, relay: false, protocol: 'http' }] };
-            const mine = await p.pickConnection(srv, { proxy: s.proxyUri() });
-            const other = await p.pickConnection({ ...srv, id: 'another-server' }, { proxy: s.proxyUri() });
-            return [mine && mine.kind, other && other.kind]; })""" % MOCK)
-        check('core: the container\'s proxy is the next best route after a local address', routes == ['proxy', 'remote'], str(routes))
+            const home = { ...srv, connections: [{ uri: '%s', local: true, relay: false, protocol: 'http' }] };
+            const pick = async (x) => (await p.pickConnection(x, { proxy: s.proxyUri() }))?.kind || null;
+            return [await pick(srv), await pick({ ...srv, id: 'another-server' }), await pick(home), await pick({ ...home, id: 'another-server' })]; })""" % (MOCK, MOCK))
+        check('core: routes to a server: its local address first, then the container\'s proxy; never another server, nor plain http over the internet',
+              routes == ['proxy', None, 'local', None] and asked and not any('X-Plex-Token' in u for u in asked), f'{routes} {asked}')
 
     # ---------- ws: live updates over a WebSocket ----------
     if run('ws'):
@@ -1965,6 +1970,7 @@ with sync_playwright() as pw:
         csv_text = open(dl.value.path(), encoding='utf-8-sig').read()
         check('missing: downloads as a spreadsheet (CSV)', dl.value.suggested_filename.startswith('missing-tracks-') and dl.value.suggested_filename.endswith('.csv')
               and csv_text.startswith('"Artist","Title","Missing","Times suggested"') and '"Glass Harbour","A Song They Never Made","Track","2"' in csv_text, csv_text[:300])
+        check('missing: ...without what was asked for (that stays on this device)', 'Best of Glass Harbour' not in csv_text and 'Asked for' not in csv_text, csv_text[:300])
         page.click('.missing-copy')
         page.wait_for_selector('.toast:has-text("Copied")')
         copied = js(page, '() => navigator.clipboard.readText()')
@@ -1993,7 +1999,17 @@ with sync_playwright() as pw:
         page.wait_for_selector('.missing-status:has-text("off the list"), .missing-status:has-text("yet")', timeout=30000)
         left = page.locator('.missing-row .row-title').all_inner_texts()
         check('missing: Check again lets go of what\'s in the library now', real['title'] not in left and len(left) == 6
-              and page.locator('.missing-status').inner_text().startswith('1 is in your library now'), f"{page.locator('.missing-status').inner_text()} {left}")
+              and re.match(r'1 is on .+ now, so it’s off the list\.', page.locator('.missing-status').inner_text()), f"{page.locator('.missing-status').inner_text()} {left}")
+        # Another server's list is its own (different servers, different music).
+        js(page, """() => { const l = JSON.parse(localStorage.getItem('pw.aiMissing'));
+            l.push(Object.assign({}, l[0], { server: 'another-server', kind: 'track', artist: 'Elsewhere Artist', title: 'Elsewhere Song' }));
+            localStorage.setItem('pw.aiMissing', JSON.stringify(l)); }""")
+        page.goto(APP + '#/settings/ai')
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
+        here = page.locator('.missing-row .row-title').all_inner_texts()
+        counted = js(page, "() => import('./js/missing.js').then((m) => m.missingCount())")
+        check('missing: another server\'s missing tracks aren\'t on this one\'s list', 'Elsewhere Song' not in here and len(here) == 6 and counted == 6, f'{here} {counted}')
         check('missing: with MusicBrainz checks off, the list has nothing about MusicBrainz',
               page.locator('.missing-mb, .mb-found, .missing-show-unknown, .missing-mb-check, .missing-row.unknown').count() == 0)
 
@@ -2018,7 +2034,7 @@ with sync_playwright() as pw:
               len(out) == 2 and 'doesn’t know them' in out[0][0] and out[0][1] == ['Not A Real Band (no music by them)', 'Imaginary Act — Made Up Song']
               and 'album, not a song' in out[1][0] and out[1][1] == ['Glass Harbour — Sea Glass'], json.dumps(out))
         check('missing: ...and where it asked', note.startswith('Checked on the player’s own MusicBrainz server.'), note)
-        kept = sorted((m['kind'], m['title'] or m['artist']) for m in stored())
+        kept = sorted((m['kind'], m['title'] or m['artist']) for m in stored() if m['server'] != 'another-server')
         check('missing: ...and only those it knows go on the list (what it doesn\'t know comes off it, from before)',
               kept == [('artist', 'Real Missing Band'), ('track', 'A Song They Never Made'), ('track', 'Lantern Song')], str(kept))
         marked = sorted((m['title'] or m['artist']) for m in stored() if m.get('mb') == 'real')
@@ -2071,7 +2087,7 @@ with sync_playwright() as pw:
               and '1 is on MusicBrainz, so it’s real.' in said, f'{left} {said}')
         check('missing: ...asking only about those not checked before', asked == ['A Song They Never Made', 'Made Up Song', 'Sea Glass', 'Somewhere Real'], str(asked))
         check('missing: ...and marks those it found', badges == ['Real Missing Band', 'Lantern Song'] and page.locator('.missing-row:has(.mb-found)').count() == 3
-              and page.locator('.missing-mb').count() == 0 and all(m.get('mb') == 'real' for m in stored()), f'{badges} {stored()}')
+              and page.locator('.missing-mb').count() == 0 and all(m.get('mb') == 'real' for m in stored() if m['server'] != 'another-server'), f'{badges} {stored()}')
         page.click('.toast-action:has-text("Undo")')
         page.wait_for_timeout(300)
         back = page.locator('.missing-row .row-title').all_inner_texts()
@@ -2082,7 +2098,8 @@ with sync_playwright() as pw:
         page.wait_for_selector('.sheet.open .ask-form .btn-danger')
         page.click('.sheet.open .ask-form .btn-danger')
         page.wait_for_timeout(400)
-        check('missing: the list can be cleared', stored() == [] and page.locator('.missing-row').count() == 0 and page.locator('.empty-state').count() == 1)
+        check('missing: the list can be cleared (another server\'s stays)', [m['title'] for m in stored()] == ['Elsewhere Song'] and page.locator('.missing-row').count() == 0
+              and page.locator('.empty-state').count() == 1, str(stored()))
         settings(page, {'ai': {'mode': 'auto'}})
         ctx.close()
 
@@ -2554,9 +2571,12 @@ with sync_playwright() as pw:
         # can't reach, and one over the internet that it can.
         resources = [{'name': 'Mock Plex', 'clientIdentifier': 'mock-server-1', 'provides': 'server', 'owned': True, 'accessToken': 't',
                       'connections': [{'uri': 'http://127.0.0.1:9', 'local': True, 'relay': False, 'protocol': 'http'},
-                                      {'uri': MOCK, 'local': False, 'relay': False, 'protocol': 'http'}]}]
+                                      {'uri': 'https://remote.test:32400', 'local': False, 'relay': False, 'protocol': 'https'}]}]
         page.route(re.compile(r'https://(clients\.)?plex\.tv/api/v2/resources.*'),
                    lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(resources), headers={'Access-Control-Allow-Origin': '*'}))
+        # Its address over the internet (https, as Plex gives them) is the mock.
+        page.route(re.compile(r'https://remote\.test:32400/.*'),
+                   lambda route: route.fulfill(response=route.fetch(url=route.request.url.replace('https://remote.test:32400', MOCK))))
         login(page, APP)
         js(page, "() => import('./js/state.js').then((m) => m.setAuth({ ...m.app.auth, manual: false }))")
         page.goto(APP + '#/settings/source')
@@ -2569,7 +2589,16 @@ with sync_playwright() as pw:
         page.wait_for_selector('.section-head h2:has-text("Libraries on")')
         page.locator('.source-body .row').first.click()
         page.wait_for_selector('.wide-card:not(.skeleton)')
-        page.goto(APP + '#/settings/debug')
+        # The Connection page: the routes aren't tried just by opening it,
+        # only when the connection is tested.
+        page.wait_for_timeout(2000)  # (the app's own look for a better route, as it started, is done)
+        tried = []
+        page.on('request', lambda r: tried.append(r.url) if '/identity' in r.url else None)
+        js(page, "() => import('./js/router.js').then((m) => m.navigate('/settings/debug'))")
+        page.wait_for_selector('.route-choice .radio-row')
+        page.wait_for_timeout(1500)
+        quiet = (list(tried), page.locator('.route-row').count())
+        page.click('button:has-text("Test connection")')
         page.wait_for_selector('.route-row', timeout=15000)
         conn = page.locator('.kv', has_text='Connection').first.inner_text()
         routes = [(r.get_attribute('data-kind'), r.inner_text()) for r in page.locator('.route-row').all()]
@@ -2577,18 +2606,19 @@ with sync_playwright() as pw:
         shot(page, 'routes-02-connection')
         page.locator('.routes').scroll_into_view_if_needed()
         shot(page, 'routes-03-routes')
+        check('routes: opening the Connection page tries no routes; testing the connection does', quiet == ([], 0) and len(routes) == 3, f'{quiet} {routes}')
         check('routes: through this container when its address on the network doesn\'t answer, saying why',
               'Through this container' in conn and 'set up for Mock Plex too' in conn and [k for k, _ in routes] == ['local', 'proxy', 'remote']
               and '(in use)' in routes[1][1] and 'Didn’t answer this browser' in routes[0][1] and ' ms' in routes[2][1] and 'Chrome asks you first' in hint,
               f'{conn!r} {routes} {hint!r}')
         page.click('.radio-row:has(.row-title:text-is("Straight to the server"))')
         page.wait_for_selector('.toast:has-text("Now connected over the internet")')
-        page.wait_for_selector('.route-row.in-use[data-kind=remote]', timeout=15000)
+        page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Remote")', timeout=15000)
         direct = (js(page, "() => import('./js/state.js').then((m) => [m.app.source.kind, m.app.settings.route])"), page.locator('.kv', has_text='Connection').first.inner_text())
-        check('routes: "Straight to the server" goes there, over the internet here', direct[0] == ['remote', 'direct'] and 'Remote' in direct[1], str(direct))
+        check('routes: "Straight to the server" goes there, over the internet here', direct[0] == ['remote', 'direct'] and 'Remote' in direct[1] and page.locator('.route-row').count() == 0, str(direct))
         page.click('.radio-row:has(.row-title:text-is("Best that answers"))')
         page.wait_for_selector('.toast:has-text("Now connected through this container")')
-        page.wait_for_selector('.route-row.in-use[data-kind=proxy]', timeout=15000)
+        page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Through this container")', timeout=15000)
         # The test of the connection: through this container, which part
         # doesn't answer.
         no_plex = re.compile(r'/pms/identity')
@@ -2601,6 +2631,93 @@ with sync_playwright() as pw:
         page.click('button:has-text("Test connection")')
         page.wait_for_selector('.kv:has-text("Response time") .kv-v:has-text(" ms")')
         check('routes: ...and the time it takes when it answers', re.search(r'\d ms', page.locator('.kv', has_text='Response time').inner_text()) is not None)
+        ctx.close()
+
+    # ---------- privacy: searches, signing out, other tabs ----------
+    if run('privacy'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'privacy')
+        login(page, APP)
+        heads = lambda: page.locator('.search-body .section-head h2').all_inner_texts()
+        # What's searched for stays out of the page's address (and so the
+        # browser's history), and still comes back with Back and a reload.
+        page.goto(APP + '#/search')
+        page.wait_for_selector('.search-box input')
+        page.fill('.search-box input', 'harbour')
+        wait_for(lambda: any('ARTISTS' in t.upper() for t in heads()), 8)
+        address = js(page, '() => location.href')
+        page.locator('.search-body a.row').first.click()
+        page.wait_for_function("() => location.hash !== '#/search'")
+        page.go_back()
+        page.wait_for_selector('.search-box input')
+        back = page.input_value('.search-box input')
+        page.reload()
+        page.wait_for_selector('.search-box input')
+        page.wait_for_timeout(600)
+        reloaded = page.input_value('.search-box input')
+        check('privacy: a search isn\'t in the page\'s address, and comes back with Back and a reload',
+              address.endswith('#/search') and 'harbour' not in address and back == 'harbour' and reloaded == 'harbour', f'{address} {back!r} {reloaded!r}')
+        page.goto(APP + '#/search?q=lantern')
+        page.wait_for_selector('.search-box input')
+        check('privacy: ...and an address from before with a search in it still opens it', page.input_value('.search-box input') == 'lantern')
+
+        # Debug mode's redaction finds tokens inside other addresses, in
+        # headers, and by their other names.
+        red = js(page, """() => import('./js/debug.js').then((m) => m.redact(
+            '/photo/:/transcode?url=%2Fx%3FX-Plex-Token%3Dsecret1%26w%3D2&X-Plex-Token=secret2 {"accessToken":"secret3"} X-Plex-Token: secret4'))""")
+        check('privacy: debug mode\'s redaction finds tokens wherever they are', not any(f'secret{i}' in red for i in range(1, 5)), red)
+
+        # AirPlay and Cast are given the server's temporary token, and never
+        # one for another server or account, nor the account's own.
+        urls = js(page, """() => import('./js/player.js').then(({ player }) => {
+            const t = { id: '120', qid: 1, partKey: '/library/parts/120/0/file.flac', codec: 'flac' };
+            player.setMediaToken('temporary-token-1');
+            player.useMediaToken = true;
+            const mine = player.sourceFor(t).url;
+            player.mediaToken = { value: 'other-servers-token', key: 'another-server|x' };
+            const other = player.sourceFor(t).url;
+            player.useMediaToken = false;
+            player.mediaToken = null;
+            return [mine, other, player.sourceFor(t).url];
+        })""")
+        check('privacy: AirPlay and Cast only ever get the server\'s temporary token for this server',
+              'X-Plex-Token=temporary-token-1' in urls[0] and 'other-servers-token' not in urls[1] and 'X-Plex-Token=' not in urls[1] and 'X-Plex-Token=t' in urls[2], str(urls))
+
+        # Signing out: what's yours goes (with the page itself), what's the
+        # device's stays, and another tab signed in follows.
+        settings(page, {'playerName': 'Dan’s phone', 'gridSize': 'large', 'home': {'mock-server-1:1': {'order': ['recent']}},
+                        'ai': {'mode': 'custom', 'url': OLLAMA, 'apiKey': 'key-123', 'model': 'llama3.1:8b', 'notes': 'Loves trip-hop'}})
+        other = ctx.new_page()
+        attach(other, 'privacy-other')
+        play_first_album_track(other, APP)
+        art = APP + 'pms/photo/:/transcode?url=%2Flibrary%2Fmetadata%2F120%2Fthumb%2F1&width=100&height=100&X-Plex-Token=t'
+        kept_art = """(u) => fetch(u, { cache: 'only-if-cached', mode: 'same-origin' }).then((r) => r.status, () => 'not kept')"""
+        page.evaluate('(u) => fetch(u).then((r) => r.blob())', art)
+        art_before = page.evaluate(kept_art, art)
+        page.goto(APP + '#/settings/account')
+        page.click('.account-card button:has-text("Sign out")')
+        page.wait_for_selector('.sheet.open')
+        said = page.locator('.sheet.open').inner_text()
+        shot(page, 'privacy-01-sign-out')
+        with page.expect_request(re.compile(r'/signed-out$')) as forgot:
+            with page.expect_navigation():
+                page.locator('.sheet.open .sheet-action', has_text='Sign out').click()
+        page.wait_for_selector('text=Use a server address and token instead')
+        kept = js(page, "() => JSON.parse(localStorage.getItem('pw.settings'))")
+        keys = js(page, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.')).sort()")
+        check('privacy: signing out says what goes and what stays', 'AI settings' in said and 'Home layouts' in said and 'How the app looks and plays stays' in said, said)
+        check('privacy: ...clears what\'s yours, and keeps the device\'s',
+              kept.get('playerName') == '' and kept.get('home') == {} and kept.get('ai') == {'mode': 'auto', 'url': '', 'apiKey': '', 'model': '', 'notes': ''}
+              and kept.get('gridSize') == 'large' and not any(k in keys for k in ('pw.auth', 'pw.source', 'pw.aiMissing')) and 'pw.clientId' in keys, f'{kept} {keys}')
+        art_after = page.evaluate(kept_art, art)
+        check('privacy: ...and the browser forgets artwork it kept from this player (its address has the token)',
+              forgot.value.url.endswith('/signed-out') and art_before == 200 and art_after == 'not kept', f'{art_before} {art_after}')
+        other.wait_for_selector('text=Use a server address and token instead', timeout=10000)
+        page.wait_for_timeout(500)
+        left = js(page, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.')).sort()")
+        check('privacy: ...and another tab signed in signs out too, keeping nothing of what it was playing',
+              other.url.endswith('#/login') and not any(k.startswith('pw.player') or k in ('pw.auth', 'pw.source') for k in left), f'{other.url} {left}')
         ctx.close()
 
     # ---------- np: the player's sleep timer and converted tracks ----------

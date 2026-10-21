@@ -37,8 +37,8 @@ fail() {
 
 [ "$(id -u)" = 0 ] || fail "Run this as root."
 [ -r /etc/debian_version ] || fail "This installs on Debian (12 or 13)."
-printf '%s\n' "$REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || fail "PW_REPO should look like owner/name."
-printf '%s\n' "$REF" | grep -Eq '^[A-Za-z0-9_./-]+$' || fail "PW_REF should be a branch or tag name."
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "PW_REPO should look like owner/name."
+[[ "$REF" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "PW_REF should be a branch or tag name."
 
 systemd=true
 if [ "${PW_NO_SYSTEMD:-}" = 1 ] || [ ! -d /run/systemd/system ]; then systemd=false; fi
@@ -56,15 +56,24 @@ if [ -n "${PW_SOURCE_DIR:-}" ]; then
     cp -r "$PW_SOURCE_DIR/web" "$PW_SOURCE_DIR/server" "$PW_SOURCE_DIR/docker" "$PW_SOURCE_DIR/proxmox" "$PW_SOURCE_DIR/Dockerfile" "$work/app/"
     say "Copied plexamp-web from $PW_SOURCE_DIR"
 else
-    # The stable branch, or main until CI has made one.
-    if ! curl -fsSL "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" -o "$work/app.tar.gz" 2>/dev/null; then
-        if [ "$REF" = stable ]; then
-            REF=main
-            curl -fsSL "https://github.com/$REPO/archive/refs/heads/main.tar.gz" -o "$work/app.tar.gz" || fail "Couldn't download plexamp-web from GitHub."
-        else
-            curl -fsSL "https://github.com/$REPO/archive/$REF.tar.gz" -o "$work/app.tar.gz" || fail "Couldn't download plexamp-web ($REF) from GitHub."
-        fi
+    # download URL FILE: its HTTP status (000: no answer, or it stopped partway).
+    download() {
+        local code
+        code="$(curl -sSL -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || code=000
+        printf '%s' "$code"
+    }
+    # The stable branch, or main until CI has made one: only when GitHub
+    # says there's no stable branch, never because a download failed (that
+    # would install something untested).
+    code="$(download "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" "$work/app.tar.gz")"
+    if [ "$code" = 404 ] && [ "$REF" = stable ]; then
+        REF=main
+        code="$(download "https://github.com/$REPO/archive/refs/heads/main.tar.gz" "$work/app.tar.gz")"
+    elif [ "$code" = 404 ]; then
+        code="$(download "https://github.com/$REPO/archive/$REF.tar.gz" "$work/app.tar.gz")"
     fi
+    [ "$code" = 200 ] || fail "Couldn't download plexamp-web ($REPO, $REF) from GitHub (HTTP ${code:-000}). Nothing was changed."
+    unset -f download
     mkdir "$work/app"
     tar -xzf "$work/app.tar.gz" -C "$work/app" --strip-components=1
 fi
@@ -110,8 +119,8 @@ rm -rf "$BASE/app.old" "$BASE/html.old"
 # already), and kept as they are on an update.
 if [ ! -f "$ENV_FILE" ]; then
     cat >"$ENV_FILE" <<'ENV'
-# plexamp-web settings, the same as the Docker image's (see "Container
-# settings" in the README). Change them with: plexamp-web-settings
+# plexamp-web settings, the same as the Docker image's (see
+# docs/configuration.md). Change them with: plexamp-web-settings
 PLEX_SERVER_URL=
 DISABLE_WEBSOCKETS=
 OLLAMA_URL=
@@ -142,8 +151,15 @@ cat >/usr/local/bin/update-plexamp-web <<UPDATE
 set -eu
 tmp="\$(mktemp)"
 trap 'rm -f "\$tmp"' EXIT
-curl -fsSL "https://raw.githubusercontent.com/$REPO/$WANT_REF/proxmox/install.sh" -o "\$tmp" 2>/dev/null ||
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/proxmox/install.sh" -o "\$tmp"
+# (Its HTTP status; 000 when it didn't all arrive.)
+get() {
+    code="\$(curl -sSL -o "\$tmp" -w '%{http_code}' "https://raw.githubusercontent.com/$REPO/\$1/proxmox/install.sh" 2>/dev/null)" || code=000
+    echo "\$code"
+}
+code="\$(get $WANT_REF)"
+# main only while there's no stable branch (not because a download failed).
+if [ "\$code" = 404 ] && [ "$WANT_REF" = stable ]; then code="\$(get main)"; fi
+[ "\$code" = 200 ] || { echo "Couldn't download the installer (HTTP \${code:-000}). Nothing was changed." >&2; exit 1; }
 LC_ALL=C.UTF-8 PW_REPO="$REPO" PW_REF="$WANT_REF" bash "\$tmp"
 UPDATE
 chmod 755 /usr/local/bin/update-plexamp-web
@@ -216,7 +232,11 @@ Group=www-data
 ExecStart=/usr/bin/node $BASE/app/server/index.js /run/plexamp-web/service.json
 Restart=always
 RestartSec=2
+# What it makes is its own alone, and it can never gain privileges or
+# capabilities (only what works in an unprivileged container).
 NoNewPrivileges=yes
+CapabilityBoundingSet=
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

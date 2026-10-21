@@ -33,19 +33,22 @@ const OPTIONS = {
   temperature: [0, 2, false],
   top_p: [0, 1, false],
   top_k: [1, 200, true],
-  num_ctx: [512, 32768, true],
   num_predict: [1, 8192, true],
   repeat_penalty: [0, 3, false],
   seed: [0, 2147483647, true],
 };
 
-// How long Ollama keeps the model loaded after a request: at most an hour.
-function keepAlive(v) {
-  const m = /^(\d{1,5})([smh]?)$/.exec(String(v ?? ''));
-  if (!m) return undefined;
-  const seconds = Number(m[1]) * { '': 1, s: 1, m: 60, h: 3600 }[m[2]];
-  return `${Math.min(seconds, 3600)}s`;
-}
+// What decides how much memory the model takes on the AI server is set here,
+// not by whoever asks: the context is as big as the messages need (worked
+// out as the app does), and the model stays loaded for 15 minutes after.
+export const contextFor = (chars) => Math.min(32768, Math.max(8192, 2 ** Math.ceil(Math.log2(chars / 3 + 1500))));
+const KEEP_ALIVE = '15m';
+const RETRY_FOR_MS = 3600000; // what Ollama turned down isn't asked for again for this long
+
+// An answer format (a JSON schema) is kept small and shallow: the app's own
+// are a few hundred bytes.
+const MAX_FORMAT = 8192;
+const depthOf = (v, d = 0) => (d > 10 || !v || typeof v !== 'object' ? d : Math.max(d + 1, ...Object.values(v).map((x) => depthOf(x, d + 1))));
 
 // A chat request as it's passed on to Ollama.
 export function cleanChat(body, model) {
@@ -61,20 +64,23 @@ export function cleanChat(body, model) {
   if (chars > AI_LIMITS.chars) throw new AIRequestError(413, 'That request is too long.');
   const out = { model, messages, stream: body.stream !== false };
   if (body.format === 'json') out.format = 'json';
-  else if (body.format && typeof body.format === 'object' && !Array.isArray(body.format)) out.format = body.format;
+  else if (body.format && typeof body.format === 'object' && !Array.isArray(body.format)) {
+    if (JSON.stringify(body.format).length > MAX_FORMAT || depthOf(body.format) > 8) throw new AIRequestError(400, 'That request’s answer format is too big.');
+    out.format = body.format;
+  }
+  const options = {};
   if (body.options && typeof body.options === 'object') {
-    const options = {};
     for (const [key, [min, max, whole]] of Object.entries(OPTIONS)) {
       const n = Number(body.options[key]);
       if (body.options[key] === undefined || body.options[key] === null || !Number.isFinite(n)) continue;
       const v = Math.max(min, Math.min(max, n));
       options[key] = whole ? Math.round(v) : v;
     }
-    if (Object.keys(options).length) out.options = options;
   }
+  options.num_ctx = contextFor(chars);
+  out.options = options;
   if (typeof body.think === 'boolean') out.think = body.think;
-  const keep = keepAlive(body.keep_alive);
-  if (keep) out.keep_alive = keep;
+  out.keep_alive = KEEP_ALIVE;
   return out;
 }
 
@@ -98,8 +104,10 @@ function readAll(res, limit) {
   });
 }
 
-// Ollama's error message, from an error answer.
-function errorText(text) {
+// Ollama's error message, from an error answer (for the log, and for
+// deciding what to try again without: never passed on as it is, as it can
+// say things about the AI server).
+export function errorText(text) {
   try {
     return String(JSON.parse(text).error || '').slice(0, 300);
   } catch {
@@ -118,6 +126,35 @@ export class SharedModel {
     this.pickedSaid = null;
     this.loads = new Map(); // `${model}|${num_ctx}` -> the load under way
     this.ps = null; // { names, at }: the models in memory
+    // What this Ollama turned down lately, and so isn't asked for for an
+    // hour (in case it's updated meanwhile): "think" (models or versions
+    // without it), answer formats as schemas (Ollama before 0.5 only knows
+    // plain JSON).
+    this.noThinkAt = 0;
+    this.plainJsonAt = 0;
+  }
+
+  // A chat as this Ollama takes it.
+  adapt(chat) {
+    const out = { ...chat };
+    const now = Date.now();
+    if (now - this.noThinkAt < RETRY_FOR_MS) delete out.think;
+    if (now - this.plainJsonAt < RETRY_FOR_MS && out.format && typeof out.format === 'object') out.format = 'json';
+    return out;
+  }
+
+  // Whether a chat Ollama turned down (400) can go again without what it
+  // objected to: `sent` is the chat as it went. Remembered for the next ones.
+  retryWithout(sent, message) {
+    if ('think' in sent && /think/i.test(message)) {
+      this.noThinkAt = Date.now();
+      return true;
+    }
+    if (sent.format && typeof sent.format === 'object' && /format|schema|unmarshal|json/i.test(message)) {
+      this.plainJsonAt = Date.now();
+      return true;
+    }
+    return false;
   }
 
   // A request to Ollama; resolves with the response once its headers are in.
@@ -169,7 +206,9 @@ export class SharedModel {
     try {
       names = await this.installed();
     } catch (err) {
-      throw new AIRequestError(502, `The AI server didn’t answer (${err.message}). Check that Ollama is running.`);
+      // (Why goes to the log: it names the AI server's address.)
+      this.log?.warn(`shared AI: couldn't list the AI server's models: ${err.message}`);
+      throw new AIRequestError(502, 'The AI server didn’t answer. Check that Ollama is running.');
     }
     if (!names.length) throw new AIRequestError(503, 'The AI server has no models installed.');
     if (this.pickedSaid !== names[0]) {
@@ -211,12 +250,14 @@ export class SharedModel {
       try {
         res = await this.request('/api/generate', { method: 'POST', body, idleMs: AI_LIMITS.loadMs });
       } catch (err) {
-        throw new AIRequestError(502, `The AI server didn’t answer (${err.message}). Check that Ollama is running.`);
+        throw Object.assign(new AIRequestError(502, 'The AI server didn’t answer. Check that Ollama is running.'), { detail: err.message });
       }
       const text = await readAll(res, 1024 * 1024);
       if (res.statusCode !== 200) {
-        // (As Ollama said it: "model 'x' not found" is a 404.)
-        throw new AIRequestError(res.statusCode === 404 ? 404 : 502, errorText(text) || `the AI server answered ${res.statusCode}`);
+        // "model 'x' not found" is a 404; what else Ollama said is for the log.
+        const detail = errorText(text) || `the AI server answered ${res.statusCode}`;
+        if (res.statusCode === 404) throw Object.assign(new AIRequestError(404, `The model "${model}" isn’t installed on the AI server.`), { detail });
+        throw Object.assign(new AIRequestError(502, 'The AI server couldn’t load the model. Whoever runs this player can see why in its log.'), { detail });
       }
       const seconds = (Date.now() - started) / 1000;
       if (seconds > 2) this.log?.info(`shared AI: loaded ${model} in ${Math.round(seconds)} s`);

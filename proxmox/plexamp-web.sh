@@ -5,7 +5,7 @@
 #
 # On the node's shell (as root):
 #
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/plexamp-web.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/stable/proxmox/plexamp-web.sh)"
 #
 # It offers its default settings, or asks about each one ("advanced"). Any
 # of them can be set beforehand instead, and with YES=1 it asks nothing:
@@ -18,6 +18,10 @@
 # Node.js from Debian (no Docker). Inside it, `update-plexamp-web` updates
 # the app and `plexamp-web-settings` changes its settings.
 set -euo pipefail
+
+# All of it is in main(), which the last line runs: if the download that
+# `bash -c "$(curl …)"` runs stopped partway, none of it runs.
+main() {
 
 REPO="${PW_REPO:-kamakazedan/plexamp-web}"
 REF="${PW_REF:-stable}"
@@ -76,8 +80,8 @@ pve_full="$(pveversion 2>/dev/null | sed -n 's#^pve-manager/\([0-9][0-9.]*\)/.*#
 pve="${pve_full%%.*}"
 if [ -z "$pve" ] || [ "$pve" -lt 8 ]; then fail "This needs Proxmox VE 8 or later."; fi
 arch="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
-printf '%s\n' "$REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || fail "PW_REPO should look like owner/name."
-printf '%s\n' "$REF" | grep -Eq '^[A-Za-z0-9_./-]+$' || fail "PW_REF should be a branch or tag name."
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "PW_REPO should look like owner/name."
+[[ "$REF" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "PW_REF should be a branch or tag name."
 ok "Proxmox VE $pve_full ($arch)"
 
 # ---------- settings ----------
@@ -110,6 +114,26 @@ valid() {
 # Storages with this content that are active.
 storages() { pvesm status -content "$1" 2>/dev/null | awk 'NR > 1 && $3 == "active" { print $1 }'; }
 
+# one_of VALUE CHOICE...: VALUE is one of the choices, exactly.
+one_of() {
+    local want="$1" choice
+    shift
+    for choice in "$@"; do
+        if [ "$choice" = "$want" ]; then return 0; fi
+    done
+    return 1
+}
+
+# download URL FILE: 0 when all of it arrived, 2 when GitHub says there's no
+# such thing (404), 1 when it couldn't be fetched (or stopped partway).
+download() {
+    local code ok=true
+    code="$(curl -sSL -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || ok=false
+    if [ "$ok" = true ] && [ "$code" = 200 ]; then return 0; fi
+    if [ "$ok" = true ] && [ "$code" = 404 ]; then return 2; fi
+    return 1
+}
+
 URL_RE='^$|^https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$|^https?://\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
 
 if [ "$tty" = true ]; then
@@ -130,17 +154,17 @@ mapfile -t disk_choices < <(storages rootdir)
 [ "${#disk_choices[@]}" -gt 0 ] || fail "No storage here can hold containers."
 default_disk="${disk_choices[0]}"
 for s in local-lvm local-zfs; do
-    if printf '%s\n' "${disk_choices[@]}" | grep -qx "$s"; then default_disk="$s" && break; fi
+    if one_of "$s" "${disk_choices[@]}"; then default_disk="$s" && break; fi
 done
 ask STORAGE "Storage for its disk (${disk_choices[*]})" "$default_disk"
-printf '%s\n' "${disk_choices[@]}" | grep -qx -- "$STORAGE" || fail "$STORAGE can't hold containers (choose from: ${disk_choices[*]})."
+one_of "$STORAGE" "${disk_choices[@]}" || fail "$STORAGE can't hold containers (choose from: ${disk_choices[*]})."
 
 mapfile -t template_choices < <(storages vztmpl)
 [ "${#template_choices[@]}" -gt 0 ] || fail "No storage here can hold container templates."
 default_tmpl="${template_choices[0]}"
-if printf '%s\n' "${template_choices[@]}" | grep -qx local; then default_tmpl=local; fi
+if one_of local "${template_choices[@]}"; then default_tmpl=local; fi
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-$default_tmpl}"
-printf '%s\n' "${template_choices[@]}" | grep -qx -- "$TEMPLATE_STORAGE" || fail "$TEMPLATE_STORAGE can't hold templates."
+one_of "$TEMPLATE_STORAGE" "${template_choices[@]}" || fail "$TEMPLATE_STORAGE can't hold templates."
 
 ask CORES "CPU cores" 1
 ask RAM_MB "Memory (MB)" 512
@@ -254,8 +278,8 @@ ok "Network up${address:+: $address}"
 # a shell inside the container.
 work="$(mktemp -d)"
 cat >"$work/plexamp-web.env" <<ENV
-# plexamp-web settings, the same as the Docker image's (see "Container
-# settings" in the README). Change them with: plexamp-web-settings
+# plexamp-web settings, the same as the Docker image's (see
+# docs/configuration.md). Change them with: plexamp-web-settings
 PLEX_SERVER_URL=$PLEX_SERVER_URL
 DISABLE_WEBSOCKETS=
 OLLAMA_URL=$OLLAMA_URL
@@ -275,7 +299,9 @@ pct push "$CTID" "$work/plexamp-web.env" /etc/plexamp-web/plexamp-web.env --perm
 
 # The installer: next to this script when it's run from a copy of the repo
 # (bash proxmox/plexamp-web.sh), otherwise (bash -c "$(curl …)") from GitHub:
-# the stable branch (the commits that passed every test), or main.
+# the stable branch (the commits that passed every test), or main if there's
+# no stable branch yet (only then: a download that failed is no reason to
+# install something untested).
 here=""
 src="${BASH_SOURCE[0]:-}"
 if [ -n "$src" ] && [ -f "$src" ]; then here="$(cd "$(dirname "$src")" && pwd)"; fi
@@ -283,8 +309,14 @@ if [ -n "${PW_INSTALL_SCRIPT:-}" ]; then
     cp "$PW_INSTALL_SCRIPT" "$work/install.sh"
 elif [ -n "$here" ] && [ -f "$here/install.sh" ] && [ -f "$here/plexamp-web.sh" ]; then
     cp "$here/install.sh" "$work/install.sh"
-elif ! curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/proxmox/install.sh" -o "$work/install.sh" 2>/dev/null; then
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/proxmox/install.sh" -o "$work/install.sh" || fail "Couldn't download the installer."
+else
+    got=0
+    download "https://raw.githubusercontent.com/$REPO/$REF/proxmox/install.sh" "$work/install.sh" || got=$?
+    if [ "$got" = 2 ] && [ "$REF" = stable ]; then
+        got=0
+        download "https://raw.githubusercontent.com/$REPO/main/proxmox/install.sh" "$work/install.sh" || got=$?
+    fi
+    [ "$got" = 0 ] || fail "Couldn't download the installer ($REPO, $REF). Nothing was installed in container $CTID."
 fi
 pct push "$CTID" "$work/install.sh" /root/install-plexamp-web.sh --perms 700
 printf '  %sInstalling plexamp-web in it (a minute or two)%s\n' "$BOLD" "$RESET"
@@ -306,3 +338,6 @@ item "Settings" "pct exec $CTID -- plexamp-web-settings"
 item "Updates" "pct exec $CTID -- update-plexamp-web"
 item "Logs" "pct exec $CTID -- journalctl -u plexamp-web -u plexamp-web-config -f"
 echo
+}
+
+main "$@"

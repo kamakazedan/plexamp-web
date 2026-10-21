@@ -1,8 +1,16 @@
 .git
 .github
+.gitignore
+.dockerignore
+.env
 dev
+docs
+proxmox
 tests
 *.md
 docker-compose.yml
 server/test.js
 web/vendor
+**/.DS_Store
+**/*.swp
+**/*~

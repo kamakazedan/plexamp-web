@@ -10,6 +10,9 @@ library matching run as they would with a real model.
 For tests, /__mock/config?load=6 makes loading a model take 6 seconds (as
 after Ollama starts), &unload=1 empties its memory and &reset=1 its counts;
 like Ollama, a load stops when the request that asked for it goes away.
+&fail=1 makes chats fail as a model that crashed would (saying things about
+the server, as Ollama does), &fail=2 the same partway through an answer,
+and &fail=0 stops that.
 
     python3 dev/mock-ollama.py                 # http://127.0.0.1:11434
     python3 dev/mock-ollama.py --origins '*'   # allow any website
@@ -56,6 +59,7 @@ STATE = {
     'loads': 0,  # loads finished
     'cancelled': 0,  # loads given up because the request went away
     'dj_prompt': '',  # what the AI DJ was asked last
+    'fail': 0,  # chats fail (/__mock/config?fail=1), or partway through (fail=2)
 }
 LOCK = threading.Lock()
 
@@ -235,6 +239,9 @@ class Handler(BaseHTTPRequestHandler):
                 STATE['loaded'] = []
             if re.search(r'[?&]reset=1', self.path):
                 STATE['loads'] = STATE['cancelled'] = 0
+            m = re.search(r'[?&]fail=([012])', self.path)
+            if m:
+                STATE['fail'] = int(m.group(1))
             return self.send_json(STATE)
         return self.send_json({'error': 'not found'}, 404)
 
@@ -263,6 +270,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'model': model, 'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'), 'response': '', 'done': True, 'done_reason': 'load'})
         if ARGS.reject_think and 'think' in body:
             return self.send_json({'error': f'"{model}" does not support thinking'}, 400)
+        crash = 'llama runner process has terminated: exit status 2 (/root/.ollama/models/blobs/sha256-0123abcd on 10.0.0.20)'
+        if STATE['fail'] == 1:
+            return self.send_json({'error': crash}, 500)
         if not self.ensure_loaded(model, ctx):
             return None
 
@@ -277,6 +287,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/x-ndjson')
         self.end_headers()
         for i in range(0, len(content), 8):
+            if STATE['fail'] == 2 and i >= 8:
+                self.wfile.write((json.dumps({'error': crash}) + '\n').encode())
+                self.wfile.flush()
+                return None
             chunk = {'model': model, 'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'), 'message': {'role': 'assistant', 'content': content[i:i + 8]}, 'done': False}
             self.wfile.write((json.dumps(chunk) + '\n').encode())
             self.wfile.flush()

@@ -559,11 +559,11 @@ export async function findArtist(name, signal, section = app.source.sectionKey) 
 // A suggested song, looked for in the library: { track } if it's there, or
 // { album } if what was suggested is really an album of theirs (models mix
 // them up), or {}.
-async function lookSong(song, signal) {
+async function lookSong(song, signal, section = app.source.sectionKey) {
   const title = norm(song?.title);
   const artist = norm(song?.artist);
   if (!title) return {};
-  const res = await app.server.search(song.title, app.source.sectionKey, { signal, limit: 12 }).catch(() => null);
+  const res = await app.server.search(song.title, section, { signal, limit: 12 }).catch(() => null);
   const named = (a) => !artist || (norm(a) && (norm(a) === artist || norm(a).includes(artist) || artist.includes(norm(a))));
   const byArtist = (m) => [m.grandparentTitle, m.originalTitle].some(named);
   const tracks = res?.track || [];
@@ -589,24 +589,24 @@ export function sameTitle(a, b) {
 // title and, if its artist is here, among that artist's own tracks, so a
 // song with a common title isn't taken for missing. `searched`: looked for
 // by title already.
-export async function songInLibrary(song, signal, { searched = false } = {}) {
+export async function songInLibrary(song, signal, { searched = false, section = app.source.sectionKey } = {}) {
   if (!searched) {
-    const { track, album } = await lookSong(song, signal);
+    const { track, album } = await lookSong(song, signal, section);
     if (track || album) return true; // (an album of theirs isn't a missing song)
   }
   const want = norm(song?.title);
   if (!want) return true; // nothing to look for
-  const artist = await findArtist(song.artist, signal);
+  const artist = await findArtist(song.artist, signal, section);
   if (!artist) return false;
   const needle = want.split(' ').find((w) => w.length >= 3) || want;
   const { items } = await app.server
-    .list(app.source.sectionKey, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal })
+    .list(section, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal })
     .catch(() => ({ items: [] }));
   return items.some((m) => sameTitle(norm(m.title), want));
 }
 
-export async function artistInLibrary(name, signal) {
-  return !!(await findArtist(name, signal));
+export async function artistInLibrary(name, signal, section = app.source.sectionKey) {
+  return !!(await findArtist(name, signal, section));
 }
 
 // ---------- playlists from a description ----------

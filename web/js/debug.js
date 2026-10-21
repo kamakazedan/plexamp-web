@@ -25,10 +25,16 @@ const client = () => {
 
 export const debugOn = () => enabled;
 
+// As the service does (server/log.js): in query strings (also inside another
+// address, URL-encoded), headers and JSON.
+const SECRET_NAMES = 'X-Plex-Token|X-Plex-Server-Token|token|authToken|accessToken|apiKey|api_key|key';
+const SECRET_PARAMS = new RegExp(`((?:^|[?&;]|%3F|%26|%3B)(?:${SECRET_NAMES})(?:=|%3D))(?:(?!%26|%23)[^&#\\s"'])*`, 'gi');
+
 export function redact(text) {
   return String(text ?? '')
-    .replace(/([?&;](?:X-Plex-Token|X-Plex-Server-Token|token|authToken|apiKey|api_key|key)=)[^&#\s"']*/gi, '$1[redacted]')
-    .replace(/("(?:authToken|accessToken|token|apiKey|api_key|X-Plex-Token)"\s*:\s*")[^"]*/gi, '$1[redacted]')
+    .replace(SECRET_PARAMS, '$1[redacted]')
+    .replace(/(X-Plex-(?:Server-)?Token\s*:\s*)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
+    .replace(/("(?:authToken|accessToken|token|apiKey|api_key|X-Plex-Token|X-Plex-Server-Token)"\s*:\s*")[^"]*/gi, '$1[redacted]')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]');
 }
 
@@ -44,7 +50,7 @@ export function safeUrl(url) {
 
 export function debugLog(area, message, level = 'info') {
   if (!enabled) return;
-  const text = redact(message).replace(/\s+/g, ' ').slice(0, 500);
+  const text = redact(String(message ?? '').slice(0, 1500)).replace(/\s+/g, ' ').slice(0, 500);
   console.info(`[plexamp-web] ${level} ${area}: ${text}`);
   queue.push({ level, area, message: text });
   if (queue.length > 200) queue.splice(0, queue.length - 200);

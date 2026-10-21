@@ -5,12 +5,16 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.15.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.16.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
 
 // ---------- persistence ----------
+
+// Signed out (here or in another tab): nothing more is kept, while the page
+// goes (see signOut in state.js).
+let frozen = false;
 
 export const store = {
   get(key, fallback = null) {
@@ -22,6 +26,7 @@ export const store = {
     }
   },
   set(key, value) {
+    if (frozen) return;
     try {
       if (value === null || value === undefined) localStorage.removeItem(`pw.${key}`);
       else localStorage.setItem(`pw.${key}`, JSON.stringify(value));
@@ -39,7 +44,13 @@ export const store = {
       /* ignore */
     }
   },
+  freeze() {
+    frozen = true;
+  },
 };
+
+// 16 random hex characters.
+const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 export function clientId() {
   let id = store.get('clientId');
@@ -236,21 +247,29 @@ export const routeRank = (kind, prefer = 'best') => (ROUTE_RANKS[prefer] || ROUT
 
 // Every route to a server, tried at once: [{ uri, kind, ok, ms, why }], `why`
 // saying why one can't be used ('http': a plain http address, which a page
-// served over https can't use; 'timeout'; 'network'; 'status' (Plex
-// answered with an error, `status`); 'other': the proxy leads to another
-// server).
+// served over https can't use; 'insecure': a plain http address over the
+// internet, which would carry your sign-in unencrypted; 'timeout';
+// 'network'; 'status' (it answered with an error, `status`); 'other': it
+// leads to another server). Each is asked who it is, without your sign-in
+// (Plex answers that without one): an address only counts if it's this very
+// server, so whatever else answers at one (on someone else's network, say)
+// gets nothing. This container's proxy only answers requests that carry a
+// sign-in, and it's this player's own address.
 export async function probeConnections(server, { proxy = null, timeout = 6000 } = {}) {
   const pageIsHttps = location.protocol === 'https:';
-  const candidates = server.connections.map((c) => ({ uri: c.uri, kind: c.relay ? 'relay' : c.local ? 'local' : 'remote', http: pageIsHttps && c.protocol === 'http' }));
-  if (proxy) candidates.push({ uri: proxy, kind: 'proxy', http: false });
+  const candidates = server.connections.map((c) => {
+    const kind = c.relay ? 'relay' : c.local ? 'local' : 'remote';
+    const http = c.protocol === 'http' || /^http:/i.test(c.uri);
+    return { uri: c.uri, kind, why: http && pageIsHttps ? 'http' : http && kind !== 'local' ? 'insecure' : null };
+  });
+  if (proxy) candidates.push({ uri: proxy, kind: 'proxy', why: null });
   return Promise.all(
-    candidates.map(async ({ uri, kind, http }) => {
-      if (http) return { uri, kind, ok: false, why: 'http' };
+    candidates.map(async ({ uri, kind, why }) => {
+      if (why) return { uri, kind, ok: false, why };
       const t0 = performance.now();
       try {
-        const id = await request(withParams(`${uri}/identity`, plexParams(server.token)), { timeout });
-        // The proxy has to lead to this very server.
-        if (kind === 'proxy' && id?.MediaContainer?.machineIdentifier !== server.id) return { uri, kind, ok: false, why: 'other' };
+        const id = await request(kind === 'proxy' ? withParams(`${uri}/identity`, plexParams(server.token)) : `${uri}/identity`, { timeout });
+        if (id?.MediaContainer?.machineIdentifier !== server.id) return { uri, kind, ok: false, why: 'other' };
         return { uri, kind, ok: true, ms: Math.round(performance.now() - t0) };
       } catch (err) {
         if (err?.status) return { uri, kind, ok: false, why: 'status', status: err.status };
@@ -344,7 +363,8 @@ export class PlexServer {
 
   // The app's own X-Plex-* values (the token above all) come last, so no
   // parameter from elsewhere, such as a filter in a link, can replace them.
-  // `token` is only ever the server's own temporary token (for casting).
+  // `token` is only ever the server's own temporary token (for casting), or
+  // '' for none at all.
   url(path, params = {}, token = this.token) {
     return withParams(this.uri + path, { ...params, ...plexParams(token) });
   }
@@ -814,13 +834,19 @@ export class PlexServer {
   }
 
   // The original file, played as-is by the browser.
+  // `token`: another token to use (AirPlay and Cast get the server's
+  // temporary one); '' for none at all.
   directUrl(track, token) {
-    return track.partKey ? this.url(track.partKey, {}, token || this.token) : null;
+    return track.partKey ? this.url(track.partKey, {}, token ?? this.token) : null;
   }
 
   // Server-side conversion for formats the browser can't decode, or to save
   // data. Uses the same universal transcoder endpoint as python-plexapi.
   transcodeUrl(track, bitrate = 320, token = this.token) {
+    // A stream's files are fetched by its session id alone (no token: see
+    // pms-proxy.inc), so it's one nobody could guess, in both the names Plex
+    // servers take it by.
+    const session = `${clientId()}-${track.id}-${randomId()}`;
     return this.url(
       '/audio/:/transcode/universal/start.m3u8',
       {
@@ -833,7 +859,8 @@ export class PlexServer {
         directStreamAudio: 0,
         hasMDE: 1,
         musicBitrate: bitrate,
-        transcodeSessionId: `${clientId()}-${track.id}`,
+        session,
+        transcodeSessionId: session,
         'X-Plex-Session-Identifier': clientId(),
         'X-Plex-Client-Profile-Extra':
           'add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=aac,mp3)',

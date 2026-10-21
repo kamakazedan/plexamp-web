@@ -42,6 +42,10 @@ RUN_DIR="${RUN_DIR%/}"
 SOCKET_DIR="$RUN_DIR/socket"
 SERVICE_SOCKET="$SOCKET_DIR/service.sock"
 NGINX_LOG_PORT="${NGINX_LOG_PORT:-5140}"
+case "$NGINX_LOG_PORT" in
+    "" | *[!0-9]* | 0*) echo "plexamp-web: NGINX_LOG_PORT must be a port number (got: $NGINX_LOG_PORT)" >&2 && exit 1 ;;
+esac
+[ "$NGINX_LOG_PORT" -le 65535 ] || { echo "plexamp-web: NGINX_LOG_PORT must be a port number (got: $NGINX_LOG_PORT)" >&2 && exit 1; }
 # The app's version, for the service to say who's asking (at MusicBrainz).
 APP_VERSION="$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" "$HTML_DIR/js/plex.js" 2>/dev/null | head -n 1 || true)"
 
@@ -135,6 +139,17 @@ parent_is_roots() {
 
 lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
 
+# whole VALUE ERE: the whole value matches the extended regular expression
+# (one line: grep alone would pass a value whose first line matched).
+NL='
+'
+TAB="$(printf '\t')"
+CR="$(printf '\r')"
+whole() {
+    case "$1" in *"$NL"*) return 1 ;; esac
+    printf '%s\n' "$1" | grep -Eq "$2"
+}
+
 # truthy NAME VALUE [DEFAULT]: is the setting on?
 truthy() {
     v="$(lower "${2:-}")"
@@ -174,9 +189,10 @@ prepare_upstream() {
     UP_PATH=""
     case "$rest" in */*) UP_PATH="/${rest#*/}" ;; esac
     UP_PATH="${UP_PATH%/}"
-    printf '%s\n' "$hostport" | grep -Eq '^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?$' ||
+    case "$url" in *"$NL"* | *"$CR"* | *"$TAB"* | *' '*) fail "$var can't have spaces or line breaks in it" ;; esac
+    whole "$hostport" '^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?$' ||
         fail "$var has an invalid host or port (got: $(safe_url "$url")). Addresses can't include a user name or password."
-    printf '%s\n' "$UP_PATH" | grep -Eq '^[A-Za-z0-9._~/-]*$' || fail "$var has an invalid path (got: $(safe_url "$url"))"
+    whole "$UP_PATH" '^[A-Za-z0-9._~/-]*$' || fail "$var has an invalid path (got: $(safe_url "$url"))"
     case "$hostport" in
         \[*\]:*) host="${hostport%%]*}]"; port="${hostport##*]:}" ;;
         \[*) host="$hostport"; port="" ;;
@@ -304,6 +320,7 @@ case "$PLEX_TV" in
     http://* | https://*) ;;
     *) fail "PLEX_TV_URL must start with http:// or https:// (got: $(safe_url "$PLEX_TV"))" ;;
 esac
+whole "$PLEX_TV" '^https?://[]A-Za-z0-9._:[-]+(/[A-Za-z0-9._~/-]*)?$' || fail "PLEX_TV_URL isn't a plain address (got: $(safe_url "$PLEX_TV"))"
 
 # ---------- the service (/api/) ----------
 
@@ -328,12 +345,36 @@ if [ -n "${PLEX_SERVER_URL:-}" ]; then
         # container in without signing in (see server/index.js).
         PMS_AUTH="auth_request /_pms_auth;"
     fi
+    # At an https:// name, Plex's certificate is checked as browsers would
+    # (it has to be for that name, from an authority the container trusts).
+    # At an https:// network address it can't be: a Plex server's certificate
+    # is for its plex.direct name, which an address never matches (the
+    # service checks it's a Plex one; see server/plex.js).
+    PMS_TLS=""
+    case "$PMS_URL" in
+        https://*)
+            case "$PMS_NAME" in
+                *:*) ;; # an IPv6 address
+                *[!0-9.]*)
+                    CA_FILE=""
+                    for f in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
+                        if [ -f "$f" ]; then CA_FILE="$f" && break; fi
+                    done
+                    [ -n "$CA_FILE" ] || fail "PLEX_SERVER_URL is an https:// address, but this container has no certificate authorities to check it with"
+                    PMS_TLS="proxy_ssl_verify on;
+    proxy_ssl_verify_depth 4;
+    proxy_ssl_trusted_certificate ${CA_FILE};"
+                    ;;
+            esac
+            ;;
+    esac
     # Shared by both locations below.
     PMS_PROXY="${PMS_ERROR_LOG}
     ${PMS_RESOLVER}
+    ${PMS_TLS}
     proxy_http_version 1.1;
     proxy_set_header Host ${PMS_HOST};
-    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Upgrade \$pw_upgrade;
     proxy_set_header Connection \$connection_upgrade;
     # Set, not appended to: a browser can't pass Plex an address of its
     # choosing (Plex treats some addresses as trusted).
@@ -345,9 +386,11 @@ if [ -n "${PLEX_SERVER_URL:-}" ]; then
     proxy_ssl_name ${PMS_NAME};
     proxy_buffering off;
     proxy_request_buffering off;
-    # Caching is decided here (see Cache-Control in nginx.conf), not by Plex.
+    # Caching is decided here (see Cache-Control in nginx.conf), not by Plex,
+    # and nothing from Plex sets cookies for the player's address.
     proxy_hide_header Cache-Control;
     proxy_hide_header Expires;
+    proxy_hide_header Set-Cookie;
     proxy_read_timeout 1h;
     proxy_send_timeout 1h;
     # The app sends Plex small requests, and pictures for playlists and
@@ -382,6 +425,10 @@ location = /_pms_auth {
     proxy_set_header Content-Length "";
     proxy_set_header Cookie "";
     proxy_set_header Upgrade "";
+    # How the service knows the check is nginx's (the header is cleared from
+    # everything else that reaches it), and who's asking.
+    proxy_set_header X-PW-Route internal;
+    proxy_set_header X-Real-IP \$remote_addr;
     # \$args would be the subrequest's own (empty) query string.
     proxy_set_header X-Original-URI \$request_uri;
     proxy_connect_timeout 5s;
@@ -412,9 +459,10 @@ AI_ON=false
 if [ -n "${OLLAMA_URL:-}" ]; then
     prepare_upstream OLLAMA_URL "$OLLAMA_URL"
     MODEL="${OLLAMA_MODEL:-}"
-    printf '%s\n' "$MODEL" | grep -Eq '^[A-Za-z0-9._:/@+-]*$' || fail "OLLAMA_MODEL has unexpected characters (got: $MODEL)"
+    # (The model's name goes into the app's config.js as it is.)
+    whole "$MODEL" '^[A-Za-z0-9._:/@+-]{0,200}$' || fail "OLLAMA_MODEL has unexpected characters (got: $(printf '%s' "$MODEL" | tr -c 'A-Za-z0-9._:/@+-' '?'))"
     KEY="${OLLAMA_API_KEY:-}"
-    printf '%s\n' "$KEY" | grep -Eq '^[A-Za-z0-9._~+/=-]*$' || fail "OLLAMA_API_KEY has unexpected characters"
+    whole "$KEY" '^[A-Za-z0-9._~+/=-]*$' || fail "OLLAMA_API_KEY has unexpected characters"
 
     case "$(lower "${OLLAMA_AUTH:-plex}")" in
         plex | on | true | yes | 1) AI_AUTH=plex ;;
@@ -436,11 +484,13 @@ if [ -n "${OLLAMA_URL:-}" ]; then
 location = /ollama/api/$1 {
     limit_except $2 { deny all; }
     limit_req zone=ai burst=20 nodelay;
+    limit_req zone=ai_ip burst=60 nodelay;
     limit_req_status 429;
     proxy_pass http://unix:${SERVICE_SOCKET}:/api/ai/$1;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Cookie "";
+    proxy_set_header X-PW-Route ai;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_buffering off;
     proxy_read_timeout 600s;
@@ -477,6 +527,7 @@ location /api/ {
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Cookie "";
+    proxy_set_header X-PW-Route "";
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_buffering off;
     proxy_read_timeout 60s;
@@ -506,6 +557,13 @@ CONF
         fi
     fi
     if [ "$TOGETHER" = true ]; then add_config 'together: true'; fi
+    # Play on with Plex players: only for the owner of the server at
+    # PLEX_SERVER_URL (without it, anyone signed in to Plex could have the
+    # service send requests around this network: see server/index.js).
+    if [ "$CAST" = true ] && [ -z "$PMS_URL" ]; then
+        CAST=false
+        say "Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner), so it's off"
+    fi
     if [ "$CAST" = true ]; then add_config 'cast: true'; fi
     if [ "$MB" = true ]; then add_config "musicbrainz: \"$MB_KIND\""; fi
     add_config 'devices: true'

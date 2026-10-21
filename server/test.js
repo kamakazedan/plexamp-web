@@ -5,8 +5,9 @@ import { Together, cleanTrack, TogetherError } from './together.js';
 import { redact, oneLine } from './log.js';
 import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
-import { isPlexDirectCert, plexServerIdentity, certProblem } from './plex.js';
-import { cleanChat, SharedModel, AIRequestError, AI_LIMITS } from './ai.js';
+import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped } from './plex.js';
+import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
+import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic } from './musicbrainz.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { createServer } from 'node:http';
@@ -187,6 +188,94 @@ test('redaction removes tokens and keys', () => {
   assert.ok(!line.includes('zzz'));
   assert.ok(!redact('a token abcDEF123456ghiJKL78 alone').includes('abcDEF123456ghiJKL78'));
   assert.equal(oneLine('line one\nfake: second line'), 'line one fake: second line');
+  // Inside another address (URL-encoded), as a header, and other names for them.
+  const inner = redact('/photo/:/transcode?url=%2Flibrary%2Fx%3FX-Plex-Token%3Dsecret1%26w%3D3&width=10');
+  assert.ok(!inner.includes('secret1') && inner.includes('%26w%3D3&width=10'), inner);
+  assert.ok(!redact('X-Plex-Token: secret2').includes('secret2'));
+  assert.ok(!redact('{"accessToken":"secret3"}').includes('secret3'));
+  assert.ok(!redact('token=secret4 first').includes('secret4'));
+});
+
+test('redaction takes the same time whatever the text (nothing can make it crawl)', () => {
+  const started = Date.now();
+  for (const text of ['a-'.repeat(200000), 'a1'.repeat(200000), `${'a'.repeat(19)}-`.repeat(20000), 'X-Plex-Token='.repeat(30000)]) {
+    oneLine(text, 2000);
+    redact(text.slice(0, 100000));
+  }
+  assert.ok(Date.now() - started < 2000, `${Date.now() - started} ms`);
+  // Only the start of a long text is kept, with a secret near the cut still found.
+  const cut = oneLine(`${'x'.repeat(490)} X-Plex-Token=abcdefghij1234567890 ${'y'.repeat(5000)}`, 500);
+  assert.ok(cut.length <= 501 && !cut.includes('abcdefghij'), cut);
+});
+
+test('only plain request paths are answered', () => {
+  for (const p of ['/api/health', '/api/together/sessions/abc_D-1/join', '/api/shares/0123abcd', '/api/ai/chat']) assert.ok(plainPath(p), p);
+  for (const p of ['/api\\internal/pms-auth', '/api/x/..\\internal', '/api//internal/pms-auth', '/api/./ai/chat', '/api/x/../ai/chat', '/api/%2e%2e/ai/chat', '/api%2Fai/chat', '/api%5Cai/chat', '/api/ai/chat/..', 'api/health', '', '/api/a b'])
+    assert.ok(!plainPath(p), p);
+});
+
+test('limits go by address, and by network for IPv6', () => {
+  const ip = (a) => clientIp({ headers: { 'x-real-ip': a } });
+  assert.equal(ip('192.168.1.5'), '192.168.1.5');
+  assert.equal(ip('::ffff:192.168.1.5'), '192.168.1.5');
+  assert.equal(ip('2001:db8:1:2:aaaa::1'), '2001:db8:1:2::/64');
+  assert.equal(ip('2001:0db8:0001:0002:ffff:ffff:ffff:ffff'), '2001:db8:1:2::/64');
+  assert.equal(ip('2001:db8::1'), '2001:db8:0:0::/64');
+  assert.equal(ip('::1'), '0:0:0:0::/64');
+  assert.equal(clientIp({ headers: {} }), 'local');
+});
+
+test('sign-ins: checked once however many requests ask at once, and remembered', async () => {
+  let asked = 0;
+  const tv = createServer((req, res) => {
+    asked += 1;
+    const token = req.headers['x-plex-token'];
+    setTimeout(() => {
+      if (token === 'good-token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 7, uuid: 'u7', username: 'dan', friendlyName: 'Dan' }));
+      } else {
+        res.writeHead(401);
+        res.end();
+      }
+    }, 50);
+  });
+  await new Promise((r) => tv.listen(0, '127.0.0.1', r));
+  try {
+    const auth = new PlexAuth({ plexTvUrl: `http://127.0.0.1:${tv.address().port}` });
+    assert.equal(auth.knows('good-token'), false);
+    const users = await Promise.all([auth.identify('good-token'), auth.identify('good-token'), auth.identify('good-token')]);
+    assert.equal(asked, 1);
+    assert.ok(users.every((u) => u.id === 7 && u.title === 'Dan'));
+    assert.equal(auth.knows('good-token'), true);
+    await assert.rejects(auth.identify('made-up-token'), (e) => e.status === 401);
+    await assert.rejects(auth.identify('made-up-token'), (e) => e.status === 401);
+    assert.equal(asked, 2);
+    assert.equal(auth.knows('made-up-token'), true);
+  } finally {
+    tv.close();
+  }
+});
+
+test('plex.tv: never followed elsewhere, and answers read up to a limit', async () => {
+  const tv = createServer((req, res) => {
+    if (req.url.startsWith('/api/v2/user')) {
+      res.writeHead(302, { Location: 'http://127.0.0.1:9/steal' });
+      return res.end();
+    }
+    res.writeHead(200);
+    return res.end('x'.repeat(5000));
+  });
+  await new Promise((r) => tv.listen(0, '127.0.0.1', r));
+  try {
+    const base = `http://127.0.0.1:${tv.address().port}`;
+    const auth = new PlexAuth({ plexTvUrl: base });
+    await assert.rejects(auth.identify('good-token'), (e) => e.network === true);
+    await assert.rejects(readCapped(await fetch(`${base}/big`), 1000), (e) => e.code === 'TOO_LONG');
+    assert.equal((await readCapped(await fetch(`${base}/big`), 10000)).length, 5000);
+  } finally {
+    tv.close();
+  }
 });
 
 // ---------- casting ----------
@@ -404,17 +493,25 @@ test('the shared AI model: only the one model, and only what the app sends', () 
     template: '{{ .Prompt }}',
   };
   const out = cleanChat(body, 'gemma4:12b');
+  // The context and how long the model stays loaded are the service's to
+  // set (they decide how much memory it takes), not the request's.
   assert.deepEqual(out, {
     model: 'gemma4:12b',
     messages: [{ role: 'system', content: 'Be brief.' }, { role: 'user', content: 'Hello' }],
     stream: true,
     format: { type: 'object' },
-    options: { temperature: 2, num_ctx: 32768, num_predict: 20 },
+    options: { temperature: 2, num_predict: 20, num_ctx: 8192 },
     think: false,
-    keep_alive: '3600s',
+    keep_alive: '15m',
   });
-  assert.equal(cleanChat({ messages: [{ role: 'user', content: 'x' }], keep_alive: '-1' }, 'm').keep_alive, undefined);
+  assert.equal(cleanChat({ messages: [{ role: 'user', content: 'x' }], keep_alive: '-1' }, 'm').keep_alive, '15m');
+  assert.equal(cleanChat({ messages: [{ role: 'user', content: 'x'.repeat(60000) }], options: { num_ctx: 512 } }, 'm').options.num_ctx, 32768);
   assert.equal(cleanChat({ messages: [{ role: 'user', content: 'x' }], format: 'json' }, 'm').format, 'json');
+  // Answer formats are kept small and shallow.
+  let deep = { type: 'string' };
+  for (let i = 0; i < 12; i++) deep = { type: 'object', properties: { a: deep } };
+  assert.throws(() => cleanChat({ messages: [{ role: 'user', content: 'x' }], format: deep }, 'm'), (e) => e.status === 400);
+  assert.throws(() => cleanChat({ messages: [{ role: 'user', content: 'x' }], format: { type: 'object', description: 'x'.repeat(9000) } }, 'm'), (e) => e.status === 400);
   assert.throws(() => cleanChat({ messages: [] }, 'm'), (e) => e instanceof AIRequestError && e.status === 400);
   assert.throws(() => cleanChat({ messages: [{ role: 'tool', content: 'x' }] }, 'm'), (e) => e.status === 400);
   assert.throws(() => cleanChat({ messages: [{ role: 'user', content: 'x'.repeat(AI_LIMITS.chars + 1) }] }, 'm'), (e) => e.status === 413);
@@ -485,10 +582,32 @@ test('the shared AI model loads in a request of its own, once for everyone waiti
     assert.deepEqual(loads[0], { model: 'llama3.1:8b', keep_alive: '900s', options: { num_ctx: 8192 } });
     await m.load('llama3.1:8b', { numCtx: 16384 });
     assert.equal(loads.length, 2);
-    await assert.rejects(m.load('nope'), (e) => e instanceof AIRequestError && e.status === 404 && /not found/.test(e.message));
+    // Said in the service's own words (what Ollama said is for the log).
+    await assert.rejects(m.load('nope'), (e) => e instanceof AIRequestError && e.status === 404 && e.message === 'The model "nope" isn’t installed on the AI server.' && /not found/.test(e.detail));
   } finally {
     ollama.close();
   }
+});
+
+test('the shared AI model: what Ollama turned down once is left out from then on', () => {
+  const m = new SharedModel({ url: 'http://127.0.0.1:1', model: 'm' });
+  const chat = { model: 'm', messages: [], think: false, format: { type: 'object' } };
+  assert.deepEqual(m.adapt(chat), chat);
+  assert.equal(m.retryWithout(chat, 'something else entirely'), false);
+  // Another chat sent with "think" before the first was turned down goes again too.
+  const before = m.adapt(chat);
+  assert.equal(m.retryWithout(chat, '"m" does not support thinking'), true);
+  assert.equal(m.retryWithout(before, '"m" does not support thinking'), true);
+  assert.equal('think' in m.adapt(chat), false);
+  assert.equal(m.retryWithout(m.adapt(chat), 'invalid format: json: cannot unmarshal object'), true);
+  assert.equal(m.adapt(chat).format, 'json');
+  // What was left out isn't what it objects to now.
+  assert.equal(m.retryWithout(m.adapt(chat), 'does not support thinking'), false);
+  // And after an hour it's asked for again (Ollama may have been updated).
+  m.noThinkAt -= 3600001;
+  m.plainJsonAt -= 3600001;
+  assert.deepEqual(m.adapt(chat), chat);
+  assert.equal(errorText('{"error":"model requires more system memory (12.3 GiB) than is available"}'), 'model requires more system memory (12.3 GiB) than is available');
 });
 
 test('MusicBrainz: real songs and artists, albums taken for songs, and made-up ones', async () => {

@@ -1,5 +1,6 @@
 # plexamp-web: the web app served by nginx, plus a small Node.js service for
-# Play Together and sign-in checks. No build step for the app itself.
+# Play Together, Play on, shared playlists, the shared AI model and sign-in
+# checks. No build step for the app itself.
 
 # hls.js (plays music your server converts, in browsers without built-in
 # HLS) is bundled into the image at a pinned version, so the app never loads
@@ -14,16 +15,18 @@ RUN npm pack --silent "hls.js@${HLS_JS_VERSION}" \
     && cp package/LICENSE out/hls.js-LICENSE.txt \
     && echo "${HLS_JS_VERSION}" >out/hls.js-VERSION.txt
 
-FROM nginx:1.27-alpine
+# nginx's stable branch (1.30), which gets its security fixes: the image is
+# rebuilt with each release, and Alpine's own fixes since are taken too.
+FROM nginx:1.30-alpine
 
 LABEL org.opencontainers.image.title="plexamp-web" \
       org.opencontainers.image.description="A web player for Plex music libraries" \
       org.opencontainers.image.source="https://github.com/kamakazedan/plexamp-web" \
       org.opencontainers.image.licenses="MIT"
 
-RUN apk add --no-cache nodejs
+RUN apk upgrade --no-cache && apk add --no-cache nodejs
 
-# All optional; see the README.
+# All optional; see docs/configuration.md.
 ENV PLEX_SERVER_URL="" \
     DISABLE_WEBSOCKETS="" \
     OLLAMA_URL="" \

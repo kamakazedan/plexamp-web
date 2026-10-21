@@ -48,6 +48,7 @@ function loadHls() {
 let qidSeq = 1;
 const withQid = (t) => ({ ...t, qid: qidSeq++ });
 const resolve = (v) => (typeof v === 'function' ? v() : v);
+const tokenKey = (server) => `${server.id}|${server.token}`;
 
 // One <audio> element plus, when needed, an hls.js instance feeding it.
 export class Deck {
@@ -141,7 +142,7 @@ class Player extends EventTarget {
     this.cast = null;
     // For AirPlay and Google Cast through the browser: a temporary token from
     // the server, used in media addresses while they go to another device.
-    this.mediaToken = null;
+    this.mediaToken = null; // { value, key }: the server's temporary token, for one server and account
     this.useMediaToken = false;
     this.failedQid = null; // a session track this device couldn't play
     this.driftHold = 0;
@@ -170,7 +171,11 @@ class Player extends EventTarget {
       if (this.state === 'playing') this.report('stopped', this.current, this.time, true);
     });
     on('source', ({ serverChanged }) => serverChanged && this.restore());
-    on('signout', () => this.reset());
+    on('signout', () => {
+      this.mediaToken = null;
+      this.useMediaToken = false;
+      this.reset();
+    });
     on('settings', (s) => {
       if (!s.playbackSpeed && this.speed !== 1) this.setSpeed(1);
       // Its button gone, a sleep timer that's set goes too.
@@ -319,10 +324,18 @@ class Player extends EventTarget {
 
   // ---------- sources ----------
 
+  // Given to AirPlay and Cast: the server's temporary token, never the account's own.
+  setMediaToken(value) {
+    this.mediaToken = app.server ? { value, key: tokenKey(app.server) } : null;
+  }
+
   sourceFor(track, forceTranscode) {
     const s = app.server;
     const quality = app.settings.quality;
-    const token = this.useMediaToken && this.mediaToken ? this.mediaToken : undefined;
+    // On AirPlay or Cast, a temporary token for another server or account
+    // isn't used, and neither is the account's own: nothing plays until
+    // there's one for this server.
+    const token = this.useMediaToken ? (this.mediaToken?.key === tokenKey(s) ? this.mediaToken.value : '') : undefined;
     // A lower quality is asked for: tracks already at it or below (a 128 kbps
     // MP3, say) play as they are; converting them would only use more data.
     const already = quality !== 'original' && !isLossless(track.codec) && track.bitrate > 0 && track.bitrate <= (Number(quality) || 320);
@@ -1336,12 +1349,13 @@ class Player extends EventTarget {
   // track's address changes to the server's temporary token (and carries on
   // from the same spot), so the device it's handed to never gets the
   // account's own token. Converted streams can't be sent to a device anyway.
+  // False when there's no temporary token for this server yet.
   prepareRemote() {
-    if (!this.mediaToken || this.cast || this.remote) return;
+    if (this.cast || this.remote || !app.server || this.mediaToken?.key !== tokenKey(app.server)) return false;
     this.useMediaToken = true;
     const t = this.current;
     const deck = this.deck;
-    if (!t || !deck.hasSource() || deck.hls) return;
+    if (!t || !deck.hasSource() || deck.hls) return true;
     const at = deck.el.currentTime || 0;
     const playing = !deck.el.paused;
     const src = this.sourceFor(t, this.transcoding);
@@ -1352,6 +1366,7 @@ class Player extends EventTarget {
     deck.el.load();
     this.pendingSeek = at;
     if (playing) deck.el.play()?.catch((err) => this.onPlayError(err));
+    return true;
   }
 
   // ---------- reporting ----------
