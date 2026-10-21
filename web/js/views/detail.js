@@ -166,14 +166,8 @@ export async function albumView({ el, params }) {
       .then((others) => {
         const more = others.filter((m) => String(m.ratingKey) !== String(album.ratingKey));
         if (!more.length) return;
-        el.append(
-          h(
-            'section.block',
-            null,
-            sectionHeader(`More by ${album.parentTitle}`, `/artist/${album.parentRatingKey}`),
-            shelf(more.map((m) => albumCard(m, { subtitle: year(m) || '' }))),
-          ),
-        );
+        const row = shelf(more.map((m) => albumCard(m, { subtitle: year(m) || '' })));
+        el.append(h('section.block', null, sectionHeader(`More by ${album.parentTitle}`, `/artist/${album.parentRatingKey}`, null, row), row));
       })
       .catch(() => {});
   }
@@ -203,12 +197,15 @@ export async function artistView({ el, params }) {
 
   const head = backHeader(artist.title, { collapse: true, actions: iconButton('more', 'More options', () => artistMenu(artist)) });
   const title = h('h1.hero-title', null, artist.title);
+  // On a desktop the photo is a banner as wide as the page, so it's asked
+  // for at that width (up to 1920 pixels) rather than stretched.
+  const wide = el.clientWidth >= 900;
   el.append(
     head,
     h(
       'section.hero.hero-artist',
       null,
-      h('div.artist-photo', null, art(artist.thumb || artist.art, { size: 640, fallback: 'mic' })),
+      h('div.artist-photo', null, art(artist.thumb || artist.art, { size: wide ? el.clientWidth : 640, most: wide ? 1920 : 960, fallback: 'mic' })),
       h(
         'div.hero-info',
         null,
@@ -276,7 +273,10 @@ export async function artistView({ el, params }) {
     .nearest(artist.ratingKey, { limit: 20 })
     .then((items) => {
       const artists = items.filter((m) => m.type === 'artist');
-      if (artists.length) similarSlot.replaceWith(h('section.block', null, sectionHeader('Sonically similar'), shelf(artists.map(artistCard))));
+      if (artists.length) {
+        const row = shelf(artists.map(artistCard));
+        similarSlot.replaceWith(h('section.block', null, sectionHeader('Sonically similar', null, null, row), row));
+      }
     })
     .catch(() => {});
 

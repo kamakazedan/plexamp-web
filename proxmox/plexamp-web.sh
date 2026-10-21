@@ -17,6 +17,9 @@
 # The container is unprivileged, starts with the node, and runs nginx and
 # Node.js from Debian (no Docker). Inside it, `update-plexamp-web` updates
 # the app and `plexamp-web-settings` changes its settings.
+#
+# PW_VERBOSE=1 (or --verbose) shows every step in detail, with the tools'
+# own output, the install inside the container included.
 set -euo pipefail
 
 # All of it is in main(), which the last line runs: if the download that
@@ -25,6 +28,17 @@ main() {
 
 REPO="${PW_REPO:-kamakazedan/plexamp-web}"
 REF="${PW_REF:-stable}"
+verbose=false
+case "${PW_VERBOSE:-}" in 1 | true | yes) verbose=true ;; esac
+for arg in "$@"; do
+    case "$arg" in
+        -v | --verbose) verbose=true ;;
+        *)
+            printf 'There is no option %s (the only one is --verbose).\n' "$arg" >&2
+            exit 2
+            ;;
+    esac
+done
 
 # ---------- output ----------
 
@@ -35,6 +49,8 @@ else
     BOLD='' DIM='' CYAN='' GREEN='' RED='' YELLOW='' RESET=''
     LIVE=false
 fi
+# (In detail, lines aren't rewritten: the tools' own output goes between them.)
+if [ "$verbose" = true ]; then LIVE=false; fi
 STEP=""
 # A step starting, and done (the line is rewritten in a terminal).
 info() {
@@ -54,6 +70,17 @@ fail() {
     exit 1
 }
 item() { printf '    %s%-13s%s %s\n' "$DIM" "$1" "$RESET" "$2"; }
+# quietly CMD...: runs CMD, its output shown (indented, after the command)
+# only in detail; its errors are shown either way.
+quietly() {
+    if [ "$verbose" = true ]; then
+        local status=0
+        printf '    %s%s%s\n' "$DIM" "$*" "$RESET"
+        "$@" 2>&1 | sed -u 's/^/      /' || status=$?
+        return "$status"
+    fi
+    "$@" >/dev/null
+}
 
 header() {
     printf '%s' "$CYAN"
@@ -228,10 +255,10 @@ info "Looking for a Debian template"
 template="$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | pick || true)"
 if [ -z "$template" ]; then
     info "Downloading a Debian template"
-    pveam update >/dev/null || true
+    quietly pveam update || true
     template="$(pveam available --section system 2>/dev/null | pick || true)"
     [ -n "$template" ] || fail "No Debian 12 or 13 template for $arch was found (pveam available --section system)."
-    pveam download "$TEMPLATE_STORAGE" "$template" >/dev/null || fail "The template $template couldn't be downloaded."
+    quietly pveam download "$TEMPLATE_STORAGE" "$template" || fail "The template $template couldn't be downloaded."
 fi
 ok "Template ${template%%_"$arch"*} on $TEMPLATE_STORAGE"
 
@@ -250,7 +277,7 @@ finish() {
 }
 trap finish EXIT
 info "Making container $CTID"
-pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$template" \
+quietly pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$template" \
     --hostname "$CT_HOSTNAME" \
     --cores "$CORES" --memory "$RAM_MB" --swap 512 \
     --rootfs "$STORAGE:$DISK_GB" \
@@ -258,7 +285,7 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$template" \
     --unprivileged 1 --features nesting=1 \
     --onboot 1 --ostype debian --timezone host \
     --tags plexamp-web \
-    --description "plexamp-web: https://github.com/$REPO" >/dev/null || fail "Container $CTID couldn't be made."
+    --description "plexamp-web: https://github.com/$REPO" || fail "Container $CTID couldn't be made."
 made=true
 ok "Made container $CTID"
 info "Starting it"
@@ -322,7 +349,9 @@ pct push "$CTID" "$work/install.sh" /root/install-plexamp-web.sh --perms 700
 printf '  %sInstalling plexamp-web in it (a minute or two)%s\n' "$BOLD" "$RESET"
 # (LC_ALL: the node's own language setting may not exist in the container,
 # and Debian's tools would complain about it.)
-pct exec "$CTID" -- env LC_ALL=C.UTF-8 PW_REPO="$REPO" PW_REF="$REF" bash /root/install-plexamp-web.sh || fail "The install in container $CTID didn't finish (see above)."
+install_env=(LC_ALL=C.UTF-8 "PW_REPO=$REPO" "PW_REF=$REF")
+if [ "$verbose" = true ]; then install_env+=(PW_VERBOSE=1); fi
+pct exec "$CTID" -- env "${install_env[@]}" bash /root/install-plexamp-web.sh || fail "The install in container $CTID didn't finish (see above)."
 pct exec "$CTID" -- rm -f /root/install-plexamp-web.sh
 
 [ -n "$address" ] || address="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{ print $1 }')"
@@ -335,7 +364,7 @@ if [ -z "$PLEX_SERVER_URL" ]; then
     printf '    on your network: pct exec %s -- plexamp-web-settings\n\n' "$CTID"
 fi
 item "Settings" "pct exec $CTID -- plexamp-web-settings"
-item "Updates" "pct exec $CTID -- update-plexamp-web"
+item "Updates" "pct exec $CTID -- update-plexamp-web (--verbose to follow each step)"
 item "Logs" "pct exec $CTID -- journalctl -u plexamp-web -u plexamp-web-config -f"
 echo
 }

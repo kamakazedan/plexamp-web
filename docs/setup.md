@@ -56,17 +56,18 @@ CTID=120 PLEX_SERVER_URL=http://192.168.1.10:32400 YES=1 bash -c "$(curl -fsSL h
 | `IP` and `GATEWAY` | `dhcp` | Or a fixed address, such as `IP=192.168.1.50/24 GATEWAY=192.168.1.1`. |
 | `PLEX_SERVER_URL`, `OLLAMA_URL`, `OLLAMA_MODEL`, `MUSICBRAINZ_URL` | not set | As in [configuration.md](configuration.md). |
 | `TEMPLATE_STORAGE` | `local` | Where the Debian template is kept. |
+| `PW_VERBOSE` | not set | `1` shows every step in detail, with the tools' own output, the install inside the container included. |
 
 Then, on the node (or inside the container, without `pct exec <ID> --`):
 
 - **Settings**: `pct exec <ID> -- plexamp-web-settings` opens them in an editor, with the same names as the Docker image's, and restarts the player with them. They're kept in `/etc/plexamp-web/plexamp-web.env`, readable by root only, and shared playlists in `/var/lib/plexamp-web`.
-- **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version, keeping your settings.
+- **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version, keeping your settings. With `--verbose` it shows every step as it goes: what it downloads (and the checksum hls.js matched), apt's own output, what it puts where, and the services restarting, with what they logged. An `update-plexamp-web` from 0.16.1 or earlier doesn't know `--verbose` yet, but passes this on: `pct exec <ID> -- env PW_VERBOSE=1 update-plexamp-web`.
 - **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`.
 
 ## Updating
 
 - **Docker**: `docker pull ghcr.io/kamakazedan/plexamp-web:latest`, then recreate the container with the same settings and volume (`docker compose pull` then `docker compose up -d` does both). In Portainer: for a stack, **Update the stack** with **Re-pull image and redeploy** on; for a container, **Recreate** with **Re-pull image** on.
-- **Proxmox VE**: `pct exec <ID> -- update-plexamp-web`.
+- **Proxmox VE**: `pct exec <ID> -- update-plexamp-web` (add `--verbose` to follow every step).
 
 What's new is in [CHANGELOG.md](../CHANGELOG.md), and in the app under **Settings › About**.
 

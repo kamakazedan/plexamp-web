@@ -69,7 +69,8 @@ function block(id, view, ctx) {
       throw err;
     }
     if (!result || !result.content) return el.remove();
-    el.replaceChildren(sectionHeader(result.title || view.title?.(ctx) || sectionById(id).title, result.href || null), result.content);
+    const scrolls = result.content.classList?.contains('shelf') ? result.content : null;
+    el.replaceChildren(sectionHeader(result.title || view.title?.(ctx) || sectionById(id).title, result.href || null, null, scrolls), result.content);
   };
   return { el, load };
 }

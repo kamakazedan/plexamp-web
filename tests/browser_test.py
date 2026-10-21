@@ -267,6 +267,9 @@ with sync_playwright() as pw:
     # ---------- core: browse and play ----------
     if run('core'):
         shot(page, 'core-01-home')
+        page.wait_for_selector('section[data-section=recentlyAdded] .card')
+        check('core: on a touch screen shelves are swiped, and the whole heading opens the list',
+              page.locator('section[data-section=recentlyAdded] a.section-head .chev').count() == 1 and page.locator('.shelf-nav, .shelf-all').count() == 0)
         play_first_album_track(page, APP, album=0, track=1)
         check('core: plays a track', player(page, "p.state") == 'playing')
         page.click('.pb-main')
@@ -278,10 +281,12 @@ with sync_playwright() as pw:
         page.keyboard.press('Escape')
         page.wait_for_timeout(400)
         check('core: Escape closes Now Playing', not js(page, "document.querySelector('.np').classList.contains('open')"))
-        # Routes to a server: each is asked who it is, without the sign-in,
-        # and only counts if it's that very server. When its local address
-        # doesn't answer, this container's proxy comes next (if it leads
-        # there); a plain http address over the internet isn't used.
+        # Routes to a server: each is asked who it is, and only counts if
+        # it's that very server. When its local address doesn't answer, this
+        # container's proxy comes next (if it leads there); a plain http
+        # address over the internet isn't used. The question carries the
+        # sign-in: like a real Plex server, the mock only lets a page on
+        # another address read who it is when the request has one.
         asked = []
         page.on('request', lambda r: asked.append(r.url) if r.url.startswith(MOCK + '/identity') else None)
         routes = js(page, """() => Promise.all([import('./js/plex.js'), import('./js/state.js')]).then(async ([p, s]) => {
@@ -290,9 +295,15 @@ with sync_playwright() as pw:
                 { uri: '%s', local: false, relay: false, protocol: 'http' }] };
             const home = { ...srv, connections: [{ uri: '%s', local: true, relay: false, protocol: 'http' }] };
             const pick = async (x) => (await p.pickConnection(x, { proxy: s.proxyUri() }))?.kind || null;
-            return [await pick(srv), await pick({ ...srv, id: 'another-server' }), await pick(home), await pick({ ...home, id: 'another-server' })]; })""" % (MOCK, MOCK))
+            const internet = (await p.probeConnections(srv)).find((c) => c.kind === 'remote')?.why;
+            return [await pick(srv), await pick({ ...srv, id: 'another-server' }), await pick(home), await pick({ ...home, id: 'another-server' }), internet]; })""" % (MOCK, MOCK))
         check('core: routes to a server: its local address first, then the container\'s proxy; never another server, nor plain http over the internet',
-              routes == ['proxy', None, 'local', None] and asked and not any('X-Plex-Token' in u for u in asked), f'{routes} {asked}')
+              routes == ['proxy', None, 'local', None, 'insecure'] and asked and all('X-Plex-Token=' in u for u in asked), f'{routes} {asked}')
+        unsigned = js(page, """() => import('./js/state.js').then(({ app }) => Promise.all(['', '?X-Plex-Token=' + encodeURIComponent(app.source.token)]
+            .map((q) => fetch('%s/identity' + q, { headers: { Accept: 'application/json' }, credentials: 'omit' })
+                .then((r) => r.json()).then((j) => j.MediaContainer.machineIdentifier, () => 'refused'))))""" % MOCK)
+        check('core: ...which is why the question carries it (asked without, the mock answers as a real server would)',
+              unsigned == ['refused', 'mock-server-1'], str(unsigned))
 
     # ---------- ws: live updates over a WebSocket ----------
     if run('ws'):
@@ -849,6 +860,68 @@ with sync_playwright() as pw:
         pl.locator('.card-play').click()
         check('cards: Play plays the playlist in order',
               wait_for(lambda: player(page, "p.state === 'playing' && !p.shuffle && p.context.href.startsWith('/playlist/')"), 10))
+        page.mouse.move(5, 5)
+
+        # Shelves, with a mouse: ‹ › by the heading scroll them a screenful
+        # (‹ once one has moved, › until its end, neither when it all fits),
+        # and the title or Show all opens the whole list.
+        sec = page.locator('section[data-section=recentlyAdded]')
+        sec.locator('.shelf-head').scroll_into_view_if_needed()
+        page.wait_for_timeout(300)
+        shelf_state = lambda s: s.evaluate("""(s) => {
+            const shelf = s.querySelector('.shelf'), box = shelf.getBoundingClientRect(), pad = parseFloat(getComputedStyle(shelf).paddingLeft);
+            const cards = [...shelf.querySelectorAll('.card')];
+            const on = (label) => { const b = s.querySelector(`.shelf-nav button[aria-label="${label}"]`); return !!b && b.checkVisibility({ visibilityProperty: true }); };
+            return { x: Math.round(shelf.scrollLeft), first: cards.findIndex((c) => c.getBoundingClientRect().left >= box.left + pad - 2),
+                     cut: cards.findIndex((c) => c.getBoundingClientRect().right > box.right - pad + 1), back: on('Scroll left'), on: on('Scroll right') };
+        }""")
+        before = shelf_state(sec)
+        sec.locator('button[aria-label="Scroll right"]').click()
+        page.wait_for_timeout(900)
+        paged = shelf_state(sec)
+        for _ in range(8):
+            if not shelf_state(sec)['on']:
+                break
+            sec.locator('button[aria-label="Scroll right"]').click()
+            page.wait_for_timeout(900)
+        end = shelf_state(sec)
+        for _ in range(8):
+            if not shelf_state(sec)['back']:
+                break
+            sec.locator('button[aria-label="Scroll left"]').click()
+            page.wait_for_timeout(900)
+        start = shelf_state(sec)
+        check('shelves: › scrolls a shelf on, the card that was cut off coming first, and ‹ appears',
+              before['x'] == 0 and before['on'] and not before['back'] and before['cut'] > 0 and paged['x'] > 0 and paged['first'] == before['cut'] and paged['back'],
+              f'{before} {paged}')
+        check('shelves: › goes at the end, and ‹ brings the shelf back to the start',
+              not end['on'] and end['back'] and start['x'] == 0 and not start['back'] and start['on'], f'{end} {start}')
+        fits = page.locator('section[data-section=collections]')
+        fits.locator('.shelf-head').scroll_into_view_if_needed()
+        page.wait_for_timeout(300)
+        check('shelves: a shelf that fits has neither', not shelf_state(fits)['on'] and not shelf_state(fits)['back'], str(shelf_state(fits)))
+        links = [sec.locator(sel).get_attribute('href') for sel in ('.section-link', '.shelf-all')]
+        check('shelves: the title and Show all open the whole list; the heading itself isn\'t a link',
+              sec.locator('.shelf-head').evaluate('e => e.tagName') == 'DIV' and links[0] == links[1] and 'browse/albums' in (links[0] or ''), str(links))
+        sec.locator('.shelf-all').click()
+        page.wait_for_selector('.grid .card')
+        check('shelves: Show all opens it', page.evaluate('location.hash').startswith('#/browse/albums'), page.evaluate('location.hash'))
+
+        # Big screens: pages to browse use the whole width (no gap on the
+        # right); settings and the like keep to a column in the middle.
+        page.set_viewport_size({'width': 2560, 'height': 1440})
+        page.goto(APP + '#/')
+        page.wait_for_selector('section[data-section=recentlyAdded] .card')
+        span = "() => { const v = document.querySelector('#main > .view').getBoundingClientRect(), m = document.querySelector('#main').getBoundingClientRect(); return [Math.round(v.width), Math.round(v.left - m.left), Math.round(m.right - v.right)]; }"
+        browse = js(page, span)
+        page.goto(APP + '#/settings')
+        page.wait_for_selector('.view .row')
+        column = js(page, span)
+        check('desktop: on a big screen pages to browse use the whole width, and settings keep to a column in the middle',
+              browse[1:] == [0, 0] and column[0] == 1080 and abs(column[1] - column[2]) <= 1, f'{browse} {column}')
+        page.set_viewport_size({'width': 1440, 'height': 900})
+        page.goto(APP + '#/')
+        page.wait_for_selector('section[data-section=recentlyAdded] .card')
         page.mouse.move(5, 5)
 
         # Volume: marks at 25/50/75%, settling on a mark when dragged near
@@ -2576,12 +2649,19 @@ with sync_playwright() as pw:
                    lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(resources), headers={'Access-Control-Allow-Origin': '*'}))
         # Its address over the internet (https, as Plex gives them) is the
         # mock, but for live updates' event stream, which never ends (live
-        # updates check every minute instead).
+        # updates check every minute instead). The mock is told where the
+        # request came from, as a real server would be, and as an answer
+        # handed over here isn't held to CORS, one the browser would refuse
+        # is refused here.
         def via_mock(route):
             url = route.request.url
             if '/:/eventsource/' in url:
                 return route.abort()
-            return route.fulfill(response=route.fetch(url=url.replace('https://remote.test:32400', MOCK)))
+            origin = route.request.header_value('origin')
+            res = route.fetch(url=url.replace('https://remote.test:32400', MOCK), headers={**route.request.headers, **({'origin': origin} if origin else {})})
+            if origin and 'access-control-allow-origin' not in res.headers:
+                return route.abort()
+            return route.fulfill(response=res)
         page.route(re.compile(r'https://remote\.test:32400/.*'), via_mock)
         login(page, APP)
         js(page, "() => import('./js/state.js').then((m) => m.setAuth({ ...m.app.auth, manual: false }))")

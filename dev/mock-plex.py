@@ -1097,10 +1097,11 @@ class Handler(BaseHTTPRequestHandler):
         self.cors()
         self.end_headers()
 
-    def send_json(self, mc, status=200):
+    def send_json(self, mc, status=200, cors=True):
         body = json.dumps({'MediaContainer': mc}).encode()
         self.send_response(status)
-        self.cors()
+        if cors:
+            self.cors()
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -1513,8 +1514,12 @@ class Handler(BaseHTTPRequestHandler):
         token = q.get('X-Plex-Token', [''])[0] or self.headers.get('X-Plex-Token', '')
         if p.startswith('/api/'):
             return self.plex_tv(p, token)
-        if p == '/identity':  # answered without signing in, like a real server
-            return self.send_json({'machineIdentifier': 'mock-server-1', 'version': '1.41.0', 'claimed': True})
+        if p == '/identity':
+            # Answered without signing in, like a real server; and as on one,
+            # a page on another address only gets to read the answer when the
+            # request carries a token (the browser calls it a network error).
+            return self.send_json({'machineIdentifier': 'mock-server-1', 'version': '1.41.0', 'claimed': True},
+                                  cors=bool(token) or not self.headers.get('Origin'))
         # A converted stream's playlists live inside its session and are
         # fetched without a token, as on a real server. (The segments here
         # aren't real audio; this is for testing the proxy.)

@@ -115,13 +115,27 @@ fi
 exec /usr/bin/curl "$@"
 STUB
         chmod 755 /tmp/stub/curl
-        update() { PATH="/tmp/stub:$PATH" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1 && ! grep -q "Syntax error" /tmp/update.log; }
+        # update [VAR=value ...] update-plexamp-web [option]: an update, its output in /tmp/update.log.
+        update() { env PATH="/tmp/stub:$PATH" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 "$@" >/tmp/update.log 2>&1 && ! grep -q "Syntax error" /tmp/update.log; }
+        quiet_update() { update update-plexamp-web && ! grep -q "^    " /tmp/update.log; }
+        env_verbose_update() { update PW_VERBOSE=1 update-plexamp-web && grep -q "^    In detail: Debian" /tmp/update.log; }
         install -m 755 /src/tests/update-plexamp-web-0.15.0.sh /usr/local/bin/update-plexamp-web
-        expect "update-plexamp-web from 0.15.0 finishes cleanly (the installer replaces it as it runs)" update
+        expect "update-plexamp-web from 0.15.0 finishes cleanly (the installer replaces it as it runs)" update update-plexamp-web
         expect "...and puts the new command in its place" grep -q "^exit$" /usr/local/bin/update-plexamp-web
-        expect "update-plexamp-web as it is now finishes cleanly too" update
+        expect "update-plexamp-web as it is now finishes cleanly too" update update-plexamp-web
         expect "...leaving nothing behind next to it" sh -c "! ls /usr/local/bin/update-plexamp-web.?????? 2>/dev/null"
         expect "an update keeps the settings" grep -q "^DISABLE_WEBSOCKETS=true$" /etc/plexamp-web/plexamp-web.env
+        # Every step in detail: --verbose, or PW_VERBOSE=1 (which commands
+        # from before --verbose pass on to the installer too).
+        expect "update-plexamp-web --help says how to use it" sh -c "update-plexamp-web --help | grep -q \"^Usage: update-plexamp-web \\[--verbose\\]\""
+        expect "...and an option it doesn'"'"'t have changes nothing" sh -c "out=\"\$(update-plexamp-web --nope 2>&1)\"; test \$? = 2 && printf \"%s\" \"\$out\" | grep -q \"Nothing was changed\""
+        expect "update-plexamp-web --verbose finishes" update update-plexamp-web --verbose
+        expect "...showing each step" grep -q "^    The installer, https://raw.githubusercontent.com/.*: HTTP 200$" /tmp/update.log
+        expect "...with the tools'"'"' own output (apt-get'"'"'s here)" grep -q "^      Reading package lists" /tmp/update.log
+        expect "...and the checksum hls.js matched" grep -q "^    Its checksum, as the registry gives it: sha512-" /tmp/update.log
+        expect "without it, an update is as quiet as before" quiet_update
+        install -m 755 /src/tests/update-plexamp-web-0.15.0.sh /usr/local/bin/update-plexamp-web
+        expect "PW_VERBOSE=1 shows each step from an older update-plexamp-web too" env_verbose_update
     ' >"$LOG" 2>&1; then
         cat "$LOG"
         echo "Debian $release: OK"

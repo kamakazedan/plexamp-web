@@ -319,6 +319,60 @@ a.section-head:hover .chev {
   transform: translateX(2px);
 }
 
+/* A shelf's heading with a mouse (ui.js sectionHeader): the title and Show
+   all open the whole list, ‹ › scroll the shelf. */
+.section-link {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: auto;
+  color: inherit;
+  text-decoration: none;
+}
+
+.section-link:hover h2 {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.shelf-all {
+  flex: none;
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.shelf-all:hover {
+  color: var(--text);
+}
+
+.shelf-nav {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  margin: -4px 0;
+}
+
+.shelf-nav .icon-btn {
+  width: 32px;
+  height: 32px;
+  background: var(--surface-2);
+}
+
+.shelf-nav .icon-btn:hover {
+  background: var(--hover);
+}
+
+.shelf-nav .icon-btn.off {
+  visibility: hidden;
+}
+
+.shelf-nav:has(.off + .off) {
+  display: none;
+}
+
 .list-count {
   padding: 4px var(--gutter) 0;
   color: var(--muted);
@@ -410,6 +464,11 @@ a.section-head:hover .chev {
 
 .link-btn:hover {
   color: #fff;
+}
+
+.link-btn.pad {
+  padding-right: var(--gutter);
+  padding-left: var(--gutter);
 }
 
 .button-row {
@@ -4777,9 +4836,51 @@ body.in-together .pb-art::after {
   }
 }
 
-@media (min-width: 1500px) {
-  #main > .view {
-    max-width: 1500px;
+/* Big screens: pages to browse use the whole width, with bigger artwork as
+   the window grows past about 1900 pixels; pages to read and fill in
+   (settings, Play Together, the AI playlist, Sonic path: routes marked
+   narrow) keep to a column in the middle, as wide as on half of one. */
+@media (min-width: 1440px) {
+  #main > .view-narrow {
+    max-width: 1080px;
+    margin-inline: auto;
+  }
+
+  .search-box {
+    max-width: 960px;
+  }
+
+  .view-narrow .search-box {
+    max-width: none;
+  }
+
+  /* A wide banner shows a strip of the photo: the upper part, where faces
+     usually are. */
+  .artist-photo .art img {
+    object-position: 50% 30%;
+  }
+}
+
+@media (min-width: 1900px) {
+  .np-main {
+    max-width: clamp(560px, 30vw, 760px);
+  }
+
+  .card {
+    width: calc(clamp(184px, 9.6vw, 280px) * var(--grid, 1));
+  }
+
+  .grid,
+  body[data-grid] .grid {
+    grid-template-columns: repeat(auto-fill, minmax(calc(clamp(160px, 8.4vw, 260px) * var(--grid, 1)), 1fr));
+  }
+
+  .hero-art {
+    width: clamp(260px, 13.5vw, 340px);
+  }
+
+  .artist-photo .art {
+    height: clamp(420px, 22vw, 560px);
   }
 }
 

@@ -94,6 +94,32 @@ calls | grep -q -- '^pct push 123 .*/plexamp-web.env /etc/plexamp-web/plexamp-we
 cmp -s "$T/pushed/install-plexamp-web.sh" "$ROOT/proxmox/install.sh" && pass "copies in the installer" || fail "the installer wasn't copied in"
 calls | grep -q '^pct exec 123 -- env LC_ALL=C.UTF-8 PW_REPO=kamakazedan/plexamp-web PW_REF=stable bash /root/install-plexamp-web.sh$' && pass "runs the installer, for the stable branch" || fail "installer run: $(calls | grep install)"
 grep -q 'plexamp-web is ready: http://10.0.0.5/' "$T/out" && pass "says where to find it" || fail "address: $(tail -3 "$T/out")"
+grep -q '^    pct create' "$T/out" && fail "the quiet way shows pct's commands: $(grep '^    pct' "$T/out")" || pass "without --verbose, the tools' own output stays out of the way"
+
+# ---------- every step in detail ----------
+
+reset
+run PW_VERBOSE=1 || true
+calls | grep -q '^pct exec 123 -- env LC_ALL=C.UTF-8 PW_REPO=kamakazedan/plexamp-web PW_REF=stable PW_VERBOSE=1 bash /root/install-plexamp-web.sh$' &&
+    pass "PW_VERBOSE=1 has the install in the container show each step too" || fail "verbose installer run: $(calls | grep install)"
+grep -q '^    pct create 123 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst --hostname plexamp-web ' "$T/out" &&
+    grep -q '^    pveam download local debian-13-standard_13.1-2_amd64.tar.zst$' "$T/out" &&
+    pass "...and shows what it runs on the node" || fail "verbose output: $(head -c 2000 "$T/out")"
+reset
+if env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" YES=1 PW_INSTALL_SCRIPT="$ROOT/proxmox/install.sh" bash "$SCRIPT" --verbose >"$T/out" 2>&1 &&
+    calls | grep -q ' PW_VERBOSE=1 bash /root/install-plexamp-web.sh$'; then
+    pass "--verbose does the same"
+else
+    fail "--verbose: $(tail -3 "$T/out")"
+fi
+reset
+if env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" YES=1 bash "$SCRIPT" --nope >"$T/out" 2>&1; then
+    fail "an option it doesn't have was taken"
+elif [ -n "$(calls)" ] || ! grep -q 'There is no option --nope' "$T/out"; then
+    fail "an option it doesn't have: $(calls) $(tail -2 "$T/out")"
+else
+    pass "an option it doesn't have changes nothing"
+fi
 
 # ---------- a fixed address, another storage, a template already there ----------
 

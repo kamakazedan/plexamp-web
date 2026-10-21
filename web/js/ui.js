@@ -224,22 +224,24 @@ export const fmt = {
 
 // ---------- artwork ----------
 
-function artPixels(css) {
+// The size to ask Plex for: what it's shown at on this screen, in a few
+// steps (so pictures are reused), up to `most` pixels.
+function artPixels(css, most = 960) {
   const n = css * Math.min(window.devicePixelRatio || 1, 2);
-  return [100, 160, 240, 320, 480, 640, 960].find((s) => s >= n) || 960;
+  return [100, 160, 240, 320, 480, 640, 960, 1280, 1920].find((s) => s >= n && s <= most) || most;
 }
 
-export function artUrl(path, css = 160) {
-  return path && app.server ? app.server.art(path, artPixels(css)) : '';
+export function artUrl(path, css = 160, most) {
+  return path && app.server ? app.server.art(path, artPixels(css, most)) : '';
 }
 
-export function art(path, { size = 160, round = false, cls = '', fallback = 'note', alt = '' } = {}) {
+export function art(path, { size = 160, most, round = false, cls = '', fallback = 'note', alt = '' } = {}) {
   const wrap = h(`div.art${round ? '.round' : ''}${cls ? `.${cls}` : ''}`);
   const missing = () => {
     wrap.classList.add('missing');
     wrap.replaceChildren(icon(fallback, Math.max(18, Math.min(44, Math.round(size / 3.4)))));
   };
-  const src = artUrl(path, size);
+  const src = artUrl(path, size, most);
   if (!src) {
     missing();
     return wrap;
@@ -302,15 +304,87 @@ export function collapseWhenHidden(head, target) {
   io.observe(target);
 }
 
-export function sectionHeader(title, href, extra) {
+// A section's heading. `href`: the page with all of it. `shelf`: the row
+// under it that scrolls sideways. On a touch screen the shelf is swiped and
+// the whole heading opens the page. With a mouse, ‹ › by the heading scroll
+// the shelf (‹ once it's moved, › until its end), and the title, or Show
+// all, opens the page.
+export function sectionHeader(title, href, extra, shelf) {
   // Non-breaking hyphens keep names like "Hi-Res" together when a heading wraps.
-  const kids = [h('h2', null, String(title).replace(/-/g, '‑')), extra || null, href ? icon('chevronRight', 26, 'chev') : null];
+  const text = h('h2', null, String(title).replace(/-/g, '‑'));
+  if (shelf && matchMedia('(hover: hover) and (pointer: fine)').matches) {
+    const back = iconButton('chevronLeft', 'Scroll left', () => scrollShelf(shelf, -1), { size: 22 });
+    const on = iconButton('chevronRight', 'Scroll right', () => scrollShelf(shelf, 1), { size: 22 });
+    const head = h(
+      'div.section-head.shelf-head',
+      null,
+      href ? h('a.section-link', { href: `#${href}` }, text) : text,
+      extra || null,
+      href ? h('a.shelf-all', { href: `#${href}` }, 'Show all') : null,
+      h('div.shelf-nav', null, back, on),
+    );
+    watchShelf(head, shelf, back, on);
+    return head;
+  }
+  const kids = [text, extra || null, href ? icon('chevronRight', 26, 'chev') : null];
   return href ? h('a.section-head', { href: `#${href}` }, kids) : h('div.section-head', null, kids);
+}
+
+// A shelf scrolled a screenful: on, so the first card that wasn't all in
+// sight comes first; back, a screenful (the shelf lines up on a card).
+function scrollShelf(shelf, dir) {
+  const box = shelf.getBoundingClientRect();
+  const style = getComputedStyle(shelf);
+  const start = box.left + (parseFloat(style.paddingLeft) || 0);
+  const end = box.right - (parseFloat(style.paddingRight) || 0);
+  const behavior = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+  if (dir > 0) {
+    const next = [...(shelf.firstElementChild?.children || [])].find((c) => c.getBoundingClientRect().right > end + 1);
+    if (next) shelf.scrollBy({ left: next.getBoundingClientRect().left - start, behavior });
+  } else {
+    shelf.scrollBy({ left: -(end - start), behavior });
+  }
+}
+
+// Which of a shelf's buttons are any use: checked when it comes into view
+// (also when its page is shown again), as it scrolls, as the pointer comes
+// to it, and when the window changes size (one listener for every shelf on
+// the page, so nothing is left behind with a page).
+const shelfChecks = new WeakMap();
+let shelvesWatched = false;
+function watchShelf(head, shelf, back, on) {
+  let frame = 0;
+  const check = () => {
+    frame = 0;
+    if (!shelf.isConnected) return;
+    const most = shelf.scrollWidth - shelf.clientWidth;
+    back.classList.toggle('off', shelf.scrollLeft <= 2);
+    on.classList.toggle('off', shelf.scrollLeft >= most - 2);
+  };
+  const soon = () => {
+    if (!frame) frame = requestAnimationFrame(check);
+  };
+  back.classList.add('off');
+  on.classList.add('off');
+  shelf.addEventListener('scroll', soon, { passive: true });
+  head.addEventListener('pointerenter', soon);
+  shelf.addEventListener('pointerenter', soon);
+  shelfChecks.set(head, soon);
+  if ('IntersectionObserver' in window) new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && soon()).observe(shelf);
+  else requestAnimationFrame(soon);
+  if (!shelvesWatched) {
+    shelvesWatched = true;
+    window.addEventListener('resize', () => document.querySelectorAll('.shelf-head').forEach((el) => shelfChecks.get(el)?.()), { passive: true });
+  }
 }
 
 // ---------- cards, shelves, grids ----------
 
-export function card({ href, image, title, subtitle, round = false, fallback = 'disc', onPlay, onShuffle, size = 200 }) {
+// Cards grow with the window on big screens (app.css), and so does the
+// artwork asked for them.
+const cardArt = () => (window.innerWidth >= 1900 ? Math.min(280, Math.round(window.innerWidth * 0.096)) : 200);
+
+export function card({ href, image, title, subtitle, round = false, fallback = 'disc', onPlay, onShuffle, size = cardArt() }) {
   const a = h(
     `a.card${round ? '.card-round' : ''}`,
     { href: `#${href}` },

@@ -58,17 +58,18 @@ route('/collection/:id', needsSource(collectionView));
 route('/appears/:id', needsSource(appearsInView));
 route('/search', needsSource(searchView), { tab: 'search' });
 route('/top/:kind', needsSource(topView), { tab: 'search' });
-route('/sonic-path', needsSource(sonicPathView), { tab: 'search' });
-route('/ai-playlist', needsSource(aiPlaylistView), { tab: 'search' });
-route('/together', needsSource(togetherView), { tab: 'together' });
-route('/together/:session', needsSource(togetherView), { tab: 'together' });
-route('/settings', needsSource(settingsView), { tab: 'settings' });
-route('/settings/:page', needsSource(settingsPageView), { tab: 'settings' });
-route('/login', (ctx) => (app.auth?.token && app.source ? navigate('/', { replace: true }) : loginView(ctx)), { bare: true });
+// narrow: a page to read and fill in, kept to a column on big screens.
+route('/sonic-path', needsSource(sonicPathView), { tab: 'search', narrow: true });
+route('/ai-playlist', needsSource(aiPlaylistView), { tab: 'search', narrow: true });
+route('/together', needsSource(togetherView), { tab: 'together', narrow: true });
+route('/together/:session', needsSource(togetherView), { tab: 'together', narrow: true });
+route('/settings', needsSource(settingsView), { tab: 'settings', narrow: true });
+route('/settings/:page', needsSource(settingsPageView), { tab: 'settings', narrow: true });
+route('/login', (ctx) => (app.auth?.token && app.source ? navigate('/', { replace: true }) : loginView(ctx)), { bare: true, narrow: true });
 route(
   '/setup',
   (ctx) => (app.auth?.token ? sourceView({ ...ctx, firstRun: true }) : navigate('/login', { replace: true })),
-  { bare: true },
+  { bare: true, narrow: true },
 );
 route('/404', ({ el }) => el.append(h('div.empty-state', null, h('p', null, 'This page doesn’t exist.'), h('a.btn.btn-secondary', { href: '#/' }, 'Go home'))));
 

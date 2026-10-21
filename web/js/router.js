@@ -551,7 +551,8 @@ async function render(k, useCache) {
   dropEntry(k);
 
   const el = document.createElement('div');
-  el.className = 'view';
+  // Pages to read and fill in keep to a column on big screens (app.css).
+  el.className = m.narrow ? 'view view-narrow' : 'view';
   const entry = { el, hash: location.hash, disposers: [], hiders: [], size: 0 };
   cache.set(k, entry);
   while (cache.size > CACHE_LIMIT) dropEntry(cache.keys().next().value);

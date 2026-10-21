@@ -3,6 +3,50 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.17.0 - 2026-10-21
+
+### Fixed
+
+- **Plex servers could only be reached through the container** (with
+  `PLEX_SERVER_URL` set), or not at all, since 0.16.0. That includes
+  servers shared with you, which the container doesn't reach for you.
+  0.16.0 asked each route who it was without your sign-in, and a Plex
+  server only lets a web page read its answer when the request carries
+  one, so every route looked as if it didn't answer ("Didn't answer this
+  browser"). Opening the address in a tab worked, as a tab isn't held to
+  that rule. Routes are asked with the server's sign-in again, but only
+  where it stays private, as before: `https://` addresses, plain `http://`
+  on your home network, and the container. A route still only counts if
+  it's your server that answers (see
+  [SECURITY.md](SECURITY.md#routes-to-your-server)).
+- On artist pages, **Show more** under Popular tracks lines up with the
+  tracks.
+
+### Changed
+
+- **Full screen on a computer uses the whole screen.** Pages to browse
+  (Home, the library, albums, artists, playlists, search) are no longer
+  held to 1500 pixels at the left, and artwork grows with the window on
+  big screens, so shelves and grids fill it. Settings, Play Together, the
+  AI playlist and Sonic path keep to a column in the middle, as wide as on
+  half the screen. Now Playing's artwork is bigger there too, and artist
+  pages ask Plex for a photo as big as the banner it fills.
+- **The arrows by a shelf's heading scroll the shelf** (with a mouse):
+  › moves it on a screenful, so the card that was cut off comes first, ‹
+  appears once it has moved and goes back, and neither shows when it all
+  fits. The title, or **Show all**, opens the whole list, as the arrow did.
+  On a touch screen shelves are swiped and the heading opens the list, as
+  before.
+- **Proxmox VE: `update-plexamp-web --verbose`** follows the update step
+  by step: the installer it downloads, apt's own output, the downloads
+  (and the checksum hls.js matched), what goes where, and the services
+  restarting with what they logged; a step that fails says which line it
+  stopped at. `--help` says how to use it. The `update-plexamp-web` that
+  0.16.1 and earlier put in place doesn't know `--verbose` yet, but passes
+  `PW_VERBOSE=1` on: `pct exec <ID> -- env PW_VERBOSE=1 update-plexamp-web`.
+  The one-line install takes `PW_VERBOSE=1` too (also for what it runs on
+  the node), and an update says which version it came from.
+
 ## 0.16.1 - 2026-10-21
 
 ### Fixed

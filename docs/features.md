@@ -22,7 +22,8 @@ AI playlists and the AI DJ have a page of their own: [ai.md](ai.md).
 - **Artist pages**: popular tracks, albums grouped by type, sonically similar artists, and artist radio.
 - **Album and playlist pages**: play, shuffle, a rating on every track (stars or thumbs, as you choose), and a menu on every track (play next, add to queue, similar tracks, add to a playlist, appears in, go to album or artist). Albums show their format (FLAC 24/96, say) and mark their best-known tracks.
 - **Appears in**, from any track's menu: the albums the song is on (its own, and others with the same song by the same artist, such as a compilation, a soundtrack or a live album), the playlists it's in, and the collections it's in, including collections of its album or its artist.
-- **Responsive**: bottom tabs and a mini player on phones; a sidebar and full transport bar on computers. Each tab keeps its own history, like a phone app's, so Back stays within the tab you're in. It can be added to a phone's home screen.
+- **Responsive**: bottom tabs and a mini player on phones; a sidebar and full transport bar on computers. On a big screen, pages to browse use the whole width, with bigger artwork as the window grows, and settings, Play Together and the AI playlist keep to a column in the middle. Each tab keeps its own history, like a phone app's, so Back stays within the tab you're in. It can be added to a phone's home screen.
+- **Shelves** (the rows on Home and album and artist pages) are swiped on a touch screen, where the heading opens the whole list. With a mouse, ‹ › by the heading scroll the shelf a screenful at a time (‹ once it's moved, › until the end), and the title or **Show all** opens the whole list.
 
 ## Now Playing and playback
 

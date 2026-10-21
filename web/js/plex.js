@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.16.1' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.17.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -250,11 +250,15 @@ export const routeRank = (kind, prefer = 'best') => (ROUTE_RANKS[prefer] || ROUT
 // served over https can't use; 'insecure': a plain http address over the
 // internet, which would carry your sign-in unencrypted; 'timeout';
 // 'network'; 'status' (it answered with an error, `status`); 'other': it
-// leads to another server). Each is asked who it is, without your sign-in
-// (Plex answers that without one): an address only counts if it's this very
-// server, so whatever else answers at one (on someone else's network, say)
-// gets nothing. This container's proxy only answers requests that carry a
-// sign-in, and it's this player's own address.
+// leads to another server). Each is asked who it is, and only counts if
+// it's this very server. The question carries the server's sign-in, as the
+// app's requests over that route would: a Plex server only lets a page on
+// another address read its answer when the request carries one, so without
+// it every route but this container's proxy looks dead (as in 0.16.0). It
+// only goes where the route rules above allow: https addresses, whose
+// certificate the browser checks (a plex.direct one is made for this very
+// server), plain http only on the home network, and this player's own
+// address.
 export async function probeConnections(server, { proxy = null, timeout = 6000 } = {}) {
   const pageIsHttps = location.protocol === 'https:';
   const candidates = server.connections.map((c) => {
@@ -268,7 +272,7 @@ export async function probeConnections(server, { proxy = null, timeout = 6000 } 
       if (why) return { uri, kind, ok: false, why };
       const t0 = performance.now();
       try {
-        const id = await request(kind === 'proxy' ? withParams(`${uri}/identity`, plexParams(server.token)) : `${uri}/identity`, { timeout });
+        const id = await request(withParams(`${uri}/identity`, plexParams(server.token)), { timeout });
         if (id?.MediaContainer?.machineIdentifier !== server.id) return { uri, kind, ok: false, why: 'other' };
         return { uri, kind, ok: true, ms: Math.round(performance.now() - t0) };
       } catch (err) {
