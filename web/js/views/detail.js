@@ -25,6 +25,8 @@ import {
   sheet,
 } from '../ui.js';
 import { albumCard, artistCard, trackRow, numberedList, collectionCard, playlistArt } from '../components.js';
+import { sharingOn, freshShares, shareOf, syncShare, sharedPlaylistChanged, sharedMark, stopSharing, leaveShared } from '../sharing.js';
+import { openShareDialog, leaveDialog, shareLine } from './share.js';
 import {
   playAlbum,
   playArtist,
@@ -518,10 +520,13 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
 
 export async function playlistView({ el, params, onDispose, onHide }) {
   const s = app.server;
-  const pl = await s.playlist(params.id);
+  const [pl] = await Promise.all([s.playlist(params.id), sharingOn() ? freshShares().catch(() => []) : null]);
   if (!pl) throw Object.assign(new Error('Not found'), { status: 404 });
+  // Shared with friends (yours), or shared with you (see sharing.js).
+  const share = shareOf(pl.ratingKey);
   // Smart playlists follow their rules in Plex; they can't be edited here.
-  const editable = !pl.smart && (pl.playlistType || 'audio') === 'audio';
+  // Nor can one shared with you to view only (changes would be undone).
+  const editable = !pl.smart && (pl.playlistType || 'audio') === 'audio' && share?.role !== 'view';
   let editing = false;
   let total = pl.leafCount || 0;
   let pager = null;
@@ -543,8 +548,24 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   });
   // A smart playlist can't be unlocked (its rules decide what's in it), but
   // its picture can still change, from its menu.
+  const shareActions = () => {
+    if (!sharingOn()) return [];
+    if (share && share.role !== 'owner') {
+      return [{ icon: 'together', label: 'Stop sharing it with me…', description: `Keep it as a playlist of your own, without ${share.owner.title}’s changes`, onSelect: () => leaveDialog(share, { onChange: refresh }) }];
+    }
+    if (pl.smart || (pl.playlistType || 'audio') !== 'audio') return [];
+    return [
+      share
+        ? { icon: 'together', label: 'Sharing…', description: shareLine(share), onSelect: () => openShareDialog(pl, { onChange: refresh }) }
+        : { icon: 'together', label: 'Share with friends…', description: 'Plex friends who can use this server get a copy, kept the same as yours', onSelect: () => openShareDialog(pl, { onChange: refresh }) },
+    ];
+  };
   const menu = iconButton('more', 'More options', () =>
-    playlistMenu(pl, { edit: editing ? { onRename: rename, onDelete: remove } : null, picture: editing || pl.smart ? () => picture.open() : null }),
+    playlistMenu(pl, {
+      edit: editing ? { onRename: rename, onDelete: remove } : null,
+      picture: editing || pl.smart ? () => picture.open() : null,
+      extra: shareActions(),
+    }),
   );
   const head = backHeader(pl.title, { collapse: true, fallback: '/playlists', actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, pl.title);
@@ -561,6 +582,11 @@ export async function playlistView({ el, params, onDispose, onHide }) {
         title,
         h('div.hero-meta', null, countEl, pl.duration ? `, ${fmt.long(pl.duration)}` : ''),
         pl.smart ? h('div.hero-meta', null, 'Smart playlist') : null,
+        share
+          ? share.role === 'owner'
+            ? h('button.hero-meta.share-line.link-btn', { type: 'button', onclick: () => openShareDialog(pl, { onChange: refresh }) }, icon('together', 18), h('span', null, shareLine(share)))
+            : h('div.hero-meta.share-line', null, icon('together', 18), h('span', null, shareLine(share)))
+          : null,
         actionButtons([
           { icon: 'play', label: 'Play', primary: true, onClick: () => playPlaylist(pl) },
           { icon: 'shuffle', label: 'Shuffle', onClick: () => playPlaylist(pl, { shuffle: true }) },
@@ -568,6 +594,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       ),
     ),
   );
+  picture.el.append(sharedMark(pl.ratingKey));
   collapseWhenHidden(head, title);
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
@@ -585,7 +612,14 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     countEl.textContent = fmt.count(total, 'track', 'tracks');
     list.style.setProperty('--pos-digits', String(Math.max(2, String(total).length)));
   };
-  const changed = () => dropCached((p) => p === '/' || p === '/playlists' || p === '/library/playlists');
+  const changed = () => {
+    dropCached((p) => p === '/' || p === '/playlists' || p === '/library/playlists');
+    // Shared: everyone's copy gets it.
+    sharedPlaylistChanged(pl.ratingKey);
+  };
+  // Opened: brought up to date with everyone else's changes (the page loads
+  // again if there were any).
+  if (share) syncShare(share).catch(() => {});
 
   function controls(r) {
     if (editing) addEditControls(r, `“${r.dataset.title}” from the playlist`, removeRow);
@@ -729,13 +763,17 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   }
 
   async function remove() {
+    const others = share?.role === 'owner' ? (share.members || []).length : 0;
     const sure = await confirmAction({
       title: `Delete “${pl.title}”?`,
-      message: 'The playlist is deleted from Plex. The tracks in it stay in your library.',
+      message: `The playlist is deleted from Plex. The tracks in it stay in your library.${
+        others ? ` It stops being shared: the ${others === 1 ? 'friend' : `${others} friends`} you shared it with keep their copies.` : share ? ' It stops being shared with you.' : ''
+      }`,
       confirm: 'Delete playlist',
     });
     if (!sure) return;
     try {
+      if (share) await (share.role === 'owner' ? stopSharing(share) : leaveShared(share)).catch(() => {});
       await s.deletePlaylist(pl.ratingKey);
       setEditing(false);
       changed();

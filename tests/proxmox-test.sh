@@ -86,7 +86,9 @@ esac
 calls | grep -q '^pveam download local debian-13-standard_13.1-2_amd64.tar.zst$' && pass "downloads the newest Debian template" || fail "template download: $(calls | grep pveam)"
 expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'"'"'s (see "Container' '# settings" in the README). Change them with: plexamp-web-settings' \
     'PLEX_SERVER_URL=http://192.168.1.10:32400' 'DISABLE_WEBSOCKETS=' 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b' \
-    'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'MUSICBRAINZ_URL=' 'DEBUG=')"
+    'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'PLAYLIST_SHARING=true' \
+    '# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org' '# (the public service) or your own mirror. Empty: no checks.' \
+    'MUSICBRAINZ_URL=' 'DEBUG=')"
 [ "$(cat "$T/pushed/plexamp-web.env" 2>/dev/null)" = "$expected" ] && pass "writes the settings" || fail "settings: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
 calls | grep -q -- '^pct push 123 .*/plexamp-web.env /etc/plexamp-web/plexamp-web.env --perms 600$' && pass "settings readable by root only" || fail "settings permissions: $(calls | grep push)"
 cmp -s "$T/pushed/install-plexamp-web.sh" "$ROOT/proxmox/install.sh" && pass "copies in the installer" || fail "the installer wasn't copied in"

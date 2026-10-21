@@ -13,6 +13,8 @@ set -eu
 
 IMAGE="${1:-plexamp-web:test}"
 NET="pw-test-$$"
+DATA_VOLUME="pw-data-$$"
+LINK_VOLUME="pw-link-$$"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="python:3.12-alpine"
 CURL="curlimages/curl:8.10.1"
@@ -23,6 +25,7 @@ CERTS=""
 cleanup() {
     docker rm -f pw-plex pw-plex-tls pw-plex-self pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-bad >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
+    docker volume rm "$DATA_VOLUME" "$LINK_VOLUME" >/dev/null 2>&1 || true
     if [ -n "$CERTS" ]; then rm -rf "$CERTS"; fi
 }
 trap cleanup EXIT
@@ -162,7 +165,7 @@ MB_SEEN="$(cb 'http://pw-plex:32400/__mock/musicbrainz?X-Plex-Token=t')"
 contains "MusicBrainz: asks as this app, with its version" '"plexamp-web/' "$MB_SEEN"
 contains "MusicBrainz: ...and where to find it" ' ( https://github.com/kamakazedan/plexamp-web )' "$MB_SEEN"
 
-contains "service: health" '"together":true,"cast":true,"devices":true' "$(cb $W/api/health)"
+contains "service: health" '"together":true,"cast":true,"devices":true,"sharing":true' "$(cb $W/api/health)"
 expect "service: internal checks can't be called from outside" 404 "$(c -H 'X-Plex-Token: t' $W/api/internal/ai-auth)"
 expect "Play Together: needs a sign-in" 401 "$(c $W/api/together/me)"
 expect "Play Together: refuses a bad token" 401 "$(c -H 'X-Plex-Token: bad' $W/api/together/me)"
@@ -202,16 +205,45 @@ expect "Your devices: a device needs a proper id" 400 "$(c -H 'X-Plex-Token: t' 
 expect "Your devices: only the one playing says what's playing" 409 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"server":"mock-server-1","device":{"id":"chk-device-1","name":"Check"},"qid":"1","playing":true}' $W/api/devices/report)"
 lacks "Your devices: one account doesn't see another's" '"chk-device-1"' "$(cb -H 'X-Plex-Token: t2' "$W/api/devices?device=chk-device-2&name=Sam&server=mock-server-1&wait=0")"
 docker logs pw-web 2>&1 | grep -q "WebSockets turned off" && pass "startup log explains settings" || fail "startup log explains settings"
+# Shared playlists: only with your own Plex friends who can use the
+# server; only those it's shared with see it; kept in /data, the service's
+# own, without anyone's sign-in, and still there after a restart.
+SHARE='{"server":"mock-server-1","playlist":"5000","title":"Shared test","tracks":["120","121"],"members":[{"id":1002,"role":"edit"},{"id":1003,"role":"view"},{"id":4242,"role":"edit"}]}'
+expect "shares: need a sign-in" 401 "$(c "$W/api/shares?server=mock-server-1")"
+expect "shares: only on a server you can use" 403 "$(c -H 'X-Plex-Token: t' -H "$JSON" -X POST -d '{"server":"someone-elses","playlist":"1","title":"x","tracks":["1"]}' $W/api/shares)"
+made="$(cb -H 'X-Plex-Token: t' -H "$JSON" -X POST -d "$SHARE" $W/api/shares)"
+SID="$(printf '%s' "$made" | sed -n 's/^{"id":"\([a-f0-9]*\)".*/\1/p')"
+contains "shares: shared with a friend who can use the server" '"members":[{"id":1002,"title":"Sam","role":"edit","joined":false}]' "$made"
+contains "shares: a friend is invited" '"role":"edit","joined":false' "$(cb -H 'X-Plex-Token: t2' "$W/api/shares?server=mock-server-1")"
+lacks "shares: ...without seeing who else it's shared with" '"members"' "$(cb -H 'X-Plex-Token: t2' "$W/api/shares?server=mock-server-1")"
+expect "shares: someone it isn't shared with (and can't use the server) can't see it" '{"shares":[]}' "$(cb -H 'X-Plex-Token: t3' "$W/api/shares?server=mock-server-1")"
+expect "shares: ...nor read it" 404 "$(c -H 'X-Plex-Token: t3' "$W/api/shares/$SID")"
+expect "shares: only whoever shared it can stop sharing it" 403 "$(c -H 'X-Plex-Token: t2' -X DELETE "$W/api/shares/$SID")"
+expect "shares: a friend adds it" 200 "$(c -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"playlist":"6000","version":1,"tracks":["120","121"],"title":"Shared test"}' "$W/api/shares/$SID/join")"
+contains "shares: ...and their changes go to everyone" '"tracks":["120","121","122"]' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"tracks":["120","121","122"],"title":"Shared test"}' "$W/api/shares/$SID/sync")"
+sleep 1
+STORE="$(docker exec pw-web sh -c 'stat -c "%U %a" /data /data/shares.json; cat /data/shares.json')"
+contains "shares: kept in /data, the service's alone" "nginx 700
+nginx 600" "$STORE"
+expect "the service's settings are root's alone, in a folder only root can change" "root 755
+root 600
+root 755" "$(docker exec pw-web stat -c "%U %a" /run/plexamp-web /run/plexamp-web/service.json /run/plexamp-web/socket)"
+lacks "shares: ...without anyone's sign-in" "token" "$(printf '%s' "$STORE" | tr '[:upper:]' '[:lower:]')"
+contains "shares: the log says /data isn't a volume (they'd go with the container)" "which isn't a volume" "$(docker logs pw-web 2>&1)"
+docker restart pw-web >/dev/null
+wait_service pw-web
+contains "shares: still there after a restart" '"version":2,"count":3' "$(cb -H 'X-Plex-Token: t' "$W/api/shares?server=mock-server-1")"
 docker logs pw-web 2>&1 | grep -q "plexamp-web service: ready" && pass "the service started" || fail "the service started"
 LOG="$(docker logs pw-web 2>&1)"
 lacks "no access log by default (tokens travel in Plex addresses)" "/pms/library/sections" "$LOG"
 lacks "no tokens in the log" "X-Plex-Token=t" "$LOG"
 
 # ---------- 2. Nothing set ----------
-docker run -d --name pw-web2 --network "$NET" "$IMAGE" >/dev/null
+docker run -d --name pw-web2 --network "$NET" -v "$DATA_VOLUME:/data" "$IMAGE" >/dev/null
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
-expect "defaults: Play Together, Play on and your devices, nothing else" "window.PW_CONFIG = { together: true, cast: true, devices: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+lacks "defaults: with a volume at /data, nothing is said about it" "which isn't a volume" "$(docker logs pw-web2 2>&1)"
+expect "defaults: Play Together, Play on, your devices and shared playlists, nothing else" "window.PW_CONFIG = { together: true, cast: true, devices: true, sharing: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
@@ -280,17 +312,18 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org)" 'window.PW_CONFIG = { cast: true, musicbrainz: "public", devices: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org)" 'window.PW_CONFIG = { cast: true, musicbrainz: "public", devices: true, sharing: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7b. Playing on other Plex players off ----------
-docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org "$IMAGE" >/dev/null
+docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false and MUSICBRAINZ=false (MUSICBRAINZ_URL set too): not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too) and PLAYLIST_SHARING=false: not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
+expect "PLAYLIST_SHARING=false: no shared playlists" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/shares?server=mock-server-1')"
 
 # ---------- 7c. A Plex server reached over HTTPS at its address ----------
 # A Plex server's certificate is for its plex.direct name, so at an address
@@ -346,6 +379,37 @@ bad "rejects a server address without http://" "PLEX_SERVER_URL must start with 
 bad "rejects an unclear true/false value" "expected true or false" -e DISABLE_WEBSOCKETS=maybe
 bad "rejects an unclear PLAY_TOGETHER" "PLAY_TOGETHER: expected true or false" -e PLAY_TOGETHER=sometimes
 bad "rejects an unclear CASTING" "CASTING: expected true or false" -e CASTING=sometimes
+bad "rejects an unclear PLAYLIST_SHARING" "PLAYLIST_SHARING: expected true or false" -e PLAYLIST_SHARING=sometimes
+bad "rejects a DATA_DIR that isn't a full path" "DATA_DIR must be a full path" -e DATA_DIR=data
+bad "rejects a DATA_DIR with .. in it" "without . or .. in it" -e DATA_DIR=/data/../etc
+bad "rejects a DATA_DIR in a system folder" "DATA_DIR can't be in a system folder" -e DATA_DIR=/etc/plexamp-web
+bad "rejects a DATA_DIR that isn't a folder of its own" "DATA_DIR must be a folder of its own" -e DATA_DIR=/var/lib
+bad "rejects a DATA_DIR in the service's own folder" "DATA_DIR can't be in /opt/plexamp-web/server" -e DATA_DIR=/opt/plexamp-web/server/data
+bad "rejects a SERVICE_USER that doesn't exist" "SERVICE_USER nobody-here doesn't exist" -e SERVICE_USER=nobody-here
+off() { # name expected-message docker-run-args...: shared playlists off, the rest still up
+    name="$1"
+    msg="$2"
+    shift 2
+    docker rm -f pw-bad >/dev/null 2>&1 || true
+    docker run -d --name pw-bad "$@" "$IMAGE" >/dev/null
+    sleep 3
+    contains "$name" "shared playlists are off: " "$(docker logs pw-bad 2>&1 || true)"
+    contains "$name: says why" "$msg" "$(docker logs pw-bad 2>&1 || true)"
+    expect "$name: the rest keeps running" true "$(docker inspect -f '{{.State.Running}}' pw-bad 2>/dev/null || echo false)"
+    docker rm -f pw-bad >/dev/null 2>&1 || true
+}
+bad "rejects a RUN_DIR outside /run" "RUN_DIR must be a folder of its own in /run" -e RUN_DIR=/etc/plexamp-web
+# A shares.json that's a link (the service can write in its folder, so it
+# could make one): never followed, so what it leads to isn't given to the
+# service.
+docker volume create "$LINK_VOLUME" >/dev/null
+docker run --rm -v "$LINK_VOLUME:/data" --entrypoint sh "$IMAGE" -c 'ln -s /etc/shadow /data/shares.json'
+off "refuses a shares.json that's a link" "shares.json must be a file of its own (not a link" -v "$LINK_VOLUME:/data"
+# A folder with other things in it isn't taken over (a home folder given
+# as the volume by mistake, say).
+docker run --rm -v "$LINK_VOLUME:/data" --entrypoint sh "$IMAGE" -c 'rm -f /data/shares.json && touch /data/notes.txt'
+off "won't take over a folder with other files in it" "has other files in it (notes.txt)" -v "$LINK_VOLUME:/data"
+expect "...and leaves it as it was" "root" "$(docker run --rm -v "$LINK_VOLUME:/data" --entrypoint stat "$IMAGE" -c %U /data/notes.txt)"
 bad "rejects an unknown OLLAMA_AUTH" "OLLAMA_AUTH must be plex or off" -e OLLAMA_URL=http://x:11434 -e OLLAMA_AUTH=sometimes
 bad "rejects an address with odd characters" "invalid path" -e 'OLLAMA_URL=http://x:11434/;evil'
 bad "rejects a MusicBrainz address without http://" "MUSICBRAINZ_URL must start with http://" -e MUSICBRAINZ_URL=musicbrainz.org

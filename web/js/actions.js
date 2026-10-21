@@ -7,6 +7,7 @@ import { normTrack } from './plex.js';
 import { navigate, describeError } from './router.js';
 import { sheet, toast, shuffleArray, fmt } from './ui.js';
 import { addToPlaylist, addToCollection, isAdminNow, tracksOf } from './editing.js';
+import { exportPlaylistFile } from './views/playlistfiles.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 
@@ -261,7 +262,8 @@ export function artistMenu(artist) {
 // `edit`: { onRename, onDelete } when the playlist is unlocked for editing.
 // `edit`: rename and delete, while it's unlocked; `picture`: change its
 // picture (then too, or any time for a smart playlist).
-export function playlistMenu(pl, { edit = null, picture = null } = {}) {
+// `extra`: more actions, after the rest (sharing it, from its page).
+export function playlistMenu(pl, { edit = null, picture = null, extra = [] } = {}) {
   const tracks = () => tracksOf([pl]);
   sheet({
     title: pl.title,
@@ -276,6 +278,13 @@ export function playlistMenu(pl, { edit = null, picture = null } = {}) {
         icon: 'collection',
         label: 'Add to collection…',
         onSelect: () => addToCollection({ kind: 'track', what: pl.title, load: tracks, suggest: pl.title }),
+      },
+      ...extra,
+      {
+        icon: 'arrowDown',
+        label: 'Export to a file',
+        description: 'To import again later, or for someone else to import',
+        onSelect: () => exportPlaylistFile(pl),
       },
       edit && { icon: 'edit', label: 'Rename…', onSelect: edit.onRename },
       picture && { icon: 'image', label: 'Change picture…', onSelect: picture },

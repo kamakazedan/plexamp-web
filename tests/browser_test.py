@@ -25,8 +25,8 @@ and t3 (Alex, a friend without access).
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
 Sections: core ws ai dj djs nows blocked poll custom desktop nav library edit
-lists pictures missing cast ratings devices fades together settings home debug
-memory (default: all).
+lists pictures missing files sharing cast ratings devices fades together
+settings home debug memory (default: all).
 """
 
 import json
@@ -362,6 +362,22 @@ with sync_playwright() as pw:
         page.click('.ai-actions button:has-text("Add to queue")')
         check('ai: ...or adds it to the queue', wait_for(lambda: player(page, 'p.queue.length') == n + rows, 5), player(page, 'p.queue.length'))
         player(page, 'p.pause()')
+
+        # The × clears the description in one tap (Escape too), to type
+        # another; the playlist made stays below.
+        box_clear = page.locator('.ai-box .search-clear')
+        had = page.locator('.ai-box input').input_value()
+        shown = box_clear.is_visible()
+        box_clear.click()
+        cleared = page.locator('.ai-box input').input_value() == '' and box_clear.is_hidden()
+        focused = js(page, "() => document.activeElement?.matches('.ai-box input')")
+        kept = page.locator('.ai-result').count() == 1
+        page.fill('.ai-box input', 'Something else')
+        back = box_clear.is_visible()
+        page.press('.ai-box input', 'Escape')
+        esc = page.locator('.ai-box input').input_value() == '' and js(page, "() => location.hash") == '#/ai-playlist'
+        check('ai: the × clears the description (Escape too), and the playlist stays', had and shown and cleared and focused and kept and back and esc,
+              f'{had!r} {shown} {cleared} {focused} {kept} {back} {esc}')
 
         # A best-of stays on its artist, even when the model brings in others.
         page.click('button:has-text("Make another playlist")')
@@ -1978,8 +1994,8 @@ with sync_playwright() as pw:
         left = page.locator('.missing-row .row-title').all_inner_texts()
         check('missing: Check again lets go of what\'s in the library now', real['title'] not in left and len(left) == 6
               and page.locator('.missing-status').inner_text().startswith('1 is in your library now'), f"{page.locator('.missing-status').inner_text()} {left}")
-        check('missing: the list has nothing about MusicBrainz: AI playlists check what they suggest before it goes on it',
-              page.locator('.missing-mb, .missing-show-unknown, .missing-mb-check, .missing-row.unknown').count() == 0)
+        check('missing: with MusicBrainz checks off, the list has nothing about MusicBrainz',
+              page.locator('.missing-mb, .mb-found, .missing-show-unknown, .missing-mb-check, .missing-row.unknown').count() == 0)
 
         # With MusicBrainz: an AI playlist checks its suggestions before it
         # lists them, and says what it left out, and why.
@@ -2005,6 +2021,8 @@ with sync_playwright() as pw:
         kept = sorted((m['kind'], m['title'] or m['artist']) for m in stored())
         check('missing: ...and only those it knows go on the list (what it doesn\'t know comes off it, from before)',
               kept == [('artist', 'Real Missing Band'), ('track', 'A Song They Never Made'), ('track', 'Lantern Song')], str(kept))
+        marked = sorted((m['title'] or m['artist']) for m in stored() if m.get('mb') == 'real')
+        check('missing: ...marked as found there (the one from before isn\'t: it wasn\'t asked about)', marked == ['Lantern Song', 'Real Missing Band'], str(marked))
         seen_mb = mock('/__mock/musicbrainz')['MediaContainer']
         # (The player keeps answers for a week: run again against the same
         # one, and these are known already, so nothing new is asked.)
@@ -2026,6 +2044,38 @@ with sync_playwright() as pw:
         page.wait_for_selector('.missing-row')
         check('missing: what 0.12.0 kept hidden is let go', 'Hidden One' not in page.locator('.missing-row .row-title').all_inner_texts()
               and not any(m.get('mb') == 'unknown' for m in stored()), str(stored()))
+
+        # Listed without being checked (MusicBrainz checks off, or before the
+        # player had one to ask): checked from the list, and what it doesn't
+        # know comes off it. Those it found already aren't asked about again.
+        js(page, """() => { const l = JSON.parse(localStorage.getItem('pw.aiMissing'));
+            const like = l[0];
+            for (const [artist, title] of [['Imaginary Act', 'Made Up Song'], ['Glass Harbour', 'Sea Glass'], ['Real Missing Band', 'Somewhere Real']])
+              l.push(Object.assign({}, like, { kind: 'track', artist, title, mb: undefined }));
+            localStorage.setItem('pw.aiMissing', JSON.stringify(l)); }""")
+        sent = []
+        page.on('request', lambda r: sent.append(json.loads(r.post_data or '{}')) if r.url.endswith('/api/musicbrainz/check') else None)
+        page.goto(APP + '#/settings/ai')
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
+        badges = page.locator('.missing-row:has(.mb-found) .row-title').all_inner_texts()
+        page.click('.missing-mb')
+        page.wait_for_selector('.missing-status:has-text("Taken off the list")', timeout=30000)
+        left = page.locator('.missing-row .row-title').all_inner_texts()
+        said = page.locator('.missing-status').inner_text()
+        asked = sorted(i.get('title') or i.get('artist') for b in sent for i in b.get('items', []))
+        shot(page, 'missing-05-checked')
+        check('missing: Check on MusicBrainz takes what it doesn\'t know (and albums) off the list',
+              left == ['Real Missing Band', 'Lantern Song', 'Somewhere Real']
+              and 'Taken off the list: 2 that MusicBrainz doesn’t know (most likely made up) and 1 album taken for a song.' in said
+              and '1 is on MusicBrainz, so it’s real.' in said, f'{left} {said}')
+        check('missing: ...asking only about those not checked before', asked == ['A Song They Never Made', 'Made Up Song', 'Sea Glass', 'Somewhere Real'], str(asked))
+        check('missing: ...and marks those it found', badges == ['Real Missing Band', 'Lantern Song'] and page.locator('.missing-row:has(.mb-found)').count() == 3
+              and page.locator('.missing-mb').count() == 0 and all(m.get('mb') == 'real' for m in stored()), f'{badges} {stored()}')
+        page.click('.toast-action:has-text("Undo")')
+        page.wait_for_timeout(300)
+        back = page.locator('.missing-row .row-title').all_inner_texts()
+        check('missing: ...with an undo', len(back) == 6 and 'Made Up Song' in back and page.locator('.missing-mb').count() == 1, str(back))
         page.goto(APP + '#/settings/missing')
         page.wait_for_selector('.missing-row')
         page.click('button:has-text("Clear the list")')
@@ -2035,6 +2085,441 @@ with sync_playwright() as pw:
         check('missing: the list can be cleared', stored() == [] and page.locator('.missing-row').count() == 0 and page.locator('.empty-state').count() == 1)
         settings(page, {'ai': {'mode': 'auto'}})
         ctx.close()
+
+    # ---------- files: playlists exported to a file, backed up, imported ----------
+    if run('files'):
+        ctx = browser.new_context(accept_downloads=True, **MOBILE)
+        ctx.grant_permissions(['clipboard-read', 'clipboard-write'], origin=APP.rstrip('/'))
+        page = ctx.new_page()
+        attach(page, 'files')
+        login(page, APP)
+        made = []  # (token, playlist id), taken away at the end
+
+        def pls(token='t'):
+            return mock(f'/playlists?playlistType=audio&X-Plex-Token={token}')['MediaContainer'].get('Metadata', [])
+
+        def entries(pid, token='t'):
+            return [m['ratingKey'] for m in mock(f'/playlists/{pid}/items?X-Plex-Token={token}&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])]
+
+        def new_ones(before, token='t'):
+            had = {p['ratingKey'] for p in before}
+            fresh = [p for p in pls(token) if p['ratingKey'] not in had]
+            made.extend((token, p['ratingKey']) for p in fresh)
+            return fresh
+
+        def write(name, data):
+            path = os.path.join(OUT, name)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(data if isinstance(data, str) else json.dumps(data))
+            return path
+
+        def import_file(page, path, *, name=None, choose=None):
+            """Import a file from the Playlists page: its name for one, or which (by title) for several."""
+            page.goto(APP + '#/playlists')
+            page.wait_for_selector('.page-head')
+            page.wait_for_timeout(300)
+            if page.locator('.empty-state button:has-text("Import playlists")').count():
+                with page.expect_file_chooser() as fc:
+                    page.click('.empty-state button:has-text("Import playlists")')
+            else:
+                page.click('.playlists-menu')
+                page.wait_for_selector('.sheet.open')
+                with page.expect_file_chooser() as fc:
+                    page.locator('.sheet.open .sheet-action', has_text='Import playlists').click()
+            fc.value.set_files(path)
+            if choose is not None:
+                page.wait_for_selector('.sheet.open .import-choice')
+                for row in page.locator('.sheet.open .import-choice').all():
+                    want = row.locator('.import-choice-title').inner_text() in choose
+                    if row.locator('input').is_checked() != want:
+                        row.locator('input').click()
+                page.locator('.sheet.open .import-form > .btn-primary').click()
+            elif name is not False:
+                page.wait_for_selector('.sheet.open .ask-form input')
+                if name:
+                    page.fill('.sheet.open .ask-form input', name)
+                page.click('.sheet.open .ask-form button[type=submit]')
+            if name is False:
+                return None
+            page.wait_for_selector('.sheet.open .dialog-close:has-text("Done")', timeout=60000)
+            out = page.locator('.sheet.open .import-form').inner_text()
+            return out
+
+        def close_dialog(page):
+            page.click('.sheet.open .dialog-close')
+            page.wait_for_selector('.sheet.open', state='detached')
+
+        # Export: from a playlist's menu, a file with each track's title,
+        # artist, album and Plex's ids for it, and nothing about the server.
+        late = next(p for p in pls() if p['title'] == 'Late night')
+        want = entries(late['ratingKey'])
+        page.goto(APP + f"#/playlist/{late['ratingKey']}")
+        page.wait_for_selector('.hero-album')
+        page.click('.back-actions button[aria-label="More options"]')
+        page.wait_for_selector('.sheet.open')
+        with page.expect_download() as dl:
+            page.locator('.sheet.open .sheet-action', has_text='Export to a file').click()
+        text = open(dl.value.path(), encoding='utf-8').read()
+        data = json.loads(text)
+        tracks = data['playlists'][0]['tracks'] if data.get('playlists') else []
+        first = mock(f"/library/metadata/{want[0]}?X-Plex-Token=t")['MediaContainer']['Metadata'][0]
+        check('files: a playlist exports to a file, from its menu', dl.value.suggested_filename == 'Late night.playlist.json' and data.get('format') == 'plexamp-web-playlists'
+              and data['playlists'][0]['title'] == 'Late night' and [t['id'] for t in tracks] == want, f'{dl.value.suggested_filename} {text[:200]}')
+        check('files: ...each track with its title, artist, album, number, length and Plex\'s ids',
+              tracks[0] == {'title': first['title'], 'artist': first.get('originalTitle') or first['grandparentTitle'], 'albumArtist': first['grandparentTitle'],
+                            'album': first['parentTitle'], 'year': first['parentYear'], 'disc': first['parentIndex'], 'index': first['index'],
+                            'duration': first['duration'], 'guid': first['guid'], 'id': first['ratingKey']}, json.dumps(tracks[:1]))
+        check('files: ...and nothing about the server (no addresses, file paths or tokens)',
+              not re.search(r'https?:|/library/|token|127\.0\.0\.1|\.flac', text, re.I) and len(text.splitlines()) >= len(tracks) + 6, text[:300])
+        late_file = write('late-night.playlist.json', text)
+
+        # Someone else with access to the server imports it: the same tracks.
+        sam_ctx = browser.new_context(accept_downloads=True, **MOBILE)
+        sam = sam_ctx.new_page()
+        attach(sam, 'files-sam')
+        login(sam, APP, 't2')
+        before = pls('t2')
+        said = import_file(sam, late_file)
+        shot(sam, 'files-01-imported')
+        got = new_ones(before, 't2')
+        check('files: a friend imports it, with the same tracks in the same order',
+              len(got) == 1 and got[0]['title'] == 'Late night' and entries(got[0]['ratingKey'], 't2') == want and f'All {len(want)} tracks found' in said, f'{said} {got}')
+        close_dialog(sam)
+
+        # A server set up again (the same music, new ids): found by Plex's id
+        # for each recording. Its name is asked, as Dan has one by that name.
+        moved = json.loads(text)
+        for t in moved['playlists'][0]['tracks']:
+            t['id'] = str(900000 + int(t['id']))
+        before = pls()
+        page.goto(APP + '#/playlists')
+        said = import_file(page, write('moved.playlist.json', moved))
+        got = new_ones(before)
+        check('files: on a server set up again, tracks are found by Plex\'s id for them (and a name in use is offered with "(imported)")',
+              len(got) == 1 and got[0]['title'] == 'Late night (imported)' and entries(got[0]['ratingKey']) == want and f'All {len(want)} tracks found' in said, f'{said} {got}')
+        close_dialog(page)
+
+        # On another server: by title and artist (and the album and length,
+        # between copies). One that isn't here is listed, to copy.
+        other = json.loads(text)
+        for t in other['playlists'][0]['tracks']:
+            del t['id'], t['guid']
+        other['playlists'][0]['tracks'].insert(2, {'title': 'A Song Nobody Has', 'artist': 'Nobody'})
+        before = pls()
+        said = import_file(page, write('other.playlist.json', other), name='From elsewhere')
+        got = new_ones(before)
+        shot(page, 'files-02-not-found')
+        missing = page.locator('.sheet.open .import-missing li').all_text_contents()
+        check('files: on another server, by title and artist; what isn\'t there is listed',
+              len(got) == 1 and got[0]['title'] == 'From elsewhere' and entries(got[0]['ratingKey']) == want
+              and f'{len(want)} of {len(want) + 1} tracks found; 1 not in ' in said and missing == ['Nobody — A Song Nobody Has'],
+              f'{said!r} {missing} {entries(got[0]["ratingKey"]) if got else None} {want}')
+        close_dialog(page)
+
+        # A backup: every playlist of yours (not smart ones), in one file.
+        page.goto(APP + '#/playlists')
+        page.wait_for_selector('.playlists-menu')
+        page.click('.playlists-menu')
+        page.wait_for_selector('.sheet.open')
+        with page.expect_download() as dl:
+            page.locator('.sheet.open .sheet-action', has_text='Back up your playlists').click()
+        page.wait_for_selector('.sheet.open .dialog-close:has-text("Done")', timeout=30000)
+        backup = json.loads(open(dl.value.path(), encoding='utf-8').read())
+        titles = sorted(p['title'] for p in backup['playlists'])
+        theirs = sorted(p['title'] for p in pls() if not p['smart'])
+        said = page.locator('.sheet.open .import-status').inner_text()
+        shot(page, 'files-03-backup')
+        check('files: a backup has all your playlists in one file, but not smart ones',
+              re.fullmatch(r'Playlists \d{4}-\d\d-\d\d\.playlist\.json', dl.value.suggested_filename) and titles == theirs and 'Everything' not in titles
+              and said.startswith(f'Saved {len(theirs)} playlists'), f'{dl.value.suggested_filename} {titles} {theirs} {said}')
+        close_dialog(page)
+
+        # ...imported (as after a server is set up again): which ones is
+        # asked, those you have (by name) not chosen to begin with.
+        before = pls('t2')
+        path = write('backup.playlist.json', open(dl.value.path(), encoding='utf-8').read())
+        sam.goto(APP + '#/playlists')
+        sam.wait_for_selector('.playlists-menu')
+        sam.click('.playlists-menu')
+        sam.wait_for_selector('.sheet.open')
+        with sam.expect_file_chooser() as fc:
+            sam.locator('.sheet.open .sheet-action', has_text='Import playlists').click()
+        fc.value.set_files(path)
+        sam.wait_for_selector('.sheet.open .import-choice')
+        offered = {r.locator('.import-choice-title').inner_text(): r.locator('input').is_checked() for r in sam.locator('.sheet.open .import-choice').all()}
+        shot(sam, 'files-04-choose')
+        check('files: importing a backup asks which, leaving out those you have', len(offered) == len(theirs) and offered.get('Late night') is False
+              and offered.get('Workout') is True, str(offered))
+        for r in sam.locator('.sheet.open .import-choice').all():
+            if r.locator('.import-choice-title').inner_text() not in ('Workout', 'Sunday morning') and r.locator('input').is_checked():
+                r.locator('input').click()
+        sam.locator('.sheet.open .import-form > .btn-primary').click()
+        sam.wait_for_selector('.sheet.open .dialog-close:has-text("Done")', timeout=60000)
+        got = new_ones(before, 't2')
+        said = sam.locator('.sheet.open .import-status').inner_text()
+        check('files: ...and makes the ones chosen', sorted(p['title'] for p in got) == ['Sunday morning', 'Workout'] and said.startswith('Imported 2 playlists'), f'{said} {got}')
+        close_dialog(sam)
+        sam.wait_for_timeout(600)
+        cards = sam.locator('.grid-playlists .card').count()
+        check('files: ...and the Playlists page shows them', cards == len(pls('t2')), f'{cards} cards')
+
+        # Something that isn't a playlist file says so.
+        import_file(page, write('not-a-playlist.json', '{"hello": 1}'), name=False)
+        check('files: a file that isn\'t a playlist file says so', page.wait_for_selector('.toast:has-text("isn’t a playlist file")', timeout=5000) is not None)
+
+        for token, pid in made:
+            urllib.request.urlopen(urllib.request.Request(f'{MOCK}/playlists/{pid}?X-Plex-Token={token}', method='DELETE'), timeout=10).read()
+        sam_ctx.close()
+        ctx.close()
+
+    # ---------- sharing: a playlist shared with a Plex friend, kept the same ----------
+    if run('sharing'):
+        def pl_items(pid, token):
+            return [m['ratingKey'] for m in mock(f'/playlists/{pid}/items?X-Plex-Token={token}&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])]
+
+        def pl_entries(pid, token):
+            return mock(f'/playlists/{pid}/items?X-Plex-Token={token}&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+
+        def plex(method, path, token):
+            sep = '&' if '?' in path else '?'
+            return urllib.request.urlopen(urllib.request.Request(f'{MOCK}{path}{sep}X-Plex-Token={token}', method=method), timeout=10).read()
+
+        def uri(ids):
+            return urllib.parse.quote(f'server://mock-server-1/com.plexapp.plugins.library/library/metadata/{",".join(ids)}', safe='')
+
+        def sync(pg):
+            js(pg, "() => import('./js/sharing.js').then((m) => m.syncAll())")
+
+        def full_sync(pg):
+            """Even where nothing seems to have changed (as every few minutes)."""
+            js(pg, "() => import('./js/sharing.js').then(async (m) => { await m.loadShares();"
+                   " for (const s of m.sharesNow()) if (s.joined && s.copy) await m.syncShare(s, { force: true }); })")
+
+        def mine(token):
+            return mock(f'/playlists?playlistType=audio&X-Plex-Token={token}')['MediaContainer'].get('Metadata', [])
+
+        dan_ctx = browser.new_context(**MOBILE)
+        dan = dan_ctx.new_page()
+        attach(dan, 'sharing-dan')
+        login(dan, APP, 't')
+        sam_ctx = browser.new_context(**MOBILE)
+        sam = sam_ctx.new_page()
+        attach(sam, 'sharing-sam')
+        login(sam, APP, 't2')
+
+        workout = next(p for p in mine('t') if p['title'] == 'Workout')
+        wid = workout['ratingKey']
+        original = pl_items(wid, 't')
+
+        # Dan shares Workout with Sam, who can edit it (Alex can't use the
+        # server, so can't have it).
+        dan.goto(APP + f'#/playlist/{wid}')
+        dan.wait_for_selector('.hero-album')
+        dan.click('.back-actions button[aria-label="More options"]')
+        dan.wait_for_selector('.sheet.open')
+        dan.locator('.sheet.open .sheet-action', has_text='Share with friends').click()
+        dan.wait_for_selector('.sheet.open .share-friend')
+        rows = {r.locator('.friend-name').inner_text(): r for r in dan.locator('.sheet.open .share-friend').all()}
+        alex_off = rows['Alex'].locator('select').is_disabled() and 'Can’t play from' in rows['Alex'].inner_text()
+        rows['Sam'].locator('select').select_option('edit')
+        shot(dan, 'sharing-01-share')
+        go = dan.locator('.sheet.open .friend-actions .btn-primary')
+        label = go.inner_text()
+        go.click()
+        dan.wait_for_selector('.toast:has-text("Shared “Workout”")')
+        dan.wait_for_selector('.share-line', timeout=10000)
+        line = dan.locator('.share-line').inner_text()
+        check('sharing: a playlist is shared from its menu, with friends who can use the server', alex_off and label == 'Share with 1 friend'
+              and line == 'Shared with Sam (invited)' and dan.locator('.hero-art-box .shared-mark:not([hidden])').count() == 1, f'{alex_off} {label!r} {line!r}')
+        dan.goto(APP + '#/playlists')
+        dan.wait_for_selector('.grid-playlists .card')
+        marked = dan.locator('.grid-playlists .card:has(.shared-mark:not([hidden])) .card-title').all_inner_texts()
+        check('sharing: ...and shows it, at the top left of its picture', marked == ['Workout'], str(marked))
+
+        # Sam: the Playlists tab says so; he adds it, and has the same tracks.
+        sync(sam)
+        dotted = wait_for(lambda: sam.locator('#tabs .tab[data-tab=playlists] .tab-dot:not([hidden])').count() == 1, 10)
+        sam.goto(APP + '#/playlists')
+        sam.wait_for_selector('.invites .invite-row')
+        invite = sam.locator('.invites .invite-row').inner_text()
+        shot(sam, 'sharing-02-invited')
+        check('sharing: a friend is told (a dot on Playlists), and offered it there', dotted and 'Workout' in invite and 'From Dan · 11 tracks · you can edit it' in invite, invite)
+        sam.locator('.invite-row button:has-text("Add")').click()
+        sam.wait_for_selector('.toast:has-text("Added “Workout”")')
+        copy = wait_for(lambda: next((p for p in mine('t2') if p['title'] == 'Workout'), None), 10)
+        cid = copy['ratingKey'] if copy else None
+        sam.wait_for_selector('.grid-playlists .card')
+        sam_marked = sam.locator('.grid-playlists .card:has(.shared-mark:not([hidden])) .card-title').all_inner_texts()
+        check('sharing: ...and once added, it\'s a playlist of his own with the same tracks, marked as shared',
+              cid and pl_items(cid, 't2') == original and sam_marked == ['Workout'] and sam.locator('.invites .invite-row').count() == 0
+              and sam.locator('#tabs .tab[data-tab=playlists] .tab-dot:not([hidden])').count() == 0, f'{sam_marked}')
+
+        # Sam takes a track out in plexamp-web: Dan's has it too.
+        sam.goto(APP + f'#/playlist/{cid}')
+        sam.wait_for_selector('.view .tracks .track')
+        sam_line = sam.locator('.share-line').inner_text()
+        sam.click('.lock-btn')
+        sam.wait_for_selector('.edit-bar:not([hidden])')
+        gone = sam.locator('.view .tracks .track').first.get_attribute('data-track-id')
+        sam.locator('.view .tracks .track .row-remove').first.click()
+        # (Dan's copy is his browser's to change: when he opens plexamp-web,
+        # or within a minute while it's open.)
+        got = wait_for(lambda: (sync(dan), gone not in pl_items(wid, 't') and pl_items(wid, 't') == pl_items(cid, 't2'))[1], 15)
+        check('sharing: a change made in plexamp-web by someone who can edit it reaches everyone', got and sam_line == 'Shared by Dan · you can edit it',
+              f'{sam_line} {pl_items(wid, "t")} {pl_items(cid, "t2")}')
+        sam.click('.edit-bar .edit-done')
+
+        # Dan adds one in another app (Plexamp, say): the next time either
+        # opens plexamp-web, everyone has it.
+        extra = next(t for t in mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=200')['MediaContainer']['Metadata']
+                     if t['ratingKey'] not in original)['ratingKey']
+        plex('PUT', f'/playlists/{wid}/items?uri={uri([extra])}', 't')
+        sync(dan)
+        sync(sam)
+        check('sharing: a change made in another app reaches everyone when plexamp-web is opened', pl_items(cid, 't2')[-1:] == [extra]
+              and pl_items(cid, 't2') == pl_items(wid, 't'), f'{pl_items(wid, "t")} {pl_items(cid, "t2")}')
+
+        # Both change theirs before either opens plexamp-web again: both
+        # changes are kept.
+        sam_extra = next(t for t in mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=200')['MediaContainer']['Metadata']
+                         if t['ratingKey'] not in original and t['ratingKey'] != extra)['ratingKey']
+        plex('PUT', f'/playlists/{cid}/items?uri={uri([sam_extra])}', 't2')
+        drop = pl_entries(wid, 't')[0]
+        plex('DELETE', f'/playlists/{wid}/items/{drop["playlistItemID"]}', 't')
+        sync(sam)
+        sync(dan)
+        sync(sam)
+        a, b = pl_items(wid, 't'), pl_items(cid, 't2')
+        check('sharing: changes made by two people meanwhile are both kept (one\'s added track, the other\'s removal)',
+              a == b and sam_extra in a and drop['ratingKey'] not in a and extra in a, f'{a} {b}')
+
+        # A track Sam can't have (from a library that isn't shared with him,
+        # say) isn't in his copy, and isn't taken out of anyone else's.
+        hidden = next(t for t in mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=200')['MediaContainer']['Metadata']
+                      if t['ratingKey'] not in a)['ratingKey']
+        mock(f'/__mock/config?hidden={hidden}')
+        plex('PUT', f'/playlists/{wid}/items?uri={uri([hidden])}', 't')
+        sync(dan)
+        sync(sam)
+        full_sync(sam)
+        full_sync(dan)
+        check('sharing: a track a friend can\'t have stays in everyone else\'s', hidden in pl_items(wid, 't') and hidden not in pl_items(cid, 't2'),
+              f'{pl_items(wid, "t")} {pl_items(cid, "t2")}')
+        mock('/__mock/config?hidden=')
+        plex('DELETE', f'/playlists/{wid}/items/{next(e for e in pl_entries(wid, "t") if e["ratingKey"] == hidden)["playlistItemID"]}', 't')
+        sync(dan)
+        sync(sam)
+
+        # One Sam can't see any more (its library stopped being shared with
+        # him, say): gone from his copy as Plex lists it, but not taken out
+        # for everyone; seen again, it's there once.
+        lost = pl_items(cid, 't2')[1]
+        mock(f'/__mock/config?hidden={lost}')
+        full_sync(sam)
+        full_sync(dan)
+        kept_for_dan = lost in pl_items(wid, 't') and lost not in pl_items(cid, 't2')
+        mock('/__mock/config?hidden=')
+        full_sync(sam)
+        full_sync(dan)
+        a, b = pl_items(wid, 't'), pl_items(cid, 't2')
+        check('sharing: a track a friend can no longer see isn\'t taken out for everyone, and is there once when they can again',
+              kept_for_dan and a == b and a.count(lost) == 1, f'{kept_for_dan} {a} {b}')
+
+        # View only: Sam's own changes are undone, and his copy can't be
+        # unlocked here.
+        dan.goto(APP + f'#/playlist/{wid}')
+        dan.wait_for_selector('.share-line')
+        dan.click('.share-line')
+        dan.wait_for_selector('.sheet.open .share-friend')
+        dan.locator('.sheet.open .share-friend', has_text='Sam').locator('select').select_option('view')
+        dan.locator('.sheet.open .friend-actions .btn-primary').click()
+        dan.wait_for_selector('.toast:has-text("Saved")')
+        before = pl_items(cid, 't2')
+        plex('DELETE', f'/playlists/{cid}/items/{pl_entries(cid, "t2")[0]["playlistItemID"]}', 't2')
+        sam.goto(APP + '#/playlists')
+        sam.wait_for_selector('.grid-playlists .card')
+        sync(sam)
+        told = sam.wait_for_selector('.toast:has-text("were undone")', timeout=10000) is not None
+        sam.goto(APP + f'#/playlist/{cid}')
+        sam.wait_for_selector('.view .tracks .track')
+        view_line = sam.locator('.share-line').inner_text()
+        check('sharing: someone who can only view it has their own changes undone (and told), and can\'t unlock it here',
+              told and pl_items(cid, 't2') == before == pl_items(wid, 't') and sam.locator('.lock-btn').count() == 0
+              and view_line == 'Shared by Dan · you can view it, not edit it', f'{view_line} {before} {pl_items(cid, "t2")}')
+
+        # Dan renames it: Sam's is renamed too.
+        plex('PUT', f'/playlists/{wid}?title=Workout+mix', 't')
+        sync(dan)
+        sync(sam)
+        check('sharing: renamed by whoever shared it, everyone\'s is', next((p['title'] for p in mine('t2') if p['ratingKey'] == cid), None) == 'Workout mix')
+
+        # Dan stops sharing it: both keep theirs, no longer marked shared.
+        dan.goto(APP + f'#/playlist/{wid}')
+        dan.wait_for_selector('.share-line')
+        dan.click('.share-line')
+        dan.wait_for_selector('.sheet.open .share-stop')
+        dan.click('.sheet.open .share-stop')
+        dan.wait_for_selector('.sheet.open .ask-form .btn-danger')
+        dan.click('.sheet.open .ask-form .btn-danger')
+        dan.wait_for_selector('.toast:has-text("isn’t shared any more")')
+        sync(sam)
+        sam.goto(APP + '#/playlists')
+        sam.wait_for_selector('.grid-playlists .card')
+        sam.wait_for_timeout(400)
+        kept = any(p['ratingKey'] == cid for p in mine('t2'))
+        check('sharing: when it stops being shared, everyone keeps theirs, without the mark', kept and sam.locator('.grid-playlists .shared-mark:not([hidden])').count() == 0
+              and dan.locator('.share-line').count() == 0, f'{kept}')
+
+        # Turned down: it's not offered again. Added, then deleted (in another
+        # app, say): it stops being shared with him.
+        share_again = ("() => import('./js/sharing.js').then(async (m) => { const { app } = await import('./js/state.js');"
+                       f" await m.sharePlaylist(await app.server.playlist({wid}), [{{ id: 1002, role: 'edit' }}]); }})")
+        js(dan, share_again)
+        sync(sam)
+        sam.goto(APP + '#/playlists')
+        sam.wait_for_selector('.invites .invite-row')
+        sam.locator('.invite-row button:has-text("No thanks")').click()
+        sam.wait_for_timeout(800)
+        sync(sam)
+        declined = sam.locator('.invites .invite-row').count() == 0
+        members = js(dan, "() => import('./js/sharing.js').then(async (m) => (await m.loadShares()).map((s) => (s.members || []).length))")
+        check('sharing: an invitation turned down goes, for both', declined and members == [0], f'{declined} {members}')
+        js(dan, "() => import('./js/sharing.js').then(async (m) => { for (const s of await m.loadShares()) await m.setMembers(s, [{ id: 1002, role: 'edit' }]); })")
+        js(sam, "() => import('./js/sharing.js').then(async (m) => { await m.loadShares(); await m.addShared(m.invitations()[0]); })")
+        second = next(p for p in mine('t2') if p['ratingKey'] != cid and p['title'].startswith('Workout'))['ratingKey']
+        plex('DELETE', f'/playlists/{second}', 't2')
+        full_sync(sam)
+        members = js(dan, "() => import('./js/sharing.js').then(async (m) => (await m.loadShares()).map((s) => (s.members || []).map((x) => x.title)))")
+        check('sharing: a friend who deletes their copy stops getting it', members == [[]], str(members))
+        js(dan, "() => import('./js/sharing.js').then(async (m) => { for (const s of await m.loadShares()) await m.stopSharing(s); })")
+
+        # A copy is brought up to date by making only the difference: a track
+        # added to it meanwhile (in another app, say) stays, after those
+        # wanted, to go to everyone the next time.
+        every = [t['ratingKey'] for t in mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=200')['MediaContainer']['Metadata']]
+        read = pl_items(wid, 't')
+        late = next(t for t in every if t not in read)
+        plex('PUT', f'/playlists/{wid}/items?uri={uri([late])}', 't')
+        wanted = read[1:] + [next(t for t in every if t not in read and t != late)]
+        r = js(dan, f"() => import('./js/playlistio.js').then((m) => m.changePlaylist({json.dumps(wid)}, {json.dumps(read)}, {json.dumps(wanted)}))")
+        after = pl_items(wid, 't')
+        check('sharing: only the difference is made to a copy (a track added to it meanwhile stays)', after == wanted + [late] and r == {'changed': True, 'base': wanted},
+              f'{after} {wanted} {r}')
+        # Only on its own server: not finding a copy on another server isn't
+        # taken for it having been deleted.
+        elsewhere = js(dan, "() => import('./js/sharing.js').then((m) => m.syncShare({ id: 'ab'.repeat(12), server: 'another-server', copy: '999999',"
+                            " role: 'owner', version: 1, owner: { id: 1001, title: 'Dan' } }))")
+        check('sharing: a copy is only looked for on its own server', elsewhere == {'changed': False}, str(elsewhere))
+
+        # Put things back for the sections after this.
+        plex('DELETE', f'/playlists/{cid}', 't2')
+        for e in pl_entries(wid, 't'):
+            plex('DELETE', f'/playlists/{wid}/items/{e["playlistItemID"]}', 't')
+        plex('PUT', f'/playlists/{wid}/items?uri={uri(original)}', 't')
+        plex('PUT', f'/playlists/{wid}?title=Workout', 't')
+        check('sharing: (the playlist is as it was)', pl_items(wid, 't') == original)
+        dan_ctx.close()
+        sam_ctx.close()
 
     # ---------- cast: playing on another Plex player, and AirPlay/Cast ----------
     # The mock runs a Plex player ("Living Room", like Plexamp on a Pi) that
@@ -2419,6 +2904,12 @@ with sync_playwright() as pw:
         b = next(t for t in tracks if t['silentStart'] and t['album'] != a['album'])
         c, d = next((x, y) for x, y in zip(tracks, tracks[1:])
                     if x['album'] == y['album'] and y['index'] == x['index'] + 1 and not x['silentEnd'] and not y['silentStart'])
+        # One with a quiet ending (and loudness analysis: not every third),
+        # and one to follow it, from another album.
+        qe = next(t for t in tracks if int(t['ratingKey']) % 3 and not t['silentEnd'] and not t['silentStart']
+                  and t['ratingKey'] not in (c['ratingKey'], d['ratingKey']))
+        qn = next(t for t in tracks if not t['silentStart'] and t['album'] != qe['album'] and t['ratingKey'] != a['ratingKey'])
+        mock(f'/__mock/config?quiet={qe["ratingKey"]}')
 
         def queue(ids, at):
             """Play these tracks (by id), starting `at` seconds into the first."""
@@ -2500,6 +2991,26 @@ with sync_playwright() as pw:
         check('fades: seeking back calls the fade off', now['cur'] == a['ratingKey'] and now['playing'] == 1 and not now['kind']
               and now['vols'][now['active']] == 1 and now['t'] < 6, json.dumps(now))
 
+        # A quiet ending (its last 8 seconds about 23 dB down, a beat still
+        # ticking): Smart starts the fade where it begins, not 5 seconds
+        # before the end.
+        queue([qe['ratingKey'], qn['ratingKey']], 9)
+        got = watch(12, qn['ratingKey'])
+        fading = [x for x in got if x['kind'] == 'fade']
+        last, first = switch_point(got, qe['ratingKey'], qn['ratingKey'])
+        check('fades: the next track starts over a quiet ending, where it begins',
+              fading and 11.6 <= fading[0]['t'] <= 13.2 and last is not None and last < 18.5,
+              f'{fading[0]["t"] if fading else None}, {last} -> {first}')
+        # How quiet it has to be is a setting: "nearly silent" lets this one
+        # play out, and the fade comes at the end.
+        settings(page, {'quietEndings': 'hushed'})
+        queue([qe['ratingKey'], qn['ratingKey']], 11)
+        got = watch(13, qn['ratingKey'])
+        fading = [x for x in got if x['kind'] == 'fade']
+        check('fades: ...as quiet as Settings asks (nearly silent: this one plays out)', fading and fading[0]['t'] >= 14.5,
+              f'{fading[0]["t"] if fading else None}')
+        settings(page, {'quietEndings': 'quiet'})
+
         # Always: at the very end of each track, album or not.
         settings(page, {'fades': 'always'})
         queue([c['ratingKey'], d['ratingKey']], 12)
@@ -2531,6 +3042,16 @@ with sync_playwright() as pw:
         length = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.fadeLength)")
         shot(page, 'fades-01-settings')
         check('fades: Crossfade and its length are set in Settings › Playback', hidden and saved == 'off' and length == 8, f'{hidden} {saved} {length}')
+        quiet_row = page.locator('.choice-row:has-text("Quiet endings")')
+        shown = quiet_row.is_visible() and 'When it’s quiet' in quiet_row.inner_text()
+        choose(page, 'Crossfade', 'Always')
+        gone = quiet_row.is_hidden()
+        choose(page, 'Crossfade', 'Smart')
+        choose(page, 'Quiet endings', 'nearly silent')
+        saved = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.quietEndings)")
+        check('fades: Quiet endings is set there too, for Smart only', shown and gone and saved == 'hushed', f'{shown} {gone} {saved}')
+        settings(page, {'quietEndings': 'quiet', 'fadeLength': 5})
+        mock('/__mock/config?quiet=')
         ctx.close()
 
     # ---------- together: Play Together, Dan (host) and Sam (friend) ----------

@@ -264,6 +264,9 @@ OLLAMA_API_KEY=
 OLLAMA_AUTH=plex
 PLAY_TOGETHER=true
 CASTING=true
+PLAYLIST_SHARING=true
+# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org
+# (the public service) or your own mirror. Empty: no checks.
 MUSICBRAINZ_URL=$MUSICBRAINZ_URL
 DEBUG=
 ENV

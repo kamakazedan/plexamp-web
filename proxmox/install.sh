@@ -120,6 +120,9 @@ OLLAMA_API_KEY=
 OLLAMA_AUTH=plex
 PLAY_TOGETHER=true
 CASTING=true
+PLAYLIST_SHARING=true
+# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org
+# (the public service) or your own mirror. Empty: no checks.
 MUSICBRAINZ_URL=
 DEBUG=
 ENV
@@ -195,7 +198,7 @@ Before=nginx.service plexamp-web.service
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=$ENV_FILE
-Environment=HTML_DIR=$BASE/html CONF_DIR=/etc/nginx/conf.d SERVICE_DIR=$BASE/app/server RUN_DIR=/run/plexamp-web SERVICE_USER=www-data SERVICE_START=false NGINX_ACCESS_LOG=syslog:server=unix:/dev/log,tag=nginx,nohostname
+Environment=HTML_DIR=$BASE/html CONF_DIR=/etc/nginx/conf.d SERVICE_DIR=$BASE/app/server RUN_DIR=/run/plexamp-web DATA_DIR=/var/lib/plexamp-web SERVICE_USER=www-data SERVICE_START=false NGINX_ACCESS_LOG=syslog:server=unix:/dev/log,tag=nginx,nohostname
 ExecStart=/bin/sh $BASE/app/docker/40-plexamp-web.sh
 
 [Install]

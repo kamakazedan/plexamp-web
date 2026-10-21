@@ -3,6 +3,57 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.14.0 - 2026-10-21
+
+### Added
+
+- **Shared playlists.** Share a playlist with Plex friends who can use your
+  server (Share with friends…, in its menu), letting each edit it or only
+  view and play it. They find it on their Playlists tab, under Shared with
+  you (a dot on the tab says so), and add it as a playlist of their own in
+  Plex. Everyone's copy is kept the same: a change made in plexamp-web goes
+  in straight away, and one made in another app (Plexamp, say) the next
+  time that person opens plexamp-web. When two people change it meanwhile,
+  both changes are kept; someone who can only view it has theirs undone.
+  A mark at the top left of its picture shows it's shared. Stop sharing it,
+  or delete it, and everyone keeps their copy, without the mark. Each
+  browser changes its own person's copy with its own sign-in, so no one's
+  Plex sign-in is shared or kept. The player keeps what's shared in `/data`
+  (`/var/lib/plexamp-web` on Proxmox): give the container a volume there,
+  as `docker-compose.yml` now does. `PLAYLIST_SHARING=false` turns it off.
+- **Playlist files.** Export a playlist to a file from its menu, or back up
+  all of yours in one (the Playlists tab's ⋯ menu), to import again later
+  (after a Plex server is set up again, say) or for a friend with access to
+  your server to import. A file has each track's title, artist, album,
+  number and length, and Plex's ids for it, and nothing else about the
+  server. Importing finds each track by its id on the same server, by
+  Plex's id for the recording on a server set up again, or by title and
+  artist elsewhere, and lists what isn't found.
+- **Quiet endings.** Smart crossfade starts the next track over a quiet
+  ending (a beat ticking on under a fade, a hushed outro: 20 dB under the
+  rest of the track), up to 15 seconds before the music stops, rather than
+  5 seconds before the end of the file. Settings › Playback › Quiet endings
+  sets how quiet (15, 20 or 25 dB, or never).
+- **Check on MusicBrainz** on the Missing tracks list, with MusicBrainz set
+  up: those listed before they were checked are looked up, and what
+  MusicBrainz doesn't know (most likely made up) and albums taken for songs
+  come off the list, with Undo. Those it knows are marked On MusicBrainz.
+- **A × to clear an AI playlist's description**, as in search (Escape
+  too).
+
+### Changed
+
+- **`docker-compose.yml` has `MUSICBRAINZ_URL` for musicbrainz.org,
+  commented out**, saying what turning it on sends where. The Proxmox
+  settings file says so too.
+- **The service's settings are root's, in a folder only root can change**
+  (`/run/plexamp-web`), readable by the service; its socket has a folder
+  of its own inside (`/run/plexamp-web/socket`). On Proxmox both were the
+  service's before, so a service that had been taken over could have had
+  root write to a file of its choosing at the next start. The start-up
+  script also refuses a `SERVICE_USER` that doesn't exist (the service
+  would have stayed root), and a `RUN_DIR` outside `/run`.
+
 ## 0.13.0 - 2026-10-20
 
 ### Added

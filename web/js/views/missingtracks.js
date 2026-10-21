@@ -2,8 +2,20 @@
 // suggested that the library doesn't have, to export and go looking for.
 import { app, on } from '../state.js';
 import { describeError } from '../router.js';
-import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction } from '../ui.js';
-import { missingList, forgetMissing, clearMissing, checkMissingAgain, missingCsv, missingText, download, copyText, fileDate, mbOn } from '../missing.js';
+import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction, download, fileDate } from '../ui.js';
+import {
+  missingList,
+  forgetMissing,
+  clearMissing,
+  checkMissingAgain,
+  checkMissingOnMusicBrainz,
+  restoreMissing,
+  missingCsv,
+  missingText,
+  copyText,
+  mbOn,
+  mbWhere,
+} from '../missing.js';
 import { aiSettings } from '../ai.js';
 
 export function missingTracksView({ el, onDispose }) {
@@ -13,7 +25,7 @@ export function missingTracksView({ el, onDispose }) {
       'p.lede',
       null,
       mbOn()
-        ? 'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up).'
+        ? 'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
         : 'Songs and artists that AI playlists suggested but your library doesn’t have, kept on this device so you can go and find them. AI models sometimes suggest songs that don’t exist, so check before you go looking.',
     ),
   );
@@ -23,6 +35,7 @@ export function missingTracksView({ el, onDispose }) {
   el.append(actions, status, body);
 
   let checking = null;
+  let asking = null;
 
   function button(name, label, onClick, cls = '') {
     return h(`button.btn.btn-secondary${cls}`, { type: 'button', onclick: onClick }, icon(name, 20), h('span', null, label));
@@ -48,9 +61,12 @@ export function missingTracksView({ el, onDispose }) {
               ? button('external', 'Share…', () => navigator.share({ title: 'Missing tracks', text: missingText(list) }).catch(() => {}), '.missing-share')
               : null,
             button('refresh', 'Check again', checkAgain, '.missing-check'),
+            mbOn() && list.some((m) => m.mb !== 'real') ? button('check', 'Check on MusicBrainz', checkOnMusicBrainz, '.missing-mb') : null,
           ].filter(Boolean)
         : []),
     );
+    if (asking) actions.querySelector('.missing-mb')?.setAttribute('disabled', '');
+    if (checking) actions.querySelector('.missing-check')?.setAttribute('disabled', '');
 
     const remove = (m) =>
       iconButton('close', `Take ${m.title || m.artist} off the list`, () => {
@@ -58,6 +74,8 @@ export function missingTracksView({ el, onDispose }) {
         render();
       });
     const lead = (name) => h('span.tile.tile-plain', null, icon(name, 22));
+    // Checked on MusicBrainz and found: real, not made up.
+    const found = (m) => (m.mb === 'real' ? h('span.mb-found', { title: `Found on ${mbWhere()}` }, 'On MusicBrainz') : null);
     const kids = [];
     if (artists.length) {
       kids.push(
@@ -68,7 +86,9 @@ export function missingTracksView({ el, onDispose }) {
           h(
             'div.rows.missing-rows',
             null,
-            artists.map((m) => row({ lead: lead('mic'), title: m.artist, subtitle: `None of their music · ${times(m)}${fmt.ago(m.last)}${where(m)}`, right: remove(m), cls: 'missing-row' })),
+            artists.map((m) =>
+              row({ lead: lead('mic'), title: m.artist, subtitle: [found(m), `None of their music · ${times(m)}${fmt.ago(m.last)}${where(m)}`], right: remove(m), cls: 'missing-row' }),
+            ),
           ),
         ),
       );
@@ -86,7 +106,7 @@ export function missingTracksView({ el, onDispose }) {
               row({
                 lead: lead('note'),
                 title: m.title,
-                subtitle: `${m.artist || 'Unknown artist'} · ${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}${where(m)}`,
+                subtitle: [found(m), `${m.artist || 'Unknown artist'} · ${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}${where(m)}`],
                 right: remove(m),
                 cls: 'missing-row',
               }),
@@ -130,8 +150,7 @@ export function missingTracksView({ el, onDispose }) {
   async function checkAgain() {
     if (checking) return;
     checking = new AbortController();
-    const btn = actions.querySelector('.missing-check');
-    if (btn) btn.disabled = true;
+    actions.querySelector('.missing-check')?.setAttribute('disabled', '');
     status.classList.remove('warn');
     status.textContent = `Looking in ${app.source?.sectionTitle || 'your library'}…`;
     try {
@@ -146,12 +165,71 @@ export function missingTracksView({ el, onDispose }) {
       status.classList.add('warn');
     } finally {
       checking = null;
-      if (btn) btn.disabled = false;
+      actions.querySelector('.missing-check')?.removeAttribute('disabled');
+    }
+  }
+
+  // Those listed without being checked, looked up on MusicBrainz: what it
+  // doesn't know comes off the list (with an undo, for a while).
+  async function checkOnMusicBrainz() {
+    if (asking) return;
+    asking = new AbortController();
+    const signal = asking.signal;
+    actions.querySelector('.missing-mb')?.setAttribute('disabled', '');
+    status.classList.remove('warn');
+    status.textContent = `Checking them on ${mbWhere()}…`;
+    let result = null;
+    let error = null;
+    try {
+      result = await checkMissingOnMusicBrainz({
+        signal,
+        onProgress: (n, of) => !signal.aborted && (status.textContent = `Checking them on ${mbWhere()}… ${fmt.number(n)} of ${fmt.number(of)}`),
+      });
+    } catch (err) {
+      error = err;
+      result = err.result || null;
+    } finally {
+      asking = null;
+    }
+    if (signal.aborted) return; // left the page: what was checked still counts
+    status.textContent = [result ? mbSummary(result) : '', error?.message || ''].filter(Boolean).join(' ');
+    status.classList.toggle('warn', !!error);
+    render();
+    const dropped = result?.dropped || [];
+    if (dropped.length) {
+      toast(`${fmt.count(dropped.length, 'suggestion', 'suggestions')} taken off the list`, {
+        action: 'Undo',
+        timeout: 8000,
+        onAction: () => {
+          restoreMissing(dropped);
+          status.textContent = `Put back: ${fmt.count(dropped.length, 'suggestion', 'suggestions')}.`;
+          status.classList.remove('warn');
+          render();
+        },
+      });
     }
   }
 
   render();
   // An AI playlist made meanwhile may add to it.
   onDispose?.(on('missing', render));
-  onDispose?.(() => checking?.abort());
+  onDispose?.(() => {
+    checking?.abort();
+    asking?.abort();
+  });
+}
+
+// What checking on MusicBrainz did, in a sentence or two.
+function mbSummary({ real, dropped, unsure }) {
+  const unknown = dropped.filter((m) => m.mb === 'unknown').length;
+  const albums = dropped.length - unknown;
+  const why = [
+    unknown ? `${fmt.number(unknown)} that MusicBrainz doesn’t know (most likely made up)` : '',
+    albums ? `${fmt.number(albums)} ${albums === 1 ? 'album' : 'albums'} taken for ${albums === 1 ? 'a song' : 'songs'}` : '',
+  ].filter(Boolean);
+  const parts = [];
+  if (dropped.length) parts.push(`Taken off the list: ${why.join(' and ')}.`);
+  if (real) parts.push(`${fmt.count(real, 'is', 'are')} on MusicBrainz, so ${real === 1 ? 'it’s' : 'they’re'} real.`);
+  if (unsure) parts.push(`${fmt.count(unsure, 'couldn’t', 'couldn’t')} be checked this time.`);
+  return parts.join(' ') || 'Nothing to check: they’re all on MusicBrainz.';
 }

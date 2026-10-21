@@ -2688,6 +2688,107 @@ body.np-open #toasts {
   line-height: 1.5;
 }
 
+/* ---------- playlist files: import, back up ---------- */
+
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: -2px -8px 0 0;
+}
+
+/* The dialog's own part scrolls when there's a lot in it. */
+.import-form {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.import-status.warn {
+  color: #ffb4a8;
+}
+
+.import-choices {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -8px;
+}
+
+.import-choice {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.import-choice:hover {
+  background: var(--hover);
+}
+
+.import-choice input {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--tint-hi);
+}
+
+.import-choice-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.import-choice-title {
+  overflow-wrap: anywhere;
+}
+
+.import-choice-sub,
+.import-result-sub {
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+}
+
+.import-results {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.import-results:empty {
+  display: none;
+}
+
+.import-result-title {
+  font-size: calc(17px * var(--fs, 1));
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.import-result.warn .import-result-title {
+  color: var(--muted);
+}
+
+.import-missing {
+  margin-top: 8px;
+}
+
+.import-missing summary {
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.import-missing ul {
+  margin: 8px 0;
+  padding-left: 22px;
+  color: rgba(255, 255, 255, 0.86);
+  line-height: 1.5;
+}
+
 /* ---------- AI playlist ---------- */
 
 .ai-box .ic {
@@ -4100,6 +4201,125 @@ body.no-list-ratings .row-rating {
   padding: 10px var(--gutter) 18px;
 }
 
+/* ---------- shared playlists ---------- */
+
+/* Who a playlist is shared with: a friend, and what they can do. */
+.share-friend {
+  cursor: default;
+}
+
+.share-friend:hover {
+  background: none;
+}
+
+.share-role {
+  flex: none;
+  max-width: 42%;
+  height: 38px;
+  padding: 0 30px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%23ffffff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 11px center;
+  color: #fff;
+  font: inherit;
+  font-size: calc(15px * var(--fs, 1));
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.share-role:focus-visible {
+  outline: 2px solid var(--tint-hi);
+  outline-offset: 2px;
+}
+
+.share-role option {
+  background: #1d1f24;
+  color: #fff;
+}
+
+.share-picker .friend-actions {
+  align-items: center;
+  justify-content: space-between;
+  flex-direction: row-reverse;
+  gap: 12px;
+}
+
+/* The mark at the top left of a shared playlist's picture. */
+.shared-mark {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(10, 11, 14, 0.66);
+  color: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+.shared-mark[hidden] {
+  display: none;
+}
+
+.hero-art-box > .shared-mark {
+  top: 10px;
+  left: 10px;
+  width: 38px;
+  height: 38px;
+}
+
+.hero-art-box > .shared-mark .ic {
+  width: 22px;
+  height: 22px;
+}
+
+/* "Shared with Sam and Alex" under a playlist's title. */
+.share-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.share-line .ic {
+  flex: none;
+}
+
+button.share-line:hover {
+  color: var(--text);
+}
+
+/* Playlists shared with you, to add. */
+.invite-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.btn.btn-small {
+  height: 36px;
+  padding: 0 16px;
+  font-size: calc(15px * var(--fs, 1));
+}
+
+@media (max-width: 480px) {
+  .invite-row {
+    flex-wrap: wrap;
+  }
+
+  .invite-row .invite-actions {
+    width: 100%;
+    padding-left: 60px;
+  }
+}
+
 .selectable {
   user-select: all;
   overflow-wrap: anywhere;
@@ -4682,6 +4902,21 @@ body.in-together .pb-art::after {
 
 .missing-row .row-sub {
   white-space: normal;
+}
+
+/* Checked on MusicBrainz and found there: real, not made up. */
+.mb-found {
+  display: inline-block;
+  margin-right: 7px;
+  padding: 0 5px;
+  border: 1px solid rgba(120, 214, 160, 0.5);
+  border-radius: 4px;
+  color: #a6e6c0;
+  font-size: calc(11px * var(--fs, 1));
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
 }
 
 .missing-clear {

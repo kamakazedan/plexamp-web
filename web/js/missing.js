@@ -7,7 +7,9 @@
 // a MusicBrainz to ask (MUSICBRAINZ_URL) and Settings › AI › Check
 // suggestions on MusicBrainz is on, an AI playlist's suggestions are looked
 // up there before they're listed (see checkSuggestions): those it doesn't
-// know, and albums, never come here.
+// know, and albums, never come here, and those it knows are marked (mb:
+// 'real'). Ones listed without being checked (before there was a
+// MusicBrainz to ask) can be checked from the list (checkMissingOnMusicBrainz).
 import { store } from './plex.js';
 import { app, emit } from './state.js';
 import { norm, songInLibrary, artistInLibrary, aiSettings } from './ai.js';
@@ -56,7 +58,9 @@ const BATCH = 5;
 // Which of an AI playlist's suggestions MusicBrainz knows, a few at a time
 // (through the player's service): in the same order, 'real', 'album' (an
 // album taken for a song), 'unknown', or null where it couldn't say. Throws
-// if MusicBrainz can't be asked at all. onProgress(done, of).
+// if MusicBrainz can't be asked at all (err.verdicts: what it said before
+// that). Called off (`signal`), it resolves to what it said so far.
+// onProgress(done, of).
 export async function checkSuggestions(list, { signal, onProgress } = {}) {
   const verdicts = list.map(() => null);
   // Who's asking, checked by the player as for its shared AI model (people
@@ -66,13 +70,21 @@ export async function checkSuggestions(list, { signal, onProgress } = {}) {
   for (let i = 0; i < list.length; i += BATCH) {
     if (signal?.aborted) break;
     const batch = list.slice(i, i + BATCH);
-    const res = await fetch('api/musicbrainz/check', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ items: batch.map((m) => ({ kind: m.kind, artist: m.artist, title: m.title })) }),
-      credentials: 'omit',
-      signal,
-    });
+    let res;
+    let data = null;
+    try {
+      res = await fetch('api/musicbrainz/check', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ items: batch.map((m) => ({ kind: m.kind, artist: m.artist, title: m.title })) }),
+        credentials: 'omit',
+        signal,
+      });
+      if (res.ok) data = await res.json();
+    } catch {
+      if (signal?.aborted) break;
+      throw Object.assign(new Error('MusicBrainz couldn’t be asked: the player didn’t answer.'), { status: 0, verdicts });
+    }
     if (!res.ok) {
       let message = '';
       try {
@@ -82,7 +94,7 @@ export async function checkSuggestions(list, { signal, onProgress } = {}) {
       }
       throw Object.assign(new Error(message || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, verdicts });
     }
-    const { results = [] } = await res.json();
+    const results = Array.isArray(data?.results) ? data.results : [];
     batch.forEach((_, j) => {
       const v = results[j];
       verdicts[i + j] = ['real', 'album', 'unknown'].includes(v) ? v : null;
@@ -95,7 +107,8 @@ export async function checkSuggestions(list, { signal, onProgress } = {}) {
 // What an AI playlist found missing (and found there), for the request
 // `prompt`: new ones are added, ones seen before counted again, and ones
 // now in the library let go, as are those in `drop` (what MusicBrainz says
-// isn't real, kept from before it was asked).
+// isn't real, kept from before it was asked). Those MusicBrainz knows come
+// with mb: 'real'.
 export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [] } = {}) {
   const src = app.source;
   if (!src) return;
@@ -110,12 +123,14 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
   for (const m of missing) {
     const entry = { kind: m.kind, artist: String(m.artist || '').slice(0, 120), title: m.kind === 'track' ? String(m.title || '').slice(0, 160) : '' };
     if (!entry.artist && !entry.title) continue;
+    if (m.mb === 'real') entry.mb = 'real';
     const k = keyOf(entry);
     const have = list.find((x) => here(x) && keyOf(x) === k);
     if (have) {
       have.times = (have.times || 1) + 1;
       have.last = now;
       have.prompt = String(prompt).slice(0, 200);
+      if (entry.mb) have.mb = entry.mb;
     } else {
       list.push({ ...entry, times: 1, first: now, last: now, prompt: String(prompt).slice(0, 200), server: src.serverId || src.uri, section: String(src.sectionKey), library: libraryName(src) });
     }
@@ -150,6 +165,63 @@ export async function checkMissingAgain({ signal, onProgress } = {}) {
   return found.size;
 }
 
+const idOf = (m) => `${keyOf(m)}|${m.server}|${m.section}`;
+
+// The ones listed without being checked on MusicBrainz (made before there
+// was one to ask, or while it couldn't be asked), looked up there now: those
+// it doesn't know (most likely made up) and albums taken for songs are let
+// go, those it knows are marked so they're not asked about again. Resolves
+// to { asked, real, dropped (the entries let go, with mb: 'unknown' or
+// 'album'), unsure (couldn't be checked this time) }. If MusicBrainz can't
+// be asked, what it said before that still counts, and it throws with
+// err.result set.
+export async function checkMissingOnMusicBrainz({ signal, onProgress } = {}) {
+  const todo = load().filter((m) => m.mb !== 'real');
+  let verdicts;
+  let failed = null;
+  try {
+    verdicts = await checkSuggestions(todo, { signal, onProgress });
+  } catch (err) {
+    verdicts = err.verdicts || [];
+    failed = err;
+  }
+  const said = new Map(todo.map((m, i) => [idOf(m), verdicts[i] || null]));
+  const dropped = [];
+  let real = 0;
+  const kept = [];
+  for (const m of load()) {
+    const v = said.get(idOf(m));
+    if (v === 'unknown' || v === 'album') {
+      dropped.push({ ...m, mb: v });
+      continue;
+    }
+    if (v === 'real') {
+      m.mb = 'real';
+      real += 1;
+    }
+    kept.push(m);
+  }
+  if (dropped.length || real) save(kept);
+  const answered = verdicts.filter(Boolean).length;
+  const result = { asked: todo.length, real, dropped, unsure: todo.length - answered };
+  if (failed) throw Object.assign(failed, { result });
+  return result;
+}
+
+// Puts entries let go back on the list (an undo), unchecked again.
+export function restoreMissing(entries = []) {
+  const list = load();
+  const have = new Set(list.map(idOf));
+  for (const m of entries) {
+    if (!m || have.has(idOf(m))) continue;
+    const entry = { ...m };
+    delete entry.mb;
+    list.push(entry);
+    have.add(idOf(m));
+  }
+  save(list.length > LIMIT ? list.sort((a, b) => (b.last || 0) - (a.last || 0)).slice(0, LIMIT) : list);
+}
+
 // ---------- export ----------
 
 const day = (sec) => (sec ? new Date(sec * 1000).toISOString().slice(0, 10) : '');
@@ -171,18 +243,6 @@ export function missingCsv(list = missingList()) {
 export function missingText(list = missingList()) {
   const lines = list.map((m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`));
   return `${lines.join('\n')}\n`;
-}
-
-// Hands the browser a file to save.
-export function download(text, name, type) {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 // Copies text, with a fallback for pages served over plain http (where the
@@ -212,5 +272,3 @@ export async function copyText(text) {
   area.remove();
   return ok;
 }
-
-export const fileDate = () => new Date().toISOString().slice(0, 10);

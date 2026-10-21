@@ -17,14 +17,32 @@ services:
       OLLAMA_URL: ""          # e.g. http://192.168.1.20:11434 or http://host.docker.internal:11434
       OLLAMA_MODEL: ""        # e.g. llama3.1:8b
       OLLAMA_AUTH: "plex"     # "off" lets anyone who can open the app use the model
+      # MusicBrainz, to check that an AI playlist's suggestions are real songs
+      # (and the ones you're missing aren't made up). Off while this is unset:
+      # nothing goes to MusicBrainz. Uncomment it to use the public
+      # musicbrainz.org service: the suggested artists, titles and albums are
+      # sent to it, about one request a second (no account or API key is
+      # needed). Or give your own MusicBrainz mirror's address instead (e.g.
+      # http://192.168.1.30:5000) to keep the checks on your network.
+      # MUSICBRAINZ_URL: "https://musicbrainz.org"
       # Play Together (listen in sync with Plex friends) is on unless this is "false".
       PLAY_TOGETHER: "true"
       # Play on (playing on other Plex players on your network) is on unless this is "false".
       CASTING: "true"
+      # Sharing playlists with Plex friends is on unless this is "false". What's
+      # shared is kept in /data (the volume below).
+      PLAYLIST_SHARING: "true"
       # "true" writes extra detail to the container log for troubleshooting
       # (tokens and keys are always removed). Turn it off again afterwards.
       DEBUG: ""
+    # Shared playlists are kept here, so they outlast the container (an update
+    # replaces it). A folder works too, e.g. ./plexamp-web-data:/data
+    volumes:
+      - plexamp-web-data:/data
     # Needed on Linux to reach Ollama running on this host as host.docker.internal.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  plexamp-web-data:

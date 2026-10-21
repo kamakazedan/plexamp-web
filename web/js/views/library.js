@@ -1,11 +1,14 @@
-import { app, playlistScope } from '../state.js';
+import { app, playlistScope, on } from '../state.js';
 import { normTrack } from '../plex.js';
-import { navigate, parseHash } from '../router.js';
-import { h, icon, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, iconTile, emptyState, debounce, fmt } from '../ui.js';
+import { navigate, parseHash, refresh } from '../router.js';
+import { h, icon, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, iconTile, emptyState, debounce, fmt, sectionHeader } from '../ui.js';
 import { mapLimit, norm } from '../ai.js';
 import { albumCard, artistRow, playlistCard, collectionCard, trackRow, numberedList } from '../components.js';
 import { playList } from '../actions.js';
 import { isLovedTitle } from '../ratings.js';
+import { importPicker, backUpPlaylists } from './playlistfiles.js';
+import { sharingOn, freshShares, invitations } from '../sharing.js';
+import { invitationRows } from './share.js';
 
 // ---------- Browsing the library (in Search) ----------
 
@@ -362,11 +365,49 @@ function renderer(type, title) {
 
 // ---------- Playlists ----------
 
-export async function playlistsView({ el }) {
-  const pls = await app.server.playlists(playlistScope());
-  el.append(pageHeader('Playlists', { subtitle: pls.length ? fmt.count(pls.length, 'playlist', 'playlists') : null }));
+// Importing from a file, and backing up to one (see playlistfiles.js).
+function playlistsMenu() {
+  sheet({
+    title: 'Playlists',
+    actions: [
+      {
+        icon: 'arrowUp',
+        label: 'Import playlists…',
+        description: `From a file exported from plexamp-web. Their tracks are looked for in ${app.source.sectionTitle}.`,
+        now: true,
+        onSelect: () => importPicker(),
+      },
+      {
+        icon: 'arrowDown',
+        label: 'Back up your playlists',
+        description: 'All of yours on this server, in one file, to import again later or on another server. Smart playlists aren’t included.',
+        onSelect: () => backUpPlaylists(),
+      },
+    ],
+  });
+}
+
+export async function playlistsView({ el, onDispose }) {
+  const [pls] = await Promise.all([app.server.playlists(playlistScope()), sharingOn() ? freshShares().catch(() => []) : null]);
+  const menu = iconButton('more', 'Import and back up', playlistsMenu, { cls: 'playlists-menu' });
+  el.append(pageHeader('Playlists', { subtitle: pls.length ? fmt.count(pls.length, 'playlist', 'playlists') : null, actions: [menu] }));
+  // Shared with you by Plex friends, to add (or not).
+  const invites = h('section.block.invites');
+  const paintInvites = () => {
+    const list = invitations();
+    invites.hidden = !list.length;
+    invites.replaceChildren(...(list.length ? [sectionHeader('Shared with you'), h('div.rows', null, invitationRows(list, { onChange: () => refresh() }))] : []));
+  };
+  paintInvites();
+  onDispose?.(on('shares', paintInvites));
+  el.append(invites);
   if (!pls.length) {
-    el.append(emptyState('No music playlists yet. To make one, choose Add to playlist… in the menu of a track, album or artist.'));
+    el.append(
+      emptyState(
+        'No music playlists yet. To make one, choose Add to playlist… in the menu of a track, album or artist, or import some from a file.',
+        h('button.btn.btn-secondary', { type: 'button', onclick: () => importPicker() }, 'Import playlists…'),
+      ),
+    );
     return;
   }
   // ❤️ Tracks first, as in Plexamp.

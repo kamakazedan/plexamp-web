@@ -24,7 +24,7 @@ Live notifications are sent over a WebSocket (/:/websockets/notifications)
 and an event stream (/:/eventsource/notifications), like a real server. For
 testing, these endpoints need no token:
 
-    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS&loved=smart|none&nearest=N&copy=0|1
+    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS&loved=smart|none&nearest=N&copy=0|1&quiet=ID,...
         ws=0 refuses WebSockets (as a blocking proxy would), sse=0 refuses the
         event stream, sse=silent accepts it but never sends anything; open=1
         accepts any token; delay=MS slows library listings down; loved=smart
@@ -33,7 +33,12 @@ testing, these endpoints need no token:
         nearest tracks (0: no limit), as a big library would, where a
         track's nearest few hundred are a sliver of it; copy=1 adds a hi-res
         copy of an album (Crate Digger: the same title, year and songs, as a
-        library with two editions has), copy=0 takes it away
+        library with two editions has), copy=0 takes it away; quiet=ID,...
+        gives those tracks a quiet ending in their loudness analysis (the
+        last 8 seconds about 23 dB down, a beat still ticking), quiet= none;
+        hidden=ID,... keeps those tracks from the friends (as if they were in
+        a library not shared with them): not added to their playlists, not
+        listed in them, not found by id. hidden= none
     /__mock/add-album?title=...   adds an album and announces it
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
@@ -153,6 +158,11 @@ artists, albums, tracks = [], [], []
 next_key = [100]
 
 
+def track_guid(rk):
+    """Plex's id for a recording (the same on any server that has it)."""
+    return 'plex://track/' + hashlib.sha1(f'track|{rk}'.encode()).hexdigest()[:24]
+
+
 def key():
     next_key[0] += 1
     return str(next_key[0])
@@ -208,7 +218,7 @@ for ai, (artist_idx, title, year, pal, sub, fmt) in enumerate(ALBUMS):
         tk = key()
         t_artist = artists[random.randrange(6)] if artist['title'] == 'Various Artists' else artist
         t = {
-            'ratingKey': tk, 'key': f'/library/metadata/{tk}', 'type': 'track',
+            'ratingKey': tk, 'key': f'/library/metadata/{tk}', 'type': 'track', 'guid': track_guid(tk),
             'title': f'{random.choice(WORDS)} {random.choice(WORDS)}' if ti % 3 else random.choice(WORDS),
             'index': ti + 1, 'parentIndex': 1 if ti < n - 2 or ai % 5 else 2,
             'parentRatingKey': k, 'parentTitle': title, 'parentThumb': al['thumb'], 'parentYear': year,
@@ -331,18 +341,19 @@ def smart_rules(query, section=SECTION):
     return 'library://mock-music/directory/' + quote(f'/library/sections/{section}/all?{query}', safe='')
 
 
-def make_playlist(title, members, smart=False, viewed=None, section=SECTION, poster=False, rules='type=10'):
+def make_playlist(title, members, smart=False, viewed=None, section=SECTION, poster=False, rules='type=10', owner='t'):
     """A playlist; `poster`: with a picture of its own, set in Plex (its
     thumb), as well as the mosaic Plex makes (its composite). A smart one
     has `rules` (a library query), given out on its own page only (Plex's
-    list of playlists may leave them out)."""
+    list of playlists may leave them out). Playlists are their owner's (a
+    token): nobody else sees them, as on a real server."""
     k = key()
     p = {
         'ratingKey': k, 'key': f'/playlists/{k}/items', 'type': 'playlist', 'playlistType': 'audio',
         'title': title, 'smart': smart, 'composite': f'/playlists/{k}/composite/1',
         'leafCount': len(members), 'duration': sum(m['duration'] for m in members),
         'addedAt': NOW - 86400 * 40, 'updatedAt': NOW - 86400 * 3, '_items': list(members),
-        '_pids': [entry_id() for _ in members], '_section': section,
+        '_pids': [entry_id() for _ in members], '_section': section, '_owner': owner,
     }
     if smart:
         p['_content'] = smart_rules(rules, section)
@@ -383,6 +394,20 @@ def playlist_changed(pl):
     pl['duration'] = sum(m['duration'] for m in pl['_items'])
     pl['updatedAt'] = int(time.time())
     timeline(pl['ratingKey'], 15, 5, section='-1')
+
+
+def owner_of(token):
+    """Whose playlists a token sees and makes: its account's (a server open
+    to this network takes everyone for its owner)."""
+    t = TRANSIENT.get(token, token)
+    return t if t in SERVER_TOKENS else 't'
+
+
+def can_have(rk, token):
+    """Whether a token's account can have a track: not those hidden from the
+    friend (/__mock/config?hidden=), as if they were in a library the owner
+    hasn't shared with them."""
+    return owner_of(token) == 't' or str(rk) not in MOCK['hidden']
 
 
 def ids_from_uri(uri):
@@ -464,6 +489,8 @@ def matches(it, field, value):
         return bool(it.get('year')) and str(it['year'] // 10 * 10) in values
     if field == 'title':  # Plex: the title contains it
         return value.lower() in str(it.get('title', '')).lower()
+    if field == 'guid':
+        return it.get('guid') in values
     if field in ('genre', 'style', 'mood'):
         return any(slug(t['tag']) in values for t in it.get(field.capitalize(), []))
     return True
@@ -518,14 +545,17 @@ def silent_start(rk):
 
 SILENT_END_AT = 0.7  # of the track: the last 6 seconds are silent
 SILENT_START_TO = 0.15  # the first 3 seconds are silent
+QUIET_END_AT = 0.6  # tracks given a quiet ending (/__mock/config?quiet=): the last 8 seconds
 
 
 def loudness_levels(stream_id, n):
     # A plausible loudness curve in dB: quiet intro, a loud body with some
     # movement, a short breakdown and a fade-out, or silence where the
-    # track's audio is silent.
+    # track's audio is silent. A quiet ending is about 23 dB under the rest,
+    # with a louder beat every second.
     rnd = random.Random(stream_id)
     rk = stream_id // 10
+    quiet_end = str(rk) in MOCK['quiet']
     out = []
     for i in range(n):
         f = i / max(1, n - 1)
@@ -534,6 +564,8 @@ def loudness_levels(stream_id, n):
             base -= 22 * (1 - f / 0.04)
         if 0.72 < f < 0.745:
             base = -48
+        if quiet_end and f >= QUIET_END_AT:
+            base = -24 if i % 8 == 0 else -34 - 2 * rnd.random()
         if f > 0.94:
             base -= 30 * (f - 0.94) / 0.06
         if (silent_end(rk) and f >= SILENT_END_AT) or (silent_start(rk) and f < SILENT_START_TO):
@@ -701,7 +733,7 @@ def tone_wav(rk):
 
 # ---------------------------------------------------------------- notifications
 
-MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False}
+MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': []}
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
 listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
 listeners_lock = threading.Lock()
@@ -777,7 +809,7 @@ def set_copy(on):
     COPIES.append(al)
     for t in [t for t in tracks if t['parentRatingKey'] == src['ratingKey']]:
         tk = key()
-        c = dict(t, ratingKey=tk, key=f'/library/metadata/{tk}', parentRatingKey=k, parentThumb=al['thumb'], duration=t['duration'] + 1000, _hires=True)
+        c = dict(t, ratingKey=tk, key=f'/library/metadata/{tk}', guid=track_guid(tk), parentRatingKey=k, parentThumb=al['thumb'], duration=t['duration'] + 1000, _hires=True)
         c['Media'] = [{'audioCodec': 'flac', 'container': 'flac', 'bitrate': 2900, 'Part': [
             {'key': f'/library/parts/{tk}/0/file.flac', 'duration': c['duration'], 'container': 'flac'}]}]
         items[tk] = c
@@ -802,7 +834,7 @@ def add_album(title):
     timeline(k, 9, 0)
     for i in range(4):
         tk = key()
-        t = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', title=f'{title} Part {i + 1}', index=i + 1,
+        t = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', guid=track_guid(tk), title=f'{title} Part {i + 1}', index=i + 1,
                  parentIndex=1, parentRatingKey=k, parentTitle=title, parentThumb=al['thumb'], parentYear=year,
                  addedAt=al['addedAt'], viewCount=0)
         t.pop('lastViewedAt', None)
@@ -1116,31 +1148,35 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self.do_GET()
 
-    def playlist_page(self, pl, q):
+    def playlist_page(self, pl, q, token=''):
         follow_rule(pl)
         start = int(q.get('X-Plex-Container-Start', ['0'])[0])
         size = int(q.get('X-Plex-Container-Size', ['50'])[0])
-        rows = [dict(public(t), playlistItemID=pid) for t, pid in zip(pl['_items'], pl['_pids'])]
+        # Tracks the account can't have (hidden=) aren't listed, as Plex
+        # leaves out what's in a library that isn't shared with someone.
+        rows = [dict(public(t), playlistItemID=pid) for t, pid in zip(pl['_items'], pl['_pids']) if can_have(t['ratingKey'], token)]
         chunk = rows[start:start + size] if size else []
         self.send_json({'size': len(chunk), 'totalSize': len(rows), 'offset': start, 'leafCount': pl['leafCount'],
                         'Metadata': chunk})
 
-    def edit_playlist(self, pl, parts, q):
+    def edit_playlist(self, pl, parts, q, token):
         """PUT/DELETE on /playlists/{id}[/items[/{entry}[/move]]]."""
         if self.command == 'DELETE' and len(parts) == 2:
             playlists.remove(pl)
             items.pop(pl['ratingKey'], None)
             timeline(pl['ratingKey'], 15, 9, section='-1')
             return self.send_json({})
-        if len(parts) == 2:  # PUT: rename
+        if len(parts) == 2:  # PUT: rename, or a new summary
             if 'title' in q:
                 pl['title'] = q['title'][0][:200]
+            if 'summary' in q:
+                pl['summary'] = q['summary'][0][:2000]
             pl['updatedAt'] = int(time.time())
             return self.send_json({'size': 1, 'Metadata': [public(pl)]})
         if pl['smart']:
             return self.send_json({'error': 'Smart playlists are edited by their rules'}, 400)
         if len(parts) == 3:  # PUT .../items?uri=: add to the end
-            new = [items[i] for i in ids_from_uri(q.get('uri', [''])[0]) if items[i]['type'] == 'track']
+            new = [items[i] for i in ids_from_uri(q.get('uri', [''])[0]) if items[i]['type'] == 'track' and can_have(i, token)]
             pl['_items'] += new
             pl['_pids'] += [entry_id() for _ in new]
             playlist_changed(pl)
@@ -1197,10 +1233,12 @@ class Handler(BaseHTTPRequestHandler):
         (GET posters), a new one (POST posters, the picture as the body),
         choosing one (PUT poster?url=) and going back to Plex's own (DELETE
         thumb). Collections are the server's owner's to change; playlists
-        their owner's (here, anyone with access)."""
+        their owner's."""
         rk = it['ratingKey']
         if it['type'] not in ('playlist', 'collection'):
             return self.send_json({'error': 'Not supported here'}, 400)
+        if it['type'] == 'playlist' and it.get('_owner') != owner_of(token):
+            return self.not_found()
         changing = self.command != 'GET'
         if changing and (not pms_token_ok(token) or (it['type'] == 'collection' and not is_admin(token))):
             return self.send_json({'error': 'Forbidden'}, 403)
@@ -1404,6 +1442,8 @@ class Handler(BaseHTTPRequestHandler):
         parts = p.strip('/').split('/')
 
         if p == '/__mock/config':
+            # (quiet= and hidden= clear those: blank values count here.)
+            q = parse_qs(u.query, keep_blank_values=True)
             if 'ws' in q:
                 MOCK['ws'] = q['ws'][0] not in ('0', 'off', 'false')
             if 'sse' in q:
@@ -1420,6 +1460,10 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['nearest'] = max(0, int(q['nearest'][0] or 0))
             if 'copy' in q:
                 set_copy(q['copy'][0] in ('1', 'on', 'true'))
+            if 'quiet' in q:
+                MOCK['quiet'] = [x for x in q['quiet'][0].split(',') if x]
+            if 'hidden' in q:
+                MOCK['hidden'] = [x for x in q['hidden'][0].split(',') if x]
             return self.send_json(dict(MOCK, listeners=len(listeners)))
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
@@ -1570,11 +1614,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'size': 1, 'Metadata': [public(c)]})
         if p.startswith('/library/metadata/') and ',' in parts[2] and len(parts) == 3:
             # Several at once, as Plex gives them: those it has.
-            many = [items[i] for i in parts[2].split(',') if i in items]
+            many = [items[i] for i in parts[2].split(',') if i in items and (items[i]['type'] != 'track' or can_have(i, token))]
             return self.send_json({'size': len(many), 'Metadata': [track_detail(x) if x['type'] == 'track' else public(x) for x in many]})
         if p.startswith('/library/metadata/'):
             it = items.get(parts[2])
-            if not it:
+            if not it or (it['type'] == 'track' and not can_have(parts[2], token)):
                 return self.not_found()
             sub = parts[3] if len(parts) > 3 else ''
             if sub in ('posters', 'poster') or (sub == 'thumb' and self.command == 'DELETE'):
@@ -1605,7 +1649,8 @@ class Handler(BaseHTTPRequestHandler):
             needle = q.get('query', [''])[0].lower()
             lim = int(q.get('limit', ['10'])[0])
             hubs = []
-            for typ, pool in (('artist', artists), ('album', albums), ('track', tracks), ('playlist', playlists)):
+            mine = [pl for pl in playlists if pl['_owner'] == owner_of(token)]
+            for typ, pool in (('artist', artists), ('album', albums), ('track', tracks), ('playlist', mine)):
                 found = [public(x) for x in pool if needle in x['title'].lower()][:lim]
                 hubs.append({'type': typ, 'hubIdentifier': typ, 'size': len(found), 'Metadata': found})
             return self.send_json({'size': len(hubs), 'Hub': hubs})
@@ -1648,25 +1693,26 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/playlists' and self.command == 'POST':
             uri = q.get('uri', [''])[0]
             ids = uri.rsplit('/', 1)[-1].split(',') if '/library/metadata/' in uri else []
-            members = [items[i] for i in ids if i in items and items[i]['type'] == 'track']
-            pl = make_playlist(q.get('title', ['Untitled'])[0], members)
+            members = [items[i] for i in ids if i in items and items[i]['type'] == 'track' and can_have(i, token)]
+            pl = make_playlist(q.get('title', ['Untitled'])[0], members, owner=owner_of(token))
             pl['addedAt'] = pl['updatedAt'] = int(time.time())
             playlists.append(pl)
             timeline(pl['ratingKey'], 15, 5, section='-1')
             return self.send_json({'size': 1, 'Metadata': [public(pl)]})
         if p == '/playlists':
             sec = q.get('sectionID', [None])[0]
-            return self.page([follow_rule(pl) for pl in playlists if not sec or pl['_section'] == sec], {'X-Plex-Container-Size': ['500']})
+            mine = [pl for pl in playlists if pl['_owner'] == owner_of(token)]
+            return self.page([follow_rule(pl) for pl in mine if not sec or pl['_section'] == sec], {'X-Plex-Container-Size': ['500']})
         if p == '/activities':
             return self.send_json({'size': 0})
         if p.startswith('/playlists/'):
             pl = items.get(parts[1])
-            if not pl or pl.get('type') != 'playlist':
+            if not pl or pl.get('type') != 'playlist' or pl['_owner'] != owner_of(token):
                 return self.not_found()
             if self.command in ('PUT', 'DELETE'):
-                return self.edit_playlist(pl, parts, q)
+                return self.edit_playlist(pl, parts, q, token)
             if len(parts) > 2 and parts[2] == 'items':
-                return self.playlist_page(pl, q)
+                return self.playlist_page(pl, q, token)
             if len(parts) > 2 and parts[2] == 'composite':
                 return self.send_bytes(cover_png(p, 600), 'image/png')
             detail = public(pl)

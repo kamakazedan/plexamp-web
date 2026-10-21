@@ -8,7 +8,11 @@ import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
 import { isPlexDirectCert, plexServerIdentity, certProblem } from './plex.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS } from './ai.js';
 import { MusicBrainz, MusicBrainzError, isPublic } from './musicbrainz.js';
+import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { createServer } from 'node:http';
+import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const dan = { id: 1, title: 'Dan', thumb: null };
 const sam = { id: 2, title: 'Sam', thumb: null };
@@ -599,4 +603,233 @@ test('MusicBrainz: a check stops when whoever asked has gone, or its time is up'
   await queued.check([{ kind: 'artist', artist: 'Z' }]);
   assert.ok(Date.now() - t0 < 350, `${Date.now() - t0} ms`);
   await first;
+});
+
+// ---------- shared playlists ----------
+
+test('shared playlists: changes on both sides are merged, whoever made them', () => {
+  const m = (base, mine, theirs) => mergeTracks(base.split(' '), mine.split(' '), theirs.split(' ')).join(' ');
+  // Only one side changed: that side.
+  assert.equal(m('1 2 3', '1 2 3', '1 3'), '1 3');
+  assert.equal(m('1 2 3', '1 2 3 4', '1 2 3'), '1 2 3 4');
+  // Both: an addition here, a removal there.
+  assert.equal(m('1 2 3', '1 2 3 4', '1 3'), '1 3 4');
+  // Added after the track it followed.
+  assert.equal(m('1 2 3', '1 5 2 3', '1 2 3 4'), '1 5 2 3 4');
+  // The same track added on both sides is in once.
+  assert.equal(m('1 2 3', '1 2 3 5', '1 2 3 5'), '1 2 3 5');
+  // Taken out on either side: out.
+  assert.equal(m('1 2 3 4', '1 3 4', '1 2 3'), '1 3');
+  // Reordered here, added to there: this order, with the addition (at the
+  // end, where it was).
+  assert.equal(m('1 2 3', '3 2 1', '1 2 3 4'), '3 2 1 4');
+  assert.equal(m('1 2 3', '3 2 1', '1 2 4 3'), '3 2 4 1');
+  // Reordered there: that order wins, with what was added here.
+  assert.equal(m('1 2 3', '1 2 3 9', '3 1 2'), '3 1 2 9');
+  // A track that's in it twice is two entries.
+  assert.equal(m('1 2 1', '1 2 1 1', '2 1'), '2 1 1');
+});
+
+function shareSetup(dir = null) {
+  const store = new Shares({ dir, writeDelayMs: 1 });
+  const s = store.create(dan, { server: 'mock-server-1', playlist: '500', title: 'Road trip', tracks: ['1', '2', '3'], members: [{ id: sam.id, title: 'Sam', role: 'edit' }, { id: eve.id, title: 'Eve', role: 'view' }] });
+  return { store, s };
+}
+
+test('shared playlists: who sees what, and who can change it', () => {
+  const { store, s } = shareSetup();
+  assert.deepEqual(store.forUser(sam.id, 'mock-server-1').map((x) => x.id), [s.id]);
+  assert.deepEqual(store.forUser(sam.id, 'another-server'), []);
+  assert.deepEqual(store.forUser(4, 'mock-server-1'), []);
+  // Its owner sees who it's shared with; the others, whose it is.
+  assert.deepEqual(store.view(s, dan.id).members.map((m) => [m.title, m.role, m.joined]), [['Sam', 'edit', false], ['Eve', 'view', false]]);
+  const samView = store.view(s, sam.id);
+  assert.equal(samView.members, undefined);
+  assert.deepEqual([samView.role, samView.joined, samView.copy, samView.owner.title, samView.server], ['edit', false, null, 'Dan', 'mock-server-1']);
+  // Not added yet: nothing to bring up to date.
+  assert.throws(() => store.sync(s, sam, { tracks: ['1'] }), (e) => e instanceof ShareError && e.status === 409);
+  store.join(s, sam, { playlist: '600', tracks: ['1', '2', '3'], version: 1, title: 'Road trip' });
+  store.join(s, eve, { playlist: '700', tracks: ['1', '2', '3'], version: 1, title: 'Road trip' });
+  // Someone who can edit it: their change is everyone's.
+  const r = store.sync(s, sam, { tracks: ['1', '3', '4'], title: 'Road trip', unseen: [] });
+  assert.deepEqual([r.tracks, r.changed, r.version], [['1', '3', '4'], true, 2]);
+  store.synced(s, sam, { version: r.version, tracks: r.tracks, title: 'Road trip', lease: r.lease });
+  // Someone who can only view it: theirs is undone.
+  const v = store.sync(s, eve, { tracks: ['9'], title: 'Mine now', unseen: [] });
+  assert.deepEqual([v.tracks, v.undone, v.changed, s.title], [['1', '3', '4'], true, false, 'Road trip']);
+  // Its owner's changes since go in with Sam's; its owner names it.
+  const o = store.sync(s, dan, { tracks: ['1', '2', '3', '5'], title: 'Road trip 2' });
+  assert.deepEqual([o.tracks, s.title, o.wasTitle], [['1', '3', '4', '5'], 'Road trip 2', 'Road trip']);
+  // A member's own name for it stays theirs.
+  store.synced(s, sam, { version: s.version, tracks: s.tracks, title: 'Our trip' });
+  assert.equal(store.sync(s, sam, { tracks: s.tracks, title: 'Our trip' }).title, 'Road trip 2');
+  assert.equal(s.title, 'Road trip 2');
+});
+
+test('shared playlists: a copy read before another device of theirs brought it up to date is read again', () => {
+  const { store, s } = shareSetup();
+  store.join(s, sam, { playlist: '600', tracks: ['1', '2', '3'], version: 1, title: 'Road trip' });
+  assert.equal(store.view(s, sam.id).at, 1);
+  // Dan adds one; Sam's phone brings his copy up to date...
+  store.sync(s, dan, { tracks: ['1', '2', '3', '4'], title: 'Road trip', since: 1 });
+  const phone = store.sync(s, sam, { tracks: ['1', '2', '3'], title: 'Road trip', since: 1 });
+  store.synced(s, sam, { version: phone.version, tracks: phone.tracks, title: 'Road trip', lease: phone.lease });
+  // ...while his laptop had read it before: that would undo Dan's.
+  const laptop = store.sync(s, sam, { tracks: ['1', '2', '3'], title: 'Road trip', since: 1 });
+  assert.deepEqual(laptop, { stale: true, at: 2 });
+  assert.deepEqual(s.tracks, ['1', '2', '3', '4']);
+  // Read again, it's in step.
+  const again = store.sync(s, sam, { tracks: ['1', '2', '3', '4'], title: 'Road trip', since: laptop.at });
+  assert.deepEqual([again.tracks, again.changed], [['1', '2', '3', '4'], false]);
+});
+
+test('shared playlists: a copy brought up to date by another device meanwhile is read again, even with nothing new shared', () => {
+  const { store, s } = shareSetup();
+  // Eve can only view it, and took track 3 out in another app. One tab of
+  // hers reads her copy; another undoes her change first.
+  store.join(s, eve, { playlist: '700', tracks: ['1', '2', '3'], version: 1, title: 'Road trip' });
+  const first = store.sync(s, eve, { tracks: ['1', '2'], title: 'Road trip', since: 1, unseen: [] });
+  assert.deepEqual([first.tracks, first.undone, first.version], [['1', '2', '3'], true, 1]);
+  assert.deepEqual(store.synced(s, eve, { version: first.version, tracks: ['1', '2', '3'], title: 'Road trip', lease: first.lease }), { at: 2 });
+  assert.equal(store.view(s, eve.id).at, 2);
+  // The other tab's read is from before: it reads again (rather than add 3 a
+  // second time).
+  assert.deepEqual(store.sync(s, eve, { tracks: ['1', '2'], title: 'Road trip', since: 1, unseen: [] }), { stale: true, at: 2 });
+});
+
+test('shared playlists: tracks someone can no longer see in their copy are not taken out for everyone', () => {
+  const { store, s } = shareSetup();
+  store.join(s, sam, { playlist: '600', tracks: ['1', '2', '3'], version: 1, title: 'Road trip' });
+  // Missing from Sam's copy: 2 (a library that isn't shared with him now)
+  // and 3 (he took it out). Which, he's asked first.
+  assert.deepEqual(store.sync(s, sam, { tracks: ['1'], title: 'Road trip', since: 1 }), { confirm: ['2', '3'] });
+  assert.deepEqual(s.tracks, ['1', '2', '3']);
+  const r = store.sync(s, sam, { tracks: ['1'], title: 'Road trip', since: 1, unseen: ['2', '9'] });
+  assert.deepEqual([r.tracks, r.changed], [['1', '2'], true]);
+  // His copy still holds 2, hidden: so it's still there for him, and he's
+  // asked about it again next time (and only about it).
+  store.synced(s, sam, { version: r.version, tracks: ['1'], title: 'Road trip', lease: r.lease });
+  assert.deepEqual(s.copies[sam.id].tracks, ['1', '2']);
+  assert.deepEqual(store.sync(s, sam, { tracks: ['1', '4'], title: 'Road trip', since: 2 }), { confirm: ['2'] });
+  const next = store.sync(s, sam, { tracks: ['1', '4'], title: 'Road trip', since: 2, unseen: ['2'] });
+  assert.deepEqual([next.confirm, next.tracks], [undefined, ['1', '2', '4']]);
+  // Put back where they were, each time they were there.
+  assert.deepEqual(withUnseen(['1', '2', '3', '2'], ['1', '3'], ['2']), ['1', '2', '3', '2']);
+  assert.deepEqual(withUnseen(['1', '2', '3'], ['3', '1'], ['2']), ['3', '1', '2']);
+  assert.deepEqual(withUnseen(['2', '1'], ['1'], ['2']), ['2', '1']);
+  assert.deepEqual(withUnseen(['1', '2'], ['1', '2'], ['2']), ['1', '2']);
+  assert.deepEqual(missingFrom(['1', '2', '2', '3'], ['2', '3', '4']), ['1', '2']);
+  assert.throws(() => store.sync(s, sam, { tracks: ['1'], title: 'Road trip', since: 2, lease: next.lease, unseen: ['x'] }), (e) => e.status === 400);
+});
+
+test('shared playlists: a hidden track someone else takes out stays out once it can be seen again', () => {
+  const { store, s } = shareSetup();
+  const title = 'Road trip';
+  store.join(s, sam, { playlist: '600', tracks: ['1', '2', '3'], version: 1, title });
+  // 2 is hidden from Sam (its library isn't shared with him now): his copy
+  // still holds it, he just can't see it, nor take it out.
+  const a = store.sync(s, sam, { tracks: ['1', '3'], title, since: 1, unseen: ['2'] });
+  assert.deepEqual([a.held, a.tracks, a.changed], [['1', '2', '3'], ['1', '2', '3'], false]);
+  store.synced(s, sam, { version: a.version, tracks: ['1', '3'], title, lease: a.lease });
+  assert.deepEqual(s.copies[sam.id].tracks, ['1', '2', '3']);
+  // Dan takes it out.
+  store.sync(s, dan, { tracks: ['1', '3'], title, unseen: [] });
+  assert.deepEqual(s.tracks, ['1', '3']);
+  // Sam, still not seeing it: it's out for everyone, still in his copy.
+  const b = store.sync(s, sam, { tracks: ['1', '3'], title, since: 2, unseen: ['2'] });
+  assert.deepEqual([b.held, b.tracks], [['1', '2', '3'], ['1', '3']]);
+  store.synced(s, sam, { version: b.version, tracks: ['1', '3'], title, lease: b.lease });
+  assert.deepEqual(s.copies[sam.id].tracks, ['1', '2', '3']);
+  // Seen again, it isn't taken for one he added: it goes from his copy too.
+  const c = store.sync(s, sam, { tracks: ['1', '2', '3'], title, since: 3 });
+  assert.deepEqual([c.tracks, c.changed, s.tracks], [['1', '3'], false, ['1', '3']]);
+});
+
+test('shared playlists: one device at a time brings a copy up to date', () => {
+  const { store, s } = shareSetup();
+  store.join(s, sam, { playlist: '600', tracks: ['1', '2', '3'], version: 1, title: 'Road trip' });
+  const phone = store.sync(s, sam, { tracks: ['1', '2', '3'], title: 'Road trip', since: 1 });
+  assert.match(phone.lease, /^[a-f0-9]{24}$/);
+  // His laptop, meanwhile: not until the phone's done.
+  assert.deepEqual(store.sync(s, sam, { tracks: ['1', '2'], title: 'Road trip', since: 1 }), { busy: true });
+  assert.throws(() => store.synced(s, sam, { version: 1, tracks: ['1', '2'], title: 'Road trip' }), (e) => e.status === 409);
+  assert.throws(() => store.synced(s, sam, { version: 1, tracks: ['1', '2'], title: 'Road trip', lease: 'ab'.repeat(12) }), (e) => e.status === 409);
+  assert.deepEqual(s.copies[sam.id].tracks, ['1', '2', '3']);
+  // The phone again, with its lease: fine. Other people's copies aren't held up.
+  assert.equal(store.sync(s, sam, { tracks: ['1', '2', '3'], title: 'Road trip', since: 1, lease: phone.lease }).lease, phone.lease);
+  assert.ok(store.sync(s, dan, { tracks: ['1', '2', '3'], title: 'Road trip' }).lease);
+  // A long one: the phone keeps its turn for longer (no one else can).
+  const until = store.leases.get(`${s.id}|${sam.id}`).until;
+  assert.deepEqual(store.renew(s, sam, { lease: phone.lease }), { ok: true });
+  assert.ok(store.leases.get(`${s.id}|${sam.id}`).until >= until && store.leases.get(`${s.id}|${sam.id}`).until <= Date.now() + LEASE_MS);
+  assert.throws(() => store.renew(s, sam, { lease: 'ab'.repeat(12) }), (e) => e.status === 409);
+  assert.deepEqual(store.synced(s, sam, { version: phone.version, tracks: phone.tracks, title: 'Road trip', lease: phone.lease }), { at: 2 });
+  assert.throws(() => store.renew(s, sam, { lease: phone.lease }), (e) => e.status === 409);
+  // Done: the laptop's turn.
+  const laptop = store.sync(s, sam, { tracks: ['1', '2', '3'], title: 'Road trip', since: 2 });
+  assert.ok(laptop.lease && laptop.lease !== phone.lease);
+  // A device that never says it's done holds it up for a while, not for ever.
+  store.leases.get(`${s.id}|${sam.id}`).until = Date.now() - 1;
+  assert.ok(store.sync(s, sam, { tracks: ['1', '2', '3'], title: 'Road trip', since: 2 }).lease);
+  // Gone with the copy.
+  store.leave(s, sam.id);
+  assert.equal(store.leases.has(`${s.id}|${sam.id}`), false);
+});
+
+test('shared playlists: who it is shared with changes; when it stops, everyone keeps theirs', () => {
+  const { store, s } = shareSetup();
+  store.join(s, sam, { playlist: '600', tracks: s.tracks, version: 1, title: 'Road trip' });
+  // Eve left out, Sam now view only (his copy kept).
+  store.setMembers(s, [{ id: sam.id, role: 'view' }]);
+  assert.deepEqual([store.roleOf(s, sam.id), store.roleOf(s, eve.id), store.view(s, sam.id).copy], ['view', null, '600']);
+  assert.deepEqual(store.forUser(eve.id, 'mock-server-1'), []);
+  // Its owner can't be a member, a bad role isn't taken, and there's a limit.
+  store.setMembers(s, [{ id: dan.id, role: 'edit' }, { id: sam.id, role: 'edit' }]);
+  assert.deepEqual(s.members.map((m) => m.id), [sam.id]);
+  assert.throws(() => store.setMembers(s, [{ id: 9, role: 'admin' }]), (e) => e.status === 400);
+  assert.throws(() => store.setMembers(s, Array.from({ length: SHARE_LIMITS.members + 1 }, (_, i) => ({ id: 100 + i, role: 'view' }))), (e) => e.status === 413);
+  store.leave(s, sam.id);
+  assert.equal(store.roleOf(s, sam.id), null);
+  store.remove(s);
+  assert.throws(() => store.get(s.id), (e) => e.status === 404);
+});
+
+test('shared playlists: what is accepted, and limits', () => {
+  const { store } = shareSetup();
+  const create = (over) => store.create(dan, { server: 'mock-server-1', playlist: '501', title: 'X', tracks: ['1'], ...over });
+  assert.throws(() => create({ tracks: ['1', '2; DROP'] }), (e) => e.status === 400);
+  assert.throws(() => create({ tracks: [] }), (e) => e.status === 400);
+  assert.throws(() => create({ playlist: '../x' }), (e) => e.status === 400);
+  assert.throws(() => create({ server: 'a/b' }), (e) => e.status === 400);
+  assert.throws(() => create({ tracks: Array.from({ length: SHARE_LIMITS.tracks + 1 }, (_, i) => String(i)) }), (e) => e.status === 413);
+  // The same playlist twice: no.
+  assert.throws(() => create({ playlist: '500' }), (e) => e.status === 409);
+  const s = create({ title: 'Line one\nline two\u0000' });
+  assert.equal(s.title, 'Line one line two');
+  assert.throws(() => store.get('../../etc/passwd'), (e) => e.status === 404);
+});
+
+test('shared playlists: kept in a file only the service can read, without anyone\'s sign-in, and read back', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-shares-'));
+  try {
+    const { store, s } = shareSetup(dir);
+    store.join(s, sam, { playlist: '600', tracks: s.tracks, version: 1, title: 'Road trip' });
+    store.flush();
+    const file = join(dir, 'shares.json');
+    const text = readFileSync(file, 'utf8');
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.doesNotMatch(text, /token/i);
+    const again = new Shares({ dir });
+    const t = again.get(s.id);
+    assert.deepEqual([t.title, t.tracks, again.view(t, sam.id).copy, again.roleOf(t, eve.id)], ['Road trip', ['1', '2', '3'], '600', 'view']);
+    // A file that's been tampered with: what doesn't check out is left out.
+    const data = JSON.parse(text);
+    data.shares.push({ ...data.shares[0], id: 'nope' }, { ...data.shares[0], id: 'ab'.repeat(12), tracks: ['x'] });
+    writeFileSync(file, JSON.stringify(data));
+    assert.equal(new Shares({ dir }).list.size, 1);
+    writeFileSync(file, '{ not json');
+    assert.equal(new Shares({ dir }).list.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

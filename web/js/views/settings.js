@@ -299,12 +299,19 @@ const FADES = [
   [
     'smart',
     'Smart',
-    'Fades into the next track where the music ends, so silence at the end of a track (or before the next one starts) doesn’t leave a gap. Tracks that follow each other on an album play gaplessly instead. Needs Plex’s loudness analysis; without it, fades happen at the very end.',
+    'Fades into the next track where the music ends, so silence at the end of a track (or before the next one starts) doesn’t leave a gap, and a quiet ending doesn’t hold the next track up. Tracks that follow each other on an album play gaplessly instead. Needs Plex’s loudness analysis; without it, fades happen at the very end.',
   ],
   ['always', 'Always', 'Fades between every track, albums too, at the very end of each one.'],
   ['off', 'Off', 'One track after another, as they are.'],
 ];
 const FADE_LENGTHS = [2, 3, 4, 5, 6, 8, 10, 12].map((v) => [v, `${v} seconds`]);
+// How far under the rest of a track its ending has to drop (transitions.js).
+const QUIET_ENDINGS = [
+  ['soft', 'When it softens', 'Starts the next track as soon as the ending drops well down (15 dB under the rest of the track). Can cut a quiet last verse short.'],
+  ['quiet', 'When it’s quiet', 'Starts the next track when the ending gets quiet, like a beat ticking on under a fade or a hushed outro (20 dB under the rest of the track).'],
+  ['hushed', 'When it’s nearly silent', 'Waits until the ending is barely there (25 dB under the rest of the track).'],
+  ['off', 'Never', 'Quiet endings play out: the fade starts just before the music stops.'],
+];
 
 function playbackView({ el }) {
   const s = app.settings;
@@ -317,6 +324,14 @@ function playbackView({ el }) {
     onChange: (v) => saveSettings({ fadeLength: v }),
   });
   length.hidden = s.fades === 'off' || !canFade;
+  const quiet = choiceRow({
+    title: 'Quiet endings',
+    subtitle: 'When a track ends quietly, Smart starts the next one there instead of waiting for the music to stop (at most 15 seconds early).',
+    options: QUIET_ENDINGS,
+    value: s.quietEndings || 'quiet',
+    onChange: (v) => saveSettings({ quietEndings: v }),
+  });
+  quiet.hidden = s.fades !== 'smart' || !canFade;
   el.append(
     backHeader('Playback', { fallback: '/settings' }),
     h('div.section-head', null, h('h2', null, 'Streaming quality')),
@@ -341,9 +356,11 @@ function playbackView({ el }) {
         onChange: (v) => {
           saveSettings({ fades: v });
           length.hidden = v === 'off' || !canFade;
+          quiet.hidden = v !== 'smart' || !canFade;
         },
       }),
       length,
+      quiet,
     ),
   );
   if (app.config.devices) {

@@ -115,7 +115,7 @@ function keepMissing(found, prompt) {
     })
     .finally(() => {
       noteMissing(
-        missing.filter((_, i) => !leftOut(mb.verdicts[i])),
+        missing.map((m, i) => (mb.verdicts[i] === 'real' ? { ...m, mb: 'real' } : m)).filter((_, i) => !leftOut(mb.verdicts[i])),
         found.seen || {},
         prompt,
         { drop: missing.filter((_, i) => leftOut(mb.verdicts[i])) },
@@ -216,8 +216,25 @@ export async function aiPlaylistView({ el, onDispose }) {
     enterkeyhint: 'go',
     maxlength: 400,
   });
+  // Clears what's typed in one tap, to describe another (Escape too). The
+  // playlist made last stays below until another is made.
+  const clear = iconButton('close', 'Clear', () => clearPrompt(), { size: 22, cls: 'search-clear' });
+  const paintClear = () => (clear.hidden = !input.value);
+  const clearPrompt = () => {
+    input.value = '';
+    paintClear();
+    input.focus();
+  };
+  input.addEventListener('input', paintClear);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && input.value) {
+      e.preventDefault();
+      e.stopPropagation();
+      clearPrompt();
+    }
+  });
   const form = h(
-    'form.search-box.ai-box',
+    'form.search-box.has-clear.ai-box',
     {
       onsubmit: (e) => {
         e.preventDefault();
@@ -226,6 +243,7 @@ export async function aiPlaylistView({ el, onDispose }) {
     },
     icon('sparkle', 22),
     input,
+    clear,
   );
   const lengthRow = h(
     'div.chips',
@@ -259,6 +277,7 @@ export async function aiPlaylistView({ el, onDispose }) {
     sharedStatus().catch((err) => {
       if (disposed || job || ![401, 403].includes(err?.status)) return;
       input.disabled = true;
+      clear.hidden = true;
       lengthRow.hidden = true;
       body.replaceChildren(noAccessCard(describeAIError(err)));
     });
@@ -273,6 +292,7 @@ export async function aiPlaylistView({ el, onDispose }) {
   } else {
     showSuggestions();
   }
+  paintClear();
 
   function showSuggestions() {
     const text = h('span.ai-suggestion-text', null, SUGGESTIONS[suggestion]);
@@ -293,6 +313,7 @@ export async function aiPlaylistView({ el, onDispose }) {
             type: 'button',
             onclick: () => {
               input.value = SUGGESTIONS[suggestion];
+              paintClear();
               start(input.value);
             },
           },
@@ -459,6 +480,7 @@ export async function aiPlaylistView({ el, onDispose }) {
             onclick: () => {
               last = null;
               input.value = '';
+              paintClear();
               showSuggestions();
               input.focus();
             },

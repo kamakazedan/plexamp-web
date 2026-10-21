@@ -12,7 +12,7 @@
 // for development.
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync, unlinkSync, chmodSync, chownSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, unlinkSync, chmodSync, chownSync, mkdirSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname } from 'node:path';
 import { log, setDebug, isDebug } from './log.js';
 import { PlexAuth, AuthError, validToken } from './plex.js';
@@ -21,6 +21,7 @@ import { Cast, CastError } from './cast.js';
 import { Devices, DevicesError } from './devices.js';
 import { SharedModel, AIRequestError, cleanChat, AI_LIMITS } from './ai.js';
 import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
+import { Shares, ShareError } from './shares.js';
 import { listenForNginx } from './syslog.js';
 
 // ---------- settings ----------
@@ -31,7 +32,7 @@ function loadConfig() {
   if (existsSync(file)) cfg = JSON.parse(readFileSync(file, 'utf8'));
   const env = process.env;
   return {
-    socket: env.PW_SERVICE_SOCKET || cfg.socket || '/run/plexamp-web/service.sock',
+    socket: env.PW_SERVICE_SOCKET || cfg.socket || '/run/plexamp-web/socket/service.sock',
     port: Number(env.PW_SERVICE_PORT || cfg.port || 0),
     debug: env.PW_SERVICE_DEBUG ? env.PW_SERVICE_DEBUG === 'true' : !!cfg.debug,
     together: env.PW_SERVICE_TOGETHER ? env.PW_SERVICE_TOGETHER === 'true' : cfg.together !== false,
@@ -41,6 +42,10 @@ function loadConfig() {
     musicbrainzUrl: env.PW_SERVICE_MUSICBRAINZ_URL ?? (cfg.musicbrainz === false ? '' : cfg.musicbrainzUrl) ?? '',
     version: cfg.version || env.PW_SERVICE_VERSION || '',
     devices: env.PW_SERVICE_DEVICES ? env.PW_SERVICE_DEVICES === 'true' : cfg.devices !== false,
+    // Shared playlists (PLAYLIST_SHARING), kept in a file in dataDir (none:
+    // in memory only, for development).
+    sharing: env.PW_SERVICE_SHARING ? env.PW_SERVICE_SHARING === 'true' : cfg.sharing !== false,
+    dataDir: env.PW_SERVICE_DATA_DIR ?? cfg.dataDir ?? '',
     // Development only: players at 127.0.0.1 (the mock player).
     castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
     aiAuth: env.PW_SERVICE_AI_AUTH || cfg.aiAuth || 'plex',
@@ -70,6 +75,9 @@ const devices = new Devices();
 setInterval(() => devices.sweep(), 15000).unref();
 const sharedModel = config.ollamaUrl ? new SharedModel({ url: config.ollamaUrl, key: config.ollamaKey, model: config.ollamaModel, log }) : null;
 const musicbrainz = config.musicbrainzUrl ? new MusicBrainz({ base: config.musicbrainzUrl, version: config.version, log }) : null;
+// Read once the service has given up root (see started()), as the user
+// that keeps the file.
+let shares = null;
 
 // ---------- rate limits ----------
 
@@ -471,6 +479,25 @@ async function browserLog(req, res) {
   send(res, 204);
 }
 
+// Your Plex friends (and Plex Home users), for inviting to Play Together or
+// sharing a playlist with. plex.tv says which of your own servers each can
+// use; for a server someone else shared with you it can't say (canPlay:
+// null), and that's checked when they join.
+async function friendsOf(user, token, serverId) {
+  if (!allow(`friends|${user.id}`, 10)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
+  let list;
+  let owned = false;
+  try {
+    [list, { owned }] = await Promise.all([auth.friends(token), auth.serverAccess(token, serverId)]);
+  } catch (err) {
+    if (err instanceof AuthError) throw new HttpError(401, err.message);
+    throw new HttpError(503, 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).');
+  }
+  return list
+    .filter((f) => f.id !== user.id)
+    .map((f) => ({ id: f.id, title: f.title, thumb: f.thumb, home: f.home, canPlay: owned ? f.servers.includes(serverId) : null }));
+}
+
 function serverAccessMessage(server) {
   return `You can’t play from ${server.name}. Ask its owner to share their music library with you.`;
 }
@@ -489,24 +516,7 @@ async function togetherRoute(req, res, parts, url) {
 
   // GET /api/together/friends?server=ID — who can be invited
   if (parts[0] === 'friends' && method === 'GET') {
-    if (!allow(`friends|${user.id}`, 10)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
-    const serverId = url.searchParams.get('server') || '';
-    let list;
-    let owned = false;
-    try {
-      [list, { owned }] = await Promise.all([auth.friends(token), auth.serverAccess(token, serverId)]);
-    } catch (err) {
-      if (err instanceof AuthError) throw new HttpError(401, err.message);
-      throw new HttpError(503, 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).');
-    }
-    // plex.tv says which of your own servers each friend can use. For a
-    // server someone else shared with you it can't say (null); that's
-    // checked when they join.
-    return send(res, 200, {
-      friends: list
-        .filter((f) => f.id !== user.id)
-        .map((f) => ({ id: f.id, title: f.title, thumb: f.thumb, home: f.home, canPlay: owned ? f.servers.includes(serverId) : null })),
-    });
+    return send(res, 200, { friends: await friendsOf(user, token, url.searchParams.get('server') || '') });
   }
 
   // POST /api/together/sessions — start a session
@@ -714,6 +724,110 @@ async function devicesRoute(req, res, parts, url) {
   throw new HttpError(404, 'Not found.');
 }
 
+// Shared playlists (see shares.js): for people signed in to Plex, on a Plex
+// server they can use, with their own Plex friends.
+//   GET    /api/shares?server=ID          yours, those shared with you, and invitations
+//   GET    /api/shares/friends?server=ID  who you can share with
+//   POST   /api/shares                    { server, playlist, title, tracks, members: [{ id, role }] }
+//   GET    /api/shares/ID                 one, with its tracks
+//   PUT    /api/shares/ID/members         { members: [{ id, role }] }    its owner only
+//   DELETE /api/shares/ID                 it stops being shared         its owner only
+//   POST   /api/shares/ID/join            { playlist, version, tracks, title }   your copy, made
+//   POST   /api/shares/ID/decline, /leave
+//   POST   /api/shares/ID/sync            { tracks, title, since, lease, unseen } -> what your copy should hold
+//   POST   /api/shares/ID/synced          { version, tracks, title, lease }    it holds that now
+//   POST   /api/shares/ID/lease           { lease }    still bringing it up to date
+async function sharesRoute(req, res, parts, url) {
+  if (!shares) throw new HttpError(404, 'Shared playlists are turned off on this player.');
+  const { user, token } = await signedIn(req);
+  if (!allow(`s|${user.id}`, 300)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
+  const method = req.method;
+  const body = method === 'POST' || method === 'PUT' ? await readBody(req, 512 * 1024) : null;
+  // The people asked for, kept to the owner's own Plex friends (by id), with
+  // their names as plex.tv has them, and (on a server of the owner's, where
+  // plex.tv can say) to those who can use the server.
+  const friendsAsked = async (asked, serverId) => {
+    if (!Array.isArray(asked)) throw new HttpError(400, 'That request couldn’t be read.');
+    if (!asked.length) return [];
+    let friends;
+    let owned = false;
+    try {
+      [friends, { owned }] = await Promise.all([auth.friends(token), auth.serverAccess(token, serverId)]);
+    } catch (err) {
+      if (err instanceof AuthError) throw new HttpError(401, err.message);
+      throw new HttpError(503, 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).');
+    }
+    const byId = new Map(friends.map((f) => [f.id, f]));
+    return asked
+      .map((m) => ({ f: byId.get(Number(m?.id)), role: m?.role }))
+      .filter(({ f }) => f && f.id !== user.id && (!owned || f.servers.includes(serverId)))
+      .map(({ f, role }) => ({ id: f.id, title: f.title, role }));
+  };
+  const canUse = (serverId) => auth.canUseServer(token, serverId).catch(() => false);
+  try {
+    if (!parts[0] && method === 'GET') {
+      const server = String(url.searchParams.get('server') || '');
+      // Only for a server they can use (nothing about one they can't).
+      if (!(await canUse(server))) return send(res, 200, { shares: [] });
+      return send(res, 200, { shares: shares.forUser(user.id, server).map((s) => shares.view(s, user.id)) });
+    }
+    if (parts[0] === 'friends' && parts.length === 1 && method === 'GET') {
+      return send(res, 200, { friends: await friendsOf(user, token, url.searchParams.get('server') || '') });
+    }
+    if (!parts[0] && method === 'POST') {
+      if (!allow(`s-new|${user.id}`, 20)) throw new HttpError(429, 'Too many in a short time. Wait a minute.');
+      const server = String(body.server || '');
+      if (!(await canUse(server))) throw new HttpError(403, 'You can’t play from that Plex server.');
+      const s = shares.create(user, { server, playlist: body.playlist, title: body.title, tracks: body.tracks, members: await friendsAsked(body.members ?? [], server) });
+      log.debug(`shares: ${user.title} shared a playlist with ${s.members.length}`);
+      return send(res, 201, shares.view(s, user.id));
+    }
+    if (parts.length > 2) throw new HttpError(404, 'Not found.');
+    const s = shares.get(parts[0]);
+    const action = parts[1] || '';
+    const role = shares.roleOf(s, user.id);
+    // Not shared with them: as if it weren't there.
+    if (!role) throw new HttpError(404, 'That shared playlist isn’t shared any more.');
+    const access = await auth.serverAccess(token, s.server).catch(() => null);
+    if (!access?.ok) throw new HttpError(403, 'You can’t play from that playlist’s Plex server.');
+    const ownerOnly = () => {
+      if (role !== 'owner') throw new HttpError(403, 'Only whoever shared the playlist can do that.');
+    };
+    if (!action && method === 'GET') return send(res, 200, { ...shares.view(s, user.id), tracks: s.tracks });
+    if (!action && method === 'DELETE') {
+      ownerOnly();
+      shares.remove(s);
+      return send(res, 200, { ok: true });
+    }
+    if (action === 'members' && method === 'PUT') {
+      ownerOnly();
+      shares.setMembers(s, await friendsAsked(body.members, s.server));
+      return send(res, 200, shares.view(s, user.id));
+    }
+    if (method !== 'POST') throw new HttpError(405, 'Not allowed.');
+    if (action === 'join') {
+      if (role === 'owner') throw new HttpError(400, 'It’s your playlist.');
+      shares.join(s, user, body);
+      return send(res, 200, shares.view(s, user.id));
+    }
+    if (action === 'decline' || action === 'leave') {
+      if (role === 'owner') throw new HttpError(400, 'It’s your playlist: stop sharing it instead.');
+      shares.leave(s, user.id);
+      return send(res, 200, { ok: true });
+    }
+    // On a Plex server of their own, nothing in a playlist of theirs is hidden
+    // from them: what's gone from it they took out (or was deleted from the
+    // library), so there's nothing to ask (see shares.sync's unseen).
+    if (action === 'sync') return send(res, 200, shares.sync(s, user, role === 'owner' && access.owned ? { ...body, unseen: [] } : body));
+    if (action === 'synced') return send(res, 200, { ok: true, ...shares.synced(s, user, body) });
+    if (action === 'lease') return send(res, 200, shares.renew(s, user, body));
+  } catch (err) {
+    if (err instanceof ShareError) throw new HttpError(err.status, err.message);
+    throw err;
+  }
+  throw new HttpError(404, 'Not found.');
+}
+
 async function handle(req, res) {
   const started = Date.now();
   const url = new URL(req.url, 'http://service.local');
@@ -727,7 +841,7 @@ async function handle(req, res) {
   try {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
-    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast, devices: config.devices, debug: config.debug });
+    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast, devices: config.devices, sharing: !!shares, debug: config.debug });
     if (area === 'internal' && rest[0] === 'pms-auth') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
@@ -735,6 +849,7 @@ async function handle(req, res) {
     if (area === 'devices') return await devicesRoute(req, res, rest, url);
     if (area === 'ai') return await aiRoute(req, res, rest);
     if (area === 'musicbrainz') return await musicbrainzRoute(req, res, rest);
+    if (area === 'shares') return await sharesRoute(req, res, rest, url);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
     const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError || err instanceof MusicBrainzError;
@@ -744,7 +859,7 @@ async function handle(req, res) {
     // Paths only (no query strings), so nothing secret can be logged. The
     // checks nginx makes for each proxied request would only be noise.
     if (isDebug() && parts[1] !== 'debug' && (parts[1] !== 'internal' || (status || res.statusCode) >= 400)) {
-      const path = url.pathname.replace(/(\/sessions\/[A-Za-z0-9_-]{6})[A-Za-z0-9_-]*/, '$1…');
+      const path = url.pathname.replace(/(\/sessions\/[A-Za-z0-9_-]{6})[A-Za-z0-9_-]*/, '$1…').replace(/(\/shares\/[a-f0-9]{6})[a-f0-9]+/, '$1…');
       log.debug(`${req.method} ${path} ${status || res.statusCode} ${Date.now() - started} ms`);
     }
   }
@@ -790,9 +905,30 @@ function started() {
     log.error(`couldn't hand the socket to the ${config.user} user: ${err.message}`);
     process.exit(1);
   }
-  const off = [!config.together && 'Play Together', !config.cast && 'playing on other devices', !config.devices && 'sharing playback between devices'].filter(Boolean);
+  startSharing();
+  const off = [
+    !config.together && 'Play Together',
+    !config.cast && 'playing on other devices',
+    !config.devices && 'sharing playback between devices',
+    !shares && 'shared playlists',
+  ].filter(Boolean);
   log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
+}
+
+// Shared playlists, kept in the data folder (it has to be this service's to
+// write, or they're off).
+function startSharing() {
+  if (!config.sharing) return;
+  if (config.dataDir) {
+    try {
+      accessSync(config.dataDir, fsConstants.W_OK);
+    } catch {
+      log.error(`shared playlists are off: ${config.dataDir} can't be written to by this service`);
+      return;
+    }
+  }
+  shares = new Shares({ dir: config.dataDir || null, log });
 }
 
 server.on('error', (err) => {
@@ -815,6 +951,7 @@ if (config.port) {
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
+    shares?.flush();
     server.close();
     process.exit(0);
   });

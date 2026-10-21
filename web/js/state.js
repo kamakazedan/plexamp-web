@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS = {
   gapless: true,
   fades: 'smart', // crossfade between tracks: off | smart (where the music ends; not within albums) | always
   fadeLength: 5, // seconds
+  quietEndings: 'quiet', // smart fades start over a quiet ending: off | soft | quiet | hushed (transitions.js)
   shareDevices: true, // your devices share what's playing; one plays (devices.js)
   reportPlays: true, // "Sync recent plays": tell Plex what's played
   liveUpdates: 'auto', // 'auto' (WebSocket first) | 'nows' (no WebSockets) | 'off'

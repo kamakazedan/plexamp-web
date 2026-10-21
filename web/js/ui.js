@@ -457,6 +457,22 @@ export function skeletonShelf(n = 4, wide = false) {
   return shelf(Array.from({ length: n }, () => h(wide ? 'div.wide-card.skeleton' : 'div.card.skeleton', null, h('div.card-art'))));
 }
 
+// ---------- files ----------
+
+// Hands the browser a file to save.
+export function download(text, name, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+export const fileDate = () => new Date().toISOString().slice(0, 10);
+
 // ---------- toasts ----------
 
 let toastTimer;
@@ -551,7 +567,7 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
 
 // A question with a text answer, in a dialog: resolves to the trimmed text,
 // or null if it was cancelled.
-export function askText({ title, label, value = '', confirm = 'Save', maxLength = 120 }) {
+export function askText({ title, label, value = '', confirm = 'Save', maxLength = 120, message = '' }) {
   return new Promise((resolve) => {
     let answer = null;
     const input = h('input', { type: 'text', value, maxLength, autocomplete: 'off', spellcheck: 'false' });
@@ -567,6 +583,7 @@ export function askText({ title, label, value = '', confirm = 'Save', maxLength 
           popOverlay();
         },
       },
+      message ? h('p.ask-message', null, message) : null,
       h('label.field', null, h('span', null, label), input),
       ok,
     );

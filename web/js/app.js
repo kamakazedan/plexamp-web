@@ -25,6 +25,7 @@ import { isAdmin } from './editing.js';
 import { cast } from './cast.js';
 import { devices } from './devices.js';
 import { refreshRows } from './ratings.js';
+import { initSharing, invitations } from './sharing.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
@@ -88,7 +89,7 @@ function buildTabs(nav) {
         },
         icon(t.icon, 28),
         h('span.tab-label', null, t.label),
-        t.id === 'together' ? h('span.tab-dot', { hidden: true, 'aria-hidden': 'true' }) : null,
+        t.id === 'together' || t.id === 'playlists' ? h('span.tab-dot', { hidden: true, 'aria-hidden': 'true' }) : null,
       ),
     ),
   );
@@ -104,6 +105,15 @@ function togetherBadge() {
   dot.hidden = !invited && !together.active;
   dot.classList.toggle('live', together.active && !invited);
   tab.setAttribute('aria-label', invited ? `Together, ${together.invites.length} invitation${together.invites.length > 1 ? 's' : ''}` : together.active ? 'Together, in a session' : 'Together');
+}
+
+// The Playlists tab shows a dot for playlists shared with you, not added yet.
+function playlistsBadge() {
+  const dot = document.querySelector('#tabs .tab[data-tab=playlists] .tab-dot');
+  if (!dot) return;
+  const n = invitations().length;
+  dot.hidden = !n;
+  dot.parentElement.setAttribute('aria-label', n ? `Playlists, ${n} shared with you` : 'Playlists');
 }
 
 function onRouteChange({ route: r, tab }) {
@@ -290,6 +300,11 @@ function boot() {
     if (app.config.together) {
       together.resume().finally(() => together.watch());
     }
+  }
+  // Shared playlists: everyone's copy kept the same.
+  if (app.config.sharing) {
+    initSharing();
+    on('shares', playlistsBadge);
   }
   on('source', () => app.config.together && !together.inviteTimer && together.watch());
   // Whether menus offer collection changes (only the server's admin can).

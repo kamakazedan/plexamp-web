@@ -548,7 +548,7 @@ async function tracksMatching(filters, n, signal) {
   return shuffled(lists.flat().filter((m) => m.type === 'track')).slice(0, n);
 }
 
-async function findArtist(name, signal) {
+export async function findArtist(name, signal) {
   const target = norm(name);
   if (!target) return null;
   const res = await app.server.search(name, app.source.sectionKey, { signal, limit: 6 }).catch(() => null);

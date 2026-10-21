@@ -24,10 +24,29 @@ export async function loudnessOf(track) {
   return values.length >= 8 ? values : null;
 }
 
-// Where the music starts and ends, in seconds: { start, end }. Silence is
-// anything well below the loud part of the track (35 dB under it, and never
-// louder than -65 dB), so a quiet piece's quiet passages still count as
-// music. Gaps under a second aren't worth skipping and are kept.
+// Quiet endings: the last stretch of a track's music, at least
+// QUIET_ENDING_MIN seconds of it, all well under the track's loud part (a
+// beat ticking on under the fade, a hushed outro). "Smart" fades can start
+// there rather than at the very end (see player.js); the "Quiet endings"
+// setting picks how far under, in dB.
+export const QUIET_ENDINGS = { soft: 15, quiet: 20, hushed: 25 };
+const QUIET_ENDING_MIN = 2;
+
+// The middle one of a sample and its neighbours: a lone louder sample (a
+// drum hit) doesn't break up a quiet stretch.
+function middleOf(v, i) {
+  const a = v[Math.max(0, i - 1)];
+  const b = v[i];
+  const c = v[Math.min(v.length - 1, i + 1)];
+  return Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
+}
+
+// Where the music starts and ends, in seconds: { start, end, quietFrom }.
+// Silence is anything well below the loud part of the track (35 dB under
+// it, and never louder than -65 dB), so a quiet piece's quiet passages still
+// count as music. Gaps under a second aren't worth skipping and are kept.
+// quietFrom: where each kind of quiet ending (QUIET_ENDINGS) starts, null
+// for the ones this track doesn't have.
 export function audibleSpan(values, durationSec) {
   if (!Array.isArray(values) || values.length < 8 || !(durationSec > 0)) return null;
   const v = values.map((x) => (Number.isFinite(x) ? x : -200));
@@ -46,7 +65,16 @@ export function audibleSpan(values, durationSec) {
   if (start < 1) start = 0;
   if (durationSec - end < 1) end = durationSec;
   if (end - start < Math.min(10, durationSec / 2)) return null; // doesn't look like music: don't trust it
-  return { start, end };
+  // Each kind of quiet ending: back from the music's last sample while it
+  // stays that far under the loud part.
+  const quietFrom = {};
+  for (const [kind, drop] of Object.entries(QUIET_ENDINGS)) {
+    const under = loud - drop;
+    let q = last;
+    while (q > first && middleOf(v, q) <= under) q -= 1;
+    quietFrom[kind] = q > first && (last - q) * step >= QUIET_ENDING_MIN ? Math.min(end, (q + 1) * step) : null;
+  }
+  return { start, end, quietFrom };
 }
 
 // The next track on the same album, in order (the first track of the next

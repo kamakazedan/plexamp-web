@@ -6,6 +6,7 @@ import { playAlbum, playPlaylist, playCollection, trackMenu } from './actions.js
 import { h, art, card, row, icon, fmt, nowBars, sheet, toast } from './ui.js';
 import { togglePreview, isPreviewing } from './preview.js';
 import { rowRating } from './ratings.js';
+import { sharedMark } from './sharing.js';
 
 export function albumCard(m, { subtitle } = {}) {
   return card({
@@ -28,7 +29,7 @@ export function artistCard(m) {
 export const playlistArt = (m) => m?.thumb || m?.composite || null;
 
 export function playlistCard(m) {
-  return card({
+  const c = card({
     href: `/playlist/${m.ratingKey}`,
     image: playlistArt(m),
     title: m.title,
@@ -37,6 +38,9 @@ export function playlistCard(m) {
     onPlay: () => playPlaylist(m),
     onShuffle: () => playPlaylist(m, { shuffle: true }),
   });
+  // Shared with friends, or by one (top left of its picture).
+  c.querySelector('.card-art')?.append(sharedMark(m.ratingKey));
+  return c;
 }
 
 const COLLECTION_UNITS = { album: ['album', 'albums'], artist: ['artist', 'artists'], track: ['track', 'tracks'] };

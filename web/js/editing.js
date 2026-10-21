@@ -6,6 +6,7 @@ import { app, on, playlistScope } from './state.js';
 import { normTrack, listServers } from './plex.js';
 import { navigate, dropCached, describeError } from './router.js';
 import { sheet, toast, askText, fmt } from './ui.js';
+import { shareOf, sharedPlaylistChanged } from './sharing.js';
 
 // ---------- who's the admin ----------
 
@@ -106,7 +107,9 @@ export async function addToPlaylist({ what, load, suggest = '', title = 'Add to 
   const s = app.server;
   let lists = [];
   try {
-    lists = (await s.playlists(playlistScope())).filter((p) => !p.smart && (p.playlistType || 'audio') === 'audio');
+    // Not smart ones (their rules decide what's in them), nor ones shared
+    // with you to view only (what's added would be undone).
+    lists = (await s.playlists(playlistScope())).filter((p) => !p.smart && (p.playlistType || 'audio') === 'audio' && shareOf(p.ratingKey)?.role !== 'view');
   } catch (err) {
     toast(describeError(err));
     return;
@@ -150,6 +153,7 @@ async function addTo(pl, load) {
     if (!fresh.length) return toast(tracks.length === 1 ? `“${tracks[0].title}” is already in “${pl.title}”` : `They’re all in “${pl.title}” already`);
     await app.server.addToPlaylist(pl.ratingKey, ids(fresh));
     refreshLists('playlist');
+    sharedPlaylistChanged(pl.ratingKey);
     const skipped = tracks.length - fresh.length;
     const added = fresh.length === 1 ? `“${fresh[0].title}”` : countOf(fresh.length);
     toast(`Added ${added} to “${pl.title}”${skipped ? ` (${fmt.count(skipped, 'was', 'were')} there already)` : ''}`, {

@@ -62,7 +62,11 @@ for release in "${releases[@]}"; do
         expect "the service answers through nginx" sh -c "curl -fsS http://127.0.0.1/api/health | grep -q \"\\\"ok\\\":true\""
         expect "settings readable by root only" test "$(stat -c %a /etc/plexamp-web/plexamp-web.env)" = 600
         expect "the service runs as www-data (its unit)" test "$user:$group" = "www-data:www-data"
-        expect "the service'"'"'s own settings are its, and no one else'"'"'s" test "$(stat -c "%U %a" /run/plexamp-web/service.json)" = "www-data 600"
+        expect "the service'"'"'s own settings are root'"'"'s, readable by it alone" test "$(stat -c "%U:%G %a" /run/plexamp-web/service.json)" = "root:www-data 640"
+        expect "...in a folder only root can change" test "$(stat -c "%U:%G %a" /run/plexamp-web)" = "root:www-data 750"
+        expect "...with a folder of the service'"'"'s own for its socket" test "$(stat -c "%U %a" /run/plexamp-web/socket)" = "www-data 750"
+        expect "shared playlists are on" sh -c "curl -fsS http://127.0.0.1/api/health | grep -q \"\\\"sharing\\\":true\""
+        expect "...and kept in /var/lib/plexamp-web, the service'"'"'s alone" test "$(stat -c "%U %a" /var/lib/plexamp-web)" = "www-data 700"
         expect "update-plexamp-web is there" test -x /usr/local/bin/update-plexamp-web
         expect "plexamp-web-settings is there" test -x /usr/local/bin/plexamp-web-settings
         # pct exec runs commands with the search path Proxmox sets for itself,

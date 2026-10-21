@@ -32,6 +32,7 @@ ENV PLEX_SERVER_URL="" \
     OLLAMA_AUTH="plex" \
     PLAY_TOGETHER="true" \
     CASTING="true" \
+    PLAYLIST_SHARING="true" \
     DEBUG=""
 
 RUN rm -rf /usr/share/nginx/html/* \

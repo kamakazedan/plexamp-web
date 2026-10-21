@@ -21,6 +21,11 @@
 #                       own (http://192.168.1.30:5000, say). Not set: no
 #                       checks. (MUSICBRAINZ, from 0.12.0: "false" still
 #                       turns them off; "true" alone means musicbrainz.org.)
+#   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends
+#                       (on by default)
+#   DATA_DIR            where shared playlists are kept (default /data: give
+#                       the container a volume there). A folder of its own:
+#                       it's made the service's alone.
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
 set -eu
@@ -29,10 +34,13 @@ HTML_DIR="${HTML_DIR:-/usr/share/nginx/html}"
 CONF_DIR="${CONF_DIR:-/etc/nginx/conf.d}"
 RESOLV_CONF="${RESOLV_CONF:-/etc/resolv.conf}"
 HOSTS_FILE="${HOSTS_FILE:-/etc/hosts}"
-# Where the service lives and where it puts its socket (changed by tests).
+# Where the service lives, and its folder in /run (changed by tests): its
+# settings, and a folder for its socket (see "start the service").
 SERVICE_DIR="${SERVICE_DIR:-/opt/plexamp-web/server}"
 RUN_DIR="${RUN_DIR:-/run/plexamp-web}"
-SERVICE_SOCKET="$RUN_DIR/service.sock"
+RUN_DIR="${RUN_DIR%/}"
+SOCKET_DIR="$RUN_DIR/socket"
+SERVICE_SOCKET="$SOCKET_DIR/service.sock"
 NGINX_LOG_PORT="${NGINX_LOG_PORT:-5140}"
 # The app's version, for the service to say who's asking (at MusicBrainz).
 APP_VERSION="$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" "$HTML_DIR/js/plex.js" 2>/dev/null | head -n 1 || true)"
@@ -43,6 +51,87 @@ fail() {
 }
 
 say() { echo "plexamp-web: $*"; }
+
+# plain_path NAME VALUE EXAMPLE: a full path of letters, digits, ".", "_",
+# "-" and "/" only (no spaces or new lines), without "." or ".." in it.
+plain_path() {
+    case "$2" in
+        /*) ;;
+        *) fail "$1 must be a full path, like $3 (got: ${2:-/})" ;;
+    esac
+    case "$2" in
+        *[!A-Za-z0-9._/-]*) fail "$1 must be a full path, like $3, of letters, numbers, . _ - and / only" ;;
+    esac
+    case "$2/" in
+        */./* | */../* | *//*) fail "$1 must be a plain full path, without . or .. in it (got: $2)" ;;
+    esac
+}
+
+# Whether a folder is something mounted there (a volume, say).
+is_mount() { awk -v d="$1" '$5 == d { found = 1 } END { exit !found }' /proc/self/mountinfo 2>/dev/null; }
+
+# Makes DATA_DIR the service's (SERVICE_USER's, or nginx's), and no one
+# else's; prints what's wrong instead, if anything is (nothing's changed).
+data_dir_problem() {
+    if [ -L "$DATA_DIR" ]; then
+        echo "DATA_DIR ($DATA_DIR) is a link, not a folder"
+        return
+    fi
+    if ! mkdir -p "$DATA_DIR" 2>/dev/null; then
+        echo "$DATA_DIR couldn't be made"
+        return
+    fi
+    d_user="${SERVICE_USER:-nginx}"
+    if [ "$(id -u)" = 0 ] && id "$d_user" >/dev/null 2>&1; then
+        if ! parent_is_roots "$DATA_DIR"; then
+            echo "DATA_DIR ($DATA_DIR) is in a folder others can change: give it one only root can"
+            return
+        fi
+        # Only a folder holding nothing but shared playlists is given to the
+        # service (a new or empty one, or a volume for them), never one with
+        # anything else in it (a home folder given by mistake, say).
+        for e in "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?*; do
+            [ -e "$e" ] || [ -L "$e" ] || continue
+            case "${e##*/}" in
+                # (and what file systems and file browsers leave around)
+                shares.json | shares.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
+                *)
+                    echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give shared playlists a folder of their own (a new or empty one, or a volume)"
+                    return
+                    ;;
+            esac
+        done
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp"; do
+            if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; } || { [ -f "$f" ] && [ "$(stat -c %h "$f")" != 1 ]; }; then
+                echo "$f must be a file of its own (not a link, or a folder)"
+                return
+            fi
+        done
+        rm -f "$DATA_DIR/shares.json.tmp"
+        d_group="$(id -gn "$d_user")"
+        if ! chown -h "$d_user:$d_group" "$DATA_DIR" || { [ -f "$DATA_DIR/shares.json" ] && ! chown -h "$d_user:$d_group" "$DATA_DIR/shares.json"; }; then
+            echo "$d_user can't own DATA_DIR ($DATA_DIR)"
+            return
+        fi
+    fi
+    chmod 700 "$DATA_DIR" 2>/dev/null || true
+}
+
+# parent_is_roots FOLDER [sticky]: whether the folder FOLDER is in can be
+# changed by root alone (so FOLDER can't be swapped for a link by anyone
+# else): root's, and no one else can write to it. "sticky": a folder anyone
+# can write to will do if it's sticky (as a tmpfs /run is), where only
+# root can swap a folder of root's (see "start the service").
+parent_is_roots() {
+    info="$(stat -c '%u %g %a' "$(dirname "$1")" 2>/dev/null)" || return 1
+    p_user="${info%% *}"
+    info="${info#* }"
+    p_group="${info%% *}"
+    p_mode="${info#* }"
+    [ "$p_user" = 0 ] || return 1
+    if [ "${2:-}" = sticky ] && [ $((p_mode / 1000 % 2)) = 1 ]; then return 0; fi
+    [ $((p_mode % 10 & 2)) = 0 ] && { [ $((p_mode / 10 % 10 & 2)) = 0 ] || [ "$p_group" = 0 ]; }
+}
 
 lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
 
@@ -159,6 +248,36 @@ TOGETHER=true
 if ! truthy PLAY_TOGETHER "${PLAY_TOGETHER:-}" true; then TOGETHER=false; fi
 CAST=true
 if ! truthy CASTING "${CASTING:-}" true; then CAST=false; fi
+
+# ---------- shared playlists ----------
+
+# Kept in a file in DATA_DIR, the service's own (see server/shares.js).
+SHARING=true
+if ! truthy PLAYLIST_SHARING "${PLAYLIST_SHARING:-}" true; then SHARING=false; fi
+DATA_DIR="${DATA_DIR:-/data}"
+DATA_DIR="${DATA_DIR%/}"
+plain_path DATA_DIR "$DATA_DIR" /data
+# A folder of its own: it's given to the service (made its own, and no one
+# else's), so never a system folder, or the web pages' (where it would be
+# served), the service's own code or the folder for its socket. (Nor one
+# with anything else in it: see below.)
+case "$DATA_DIR/" in
+    /bin/* | /boot/* | /dev/* | /etc/* | /lib/* | /lib32/* | /lib64/* | /libx32/* | /proc/* | /sbin/* | /sys/* | /usr/*)
+        fail "DATA_DIR can't be in a system folder (got: $DATA_DIR)" ;;
+    /home/ | /media/ | /mnt/ | /opt/ | /root/ | /run/ | /srv/ | /tmp/ | /var/ | /var/cache/ | /var/lib/ | /var/log/ | /var/run/ | /var/tmp/ | /var/www/)
+        fail "DATA_DIR must be a folder of its own, like /data (got: $DATA_DIR)" ;;
+esac
+# The service's folder in /run (see "start the service"): one of its own.
+plain_path RUN_DIR "$RUN_DIR" /run/plexamp-web
+case "$RUN_DIR/" in
+    /run/?*/) ;;
+    *) fail "RUN_DIR must be a folder of its own in /run (got: $RUN_DIR)" ;;
+esac
+for d in "$HTML_DIR" "$SERVICE_DIR" "$RUN_DIR"; do
+    d="${d%/}"
+    case "$DATA_DIR/" in "$d"/*) fail "DATA_DIR can't be in $d (got: $DATA_DIR)" ;; esac
+    case "$d/" in "$DATA_DIR"/*) fail "DATA_DIR can't hold $d (got: $DATA_DIR)" ;; esac
+done
 
 # ---------- MusicBrainz ----------
 
@@ -364,10 +483,33 @@ location /api/ {
     client_max_body_size 512k;
 }
 CONF
+    # The user the service runs as once it's started (it stops being root):
+    # one that doesn't exist would leave it root.
+    if [ -n "${SERVICE_USER:-}" ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
+        fail "SERVICE_USER $SERVICE_USER doesn't exist"
+    fi
+    # Shared playlists: their folder is the service's, and no one else's.
+    # Nothing in it is ever followed through a link, or changed through one
+    # (the service can write there, so anything there could be one). What's
+    # wrong with it turns shared playlists off (and says why), not the app.
+    if [ "$SHARING" = true ]; then
+        why="$(data_dir_problem)"
+        if [ -n "$why" ]; then
+            say "shared playlists are off: $why"
+            SHARING=false
+        else
+            # In a container, a folder that isn't a volume goes when the
+            # container is replaced (an update, say), and the shares with it.
+            if [ -f /.dockerenv ] && ! is_mount "$DATA_DIR"; then
+                say "shared playlists are kept in $DATA_DIR, which isn't a volume, so they'd be lost when this container is replaced (by an update, say). Give the container a volume there (see docker-compose.yml)."
+            fi
+        fi
+    fi
     if [ "$TOGETHER" = true ]; then add_config 'together: true'; fi
     if [ "$CAST" = true ]; then add_config 'cast: true'; fi
     if [ "$MB" = true ]; then add_config "musicbrainz: \"$MB_KIND\""; fi
     add_config 'devices: true'
+    if [ "$SHARING" = true ]; then add_config 'sharing: true'; fi
     if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
 else
     echo 'location ^~ /api/ { return 404; }' >"$API_CONF"
@@ -375,8 +517,10 @@ else
     TOGETHER=false
     CAST=false
     MB=false
+    SHARING=false
 fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
+if [ "$SHARING" = true ]; then say "shared playlists are kept in $DATA_DIR"; fi
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi
@@ -386,9 +530,46 @@ printf 'window.PW_CONFIG = { %s };\n' "$CONFIG" >"$HTML_DIR/config.js"
 # ---------- start the service ----------
 
 if [ "$SERVICE" = true ]; then
-    mkdir -p "$RUN_DIR"
+    # Its settings are written by root, so into a folder only root can change
+    # (and never through a link something else left there). Its socket goes
+    # in a folder of its own inside: the service's, when it runs as
+    # SERVICE_USER from the start (SERVICE_START=false: see below).
+    run_group=""
+    if [ "$(id -u)" = 0 ]; then
+        parent_is_roots "$RUN_DIR" sticky || fail "RUN_DIR must be in a folder only root can change (got: $RUN_DIR)"
+        # One that's the service's (before 0.14.0, on Proxmox, it was) is made
+        # afresh: nothing left in it, or set on it, by the service stays. One
+        # that's anyone else's is left alone.
+        if [ -L "$RUN_DIR" ] || { [ -e "$RUN_DIR" ] && [ ! -d "$RUN_DIR" ]; }; then
+            rm -f "$RUN_DIR"
+        elif [ -d "$RUN_DIR" ] && [ "$(stat -c %u "$RUN_DIR")" != 0 ]; then
+            [ "$(stat -c %u "$RUN_DIR")" = "$(id -u "${SERVICE_USER:-nginx}" 2>/dev/null)" ] ||
+                fail "RUN_DIR ($RUN_DIR) is someone else's: give the service a folder of its own in /run"
+            rm -rf "$RUN_DIR"
+        fi
+        mkdir -p "$RUN_DIR"
+        { [ ! -L "$RUN_DIR" ] && [ "$(stat -c %u "$RUN_DIR")" = 0 ]; } || fail "RUN_DIR ($RUN_DIR) couldn't be made root's"
+        if [ "${SERVICE_START:-true}" = false ] && [ -n "${SERVICE_USER:-}" ]; then
+            run_group="$(id -gn "$SERVICE_USER")"
+            chown -h "0:$run_group" "$RUN_DIR"
+            chmod 750 "$RUN_DIR"
+        else
+            chown -h 0:0 "$RUN_DIR"
+            chmod 755 "$RUN_DIR"
+        fi
+        # The settings are written afresh below (and the socket's old place,
+        # before 0.14.0, goes).
+        rm -f "$RUN_DIR/service.json" "$RUN_DIR/service.sock"
+    else
+        mkdir -p "$RUN_DIR"
+    fi
+    mkdir -p "$SOCKET_DIR"
+    if [ -n "$run_group" ]; then
+        chown -h "$SERVICE_USER:$run_group" "$SOCKET_DIR"
+        chmod 750 "$SOCKET_DIR"
+    fi
     json() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-    cat >"$RUN_DIR/service.json" <<JSON
+    (umask 077 && cat >"$RUN_DIR/service.json") <<JSON
 {
   "socket": "$(json "$SERVICE_SOCKET")",
   "together": $TOGETHER,
@@ -397,6 +578,8 @@ if [ "$SERVICE" = true ]; then
   "musicbrainzUrl": "$(json "$MB_URL")",
   "version": "$(json "$APP_VERSION")",
   "devices": $SERVICE,
+  "sharing": $SHARING,
+  "dataDir": "$(json "$DATA_DIR")",
   "debug": $DEBUG_ON,
   "aiAuth": "$AI_AUTH",
   "ollamaUrl": "$([ "$AI_ON" = true ] && json "${OLLAMA_URL%/}")",
@@ -405,17 +588,16 @@ if [ "$SERVICE" = true ]; then
   "plexServerUrl": "$(json "${PLEX_SERVER_URL:-}")",
   "plexTvUrl": "$(json "$PLEX_TV")",
   "nginxLogPort": $NGINX_LOG_PORT,
-  "user": "${SERVICE_USER:-nginx}"
+  "user": "$(json "${SERVICE_USER:-nginx}")"
 }
 JSON
-    chmod 600 "$RUN_DIR/service.json"
     # SERVICE_START=false: systemd starts the service (on Proxmox: see
     # proxmox/install.sh), as SERVICE_USER from the start rather than as
-    # root, so its settings and the folder for its socket are that user's.
-    if [ "${SERVICE_START:-true}" = false ] && [ -n "${SERVICE_USER:-}" ] && [ "$(id -u)" = 0 ]; then
-        chown "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$RUN_DIR" "$RUN_DIR/service.json" ||
-            fail "SERVICE_USER $SERVICE_USER can't own $RUN_DIR"
-        chmod 750 "$RUN_DIR"
+    # root, so it can read its settings (root's still), and the folder for
+    # its socket is its own.
+    if [ -n "$run_group" ]; then
+        chown -h "0:$run_group" "$RUN_DIR/service.json"
+        chmod 640 "$RUN_DIR/service.json"
     fi
 fi
 # SERVICE_START=false: something else starts it (systemd, on Proxmox: see
@@ -452,7 +634,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.

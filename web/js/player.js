@@ -21,6 +21,7 @@ const PRELOAD_AT = 25; // seconds before the next track starts
 // next track is started this much before the current one ends.
 const GAPLESS_LEAD = 0.06;
 const MAX_SKIP_IN = 20; // at most this much silence is skipped at the start of a track
+const MAX_QUIET_LEAD = 15; // a fade starts at most this long before the music ends, over a quiet ending
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
 // Bundled into the image at a pinned version (see the Dockerfile), so no
 // code is ever loaded from another site.
@@ -419,7 +420,8 @@ class Player extends EventTarget {
   //   gapless  it starts as this one ends (albums, or with Crossfade off)
   //   fade     it fades in as this one fades out, ending where this one's
   //            music ends ("smart" skips the silence after it, and before
-  //            the next track's music starts)
+  //            the next track's music starts, and starts over a quiet
+  //            ending rather than waiting for it to play out)
   //   cut      straight on where the music ends, for browsers that can't
   //            fade (Safari on iPhone and iPad)
   // The next track becomes the current one once the change is done, so its
@@ -441,16 +443,25 @@ class Player extends EventTarget {
     if (mode === 'off' || (mode === 'smart' && followsOnAlbum(cur, next))) return gapless;
     let end = d;
     let startAt = 0;
+    let quietFrom = null;
     if (mode === 'smart') {
       const a = this.spans.get(cur.id);
       const b = this.spans.get(next.id);
       if (a) end = Math.min(d, a.end);
       if (b && b.start <= MAX_SKIP_IN) startAt = b.start;
+      quietFrom = a?.quietFrom?.[app.settings.quietEndings ?? 'quiet'] ?? null;
     }
+    // Without a fade, a quiet ending plays out: cutting it off part-way
+    // would be heard.
     if (!canFade) return end < d - 1 || startAt ? { ni, next, kind: 'cut', at: end, startAt } : gapless;
     const nextLen = (next.duration || 0) / 1000 || Infinity;
     const fade = Math.max(0.5, Math.min(Number(app.settings.fadeLength) || 5, end / 3, nextLen / 3));
-    return { ni, next, kind: 'fade', at: Math.max(0, end - fade), fade, startAt };
+    // A quiet ending longer than the fade: the fade starts where it does, but
+    // no more than MAX_QUIET_LEAD seconds before the music ends (and not in
+    // the first half of the track).
+    let at = end - fade;
+    if (quietFrom != null) at = Math.min(at, Math.max(quietFrom, end - MAX_QUIET_LEAD, end / 2));
+    return { ni, next, kind: 'fade', at: Math.max(0, at), fade, startAt };
   }
 
   // Where the music starts and ends in the current track and the next one
