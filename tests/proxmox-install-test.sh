@@ -49,6 +49,7 @@ for release in "${releases[@]}"; do
                 echo "FAIL $name"
                 echo "--- the service:"
                 cat /tmp/service.log
+                if [ -f /tmp/update.log ]; then echo "--- the last update:"; tail -n 20 /tmp/update.log; fi
                 ls -la /run/plexamp-web
                 echo "--- nginx:"
                 tail -n 15 /var/log/nginx/error.log
@@ -89,8 +90,37 @@ for release in "${releases[@]}"; do
         configure DEBUG=true >/dev/null
         expect "debug mode logs to the journal" grep -q "access_log syslog:server=unix:/dev/log" /etc/nginx/conf.d/log.inc
         expect "nginx takes debug mode'"'"'s settings" nginx -t -q
-        # An update keeps the settings.
-        PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 bash /src/proxmox/install.sh >/dev/null
+        # Updates, as update-plexamp-web runs them, with this checkout for the
+        # installer it downloads: first from the command 0.15.0 put there.
+        # The installer replaces that command while it runs, and until 0.16.1
+        # it changed the file where it stood, so the shell running it read on
+        # into the new one, and the update ended with a "Syntax error".
+        mkdir -p /tmp/stub
+        cat >/tmp/stub/curl <<"STUB"
+#!/bin/sh
+out=""
+url=""
+w=""
+prev=""
+for a in "$@"; do
+    case "$prev" in -o) out="$a" ;; -w) w=1 ;; esac
+    case "$a" in https://raw.githubusercontent.com/*/proxmox/install.sh) url="$a" ;; esac
+    prev="$a"
+done
+if [ -n "$url" ]; then
+    cp /src/proxmox/install.sh "$out"
+    if [ -n "$w" ]; then printf 200; fi
+    exit 0
+fi
+exec /usr/bin/curl "$@"
+STUB
+        chmod 755 /tmp/stub/curl
+        update() { PATH="/tmp/stub:$PATH" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1 && ! grep -q "Syntax error" /tmp/update.log; }
+        install -m 755 /src/tests/update-plexamp-web-0.15.0.sh /usr/local/bin/update-plexamp-web
+        expect "update-plexamp-web from 0.15.0 finishes cleanly (the installer replaces it as it runs)" update
+        expect "...and puts the new command in its place" grep -q "^exit$" /usr/local/bin/update-plexamp-web
+        expect "update-plexamp-web as it is now finishes cleanly too" update
+        expect "...leaving nothing behind next to it" sh -c "! ls /usr/local/bin/update-plexamp-web.?????? 2>/dev/null"
         expect "an update keeps the settings" grep -q "^DISABLE_WEBSOCKETS=true$" /etc/plexamp-web/plexamp-web.env
     ' >"$LOG" 2>&1; then
         cat "$LOG"

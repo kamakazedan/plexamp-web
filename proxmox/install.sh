@@ -144,10 +144,28 @@ sed -e "s#root /usr/share/nginx/html;#root $BASE/html;#" "$BASE/app/docker/nginx
 for inc in pms-proxy ai-proxy api log; do touch "/etc/nginx/conf.d/$inc.inc"; done
 say "Put plexamp-web ${version:-} in $BASE"
 
-# `update-plexamp-web`: the newest version, with the same settings.
-cat >/usr/local/bin/update-plexamp-web <<UPDATE
+# put_command PATH: what's read in, put in place as a command at PATH, by
+# writing it next to it and renaming it there, never by changing the file
+# that's there. update-plexamp-web is running while it's replaced (it's
+# what runs this), and a shell reads its script as it goes: changed where it
+# stood, it would carry on reading into the new one (as 0.16.0's update
+# did, ending in a "Syntax error").
+put_command() {
+    local tmp
+    rm -f "$1".??????
+    tmp="$(mktemp "$1.XXXXXX")"
+    cat >"$tmp"
+    chmod 755 "$tmp"
+    mv -f "$tmp" "$1"
+}
+
+# `update-plexamp-web`: the newest version, with the same settings. All of
+# it in braces, so it's read to the end before any of it runs: the
+# installer it runs puts a new one in its place.
+put_command /usr/local/bin/update-plexamp-web <<UPDATE
 #!/bin/sh
 # Updates plexamp-web to the newest tested version; settings are kept.
+{
 set -eu
 tmp="\$(mktemp)"
 trap 'rm -f "\$tmp"' EXIT
@@ -161,11 +179,12 @@ code="\$(get $WANT_REF)"
 if [ "\$code" = 404 ] && [ "$WANT_REF" = stable ]; then code="\$(get main)"; fi
 [ "\$code" = 200 ] || { echo "Couldn't download the installer (HTTP \${code:-000}). Nothing was changed." >&2; exit 1; }
 LC_ALL=C.UTF-8 PW_REPO="$REPO" PW_REF="$WANT_REF" bash "\$tmp"
+exit
+}
 UPDATE
-chmod 755 /usr/local/bin/update-plexamp-web
 
 # `plexamp-web-settings`: opens the settings, then restarts the app with them.
-cat >/usr/local/bin/plexamp-web-settings <<'SETTINGS'
+put_command /usr/local/bin/plexamp-web-settings <<'SETTINGS'
 #!/bin/sh
 # Opens plexamp-web's settings in an editor, then restarts it with them.
 set -eu
@@ -191,7 +210,6 @@ else
     exit 1
 fi
 SETTINGS
-chmod 755 /usr/local/bin/plexamp-web-settings
 
 # Both are linked from /usr/bin too: `pct exec <ID> -- update-plexamp-web`
 # runs it with Proxmox's own search path (PATH=/sbin:/bin:/usr/sbin:/usr/bin,
@@ -250,9 +268,9 @@ UNIT
 if [ "$systemd" = true ]; then
     systemctl daemon-reload
     systemctl enable --quiet plexamp-web-config.service plexamp-web.service nginx.service
-    systemctl restart plexamp-web-config.service
-    systemctl restart plexamp-web.service
-    systemctl restart nginx.service
+    # All at once, so each restarts once (restarting the settings alone
+    # restarts the service with them, and it went again after).
+    systemctl restart plexamp-web-config.service plexamp-web.service nginx.service
     # Until the service is up, nginx answers its address with an error
     # (502), so the checks are quiet, and only the outcome is told.
     for _ in $(seq 1 30); do

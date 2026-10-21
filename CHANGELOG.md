@@ -3,6 +3,22 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.16.1 - 2026-10-21
+
+### Fixed
+
+- **Proxmox VE: `update-plexamp-web` ended with `Syntax error: ")"
+  unexpected`** after updating to 0.16.0. The update itself had finished:
+  the installer the command runs puts a new copy of the command in place,
+  and it did that by changing the file the running command was reading,
+  so the shell carried on into the new copy from where the old one ended,
+  partway through a comment. Nothing else ran. The installer now puts its
+  commands in place without touching the file a running one reads, and
+  the command reads all of itself before any of it runs. Updating from
+  0.16.0 to this is clean.
+- The installer restarts the player once rather than twice (restarting
+  its settings already restarted the service).
+
 ## 0.16.0 - 2026-10-21
 
 A security and privacy review: what it found, and what changed, is in
