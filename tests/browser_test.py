@@ -2574,9 +2574,15 @@ with sync_playwright() as pw:
                                       {'uri': 'https://remote.test:32400', 'local': False, 'relay': False, 'protocol': 'https'}]}]
         page.route(re.compile(r'https://(clients\.)?plex\.tv/api/v2/resources.*'),
                    lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(resources), headers={'Access-Control-Allow-Origin': '*'}))
-        # Its address over the internet (https, as Plex gives them) is the mock.
-        page.route(re.compile(r'https://remote\.test:32400/.*'),
-                   lambda route: route.fulfill(response=route.fetch(url=route.request.url.replace('https://remote.test:32400', MOCK))))
+        # Its address over the internet (https, as Plex gives them) is the
+        # mock, but for live updates' event stream, which never ends (live
+        # updates check every minute instead).
+        def via_mock(route):
+            url = route.request.url
+            if '/:/eventsource/' in url:
+                return route.abort()
+            return route.fulfill(response=route.fetch(url=url.replace('https://remote.test:32400', MOCK)))
+        page.route(re.compile(r'https://remote\.test:32400/.*'), via_mock)
         login(page, APP)
         js(page, "() => import('./js/state.js').then((m) => m.setAuth({ ...m.app.auth, manual: false }))")
         page.goto(APP + '#/settings/source')
@@ -2631,6 +2637,7 @@ with sync_playwright() as pw:
         page.click('button:has-text("Test connection")')
         page.wait_for_selector('.kv:has-text("Response time") .kv-v:has-text(" ms")')
         check('routes: ...and the time it takes when it answers', re.search(r'\d ms', page.locator('.kv', has_text='Response time').inner_text()) is not None)
+        page.unroute_all(behavior='ignoreErrors')
         ctx.close()
 
     # ---------- privacy: searches, signing out, other tabs ----------
