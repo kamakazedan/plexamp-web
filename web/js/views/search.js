@@ -6,6 +6,8 @@ import { artistRow, albumRow, playlistRow, trackRow, numberedList } from '../com
 import { playList, shuffleLibrary, sonicPath } from '../actions.js';
 import { aiReady, aiEvents, norm } from '../ai.js';
 import { libraryTiles } from './library.js';
+import { spotifyOffered } from '../spotify.js';
+import { importFromSpotify } from './spotifyimport.js';
 
 // Recent searches were kept until 0.9.1; what was stored goes.
 try {
@@ -363,6 +365,10 @@ function browseContent(setAiRow) {
         aiRow,
         row({ href: '/sonic-path', lead: h('span.tile.tile-plain', null, icon('path', 26)), title: 'Sonic path', subtitle: 'A smooth journey from one track to another' }),
         row({ onClick: () => shuffleLibrary(), lead: h('span.tile.tile-plain', null, icon('shuffle', 26)), title: 'Shuffle library', subtitle: `Random tracks from ${app.source.sectionTitle}`, chevron: true }),
+        // (SPOTIFY_IMPORT on the container.)
+        spotifyOffered()
+          ? row({ onClick: () => importFromSpotify(), lead: h('span.tile.tile-plain', null, icon('link', 26)), title: 'From Spotify', subtitle: 'A playlist here from a Spotify playlist’s link', chevron: true, cls: 'spotify-row' })
+          : null,
       ),
     ),
   );

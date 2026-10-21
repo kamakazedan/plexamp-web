@@ -3,6 +3,27 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.18.0 - 2026-10-21
+
+### Added
+
+- **Search › From Spotify** (with `SPOTIFY_IMPORT=true` on the container,
+  off unless you turn it on): paste a Spotify playlist's link, see the
+  playlist as Spotify has it (its name, who made it, how many tracks and
+  how long), name it, and the tracks your library has make a playlist here
+  in the same order. Spotify's extras on a title ("Song - Remastered
+  2011", "(feat. …)") and lists of artists don't get in the way of finding
+  them. What isn't found is listed, to copy or save, and goes on **Missing
+  tracks**, saying which Spotify playlist it was in (unless that's turned
+  off for the import). Spotify's API only gives a playlist's tracks to the
+  account that owns it, so the container reads the page Spotify shows
+  anyone for the playlist: public playlists only, their first 100 tracks
+  at most, and only for as long as Spotify keeps that page as it is. Only
+  the playlist's id goes to Spotify, from the container (see
+  [SECURITY.md](SECURITY.md#spotify-imports)).
+- Missing tracks' spreadsheet says where each came from (an AI playlist or
+  a Spotify playlist), in a new last column.
+
 ## 0.17.1 - 2026-10-21
 
 ### Changed

@@ -22,6 +22,7 @@ import { Devices, DevicesError } from './devices.js';
 import { SharedModel, AIRequestError, cleanChat, errorText, AI_LIMITS } from './ai.js';
 import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
 import { Shares, ShareError } from './shares.js';
+import { Spotify, SpotifyError, playlistId, NOT_A_LINK } from './spotify.js';
 import { listenForNginx } from './syslog.js';
 import { plainPath, clientIp } from './paths.js';
 
@@ -47,6 +48,10 @@ function loadConfig() {
     // in memory only, for development).
     sharing: env.PW_SERVICE_SHARING ? env.PW_SERVICE_SHARING === 'true' : cfg.sharing !== false,
     dataDir: env.PW_SERVICE_DATA_DIR ?? cfg.dataDir ?? '',
+    // Search › From Spotify (SPOTIFY_IMPORT): off unless it's turned on. Its
+    // address is for tests (the mock's).
+    spotify: env.PW_SERVICE_SPOTIFY ? env.PW_SERVICE_SPOTIFY === 'true' : cfg.spotify === true,
+    spotifyUrl: env.PW_SERVICE_SPOTIFY_URL ?? cfg.spotifyUrl ?? '',
     // Development only: players at 127.0.0.1 (the mock player).
     castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
     aiAuth: env.PW_SERVICE_AI_AUTH || cfg.aiAuth || 'plex',
@@ -76,6 +81,7 @@ const devices = new Devices();
 setInterval(() => devices.sweep(), 15000).unref();
 const sharedModel = config.ollamaUrl ? new SharedModel({ url: config.ollamaUrl, key: config.ollamaKey, model: config.ollamaModel, log }) : null;
 const musicbrainz = config.musicbrainzUrl ? new MusicBrainz({ base: config.musicbrainzUrl, version: config.version, log }) : null;
+const spotify = config.spotify ? new Spotify({ base: config.spotifyUrl || 'https://open.spotify.com', version: config.version, log }) : null;
 // Read once the service has given up root (see started()), as the user
 // that keeps the file.
 let shares = null;
@@ -459,6 +465,48 @@ async function musicbrainzRoute(req, res, parts) {
     const n = (mbBusy.get(key) || 1) - 1;
     if (n > 0) mbBusy.set(key, n);
     else mbBusy.delete(key);
+  }
+}
+
+// Search › From Spotify (SPOTIFY_IMPORT): a public playlist's name and
+// tracks, read from Spotify's own page for it (see spotify.js), for the
+// people the shared AI model is for (who can use this player's Plex server,
+// or anyone signed in to Plex without PLEX_SERVER_URL). A few a minute for
+// each, a few at once for everyone, and only the link is read from the
+// request.
+const SPOTIFY_PER_MINUTE = 10;
+const SPOTIFY_AT_ONCE = 4;
+let spotifyReads = 0;
+
+async function spotifyRoute(req, res, parts) {
+  if (!spotify) throw new HttpError(404, 'Importing from Spotify is turned off on this player.');
+  if (parts[0] !== 'playlist' || parts.length > 1) throw new HttpError(404, 'Not found.');
+  if (req.method !== 'POST') throw new HttpError(405, 'Not allowed.');
+  const { key } = await plexAllowed(req, {
+    what: 'Spotify imports',
+    signIn: 'Sign in to Plex first.',
+    noAccess: 'Importing from Spotify is for people who can use this player’s Plex server, and your Plex account can’t.',
+  });
+  if (!allow(`spotify|${key}`, SPOTIFY_PER_MINUTE) || !allow('spotify', 60, 1, everyone)) {
+    throw new HttpError(429, 'Too many Spotify playlists read in a short time. Wait a minute and try again.');
+  }
+  const body = await readBody(req, 8 * 1024);
+  const link = typeof body.link === 'string' ? body.link.slice(0, 500) : '';
+  if (spotifyReads >= SPOTIFY_AT_ONCE) throw new HttpError(429, 'Other playlists are being read from Spotify right now. Try again in a moment.');
+  spotifyReads += 1;
+  const ctrl = new AbortController();
+  res.on('close', () => !res.writableFinished && ctrl.abort());
+  try {
+    const id = playlistId(link) || (await spotify.resolveShort(link, { signal: ctrl.signal }));
+    if (!id) throw new HttpError(400, NOT_A_LINK);
+    const playlist = await spotify.playlist(id, { signal: ctrl.signal });
+    log.debug(`spotify: read a playlist (${id.slice(0, 6)}…): ${playlist.tracks.length} tracks${playlist.capped ? ', as many as its page lists' : ''}`);
+    return send(res, 200, { playlist });
+  } catch (err) {
+    if (err instanceof SpotifyError) throw new HttpError(err.status, err.message);
+    throw err;
+  } finally {
+    spotifyReads -= 1;
   }
 }
 
@@ -952,7 +1000,7 @@ async function handle(req, res) {
   try {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
-    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast && !!config.plexServerUrl, devices: config.devices, sharing: !!shares, debug: config.debug });
+    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast && !!config.plexServerUrl, devices: config.devices, sharing: !!shares, spotify: !!spotify, debug: config.debug });
     if (area === 'internal' && rest[0] === 'pms-auth' && routeOf(req) === 'internal') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
@@ -961,6 +1009,7 @@ async function handle(req, res) {
     if (area === 'ai' && routeOf(req) === 'ai') return await aiRoute(req, res, rest);
     if (area === 'musicbrainz') return await musicbrainzRoute(req, res, rest);
     if (area === 'shares') return await sharesRoute(req, res, rest, url);
+    if (area === 'spotify') return await spotifyRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
     const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError || err instanceof MusicBrainzError;
@@ -1028,7 +1077,7 @@ function started() {
     !config.devices && 'sharing playback between devices',
     !shares && 'shared playlists',
   ].filter(Boolean);
-  log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${config.debug ? ', debug mode on' : ''}`);
+  log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${spotify ? ', importing from Spotify on' : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
 }
 

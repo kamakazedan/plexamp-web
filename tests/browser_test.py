@@ -3736,6 +3736,105 @@ with sync_playwright() as pw:
         check('home: reset brings the defaults back', order[:3] == ['mixes', 'recentPlays', 'recentPlaylists'] and 'decade2020' not in order, str(order))
         ctx.close()
 
+    # ---------- spotify: a playlist from a Spotify playlist's link ----------
+    if run('spotify'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'spotify', expected=('status of 404',))  # the private playlist, on purpose
+        login(page, APP)
+        page.goto(APP + '#/search')
+        page.wait_for_selector('.spotify-row')
+        form = '.spotify-form'
+        said = lambda: page.locator('.spotify-status').inner_text()
+
+        def look(link, until):
+            page.fill(f'{form} input[type=url]', link)
+            page.click(f'{form} button[type=submit]')
+            page.wait_for_selector(until, timeout=15000)
+
+        def open_dialog():
+            page.locator('.spotify-row').scroll_into_view_if_needed()
+            page.click('.spotify-row')
+            page.wait_for_selector(f'{form} input[type=url]')
+
+        open_dialog()
+        look('https://example.com/playlist/mockRoadTrip0000000001', '.spotify-status.warn')
+        not_link = said()
+        look('https://open.spotify.com/album/mockRoadTrip0000000001', '.spotify-status.warn:has-text("Only playlists")')
+        album = said()
+        look('https://open.spotify.com/playlist/mockPrivate00000000004', '.spotify-status.warn:has-text("public")')
+        private = said()
+        check('spotify: a link that isn\'t to a public playlist says so', 'isn’t a link to a Spotify playlist' in not_link and 'Only playlists' in album and 'no public playlist' in private,
+              f'{not_link!r} {album!r} {private!r}')
+        look('https://open.spotify.com/playlist/mockRoadTrip0000000001?si=abc', '.spotify-found')
+        card = page.locator('.spotify-found').inner_text()
+        check('spotify: the playlist as Spotify has it: its name, who made it and its tracks (not the podcast episode in it)',
+              'Road trip classics' in card and 'By Dan' in card and '11 tracks' in card, card)
+        shot(page, 'spotify-01-found')
+        page.click(f'{form} button:has-text("Make the playlist")')
+        page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        result = page.locator('.import-form').inner_text()
+        shot(page, 'spotify-02-result')
+        sp = js(page, "() => import('./js/spotify.js').then((m) => m.readSpotifyPlaylist('spotify:playlist:mockRoadTrip0000000001'))")
+        plain = lambda t: re.sub(r' - Remastered 2011$| \(feat\. [^)]*\)$', '', t)
+        made = js(page, """() => import('./js/state.js').then(async ({ app }) => {
+            app.server.forgetPlaylists();
+            const pl = (await app.server.playlists()).find((p) => p.title === 'Road trip classics');
+            const { items } = await app.server.playlistItems(pl.ratingKey, { start: 0, size: 50 });
+            return items.map((m) => m.title);
+        })""")
+        check('spotify: its tracks are found in the library, in its order ("Song - Remastered 2011", "(feat. …)" and "Artist, Guest" too), and what isn\'t is said',
+              '8 of 11 tracks found' in result and 'on Missing tracks' in result and made == [plain(t['title']) for t in sp['tracks'][:8]], f'{result!r} {made} {[t["title"] for t in sp["tracks"]]}')
+        page.click('.import-remembered .link-btn')
+        page.wait_for_selector('.missing-row')
+        rows = [r.inner_text() for r in page.locator('.missing-row').all()]
+        shot(page, 'spotify-03-missing')
+        check('spotify: what isn\'t found is on Missing tracks, with the Spotify playlist it was in (and isn\'t asked about on MusicBrainz)',
+              sorted(r.split('\n')[0] for r in rows) == ['Another Missing One', 'Imaginary Song', 'Not On Any Album'] and all('in “Road trip classics” from Spotify' in r for r in rows)
+              and page.locator('.missing-mb').count() == 0 and page.locator('.missing-check').count() == 1, str(rows))
+        csv_text = js(page, "() => import('./js/missing.js').then((m) => m.missingCsv())")
+        check('spotify: ...and in its spreadsheet, saying where it came from', '"Ghost Band","Another Missing One","Track","1"' in csv_text and '"A Spotify playlist"' in csv_text, csv_text[:300])
+        # Another, all of it found; one as long as Spotify's page lists; and
+        # one again, without putting what's missing on the list.
+        page.goto(APP + '#/search')
+        page.wait_for_selector('.spotify-row')
+        open_dialog()
+        look('spotify:playlist:mockLateNight000000002', '.spotify-found')
+        page.click(f'{form} button:has-text("Make the playlist")')
+        page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        late = page.locator('.import-form').inner_text()
+        check('spotify: a playlist all in the library is all found (read from another shape of Spotify\'s page)', 'All 4 tracks found' in late and 'Missing tracks' not in late, late)
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
+        open_dialog()
+        look('https://open.spotify.com/playlist/mockHundred00000000003', '.spotify-found')
+        hundred = page.locator(f'{form}').inner_text()
+        check('spotify: a playlist as long as Spotify\'s page lists says the rest aren\'t in it', '100 tracks' in hundred and 'first 100 tracks, so any after those aren’t in it' in hundred, hundred[:400])
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
+        open_dialog()
+        look('https://open.spotify.com/playlist/mockRoadTrip0000000001', '.spotify-found')
+        again = (page.input_value(f'{form} input[type=text]'), page.locator(f'{form}').inner_text())
+        page.uncheck(f'{form} .spotify-keep input')
+        page.click(f'{form} button:has-text("Make the playlist")')
+        page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
+        rows2 = [r.inner_text() for r in page.locator('.missing-row').all()]
+        check('spotify: a name you have already is offered with "(from Spotify)", and with Missing tracks off for it, nothing more goes there',
+              again[0] == 'Road trip classics (from Spotify)' and 'You have a playlist called “Road trip classics” already' in again[1] and len(rows2) == 3 and not any('in 2 playlists' in r for r in rows2),
+              f'{again[0]!r} {rows2}')
+        js(page, """() => import('./js/state.js').then(async ({ app }) => {
+            app.server.forgetPlaylists();
+            for (const p of await app.server.playlists()) if (['Road trip classics', 'Road trip classics (from Spotify)', 'Night drive mix'].includes(p.title)) await app.server.deletePlaylist(p.ratingKey);
+        })""")
+        # Off unless it's turned on (SPOTIFY_IMPORT): not on a player without it.
+        login(page, APP_NOWS)
+        page.goto(APP_NOWS + '#/search')
+        page.wait_for_selector('.search-body .row')
+        check('spotify: not on a player without SPOTIFY_IMPORT', page.locator('.spotify-row').count() == 0)
+        ctx.close()
+
     # ---------- debug: DEBUG=true ----------
     if run('debug') and APP_DEBUG:
         ctx = browser.new_context(**MOBILE)

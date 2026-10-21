@@ -2879,6 +2879,47 @@ body.np-open #toasts {
   gap: 8px 20px;
 }
 
+.import-remembered {
+  margin: 0;
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+}
+
+.import-remembered .link-btn {
+  padding: 0;
+  font-size: inherit;
+}
+
+/* ---------- From Spotify (Search › Explore) ---------- */
+
+.spotify-status:empty {
+  display: none;
+}
+
+.spotify-found {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.spotify-found-title {
+  font-size: calc(17px * var(--fs, 1));
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.spotify-found-sub {
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+}
+
+.spotify-keep {
+  margin: 0 -8px;
+}
+
 /* ---------- AI playlist ---------- */
 
 .ai-box .ic {

@@ -48,7 +48,7 @@ If the player is served over HTTPS, browsers block plain `http://` addresses oth
 
 ## Missing tracks
 
-Turn on **Settings › AI › Show missing tracks** (it's off to begin with), and under each AI playlist is a list of the songs and artists the model suggested that your library doesn't have, or a line saying they're all there. They're collected in **Settings › AI › Missing tracks**, with how often each was suggested and for what. Download them as a spreadsheet (CSV), copy or share them, so whoever looks after the server can go and find them: that has each one's artist and title, its library, and how often and when it was suggested, but not what you asked for.
+Turn on **Settings › AI › Show missing tracks** (it's off to begin with), and under each AI playlist is a list of the songs and artists the model suggested that your library doesn't have, or a line saying they're all there. They're collected in **Settings › AI › Missing tracks**, with how often each was suggested and for what. Download them as a spreadsheet (CSV), copy or share them, so whoever looks after the server can go and find them: that has each one's artist and title, its library, and how often and when it was suggested, but not what you asked for. Playlists brought over from Spotify put the tracks they had that the library doesn't on the same list, saying which Spotify playlist each was in (see [features.md](features.md#from-spotify)); MusicBrainz isn't asked about those, as they're real songs.
 
 - Each Plex server has a list of its own: the page shows the one for the server in use.
 - **Check again**, after adding music, takes off what's in the library now.

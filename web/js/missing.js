@@ -1,6 +1,7 @@
 // Songs and artists that AI playlists suggested but the library doesn't
-// have (Settings › AI › Missing tracks), so whoever looks after the server
-// can go and find them. Kept on this device (until it's cleared, or you sign
+// have, and the tracks of playlists imported from Spotify it doesn't have
+// (via: 'spotify'), in Settings › AI › Missing tracks, so whoever looks
+// after the server can go and find them. Kept on this device (until it's cleared, or you sign
 // out), each with the Plex server and library it's missing from: the list
 // shows the server in use's (different servers have different music). It's
 // exported as a spreadsheet (CSV) or plain text.
@@ -114,8 +115,10 @@ export async function checkSuggestions(list, { signal, onProgress } = {}) {
 // `prompt`: new ones are added, ones seen before counted again, and ones
 // now in the library let go, as are those in `drop` (what MusicBrainz says
 // isn't real, kept from before it was asked). Those MusicBrainz knows come
-// with mb: 'real'.
-export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [] } = {}) {
+// with mb: 'real'. `via`: where they came from instead ('spotify', with the
+// playlist's name as `prompt`): real songs, never asked about on
+// MusicBrainz.
+export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [], via = '' } = {}) {
   const src = app.source;
   if (!src) return;
   const now = Math.round(Date.now() / 1000);
@@ -137,8 +140,10 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
       have.last = now;
       have.prompt = String(prompt).slice(0, 200);
       if (entry.mb) have.mb = entry.mb;
+      if (via) have.via = via;
+      else delete have.via;
     } else {
-      list.push({ ...entry, times: 1, first: now, last: now, prompt: String(prompt).slice(0, 200), server: src.serverId || src.uri, section: String(src.sectionKey), library: libraryName(src) });
+      list.push({ ...entry, ...(via ? { via } : {}), times: 1, first: now, last: now, prompt: String(prompt).slice(0, 200), server: src.serverId || src.uri, section: String(src.sectionKey), library: libraryName(src) });
     }
   }
   // The most recently suggested are kept.
@@ -176,6 +181,10 @@ export async function checkMissingAgain({ signal, onProgress } = {}) {
 
 const idOf = (m) => `${keyOf(m)}|${m.server}|${m.section}`;
 
+// The server in use's that MusicBrainz could be asked about: not checked yet,
+// and suggested by an AI (what came from Spotify is real).
+export const askable = (m) => sameServer(m) && m.mb !== 'real' && m.via !== 'spotify';
+
 // The ones listed without being checked on MusicBrainz (made before there
 // was one to ask, or while it couldn't be asked), looked up there now: those
 // it doesn't know (most likely made up) and albums taken for songs are let
@@ -185,7 +194,7 @@ const idOf = (m) => `${keyOf(m)}|${m.server}|${m.section}`;
 // be asked, what it said before that still counts, and it throws with
 // err.result set.
 export async function checkMissingOnMusicBrainz({ signal, onProgress } = {}) {
-  const todo = load().filter((m) => sameServer(m) && m.mb !== 'real');
+  const todo = load().filter(askable);
   let verdicts;
   let failed = null;
   try {
@@ -246,11 +255,12 @@ function cell(v) {
 // as UTF-8 ("—", "é").
 export const toCsv = (head, rows) => `\ufeff${[head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`;
 
-// What's shared with whoever finds the music: what's missing, not what you
-// asked the AI for (that's only shown here).
+// What's shared with whoever finds the music: what's missing, and where
+// from (an AI playlist, or a playlist from Spotify), not what you asked the
+// AI for (that's only shown here).
 export function missingCsv(list = missingList()) {
-  const head = ['Artist', 'Title', 'Missing', 'Times suggested', 'Last suggested', 'Library'];
-  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', m.times || 1, day(m.last), m.library]));
+  const head = ['Artist', 'Title', 'Missing', 'Times suggested', 'Last suggested', 'Library', 'From'];
+  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', m.times || 1, day(m.last), m.library, m.via === 'spotify' ? 'A Spotify playlist' : 'An AI playlist']));
 }
 
 export function missingText(list = missingList()) {

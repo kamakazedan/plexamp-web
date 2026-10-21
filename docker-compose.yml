@@ -25,6 +25,11 @@
 #   CASTING             "false" turns off Play on (other Plex players on your
 #                       network, for your server's owner: needs PLEX_SERVER_URL).
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends.
+#   SPOTIFY_IMPORT      "true": Search › From Spotify makes a playlist from a
+#                       Spotify playlist's link, with the tracks you have. Off
+#                       unless set: it reads Spotify's public page for the
+#                       playlist (the first 100 tracks), which Spotify's terms
+#                       don't allow, and which can stop working.
 #   DEBUG               "true" writes extra detail to the log, with tokens and
 #                       keys removed. Turn it off when you're done.
 #
@@ -48,6 +53,7 @@ services:
       PLAY_TOGETHER: "true"
       CASTING: "true"
       PLAYLIST_SHARING: "true"
+      SPOTIFY_IMPORT: ""
       DEBUG: ""
     volumes:
       - plexamp-web-data:/data

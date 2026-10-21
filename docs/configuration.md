@@ -23,6 +23,7 @@ All optional. Set them as environment variables on the container; on Proxmox VE,
 | `PLAY_TOGETHER` | `true` (default) or `false` | Play Together and its tab. |
 | `CASTING` | `true` (default) or `false` | Playing on other Plex players from the app, for the server's owner: it needs `PLEX_SERVER_URL`. AirPlay and Cast, which are the browser's own, aren't affected. |
 | `PLAYLIST_SHARING` | `true` (default) or `false` | Sharing playlists with Plex friends. |
+| `SPOTIFY_IMPORT` | `true`, or `false` (default) | **Search › From Spotify**: paste a Spotify playlist's link, and the tracks you have make a playlist here (see [features.md](features.md#from-spotify)). Off unless you turn it on: Spotify's API only gives a playlist's tracks to the account that owns it, so the container reads them from the page Spotify shows anyone for the playlist instead. That page lists the first 100 tracks at most, Spotify's terms don't allow reading it like this, and it can stop working whenever Spotify changes it. For the people who can use your server, as the shared AI model is. |
 | `DATA_DIR` | `/data` (default) | Where shared playlists are kept: a folder of their own (give the container a volume there). |
 | `DEBUG` | `true` | Writes extra detail to the container log, with tokens removed (see [Debug mode](#debug-mode)). |
 

@@ -5,6 +5,7 @@
 - [Playlists and collections](#playlists-and-collections)
 - [Shared playlists](#shared-playlists)
 - [Playlist files](#playlist-files)
+- [From Spotify](#from-spotify)
 - [Your devices](#your-devices)
 - [Play Together](#play-together)
 - [Play on](#play-on)
@@ -59,6 +60,18 @@ Everyone uses the same player address, signed in with Plex, and the friend needs
 - **Import** from the same menu: **Import playlists…** opens a file. One playlist asks for its name; a backup asks which to bring back, leaving out those you have already. Each track is looked for in every music library on the server, the one you're in first: by its id on the same server, by Plex's id for the recording on a server that's been set up again, by title and artist anywhere else, and last on its album by its number there. What isn't found is listed with its album, year, number and length, to copy or save as a spreadsheet (CSV).
 
 Friends with access to your server can import a file you send them, and get the same tracks. To keep a playlist the same for both of you, share it instead.
+
+## From Spotify
+
+With `SPOTIFY_IMPORT=true` on the container (it's off unless you turn it on: see [configuration.md](configuration.md#container-settings)), **Search › From Spotify** makes a playlist here from a Spotify playlist's link.
+
+- **The link**: in Spotify, open the playlist and choose **Share › Copy link to playlist** (an `open.spotify.com/playlist/…` link, a `spotify:playlist:…` URI, or a `spotify.link` short link). The playlist has to be public.
+- **What's read**: its name, who made it, and each track's title, artists and length, from the page Spotify shows anyone for the playlist. That page lists the first 100 tracks at most, so a longer playlist comes over as its first 100. Podcast episodes in it are left out.
+- **Finding them**: each track is looked for in every music library on the server, the one you're in first, by its title and artist, its length choosing between copies. Spotify's extras on a title ("Song - Remastered 2011", "(feat. …)") and a list of artists ("Artist, Guest") don't get in the way. Those found make a playlist in the same order, named as on Spotify (or with "(from Spotify)" when you have one of that name), which you can change first.
+- **What isn't found** is listed when it's done, to copy or save as a spreadsheet, and goes on **Missing tracks** (Settings › AI › Missing tracks), saying which Spotify playlist it was in, unless you turn that off for the import. It's kept on the device that did the import: when a friend imports one, the list is on their device, for them to share with you.
+- **What goes where**: the link goes to the container, which reads the page from Spotify. Nothing goes from your browser to Spotify, and nothing about you or your library goes to Spotify.
+
+Spotify's page isn't an API: when Spotify changes it, this stops working until plexamp-web is updated, and the app says so.
 
 ## Your devices
 

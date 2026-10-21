@@ -23,6 +23,10 @@
 #                       turns them off; "true" alone means musicbrainz.org.)
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends
 #                       (on by default)
+#   SPOTIFY_IMPORT      "true" turns on Search › From Spotify: a playlist made
+#                       from a Spotify playlist's link, read from Spotify's
+#                       public page for it (off by default: see
+#                       server/spotify.js)
 #   DATA_DIR            where shared playlists are kept (default /data: give
 #                       the container a volume there). A folder of its own:
 #                       it's made the service's alone.
@@ -322,6 +326,16 @@ case "$PLEX_TV" in
 esac
 whole "$PLEX_TV" '^https?://[]A-Za-z0-9._:[-]+(/[A-Za-z0-9._~/-]*)?$' || fail "PLEX_TV_URL isn't a plain address (got: $(safe_url "$PLEX_TV"))"
 
+# ---------- Spotify import ----------
+
+# Off unless it's turned on: it reads playlists from Spotify's public pages,
+# which Spotify's terms don't allow (see server/spotify.js). SPOTIFY_URL is
+# for tests (the mock's address).
+SPOTIFY=false
+if truthy SPOTIFY_IMPORT "${SPOTIFY_IMPORT:-}"; then SPOTIFY=true; fi
+SPOTIFY_URL="${SPOTIFY_URL:-https://open.spotify.com}"
+whole "$SPOTIFY_URL" '^https?://[]A-Za-z0-9._:[-]+$' || fail "SPOTIFY_URL isn't a plain address (got: $(safe_url "$SPOTIFY_URL"))"
+
 # ---------- the service (/api/) ----------
 
 NODE_BIN="${NODE_BIN:-node}"
@@ -568,6 +582,7 @@ CONF
     if [ "$MB" = true ]; then add_config "musicbrainz: \"$MB_KIND\""; fi
     add_config 'devices: true'
     if [ "$SHARING" = true ]; then add_config 'sharing: true'; fi
+    if [ "$SPOTIFY" = true ]; then add_config 'spotify: true'; fi
     if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
 else
     echo 'location ^~ /api/ { return 404; }' >"$API_CONF"
@@ -576,12 +591,14 @@ else
     CAST=false
     MB=false
     SHARING=false
+    SPOTIFY=false
 fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
 if [ "$SHARING" = true ]; then say "shared playlists are kept in $DATA_DIR"; fi
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi
+if [ "$SPOTIFY" = true ]; then say "importing from Spotify is on: playlists are read from Spotify's public pages"; fi
 
 printf 'window.PW_CONFIG = { %s };\n' "$CONFIG" >"$HTML_DIR/config.js"
 
@@ -638,6 +655,8 @@ if [ "$SERVICE" = true ]; then
   "devices": $SERVICE,
   "sharing": $SHARING,
   "dataDir": "$(json "$DATA_DIR")",
+  "spotify": $SPOTIFY,
+  "spotifyUrl": "$(json "$SPOTIFY_URL")",
   "debug": $DEBUG_ON,
   "aiAuth": "$AI_AUTH",
   "ollamaUrl": "$([ "$AI_ON" = true ] && json "${OLLAMA_URL%/}")",
@@ -692,7 +711,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  SPOTIFY_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.

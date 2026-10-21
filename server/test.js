@@ -10,6 +10,7 @@ import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './
 import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic } from './musicbrainz.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
+import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -951,4 +952,151 @@ test('shared playlists: kept in a file only the service can read, without anyone
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------- Spotify import ----------
+
+const SP_ID = '37i9dQZF1DXcBWIGoYBM5M';
+const spTrack = (n, extra = {}) => ({ uri: `spotify:track:${String(n).padStart(22, 'x')}`, title: `Song ${n}`, subtitle: `Artist ${n}, Guest`, duration: 200000 + n, isPlayable: true, ...extra });
+const spEntity = (tracks, extra = {}) => ({ type: 'playlist', name: 'Road trip', uri: `spotify:playlist:${SP_ID}`, subtitle: 'Dan', trackList: tracks, ...extra });
+const nextPage = (e) =>
+  `<!doctype html><html><head><title>x</title></head><body><div id="root"></div><script src="https://embed-cdn.spotifycdn.com/x.js"></script>` +
+  `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { state: { data: { entity: e } } } } })}</script></body></html>`;
+const statePage = (e) => `<html><body><script id="initial-state" type="text/plain">\n${Buffer.from(JSON.stringify({ data: { entity: e } })).toString('base64')}\n</script></body></html>`;
+const resourcePage = (e) => `<html><body><script id="resource" type="text/plain">${Buffer.from(JSON.stringify(e)).toString('base64')}</script></body></html>`;
+const otherPage = (e) => `<html><body><script type="application/json">${JSON.stringify({ deep: { inside: [{ x: 1 }, { playlist: e }] } })}</script></body></html>`;
+
+test('Spotify: a playlist from its link, URI or id, and nothing else', () => {
+  for (const ok of [
+    `https://open.spotify.com/playlist/${SP_ID}?si=abc123&pt=x`,
+    `https://open.spotify.com/intl-de/playlist/${SP_ID}`,
+    `https://open.spotify.com/intl-pt-BR/playlist/${SP_ID}/`,
+    `http://open.spotify.com/embed/playlist/${SP_ID}`,
+    `https://play.spotify.com/user/dan/playlist/${SP_ID}`,
+    `spotify:playlist:${SP_ID}`,
+    `spotify:user:dan:playlist:${SP_ID}`,
+    `  ${SP_ID}  `,
+  ]) {
+    assert.equal(playlistId(ok), SP_ID, ok);
+  }
+  for (const no of [
+    `https://open.spotify.com/album/${SP_ID}`,
+    `https://evil.example/playlist/${SP_ID}`,
+    `https://open.spotify.com.evil.example/playlist/${SP_ID}`,
+    `https://user:pw@open.spotify.com/playlist/${SP_ID}`,
+    `ftp://open.spotify.com/playlist/${SP_ID}`,
+    `https://open.spotify.com/playlist/${SP_ID}/../../etc`,
+    `https://open.spotify.com/playlist/short`,
+    'javascript:alert(1)',
+    `${SP_ID}x`,
+    'x'.repeat(600),
+    '',
+    null,
+  ]) {
+    assert.equal(playlistId(no), null, String(no));
+  }
+  assert.equal(shortCode('https://spotify.link/AbC123xyz'), 'AbC123xyz');
+  assert.equal(shortCode('http://spotify.link/AbC123xyz'), null);
+  assert.equal(shortCode('https://spotify.link.evil.example/AbC123xyz'), null);
+  assert.equal(shortCode('https://spotify.link/a/b'), null);
+});
+
+test('Spotify: the playlist is found in each shape its page has had, and nothing that isn\'t one', () => {
+  const e = spEntity([spTrack(1), spTrack(2)]);
+  for (const page of [nextPage(e), statePage(e), resourcePage(e), otherPage(e)]) {
+    assert.deepEqual(embedPlaylist(page)?.trackList?.map((t) => t.title), ['Song 1', 'Song 2']);
+  }
+  assert.equal(embedPlaylist(nextPage({ type: 'track', name: 'One song', uri: 'spotify:track:x' })), null);
+  assert.equal(embedPlaylist('<html><body><script>window.x = 1</script><p>no data</p></body></html>'), null);
+  assert.equal(embedPlaylist('<script id="__NEXT_DATA__">{ broken'), null);
+  assert.equal(embedPlaylist(''), null);
+});
+
+test('Spotify: tracks come out as plain text and numbers, and only tracks', () => {
+  assert.deepEqual(trackOf(spTrack(1)), { title: 'Song 1', artist: 'Artist 1, Guest', duration: 200001 });
+  assert.deepEqual(trackOf({ uri: 'spotify:track:a', title: 'Two', artists: [{ name: 'Tyler, The Creator' }, { name: 'Kali Uchis' }], album: { name: 'Flower Boy' }, duration: { totalMilliseconds: 1234 } }), {
+    title: 'Two',
+    artist: 'Tyler, The Creator, Kali Uchis',
+    artists: ['Tyler, The Creator', 'Kali Uchis'],
+    album: 'Flower Boy',
+    duration: 1234,
+  });
+  assert.equal(trackOf({ uri: 'spotify:episode:a', title: 'A podcast' }), null);
+  assert.equal(trackOf({ uri: 'spotify:track:a', title: '' }), null);
+  assert.equal(trackOf('nope'), null);
+  const odd = trackOf({ title: `Line one\nline two\u0000 x${'y'.repeat(400)}`, subtitle: 42, duration: -5 });
+  assert.equal(odd.title.length, 300);
+  assert.match(odd.title, /^Line one line two x/);
+  assert.equal(odd.artist, '');
+  assert.equal(odd.duration, undefined);
+  assert.equal(trackOf({ title: 'Long', duration: 49 * 3600 * 1000 }).duration, undefined);
+  assert.equal(trackOf({ uri: 'spotify:local:a:b:c:1', title: 'A local file' }).title, 'A local file');
+});
+
+// A stand-in for Spotify: answers by path, and remembers what was asked.
+function fakeSpotify(routes) {
+  const asked = [];
+  const fetchImpl = async (url, opts) => {
+    asked.push({ url, opts });
+    const r = routes[new URL(url).pathname] ?? { status: 404, body: 'Not found' };
+    if (r.throws) throw new Error(r.throws);
+    return new Response(r.body ?? '', { status: r.status ?? 200, headers: r.headers ?? { 'Content-Type': 'text/html' } });
+  };
+  return { asked, fetchImpl };
+}
+
+test('Spotify: a public playlist is read from its page at Spotify\'s own address, and kept a while', async () => {
+  const { asked, fetchImpl } = fakeSpotify({ [`/embed/playlist/${SP_ID}`]: { body: nextPage(spEntity([spTrack(1), spTrack(2, { uri: 'spotify:episode:x' }), spTrack(3)])) } });
+  const sp = new Spotify({ base: 'https://spotify.test', version: '0.18.0', fetchImpl });
+  const pl = await sp.playlist(SP_ID);
+  assert.deepEqual(pl, {
+    id: SP_ID,
+    name: 'Road trip',
+    owner: 'Dan',
+    tracks: [
+      { title: 'Song 1', artist: 'Artist 1, Guest', duration: 200001 },
+      { title: 'Song 3', artist: 'Artist 3, Guest', duration: 200003 },
+    ],
+    capped: false,
+  });
+  assert.equal(asked[0].url, `https://spotify.test/embed/playlist/${SP_ID}`);
+  assert.equal(asked[0].opts.redirect, 'manual');
+  assert.match(asked[0].opts.headers['User-Agent'], /^plexamp-web\/0\.18\.0 /);
+  assert.equal(asked[0].opts.headers.Cookie, undefined);
+  await sp.playlist(SP_ID);
+  assert.equal(asked.length, 1, 'kept for a while');
+  await assert.rejects(sp.playlist('../../etc/passwd'), (e) => e instanceof SpotifyError && e.status === 400);
+  // As many as the page lists: there may be more.
+  const many = fakeSpotify({ [`/embed/playlist/${SP_ID}`]: { body: statePage(spEntity(Array.from({ length: SPOTIFY_LIMITS.shown }, (_, i) => spTrack(i)))) } });
+  assert.equal((await new Spotify({ base: 'https://spotify.test', fetchImpl: many.fetchImpl }).playlist(SP_ID)).capped, true);
+});
+
+test('Spotify: private, missing, changed or unreachable pages each say so, and redirects stay at Spotify', async () => {
+  const say = async (route, expect) => {
+    const { fetchImpl } = fakeSpotify({ [`/embed/playlist/${SP_ID}`]: route, '/elsewhere': { body: nextPage(spEntity([spTrack(1)])) } });
+    await assert.rejects(new Spotify({ base: 'https://spotify.test', fetchImpl }).playlist(SP_ID), (e) => e instanceof SpotifyError && e.status === expect.status && expect.says.test(e.message));
+  };
+  await say({ status: 404 }, { status: 404, says: /no public playlist/ });
+  await say({ status: 429 }, { status: 503, says: /slow down/ });
+  await say({ status: 500 }, { status: 502, says: /answered 500/ });
+  await say({ body: '<html><body>Something else entirely</body></html>' }, { status: 502, says: /changed the page/ });
+  await say({ throws: 'ECONNREFUSED' }, { status: 502, says: /couldn’t be reached/ });
+  await say({ status: 302, headers: { Location: 'https://evil.example/elsewhere' } }, { status: 502, says: /redirect elsewhere/ });
+  await say({ body: `<html><body><script type="application/json">${'x'.repeat(SPOTIFY_LIMITS.bytes + 10)}</script></body></html>` }, { status: 502, says: /bigger than expected/ });
+  // Within Spotify's own address, a redirect is followed.
+  const { asked, fetchImpl } = fakeSpotify({ [`/embed/playlist/${SP_ID}`]: { status: 301, headers: { Location: '/elsewhere' } }, '/elsewhere': { body: nextPage(spEntity([spTrack(1)])) } });
+  assert.equal((await new Spotify({ base: 'https://spotify.test', fetchImpl }).playlist(SP_ID)).tracks.length, 1);
+  assert.deepEqual(asked.map((a) => a.url), [`https://spotify.test/embed/playlist/${SP_ID}`, 'https://spotify.test/elsewhere']);
+});
+
+test('Spotify: a short link from the share sheet leads to its playlist', async () => {
+  const { fetchImpl } = fakeSpotify({
+    '/AbC123xyz': { status: 307, headers: { Location: `https://open.spotify.com/playlist/${SP_ID}?si=1` } },
+    '/InPage1234': { body: `<html><a href="https://open.spotify.com/playlist/${SP_ID}?si=2">Open</a></html>` },
+  });
+  const sp = new Spotify({ shortBase: 'https://short.test', fetchImpl });
+  assert.equal(await sp.resolveShort('https://spotify.link/AbC123xyz'), SP_ID);
+  assert.equal(await sp.resolveShort('https://spotify.link/InPage1234'), SP_ID);
+  assert.equal(await sp.resolveShort('https://spotify.link/Nothing123'), null);
+  assert.equal(await sp.resolveShort('https://example.com/AbC123xyz'), null);
 });

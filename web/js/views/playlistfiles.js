@@ -4,7 +4,7 @@
 import { app } from '../state.js';
 import { navigate, describeError, popOverlay, refresh, parseHash } from '../router.js';
 import { h, sheet, toast, askText, fmt, download, fileDate } from '../ui.js';
-import { copyText } from '../missing.js';
+import { copyText, noteMissing } from '../missing.js';
 import { refreshLists } from '../editing.js';
 import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine, entryWhere, entryText, entriesCsv } from '../playlistio.js';
 
@@ -161,8 +161,10 @@ function choosePlaylists(list, have) {
   });
 }
 
-// Makes each, saying how it goes, and then what was found.
-function runImport(jobs) {
+// Makes each, saying how it goes, and then what was found. `remember`:
+// what isn't found goes on Missing tracks ({ via, from: what it was in }),
+// and what is comes off it.
+export function runImport(jobs, { remember = null } = {}) {
   const ctrl = new AbortController();
   const status = h('p.ask-message.import-status', { role: 'status' }, 'Looking for the tracks…');
   const results = h('div.import-results');
@@ -193,6 +195,12 @@ function runImport(jobs) {
           signal: ctrl.signal,
           onProgress: (n, of) => (status.textContent = `${lead}looking for the tracks… ${fmt.number(n)} of ${fmt.number(of)}`),
         });
+        if (remember) {
+          const gone = new Set(r.missing);
+          const song = (e) => ({ kind: 'track', artist: e.artist || e.albumArtist || '', title: e.title });
+          noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.title, { via: remember.via });
+          r.remembered = r.missing.length;
+        }
         done.push({ job, ...r });
         if (r.playlist) made += 1;
       } catch (err) {
@@ -216,6 +224,17 @@ function runImport(jobs) {
 
 const SHOWN = 200;
 
+// "They're on Missing tracks", where what wasn't found went there.
+const rememberedNote = (r) =>
+  r.remembered
+    ? h(
+        'p.import-remembered',
+        null,
+        `${r.remembered === 1 ? 'It’s' : 'They’re'} on Missing tracks now, to go and find. `,
+        h('button.link-btn', { type: 'button', onclick: () => navigate('/settings/missing') }, 'See Missing tracks'),
+      )
+    : null;
+
 function resultRow(r) {
   const title = r.job.title;
   if (r.error) return h('div.import-result.warn', null, h('div.import-result-title', null, title), h('div.import-result-sub', null, describeError(r.error)));
@@ -225,6 +244,7 @@ function resultRow(r) {
       null,
       h('div.import-result-title', null, title),
       h('div.import-result-sub', null, r.missing.length ? `None of its ${fmt.count(r.missing.length, 'track is', 'tracks are')} in ${where()}, so it wasn’t made.` : 'It has no tracks, so it wasn’t made.'),
+      rememberedNote(r),
     );
   }
   const of = r.found + r.missing.length;
@@ -267,5 +287,6 @@ function resultRow(r) {
           ),
         )
       : null,
+    rememberedNote(r),
   );
 }

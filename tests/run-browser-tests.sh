@@ -62,7 +62,7 @@ mock pwb-ollama2 11435 mock-ollama.py --port 11435 --reject-think --quiet
 TV=PLEX_TV_URL=http://pwb-plex:32400
 docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e OLLAMA_URL=http://pwb-ollama:11434 -e OLLAMA_MODEL=llama3.1:8b \
-    -e MUSICBRAINZ_URL=http://pwb-plex:32400 "$IMAGE" >/dev/null
+    -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pwb-plex:32400 "$IMAGE" >/dev/null
 docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 -e "$TV" \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 docker run -d --name pwb-web3 --network "$NET" -p 127.0.0.1:8083:80 -e "$TV" \

@@ -41,6 +41,7 @@ All optional, as environment variables on the container (on Proxmox: `pct exec <
 | `OLLAMA_URL`, `OLLAMA_MODEL` | An [Ollama](https://ollama.com) server, and its model, for AI playlists and the AI DJ, shared with everyone who uses the player. |
 | `MUSICBRAINZ_URL` | `https://musicbrainz.org` (or your own mirror), to check AI suggestions are real songs. Not set: nothing goes to MusicBrainz. |
 | `PLAY_TOGETHER`, `CASTING`, `PLAYLIST_SHARING` | `false` turns off Play Together, Play on with Plex players (for the server's owner, with `PLEX_SERVER_URL`), or shared playlists. |
+| `SPOTIFY_IMPORT` | `true` turns on making a playlist from a Spotify playlist's link, read from Spotify's public page for it (off unless set: see [docs/configuration.md](docs/configuration.md)). |
 | `DISABLE_WEBSOCKETS` | `true` for networks that block WebSockets. |
 | `DEBUG` | `true` writes extra detail to the container log, with tokens removed. |
 
@@ -50,7 +51,7 @@ Every setting, and how the app reaches your server: [docs/configuration.md](docs
 
 - **Browse and search** your library: artists, albums, genres, moods, decades, collections, with live search that narrows word by word.
 - **Now Playing** with a waveform from your server's loudness analysis, ratings that save to Plex, Up next, gapless playback and Smart crossfades.
-- **Playlists and collections**: make and edit them, sort them, change their pictures, export them to a file and import them again.
+- **Playlists and collections**: make and edit them, sort them, change their pictures, export them to a file and import them again, or bring one over from Spotify by its link (if you turn that on).
 - **Shared playlists** with your Plex friends, kept the same for everyone, and **Play Together**, to listen in sync with them.
 - **Your devices** share what's playing: control your computer from your phone, or move the music to the device in your hand.
 - **Play on** Plexamp and other Plex players on your network, or AirPlay and Google Cast speakers.

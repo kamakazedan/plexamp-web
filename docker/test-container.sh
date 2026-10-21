@@ -92,7 +92,7 @@ OLLAMA_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}
 docker run -d --name pw-web --network "$NET" --add-host "ollama.box:$OLLAMA_IP" -e "$TV" \
     -e PLEX_SERVER_URL=http://pw-plex:32400 -e DISABLE_WEBSOCKETS=true \
     -e OLLAMA_URL=http://ollama.box:11434 -e OLLAMA_MODEL=llama3.1:8b \
-    -e MUSICBRAINZ_URL=http://pw-plex:32400 "$IMAGE" >/dev/null
+    -e MUSICBRAINZ_URL=http://pw-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pw-plex:32400 "$IMAGE" >/dev/null
 wait_http pw-web http://pw-web/
 wait_service pw-web
 W=http://pw-web
@@ -185,6 +185,18 @@ contains "MusicBrainz: says which are real, unknown, or albums" '{"results":["re
 MB_SEEN="$(cb 'http://pw-plex:32400/__mock/musicbrainz?X-Plex-Token=t')"
 contains "MusicBrainz: asks as this app, with its version" '"plexamp-web/' "$MB_SEEN"
 contains "MusicBrainz: ...and where to find it" ' ( https://github.com/kamakazedan/plexamp-web )' "$MB_SEEN"
+
+# Spotify import (SPOTIFY_IMPORT): a public playlist, read from Spotify's
+# page for it (the mock's here), for people who can use the server.
+SPQ='{"link":"https://open.spotify.com/playlist/mockRoadTrip0000000001?si=x"}'
+contains "Spotify: in config.js when it's on" "spotify: true" "$(cb $W/config.js)"
+contains "Spotify: the log says it's on, and how it works" "importing from Spotify is on: playlists are read from Spotify's public pages" "$(docker logs pw-web 2>&1)"
+expect "Spotify: needs a sign-in" 401 "$(c -H "$JSON" -X POST -d "$SPQ" $W/api/spotify/playlist)"
+expect "Spotify: Plex account without access to the server refused" 403 "$(c -H 'X-Plex-Token: t3' -H "$JSON" -X POST -d "$SPQ" $W/api/spotify/playlist)"
+expect "Spotify: only POST" 405 "$(c -H 'X-Plex-Token: t2' $W/api/spotify/playlist)"
+contains "Spotify: the playlist's name and tracks" '"name":"Road trip classics","owner":"Dan","tracks":[{"title":' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d "$SPQ" $W/api/spotify/playlist)"
+expect "Spotify: a private playlist says so" 404 "$(c -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"link":"spotify:playlist:mockPrivate00000000004"}' $W/api/spotify/playlist)"
+expect "Spotify: only Spotify's own links (nothing else is fetched)" 400 "$(c -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"link":"http://pw-plex:32400/identity"}' $W/api/spotify/playlist)"
 
 contains "service: health" '"together":true,"cast":true,"devices":true,"sharing":true' "$(cb $W/api/health)"
 expect "service: internal checks can't be called from outside" 404 "$(c -H 'X-Plex-Token: t' $W/api/internal/ai-auth)"
@@ -284,6 +296,7 @@ expect "defaults: Play Together, your devices and shared playlists, nothing else
 contains "defaults: Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner)" "Play on with Plex players needs PLEX_SERVER_URL" "$(docker logs pw-web2 2>&1)"
 expect "defaults: ...so the service has no players for anyone" 404 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/cast/players)"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
+expect "defaults: no Spotify import (SPOTIFY_IMPORT isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"link":"spotify:playlist:mockRoadTrip0000000001"}' http://pw-web2/api/spotify/playlist)"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
 expect "defaults: Play Together needs a sign-in" 401 "$(c http://pw-web2/api/together/me)"
@@ -462,6 +475,8 @@ bad "rejects a model name with a line break in it (it goes into config.js)" "OLL
 bad "rejects an NGINX_LOG_PORT that isn't a port" "NGINX_LOG_PORT must be a port number" -e 'NGINX_LOG_PORT=5140,"x":1'
 bad "rejects a MusicBrainz address without http://" "MUSICBRAINZ_URL must start with http://" -e MUSICBRAINZ_URL=musicbrainz.org
 bad "rejects a MusicBrainz address with a password in it" "MUSICBRAINZ_URL has an invalid host or port" -e 'MUSICBRAINZ_URL=http://me:secret@mb.box:5000'
+bad "rejects a SPOTIFY_IMPORT that isn't true or false" "SPOTIFY_IMPORT: expected true or false" -e SPOTIFY_IMPORT=sometimes
+bad "rejects a SPOTIFY_URL with a path in it" "SPOTIFY_URL isn't a plain address" -e SPOTIFY_IMPORT=true -e 'SPOTIFY_URL=http://spotify.box/x'
 docker rm -f pw-bad >/dev/null 2>&1 || true
 docker run -d --name pw-bad -e 'PLEX_SERVER_URL=http://user:hunter2@plex.box:32400' "$IMAGE" >/dev/null
 sleep 3

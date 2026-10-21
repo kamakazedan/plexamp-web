@@ -19,11 +19,12 @@ If the repository's **Security** tab offers **Report a vulnerability**, use that
 - **Your library and listening.** Requests go from your browser to your Plex server. Plays are reported to Plex if **Sync recent plays** is on.
 - **Missing tracks.** With **Show missing tracks** on (Settings › AI), the songs and artists AI playlists suggest that your library doesn't have are kept in the browser on that device, for each Plex server, with what each was suggested for, until you clear them or sign out. Nothing else gets them, unless you download, copy or share the list, and that leaves out what you asked the AI for.
 - **MusicBrainz checks**, only if the container is given a MusicBrainz to ask (`MUSICBRAINZ_URL`). Then the names an AI playlist suggests that your library doesn't have go to the container, which looks them up there. See [MusicBrainz checks](#musicbrainz-checks).
+- **Spotify imports**, only if the container's `SPOTIFY_IMPORT` is on. A Spotify playlist's link goes to the container, which reads that playlist from Spotify's public page for it; only the playlist's id goes to Spotify. Its tracks are then looked for in your library from the browser, and those not found go on the device's Missing tracks. See [Spotify imports](#spotify-imports).
 - **Playlist files.** A playlist you export, or a backup of all of yours, is a file on your device with each track's title, artist, album, number and length, and Plex's ids for it. Nothing about the server: no addresses, file paths or tokens. Importing one reads it in the browser only, and every field is checked and kept to plain text and numbers.
 - **Shared playlists** are kept by the container's service: titles, tracks (by their ids on the server), and the Plex names and ids of who shares them with whom. No tokens. See [Shared playlists](#shared-playlists).
 - **Pictures you upload** for a playlist or collection are redrawn smaller in the browser first, so what a photo carries besides the picture (where it was taken, the camera) doesn't go with it, and go to your Plex server only.
 - **The container** has no database. It writes only its start-up configuration, and shared playlists, in one file in `/data` that only its service can read. Play Together sessions, and what your devices are playing, are in memory only. The service never stores tokens: it keeps short-lived SHA-256 hashes of them as cache keys, so it doesn't ask plex.tv on every request.
-- **No outside code or tracking.** No analytics, no third-party scripts, and hls.js is bundled into the image. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and Ollama if you set up your own. The container contacts only plex.tv, your Plex server, the shared Ollama and the MusicBrainz you set, if you set them.
+- **No outside code or tracking.** No analytics, no third-party scripts, and hls.js is bundled into the image. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and Ollama if you set up your own. The container contacts only plex.tv, your Plex server, the shared Ollama and the MusicBrainz you set, if you set them, and Spotify (`open.spotify.com`, and `spotify.link` for short links) if you turn on `SPOTIFY_IMPORT`.
 - **Signing out** clears everything kept for you on that device: your sign-in, the queue, lists such as missing tracks, and the settings that are yours rather than the device's (anything for the AI, the player's name, Home layouts). The page then loads afresh, so nothing of yours is left in it, other tabs signed in sign out too, and the browser is asked to forget the artwork it kept from the player (over HTTPS; see [Remaining risks](#remaining-risks)).
 
 ## Safeguards
@@ -79,6 +80,14 @@ Browsers can't send commands to a Plex player on your network, so the service pa
 - **For people who can use your Plex server**, as the shared AI model is.
 - **Searches it builds itself**, with each name quoted, and answers reduced to "known", "an album" or "not known".
 - **Limited**: 10 names a request, 30 requests a minute each, a few at a time. musicbrainz.org is asked at most once a second for everyone (its rule). Answers are kept in memory for a week.
+
+### Spotify imports
+
+- **Off unless you turn it on** (`SPOTIFY_IMPORT=true`). Spotify's API only gives a playlist's tracks to the account that owns it, so the container reads the page Spotify shows anyone for the playlist (its embed player) instead. Spotify's terms don't allow reading it like that, which is why it's off to begin with.
+- **Only the playlist's id goes to Spotify**, from the container: the link is checked to be an `open.spotify.com` playlist link, a `spotify:playlist:` URI or a `spotify.link` short link, and the page is always fetched from Spotify's own address with that id in it, so a link can't make the container fetch anything else. A short link is followed to Spotify's address only. No tokens, cookies or anything about you or your library go to Spotify, and your browser never contacts it.
+- **For people who can use your Plex server**, as the shared AI model is (anyone signed in to Plex without `PLEX_SERVER_URL`).
+- **What's read is bounded**: a 15-second limit, at most 5 MB of page, redirects followed only within Spotify's address, and only the playlist's name, its maker's name and each track's title, artists, album and length come out of it, as plain text and numbers. Pages are kept in memory for 10 minutes.
+- **Limited**: 10 playlists a minute each, 60 a minute for everyone, 4 at once.
 
 ### Shared playlists
 
@@ -136,6 +145,7 @@ These come with how the player works:
 - **hls.js** is checked against the npm registry's checksum, as it's downloaded. npm doesn't let a version be published twice.
 - **Debug mode accepts log lines from anyone who can open the player** (a limited number a minute), so it can fill the log with noise while it's on.
 - **Wide connection rules.** The content security policy has to allow connections, images and audio from any address, because Plex servers and Ollama can be anywhere.
+- **Spotify imports read a page, not an API** (when `SPOTIFY_IMPORT` is on). Spotify's terms don't allow it, so it's for whoever runs the player to decide, and when Spotify changes the page the import stops working (or, at worst, reads names wrongly: they're only ever plain text). Spotify sees the container's address asking for the playlists people import.
 - **Whoever runs the container is trusted.** They control the code your browser runs, and the service sees your token when it checks who you are, and what you play while your devices share playback. That's true of any web app you open.
 
 ## Reviews

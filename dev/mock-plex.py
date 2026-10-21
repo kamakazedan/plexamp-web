@@ -1064,6 +1064,58 @@ def server_resource(token, base):
     }
 
 
+# ---------------------------------------------------------------- Spotify
+
+# Spotify's public page for a playlist (its embed player), as the container's
+# Spotify import reads it (point it here with SPOTIFY_URL): the playlist's
+# name, who made it, and up to 100 tracks, in the JSON the page carries. Made
+# from this library's tracks as Spotify names them ("Song - Remastered 2011",
+# "Song (feat. Someone)", "Artist, Guest"), with a few the library doesn't
+# have and a podcast episode. Any other playlist answers 404, as Spotify does
+# for a private or deleted one.
+SPOTIFY_IDS = {'road': 'mockRoadTrip0000000001', 'late': 'mockLateNight000000002', 'hundred': 'mockHundred00000000003'}
+
+
+def spotify_playlist(pid):
+    own = [t for t in tracks if not t.get('originalTitle') and t['type'] == 'track']
+    seen, lib = set(), []
+    for t in own:  # one of each title, so each is plain to find
+        if t['title'].lower() not in seen:
+            seen.add(t['title'].lower())
+            lib.append(t)
+
+    def sp(t=None, title=None, artist=None):
+        title = title or t['title']
+        return {'uri': f'spotify:track:{hashlib.sha1(title.encode()).hexdigest()[:22]}', 'uid': 'x', 'title': title,
+                'subtitle': artist or t['grandparentTitle'], 'duration': (t or {}).get('duration', 201000),
+                'isPlayable': True, 'isExplicit': False}
+    if pid == SPOTIFY_IDS['road']:
+        a = lib[0]['grandparentTitle']
+        tl = [sp(lib[0], title=f"{lib[0]['title']} - Remastered 2011"), sp(lib[1], artist=f"{lib[1]['grandparentTitle']}, Guest Singer"),
+              sp(lib[2], title=f"{lib[2]['title']} (feat. Someone Else)")] + [sp(t) for t in lib[3:8]] + [
+              {'uri': 'spotify:episode:4rOoJ6Egrf8K2IrywzwOMk', 'title': 'A podcast episode', 'subtitle': 'Some Show', 'duration': 3600000},
+              sp(title='Imaginary Song', artist='Nobody Known'), sp(title='Another Missing One', artist='Ghost Band, Someone'),
+              sp(title='Not On Any Album', artist=a)]
+        return 'next', {'type': 'playlist', 'name': 'Road trip classics', 'uri': f'spotify:playlist:{pid}', 'subtitle': 'Dan', 'trackList': tl}
+    if pid == SPOTIFY_IDS['late']:
+        return 'state', {'type': 'playlist', 'name': 'Night drive mix', 'uri': f'spotify:playlist:{pid}', 'subtitle': 'Sam', 'trackList': [sp(t) for t in lib[8:12]]}
+    if pid == SPOTIFY_IDS['hundred']:
+        return 'next', {'type': 'playlist', 'name': 'A hundred songs', 'uri': f'spotify:playlist:{pid}', 'subtitle': 'Dan',
+                        'trackList': [sp(lib[i % len(lib)]) for i in range(100)]}
+    return None, None
+
+
+def spotify_page(shape, entity):
+    if shape == 'state':
+        blob = base64.b64encode(json.dumps({'data': {'entity': entity}}).encode()).decode()
+        data = f'<script id="initial-state" type="text/plain">{blob}</script>'
+    else:
+        blob = json.dumps({'props': {'pageProps': {'state': {'data': {'entity': entity}}}}}).replace('<', '\\u003c')
+        data = f'<script id="__NEXT_DATA__" type="application/json">{blob}</script>'
+    return (f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>{entity["name"]}</title></head><body>'
+            f'<div id="__next"></div><script src="https://embed-cdn.spotifycdn.com/_next/static/chunks/main.js"></script>{data}</body></html>')
+
+
 def friends_xml(token):
     from xml.sax.saxutils import quoteattr
     rows = []
@@ -1514,6 +1566,11 @@ class Handler(BaseHTTPRequestHandler):
         token = q.get('X-Plex-Token', [''])[0] or self.headers.get('X-Plex-Token', '')
         if p.startswith('/api/'):
             return self.plex_tv(p, token)
+        if p.startswith('/embed/playlist/'):  # Spotify's public page for a playlist (see spotify_playlist)
+            shape, entity = spotify_playlist(p.rsplit('/', 1)[-1])
+            if not entity:
+                return self.send_text('<!DOCTYPE html><html><body>Page not found</body></html>', 'text/html', 404)
+            return self.send_text(spotify_page(shape, entity), 'text/html; charset=utf-8')
         if p == '/identity':
             # Answered without signing in, like a real server; and as on one,
             # a page on another address only gets to read the answer when the

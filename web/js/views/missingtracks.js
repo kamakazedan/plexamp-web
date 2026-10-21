@@ -1,5 +1,6 @@
 // Settings › AI › Missing tracks: the songs and artists AI playlists
-// suggested that the library doesn't have, to export and go looking for.
+// suggested, and the tracks of playlists imported from Spotify, that the
+// library doesn't have, to export and go looking for.
 import { app, on } from '../state.js';
 import { describeError } from '../router.js';
 import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction, download, fileDate } from '../ui.js';
@@ -9,6 +10,7 @@ import {
   clearMissing,
   checkMissingAgain,
   checkMissingOnMusicBrainz,
+  askable,
   restoreMissing,
   missingCsv,
   missingText,
@@ -25,7 +27,7 @@ export function missingTracksView({ el, onDispose }) {
     h(
       'p.lede',
       null,
-      `Songs and artists that AI playlists suggested but ${server} doesn’t have, kept on this device so you can go and find them (each server has a list of its own). ` +
+      `Songs and artists that AI playlists suggested, and tracks of playlists imported from Spotify, that ${server} doesn’t have, kept on this device so you can go and find them (each server has a list of its own). ` +
         (mbOn()
           ? 'AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
           : 'AI models sometimes suggest songs that don’t exist, so check before you go looking.'),
@@ -50,6 +52,12 @@ export function missingTracksView({ el, onDispose }) {
     const libraries = new Set(list.map((m) => m.library));
     const where = (m) => (libraries.size > 1 && m.library ? ` · ${m.library}` : '');
     const times = (m) => (m.times > 1 ? `suggested ${m.times} times, last ` : 'suggested ');
+    // Where a track came from: what it was suggested for, or the Spotify
+    // playlist it was in.
+    const told = (m) =>
+      m.via === 'spotify'
+        ? `${m.times > 1 ? `in ${m.times} playlists from Spotify, last “${m.prompt}”` : `in “${m.prompt}” from Spotify`}, ${fmt.ago(m.last)}`
+        : `${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}`;
 
     actions.replaceChildren(
       ...(list.length
@@ -64,7 +72,7 @@ export function missingTracksView({ el, onDispose }) {
               ? button('external', 'Share…', () => navigator.share({ title: 'Missing tracks', text: missingText(list) }).catch(() => {}), '.missing-share')
               : null,
             button('refresh', 'Check again', checkAgain, '.missing-check'),
-            mbOn() && list.some((m) => m.mb !== 'real') ? button('check', 'Check on MusicBrainz', checkOnMusicBrainz, '.missing-mb') : null,
+            mbOn() && list.some(askable) ? button('check', 'Check on MusicBrainz', checkOnMusicBrainz, '.missing-mb') : null,
           ].filter(Boolean)
         : []),
     );
@@ -109,7 +117,7 @@ export function missingTracksView({ el, onDispose }) {
               row({
                 lead: lead('note'),
                 title: m.title,
-                subtitle: [found(m), `${m.artist || 'Unknown artist'} · ${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}${where(m)}`],
+                subtitle: [found(m), `${m.artist || 'Unknown artist'} · ${told(m)}${where(m)}`],
                 right: remove(m),
                 cls: 'missing-row',
               }),

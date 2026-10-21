@@ -185,6 +185,9 @@ PLAYLIST_SHARING=true
 # MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org
 # (the public service) or your own mirror. Empty: no checks.
 MUSICBRAINZ_URL=
+# true: Search › From Spotify makes a playlist from a Spotify playlist's link,
+# read from Spotify's public page for it (see docs/configuration.md).
+SPOTIFY_IMPORT=
 DEBUG=
 ENV
 fi
