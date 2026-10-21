@@ -3,6 +3,14 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.17.1 - 2026-10-21
+
+### Changed
+
+- **No Show all beside a shelf's arrows**: with a mouse, the shelf's title
+  opens the whole list (it's underlined as the pointer goes over it), and
+  the arrows are all there is on the right.
+
 ## 0.17.0 - 2026-10-21
 
 ### Fixed

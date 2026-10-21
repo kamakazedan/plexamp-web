@@ -269,7 +269,7 @@ with sync_playwright() as pw:
         shot(page, 'core-01-home')
         page.wait_for_selector('section[data-section=recentlyAdded] .card')
         check('core: on a touch screen shelves are swiped, and the whole heading opens the list',
-              page.locator('section[data-section=recentlyAdded] a.section-head .chev').count() == 1 and page.locator('.shelf-nav, .shelf-all').count() == 0)
+              page.locator('section[data-section=recentlyAdded] a.section-head .chev').count() == 1 and page.locator('.shelf-nav, .section-link').count() == 0)
         play_first_album_track(page, APP, album=0, track=1)
         check('core: plays a track', player(page, "p.state") == 'playing')
         page.click('.pb-main')
@@ -864,7 +864,7 @@ with sync_playwright() as pw:
 
         # Shelves, with a mouse: ‹ › by the heading scroll them a screenful
         # (‹ once one has moved, › until its end, neither when it all fits),
-        # and the title or Show all opens the whole list.
+        # and the title opens the whole list.
         sec = page.locator('section[data-section=recentlyAdded]')
         sec.locator('.shelf-head').scroll_into_view_if_needed()
         page.wait_for_timeout(300)
@@ -900,12 +900,13 @@ with sync_playwright() as pw:
         fits.locator('.shelf-head').scroll_into_view_if_needed()
         page.wait_for_timeout(300)
         check('shelves: a shelf that fits has neither', not shelf_state(fits)['on'] and not shelf_state(fits)['back'], str(shelf_state(fits)))
-        links = [sec.locator(sel).get_attribute('href') for sel in ('.section-link', '.shelf-all')]
-        check('shelves: the title and Show all open the whole list; the heading itself isn\'t a link',
-              sec.locator('.shelf-head').evaluate('e => e.tagName') == 'DIV' and links[0] == links[1] and 'browse/albums' in (links[0] or ''), str(links))
-        sec.locator('.shelf-all').click()
+        heading = sec.locator('.shelf-head')
+        check('shelves: the title is the link to the whole list, with nothing else beside the arrows',
+              heading.evaluate('e => e.tagName') == 'DIV' and 'browse/albums' in (sec.locator('.section-link').get_attribute('href') or '')
+              and heading.evaluate('e => [...e.children].map((c) => c.className).join(" ")') == 'section-link shelf-nav', heading.evaluate('e => e.outerHTML.slice(0, 300)'))
+        sec.locator('.section-link').click()
         page.wait_for_selector('.grid .card')
-        check('shelves: Show all opens it', page.evaluate('location.hash').startswith('#/browse/albums'), page.evaluate('location.hash'))
+        check('shelves: the title opens it', page.evaluate('location.hash').startswith('#/browse/albums'), page.evaluate('location.hash'))
 
         # Big screens: pages to browse use the whole width (no gap on the
         # right); settings and the like keep to a column in the middle.

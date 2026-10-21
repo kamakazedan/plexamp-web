@@ -307,8 +307,8 @@ export function collapseWhenHidden(head, target) {
 // A section's heading. `href`: the page with all of it. `shelf`: the row
 // under it that scrolls sideways. On a touch screen the shelf is swiped and
 // the whole heading opens the page. With a mouse, ‹ › by the heading scroll
-// the shelf (‹ once it's moved, › until its end), and the title, or Show
-// all, opens the page.
+// the shelf (‹ once it's moved, › until its end), and the title opens the
+// page.
 export function sectionHeader(title, href, extra, shelf) {
   // Non-breaking hyphens keep names like "Hi-Res" together when a heading wraps.
   const text = h('h2', null, String(title).replace(/-/g, '‑'));
@@ -320,7 +320,6 @@ export function sectionHeader(title, href, extra, shelf) {
       null,
       href ? h('a.section-link', { href: `#${href}` }, text) : text,
       extra || null,
-      href ? h('a.shelf-all', { href: `#${href}` }, 'Show all') : null,
       h('div.shelf-nav', null, back, on),
     );
     watchShelf(head, shelf, back, on);

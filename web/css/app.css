@@ -319,8 +319,8 @@ a.section-head:hover .chev {
   transform: translateX(2px);
 }
 
-/* A shelf's heading with a mouse (ui.js sectionHeader): the title and Show
-   all open the whole list, ‹ › scroll the shelf. */
+/* A shelf's heading with a mouse (ui.js sectionHeader): the title opens the
+   whole list, ‹ › scroll the shelf. */
 .section-link {
   display: flex;
   flex: 0 1 auto;
@@ -333,19 +333,6 @@ a.section-head:hover .chev {
 .section-link:hover h2 {
   text-decoration: underline;
   text-underline-offset: 4px;
-}
-
-.shelf-all {
-  flex: none;
-  margin-right: 4px;
-  color: var(--muted);
-  font-size: calc(14px * var(--fs, 1));
-  font-weight: 700;
-  text-decoration: none;
-}
-
-.shelf-all:hover {
-  color: var(--text);
 }
 
 .shelf-nav {
