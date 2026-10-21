@@ -11,7 +11,7 @@
 // plays nothing: transport and queue changes go to that player, and what it
 // does comes back through castUpdate().
 import { app, on } from './state.js';
-import { store, canPlayCodec, canPlayHlsNatively } from './plex.js';
+import { store, canPlayCodec, canPlayHlsNatively, isLossless } from './plex.js';
 import { shuffleArray } from './ui.js';
 import { debugLog } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
@@ -173,6 +173,8 @@ class Player extends EventTarget {
     on('signout', () => this.reset());
     on('settings', (s) => {
       if (!s.playbackSpeed && this.speed !== 1) this.setSpeed(1);
+      // Its button gone, a sleep timer that's set goes too.
+      if (!s.sleepTimer && this.sleepActive) this.setSleep(null);
       this.setupMediaSession();
       this.updateMediaSession();
     });
@@ -321,7 +323,10 @@ class Player extends EventTarget {
     const s = app.server;
     const quality = app.settings.quality;
     const token = this.useMediaToken && this.mediaToken ? this.mediaToken : undefined;
-    const direct = quality === 'original' && !forceTranscode && track.partKey && (!track.codec || canPlayCodec(track.codec));
+    // A lower quality is asked for: tracks already at it or below (a 128 kbps
+    // MP3, say) play as they are; converting them would only use more data.
+    const already = quality !== 'original' && !isLossless(track.codec) && track.bitrate > 0 && track.bitrate <= (Number(quality) || 320);
+    const direct = (quality === 'original' || already) && !forceTranscode && track.partKey && (!track.codec || canPlayCodec(track.codec));
     if (direct) return { url: s.directUrl(track, token), hls: false };
     return { url: s.transcodeUrl(track, quality === 'original' ? 320 : Number(quality) || 320, token), hls: true };
   }

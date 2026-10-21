@@ -548,10 +548,10 @@ async function tracksMatching(filters, n, signal) {
   return shuffled(lists.flat().filter((m) => m.type === 'track')).slice(0, n);
 }
 
-export async function findArtist(name, signal) {
+export async function findArtist(name, signal, section = app.source.sectionKey) {
   const target = norm(name);
   if (!target) return null;
-  const res = await app.server.search(name, app.source.sectionKey, { signal, limit: 6 }).catch(() => null);
+  const res = await app.server.search(name, section, { signal, limit: 6 }).catch(() => null);
   const artists = res?.artist || [];
   return artists.find((a) => norm(a.title) === target) || artists.find((a) => norm(a.title).startsWith(target) || target.startsWith(norm(a.title))) || null;
 }

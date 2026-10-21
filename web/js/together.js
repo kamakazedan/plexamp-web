@@ -336,7 +336,7 @@ class Together extends EventTarget {
     const servers = await listServers(app.auth.token);
     const srv = servers.find((x) => x.id === server.id);
     if (!srv) throw new TogetherError(`You can’t play from ${server.name}. Ask its owner to share their music library with you.`, 403);
-    const conn = await pickConnection(srv, { proxy: proxyUri() });
+    const conn = await pickConnection(srv, { proxy: proxyUri(), prefer: app.settings.route });
     if (!conn) throw new TogetherError(`Can’t reach ${server.name} from this browser.`, 0);
     this.prevSource = src;
     setSource({

@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.14.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.15.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -214,33 +214,56 @@ export async function listServers(token) {
     }));
 }
 
-// How good a route to a server is: lower is better.
-export const CONNECTION_RANK = { local: 0, proxy: 1, remote: 2, relay: 3 };
+// How good a route to a server is (lower is better), for the route chosen
+// in Settings › Connection (app.settings.route):
+//   best (the default): its address on the home network first. Next, this
+//     container's /pms/ proxy, when it fronts this server: it reaches the
+//     server on the home network even when the browser can't, such as when
+//     the router won't look up plex.direct addresses that point into the
+//     home network (DNS rebinding protection), or the browser keeps a page
+//     on the internet from reaching the home network. Then remote addresses,
+//     and the relay is the last resort.
+//   container: this container's proxy first.
+//   direct: the server's own addresses first (the container's proxy before
+//     the relay).
+const ROUTE_RANKS = {
+  best: { local: 0, proxy: 1, remote: 2, relay: 3 },
+  container: { proxy: 0, local: 1, remote: 2, relay: 3 },
+  direct: { local: 0, remote: 1, proxy: 2, relay: 3 },
+};
+export const ROUTE_KINDS = ['local', 'proxy', 'remote', 'relay'];
+export const routeRank = (kind, prefer = 'best') => (ROUTE_RANKS[prefer] || ROUTE_RANKS.best)[kind] ?? 9;
 
-// Probe every connection at once and keep the best one that answers. A local
-// address is best. Next is this container's /pms/ proxy (`proxy`), when it
-// fronts this server: it reaches the server on the home network even when
-// the browser can't, such as when the router won't look up plex.direct
-// addresses that point into the home network (DNS rebinding protection).
-// Then remote addresses, and the relay is the last resort.
-export async function pickConnection(server, { proxy = null, timeout = 6000 } = {}) {
+// Every route to a server, tried at once: [{ uri, kind, ok, ms, why }], `why`
+// saying why one can't be used ('http': a plain http address, which a page
+// served over https can't use; 'timeout'; 'network'; 'status' (Plex
+// answered with an error, `status`); 'other': the proxy leads to another
+// server).
+export async function probeConnections(server, { proxy = null, timeout = 6000 } = {}) {
   const pageIsHttps = location.protocol === 'https:';
-  const candidates = server.connections
-    .filter((c) => !(pageIsHttps && c.protocol === 'http'))
-    .map((c) => ({ uri: c.uri, kind: c.relay ? 'relay' : c.local ? 'local' : 'remote' }));
-  const probe = async (c) => {
-    try {
-      const id = await request(withParams(`${c.uri}/identity`, plexParams(server.token)), { timeout });
-      // The proxy has to lead to this very server.
-      if (c.kind === 'proxy' && id?.MediaContainer?.machineIdentifier !== server.id) return null;
-      return c;
-    } catch {
-      return null;
-    }
-  };
-  if (proxy) candidates.push({ uri: proxy, kind: 'proxy' });
-  const alive = (await Promise.all(candidates.map(probe))).filter(Boolean).sort((a, b) => CONNECTION_RANK[a.kind] - CONNECTION_RANK[b.kind]);
-  return alive[0] || null;
+  const candidates = server.connections.map((c) => ({ uri: c.uri, kind: c.relay ? 'relay' : c.local ? 'local' : 'remote', http: pageIsHttps && c.protocol === 'http' }));
+  if (proxy) candidates.push({ uri: proxy, kind: 'proxy', http: false });
+  return Promise.all(
+    candidates.map(async ({ uri, kind, http }) => {
+      if (http) return { uri, kind, ok: false, why: 'http' };
+      const t0 = performance.now();
+      try {
+        const id = await request(withParams(`${uri}/identity`, plexParams(server.token)), { timeout });
+        // The proxy has to lead to this very server.
+        if (kind === 'proxy' && id?.MediaContainer?.machineIdentifier !== server.id) return { uri, kind, ok: false, why: 'other' };
+        return { uri, kind, ok: true, ms: Math.round(performance.now() - t0) };
+      } catch (err) {
+        if (err?.status) return { uri, kind, ok: false, why: 'status', status: err.status };
+        return { uri, kind, ok: false, why: performance.now() - t0 >= timeout - 100 ? 'timeout' : 'network' };
+      }
+    }),
+  );
+}
+
+// The best route that answers (see ROUTE_RANKS), or null.
+export async function pickConnection(server, { proxy = null, timeout = 6000, prefer = 'best' } = {}) {
+  const alive = (await probeConnections(server, { proxy, timeout })).filter((c) => c.ok).sort((a, b) => routeRank(a.kind, prefer) - routeRank(b.kind, prefer));
+  return alive[0] ? { uri: alive[0].uri, kind: alive[0].kind } : null;
 }
 
 // ---------- normalisers ----------

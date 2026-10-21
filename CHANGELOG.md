@@ -3,6 +3,45 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.15.0 - 2026-10-21
+
+### Added
+
+- **Routes, in Settings › Connection.** Each way this browser can reach
+  your server (on your network, through this container, over the
+  internet, Plex's relay), tried, with how long each took or why it didn't
+  answer, and which one is in use. The connection says why it's the one in
+  use. With `PLEX_SERVER_URL` set, **Route to the server** chooses: the best
+  that answers (as before), always through this container, or straight to
+  the server (through the container only when its own addresses don't
+  answer).
+- **Converted tracks are marked** in Now Playing, by their bitrate. Hover
+  over the mark, or tap it, to see why your server converts the track (the
+  Streaming quality chosen, or a format this browser can't play), with a
+  way to the setting.
+- **Tracks an import didn't find, with their albums.** The list shows each
+  one's album, year, number and length, Copy the list adds the album, and
+  Save as a spreadsheet (CSV) has the lot.
+
+### Changed
+
+- **The sleep timer's button is off to begin with.** Settings › Experience
+  › Player › Sleep timer adds it to the player. A timer that's set goes
+  when it's turned off.
+- **The server this container is set up for is listed once** in
+  Settings › Source: as that server ("also set up for this app") when
+  it's one of yours on plex.tv, rather than again as "Server set up for
+  this app".
+- **Importing looks in every music library on the server**, the one in
+  use first, and last on a track's album, by its number there (for a title
+  written differently, "Song - 2011 Remaster", say).
+- **A track already at the Streaming quality chosen, or lower** (a 128 kbps
+  MP3 with High chosen, say), plays as it is rather than being converted.
+- Going through this container, the app also looks for a better route when
+  it starts (back on your network, say).
+- **Test connection** waits 15 seconds, and through this container says
+  which part didn't answer: the container, or the server behind it.
+
 ## 0.14.0 - 2026-10-21
 
 ### Added

@@ -11,6 +11,7 @@
 import { app } from './state.js';
 import { norm, sameTitle, mapLimit, findArtist } from './ai.js';
 import { saveOrder } from './sorting.js';
+import { toCsv } from './missing.js';
 
 export const FORMAT = 'plexamp-web-playlists';
 const VERSION = 1;
@@ -199,14 +200,51 @@ const best = (e, list) =>
     .map((m) => ({ m, n: likeness(e, m) }))
     .sort((a, b) => b.n - a.n)[0]?.m || null;
 
-// Each entry's track in this library, or null. First by its id on this
+// The music libraries on this server, the one in use first: a playlist can
+// hold tracks from more than one (a hi-res library beside another, say).
+async function musicLibraries(s) {
+  const here = String(app.source.sectionKey);
+  const all = await s
+    .musicSections()
+    .then((list) => list.map((d) => String(d.key)))
+    .catch(() => []);
+  return [here, ...all.filter((k) => k !== here)];
+}
+
+// An album in the library like an entry's: the same title, by its artist
+// (or, if the artist is named differently there, from the same year).
+const sameAlbum = (e, a) =>
+  a?.type === 'album' &&
+  sameTitle(norm(a.title), norm(e.album)) &&
+  ((!e.artist && !e.albumArtist) || sameName(e.albumArtist, a.parentTitle) || sameName(e.artist, a.parentTitle) || (!!e.year && a.year === e.year));
+
+// The entry's track among an album's: the same title, or, if it's named
+// differently there ("Song - 2011 Remaster"), the same disc and number and
+// the same length near enough.
+const onAlbum = (e, tracks) =>
+  tracks.find((m) => sameTitle(norm(m.title), norm(e.title))) ||
+  tracks.find(
+    (m) =>
+      e.index !== undefined &&
+      m.index === e.index &&
+      (e.disc === undefined || (m.parentIndex ?? 1) === e.disc) &&
+      !!e.duration &&
+      !!m.duration &&
+      Math.abs(m.duration - e.duration) <= 5000,
+  ) ||
+  null;
+
+// Each entry's track on this server, or null. First by its id on this
 // server (checked to be the same song: on another server an id means
 // something else), then by Plex's id for the recording, then by its title
-// and artist, the album, length and number choosing between copies.
-// onProgress(done, of).
+// and artist (the album, length and number choosing between copies), and
+// last on its album, by its number there. In every music library on the
+// server, the one in use first. onProgress(done, of).
 export async function matchEntries(entries, { signal, onProgress } = {}) {
   const s = app.server;
-  const sec = app.source.sectionKey;
+  const libraries = await musicLibraries(s);
+  // (Without a library, Plex's search covers them all.)
+  const everywhere = libraries.length > 1 ? undefined : libraries[0];
   const out = entries.map(() => null);
   let done = 0;
   const tick = () => onProgress?.(done, entries.length);
@@ -230,21 +268,37 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
   let guids = true; // until the server shows it doesn't look tracks up by them
   const lookUp = async (e) => {
     if (guids && e.guid?.startsWith('plex://')) {
-      const { items, total } = await s.list(sec, 10, { filters: { guid: e.guid }, size: 5, signal });
-      if (total > 5) guids = false; // it didn't filter by it
-      const hit = items.find((m) => m.guid === e.guid && byArtist(e, m)) || null;
-      if (hit) return hit;
+      for (const sec of libraries) {
+        const { items, total } = await s.list(sec, 10, { filters: { guid: e.guid }, size: 5, signal });
+        if (total > 5) {
+          guids = false; // it didn't filter by it
+          break;
+        }
+        const hit = items.find((m) => m.guid === e.guid && byArtist(e, m)) || null;
+        if (hit) return hit;
+      }
     }
-    const res = await s.search(e.title, sec, { signal, limit: 20 });
+    const res = await s.search(e.title, everywhere, { signal, limit: 20 });
     const hit = best(e, res.track || []);
     if (hit) return hit;
     // A common title: among the artist's own tracks.
-    const artist = await findArtist(e.artist || e.albumArtist, signal);
-    if (!artist) return null;
     const want = norm(e.title);
     const needle = want.split(' ').find((w) => w.length >= 3) || want;
-    const { items } = await s.list(sec, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal });
-    return best(e, items);
+    for (const sec of libraries) {
+      const artist = await findArtist(e.artist || e.albumArtist, signal, sec);
+      if (!artist) continue;
+      const { items } = await s.list(sec, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal });
+      const mine = best(e, items);
+      if (mine) return mine;
+    }
+    // Its album, and its number there.
+    if (!e.album) return null;
+    const found = await s.search(e.album, everywhere, { signal, limit: 10 });
+    for (const album of (found.album || []).filter((a) => sameAlbum(e, a)).slice(0, 3)) {
+      const there = onAlbum(e, await s.children(album.ratingKey));
+      if (there) return there;
+    }
+    return null;
   };
   const rest = entries.map((e, i) => [e, i]).filter(([, i]) => !out[i]);
   await mapLimit(rest, 4, async ([e, i]) => {
@@ -279,6 +333,32 @@ export async function importPlaylist(p, { title = p.title, signal, onProgress } 
 
 // A missing entry, as a line: "Artist — Title".
 export const entryLine = (e) => `${e.artist ? `${e.artist} — ` : ''}${e.title}`;
+
+// Where it's from: "Album, 2019 · disc 2, track 5 · 3:45".
+export function entryWhere(e) {
+  const place = [e.album, e.year].filter(Boolean).join(', ');
+  const number = e.index !== undefined ? `${e.disc > 1 ? `disc ${e.disc}, ` : ''}track ${e.index}` : '';
+  const length = e.duration ? clock(e.duration / 1000) : '';
+  return [place, number, length].filter(Boolean).join(' · ');
+}
+
+// To copy: "Artist — Title — Album (2019)", one to a line.
+export const entryText = (e) => `${entryLine(e)}${e.album ? ` — ${e.album}${e.year ? ` (${e.year})` : ''}` : ''}`;
+
+// The entries as a spreadsheet (CSV).
+export const entriesCsv = (list) =>
+  toCsv(
+    ['Artist', 'Title', 'Album', 'Album artist', 'Year', 'Disc', 'Track', 'Length'],
+    list.map((e) => [e.artist, e.title, e.album, e.albumArtist, e.year ?? '', e.disc ?? '', e.index ?? '', e.duration ? clock(e.duration / 1000) : '']),
+  );
+
+const clock = (sec) => {
+  const t = Math.round(sec);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const ss = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+};
 
 // ---------- changing a playlist from one list of tracks to another ----------
 

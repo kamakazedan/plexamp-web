@@ -1,6 +1,6 @@
 import { app, on, saveSettings, setSource, signOut, proxyUri } from '../state.js';
-import { APP_INFO, PlexServer, listServers, pickConnection, clientId, canPlayCodec, canPlayHlsNatively } from '../plex.js';
-import { navigate, clearViewCache, describeError, dropCached } from '../router.js';
+import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively } from '../plex.js';
+import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
@@ -122,22 +122,33 @@ async function showServers(body) {
   const auth = app.auth;
   const entries = [];
   const proxy = proxyUri();
-  if (proxy) entries.push({ kind: 'proxy', name: 'Server set up for this app', uri: proxy, token: auth.token, connections: [] });
-
-  let servers = [];
   let listError = null;
-  if (!auth.manual) {
-    try {
-      servers = await listServers(auth.token);
-    } catch (err) {
-      listError = err;
-    }
-  }
-  entries.push(...servers.map((s) => ({ ...s, kind: 'discovered' })));
+  // The server this container is set up for (PLEX_SERVER_URL) is usually one
+  // of yours on plex.tv too: then it's listed once, as that one (which goes
+  // through this container when that's the best route: Settings ›
+  // Connection).
+  const [servers, proxied] = await Promise.all([
+    auth.manual
+      ? []
+      : listServers(auth.token).catch((err) => {
+          listError = err;
+          return [];
+        }),
+    proxy
+      ? new PlexServer({ uri: proxy, token: auth.token })
+          .identity({ timeout: 5000 })
+          .then((mc) => mc?.machineIdentifier || null)
+          .catch(() => null)
+      : null,
+  ]);
+  const same = proxied ? servers.find((s) => s.id === proxied) : null;
+  if (proxy && !same) entries.push({ kind: 'proxy', name: 'Server set up for this app', uri: proxy, token: auth.token, connections: [] });
+  entries.push(...servers.map((s) => ({ ...s, kind: 'discovered', setUp: s === same })));
 
+  const whose = (s) => (s.owned ? 'Your server' : s.sharedBy ? `Shared by ${s.sharedBy}` : 'Shared with you');
   const list = h('div.rows');
   for (const s of entries) {
-    const sub = h('span', null, s.kind === 'proxy' ? 'Connects through this container' : s.owned ? 'Your server' : s.sharedBy ? `Shared by ${s.sharedBy}` : 'Shared with you');
+    const sub = h('span', null, s.kind === 'proxy' ? 'Connects through this container' : s.setUp ? `${whose(s)} · also set up for this app` : whose(s));
     const r = row({ onClick: () => connect(s, r, sub, body, servers), lead: h('span.row-icon', null, icon('server', 26)), title: s.name, subtitle: sub, chevron: true });
     if (app.source?.serverId && app.source.serverId === s.id) r.classList.add('is-selected');
     list.append(r);
@@ -189,7 +200,7 @@ async function connect(entry, rowEl, subEl, body, servers) {
     let serverId = entry.id;
     let name = entry.name;
     if (entry.kind === 'discovered') {
-      conn = await pickConnection(entry, { proxy: proxyUri() });
+      conn = await pickConnection(entry, { proxy: proxyUri(), prefer: app.settings.route });
       if (!conn) throw Object.assign(new Error('unreachable'), { unreachable: true });
     } else {
       conn = { uri: entry.uri, kind: entry.kind };
@@ -426,10 +437,126 @@ function liveOptions() {
   ];
 }
 
+// The routes to a server (see plex.js ROUTE_RANKS), as Settings › Connection
+// names them.
+const ROUTE_NAMES = { local: 'On your network', proxy: 'Through this container', remote: 'Over the internet', relay: 'Plex relay (limited speed)' };
+const ROUTE_CHOICES = [
+  ['best', 'Best that answers', 'Straight to the server on your network when this browser can reach it there. Otherwise through this container, then over the internet, then Plex’s relay.'],
+  ['container', 'Through this container', 'Always through this container (which reaches the server at its PLEX_SERVER_URL), while it answers.'],
+  ['direct', 'Straight to the server', 'The server’s own addresses first, on your network or over the internet. Through this container only when they don’t answer.'],
+];
+
+// Why the app reaches the server the way it does.
+function routeNote(src) {
+  if (src.kind === 'proxy') {
+    return src.connections?.length
+      ? `This container is set up for ${src.serverName} too (its PLEX_SERVER_URL), and going through it was the best route from this browser (see Routes).`
+      : 'You chose the server set up for this app, so the app always goes through this container to it.';
+  }
+  if (src.kind === 'local') return 'Straight to the server, on your network.';
+  if (src.kind === 'remote') return 'Straight to the server, over the internet (its address outside your network).';
+  if (src.kind === 'relay') return 'Through Plex’s relay, which is slow: the server’s other addresses didn’t answer from this browser.';
+  return '';
+}
+
+function routeResult(r) {
+  if (r.ok) return `${fmt.number(r.ms)} ms`;
+  return {
+    http: 'Can’t be used here: it’s a plain http address, and this page is https',
+    timeout: 'No answer within 6 seconds',
+    network: 'Didn’t answer this browser',
+    status: `Answered with an error (${r.status})`,
+    other: 'Leads to another server',
+  }[r.why];
+}
+
+const hostOf = (uri) => {
+  try {
+    const u = new URL(uri);
+    return `${u.host}${u.pathname === '/' ? '' : u.pathname}`;
+  } catch {
+    return uri;
+  }
+};
+
+// The Test connection answer, when there's no answer: through this
+// container, whether it's the container or the server behind it.
+async function noAnswer(err, took, src, timeout) {
+  const proxyError = src.kind === 'proxy' && [502, 503, 504].includes(err?.status);
+  if (!err?.network && !proxyError) return describeError(err);
+  const waited = took >= timeout - 100;
+  if (src.kind !== 'proxy') return waited ? `No answer from ${src.serverName} within ${timeout / 1000} seconds.` : `${src.serverName} didn’t answer this browser. Check it’s on, and that this device can reach it.`;
+  const container = await fetch('config.js', { cache: 'no-store', credentials: 'omit' })
+    .then((r) => r.ok)
+    .catch(() => false);
+  if (!container) return 'This container didn’t answer either: check this device’s connection to it.';
+  if (proxyError) return `This container answers, but couldn’t reach ${src.serverName} (error ${err.status}). Check the server’s on, and the container’s PLEX_SERVER_URL.`;
+  return `This container answers, but ${src.serverName} didn’t answer through it${waited ? ` within ${timeout / 1000} seconds` : ''}. Check the server’s on, and the container’s PLEX_SERVER_URL.`;
+}
+
 function debugView({ el, onDispose }) {
   const src = app.source || {};
   const kv = (k, v) => h('div.kv', null, h('div.kv-k', null, k), h('div.kv-v', null, v ?? '—'));
   const kinds = { local: 'Local network', remote: 'Remote', relay: 'Plex relay (limited speed)', manual: 'Address you entered', proxy: 'Through this container' };
+  // Every route to the server, tried (a server of the account's only).
+  const routeList = h('div.rows.route-rows');
+  const routeHint = h('p.hint.route-hint');
+  const routes = h('div.routes', { hidden: true });
+  const pickable = !app.auth?.manual && !!src.serverId && src.kind !== 'manual' && !(src.kind === 'proxy' && !src.connections?.length);
+  const checkRoutes = async () => {
+    if (!pickable) return;
+    let srv = null;
+    try {
+      srv = (await listServers(app.auth.token)).find((x) => x.id === src.serverId) || null;
+    } catch {
+      srv = null;
+    }
+    if (!srv || app.source !== src) return;
+    routes.hidden = false;
+    routeList.replaceChildren(spinner('Trying each route'));
+    const prefer = app.settings.route;
+    const tried = (await probeConnections(srv, { proxy: proxyUri(), timeout: 6000 })).sort((a, b) => routeRank(a.kind, prefer) - routeRank(b.kind, prefer));
+    if (app.source !== src) return;
+    routeList.replaceChildren(
+      ...tried.map((r) =>
+        h(
+          `div.row.route-row${r.uri === src.uri ? '.in-use' : ''}`,
+          { dataset: { kind: r.kind } },
+          h('div.row-main', null, h('div.row-title', null, `${ROUTE_NAMES[r.kind] || r.kind}${r.uri === src.uri ? ' (in use)' : ''}`), h('div.row-sub', null, `${hostOf(r.uri)} · ${routeResult(r)}`)),
+        ),
+      ),
+    );
+    const local = tried.filter((r) => r.kind === 'local');
+    routeHint.textContent =
+      local.length && local.every((r) => !r.ok && r.why !== 'http') && tried.some((r) => r.ok && r.kind !== 'local')
+        ? 'Its address on your network didn’t answer this browser. Browsers may keep a page on the internet from reaching your home network (Chrome asks you first), and some routers block the plex.direct addresses Plex uses there. The app takes the best route that answers.'
+        : '';
+  };
+  // Another route preference: the best route for it, now.
+  const useRoute = async (prefer) => {
+    saveSettings({ route: prefer });
+    if (!pickable) return;
+    try {
+      const srv = (await listServers(app.auth.token)).find((x) => x.id === src.serverId);
+      const conn = srv && (await pickConnection(srv, { proxy: proxyUri(), prefer }));
+      if (conn && conn.uri !== app.source?.uri && app.source === src) {
+        setSource({ ...src, uri: conn.uri, kind: conn.kind, token: srv.token, connections: srv.connections });
+        toast(`Now connected ${conn.kind === 'proxy' ? 'through this container' : conn.kind === 'local' ? 'on your network' : conn.kind === 'remote' ? 'over the internet' : 'through Plex’s relay'}`);
+        refresh();
+        return;
+      }
+    } catch {
+      /* the route stays as it is */
+    }
+    checkRoutes();
+  };
+  if (pickable && proxyUri()) {
+    routes.append(
+      h('div.section-head', null, h('h2', null, 'Route to the server')),
+      radioRows('Route to the server', ROUTE_CHOICES, app.settings.route || 'best', useRoute),
+    );
+  }
+  routes.prepend(h('div.section-head', null, h('h2', null, 'Routes')), h('p.lede', null, `Each way this browser can reach ${src.serverName}, tried just now.`), routeList, routeHint);
   const support = ['flac', 'alac', 'mp3', 'aac', 'opus']
     .map((c) => `${fmt.codec(c)} ${canPlayCodec(c) ? 'yes' : 'no'}`)
     .concat(`HLS ${canPlayHlsNatively() ? 'built in' : 'via hls.js'}`)
@@ -451,7 +578,7 @@ function debugView({ el, onDispose }) {
       kv('Server', src.serverName),
       kv('Library', src.sectionTitle),
       kv('Address', src.uri),
-      kv('Connection', kinds[src.kind] || src.kind),
+      h('div.kv', null, h('div.kv-k', null, 'Connection'), h('div.kv-v', null, kinds[src.kind] || src.kind || '—'), h('div.kv-note.route-note', null, routeNote(src))),
       h('div.kv', null, h('div.kv-k', null, 'Response time'), status),
       h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
@@ -471,11 +598,13 @@ function debugView({ el, onDispose }) {
             status.textContent = 'Testing…';
             const t0 = performance.now();
             try {
-              await app.server.identity({ timeout: 8000 });
-              status.textContent = `${Math.round(performance.now() - t0)} ms`;
+              await app.server.identity({ timeout: 15000 });
+              const ms = Math.round(performance.now() - t0);
+              status.textContent = `${fmt.number(ms)} ms${ms > 3000 ? ' (slow)' : ''}`;
             } catch (err) {
-              status.textContent = describeError(err);
+              status.textContent = await noAnswer(err, performance.now() - t0, src, 15000);
             }
+            checkRoutes();
           },
         },
         icon('refresh', 20),
@@ -483,6 +612,7 @@ function debugView({ el, onDispose }) {
       ),
       h('button.btn.btn-secondary', { type: 'button', onclick: () => navigate('/settings/source') }, icon('server', 20), h('span', null, 'Change server')),
     ),
+    routes,
     h('div.section-head', null, h('h2', null, 'Live updates')),
     h('p.lede', null, 'New music, playlist changes and ratings from other Plex apps show up here without reloading.'),
     radioRows('Live updates', liveOptions(), app.settings.liveUpdates, (v) => saveSettings({ liveUpdates: v })),
@@ -503,6 +633,7 @@ function debugView({ el, onDispose }) {
       ),
     ),
   );
+  checkRoutes();
 }
 
 // ---------- AI ----------

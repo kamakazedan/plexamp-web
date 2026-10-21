@@ -6,7 +6,7 @@ import { navigate, describeError, popOverlay, refresh, parseHash } from '../rout
 import { h, sheet, toast, askText, fmt, download, fileDate } from '../ui.js';
 import { copyText } from '../missing.js';
 import { refreshLists } from '../editing.js';
-import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine } from '../playlistio.js';
+import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine, entryWhere, entryText, entriesCsv } from '../playlistio.js';
 
 const where = () => app.source?.sectionTitle || 'this library';
 // Playlists by name ("Late night" and "late night " are one name).
@@ -239,12 +239,31 @@ function resultRow(r) {
           'details.import-missing',
           null,
           h('summary', null, `Not found (${fmt.number(r.missing.length)})`),
-          h('ul', null, r.missing.slice(0, SHOWN).map((e) => h('li', null, entryLine(e)))),
+          h(
+            'ul',
+            null,
+            r.missing.slice(0, SHOWN).map((e) => h('li', null, h('span.import-missing-song', null, entryLine(e)), entryWhere(e) ? h('span.import-missing-where', null, entryWhere(e)) : null)),
+          ),
           r.missing.length > SHOWN ? h('p.hint', null, `and ${fmt.number(r.missing.length - SHOWN)} more`) : null,
           h(
-            'button.link-btn',
-            { type: 'button', onclick: async () => toast((await copyText(`${r.missing.map(entryLine).join('\n')}\n`)) ? 'Copied: artist — title, one to a line' : 'Couldn’t copy here.') },
-            'Copy the list',
+            'div.import-missing-actions',
+            null,
+            h(
+              'button.link-btn',
+              { type: 'button', onclick: async () => toast((await copyText(`${r.missing.map(entryText).join('\n')}\n`)) ? 'Copied: artist — title — album, one to a line' : 'Couldn’t copy here.') },
+              'Copy the list',
+            ),
+            h(
+              'button.link-btn',
+              {
+                type: 'button',
+                onclick: () => {
+                  download(entriesCsv(r.missing), `${playlistFileName(title).replace(/\.playlist\.json$/, '')} - not found.csv`, 'text/csv;charset=utf-8');
+                  toast('Saved: artist, title, album, year, number and length of each');
+                },
+              },
+              'Save as a spreadsheet (CSV)',
+            ),
           ),
         )
       : null,

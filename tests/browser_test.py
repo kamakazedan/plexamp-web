@@ -25,8 +25,8 @@ and t3 (Alex, a friend without access).
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
 Sections: core ws ai dj djs nows blocked poll custom desktop nav library edit
-lists pictures missing files sharing cast ratings devices fades together
-settings home debug memory (default: all).
+lists pictures missing files sharing routes np cast ratings devices fades
+together settings home debug memory (default: all).
 """
 
 import json
@@ -2205,15 +2205,38 @@ with sync_playwright() as pw:
         for t in other['playlists'][0]['tracks']:
             del t['id'], t['guid']
         other['playlists'][0]['tracks'].insert(2, {'title': 'A Song Nobody Has', 'artist': 'Nobody'})
+        # One named differently there, and by an artist named differently:
+        # found on its album, by its number and length.
+        spare = next(m for m in mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=300')['MediaContainer']['Metadata'] if m['ratingKey'] not in want)
+        other['playlists'][0]['tracks'].append({'title': 'Called Something Else Here', 'artist': 'Somebody Else', 'albumArtist': spare['grandparentTitle'],
+                                                'album': spare['parentTitle'], 'year': spare.get('parentYear'), 'disc': spare.get('parentIndex', 1),
+                                                'index': spare['index'], 'duration': spare['duration'] + 1500})
+        # One that isn't here, with its album, to look for.
+        other['playlists'][0]['tracks'].append({'title': 'Lost B-Side', 'artist': 'Nobody', 'album': 'Unreleased Things', 'year': 1999, 'disc': 1, 'index': 7, 'duration': 245000})
         before = pls()
         said = import_file(page, write('other.playlist.json', other), name='From elsewhere')
         got = new_ones(before)
         shot(page, 'files-02-not-found')
-        missing = page.locator('.sheet.open .import-missing li').all_text_contents()
-        check('files: on another server, by title and artist; what isn\'t there is listed',
-              len(got) == 1 and got[0]['title'] == 'From elsewhere' and entries(got[0]['ratingKey']) == want
-              and f'{len(want)} of {len(want) + 1} tracks found; 1 not in ' in said and missing == ['Nobody — A Song Nobody Has'],
-              f'{said!r} {missing} {entries(got[0]["ratingKey"]) if got else None} {want}')
+        page.click('.sheet.open .import-missing summary')
+        songs = page.locator('.sheet.open .import-missing .import-missing-song').all_inner_texts()
+        wheres = page.locator('.sheet.open .import-missing .import-missing-where').all_inner_texts()
+        check('files: on another server, by title and artist, or on its album by its number; what isn\'t there is listed, with its album',
+              len(got) == 1 and got[0]['title'] == 'From elsewhere' and entries(got[0]['ratingKey']) == want + [spare['ratingKey']]
+              and f'{len(want) + 1} of {len(want) + 3} tracks found; 2 not in ' in said
+              and songs == ['Nobody — A Song Nobody Has', 'Nobody — Lost B-Side'] and wheres == ['Unreleased Things, 1999 · track 7 · 4:05'],
+              f'{said!r} {songs} {wheres} {entries(got[0]["ratingKey"]) if got else None} {want} {spare["ratingKey"]}')
+        page.locator('.sheet.open .import-missing button', has_text='Copy the list').click()
+        page.wait_for_selector('.toast:has-text("Copied")')
+        copied = js(page, '() => navigator.clipboard.readText()')
+        with page.expect_download() as dl:
+            page.locator('.sheet.open .import-missing button', has_text='Save as a spreadsheet').click()
+        sheet_text = open(dl.value.path(), encoding='utf-8-sig').read()
+        check('files: ...to copy, or save as a spreadsheet, with each one\'s album',
+              copied == 'Nobody — A Song Nobody Has\nNobody — Lost B-Side — Unreleased Things (1999)\n'
+              and dl.value.suggested_filename == 'From elsewhere - not found.csv'
+              and sheet_text.splitlines()[0] == '"Artist","Title","Album","Album artist","Year","Disc","Track","Length"'
+              and '"Nobody","Lost B-Side","Unreleased Things","","1999","1","7","4:05"' in sheet_text.splitlines(),
+              f'{copied!r} {dl.value.suggested_filename} {sheet_text!r}')
         close_dialog(page)
 
         # A backup: every playlist of yours (not smart ones), in one file.
@@ -2520,6 +2543,116 @@ with sync_playwright() as pw:
         check('sharing: (the playlist is as it was)', pl_items(wid, 't') == original)
         dan_ctx.close()
         sam_ctx.close()
+
+    # ---------- routes: how the app reaches the server, and why ----------
+    if run('routes'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'routes')
+        # plex.tv, as this browser sees it: Dan's server (the one this
+        # container proxies), with an address on his network this browser
+        # can't reach, and one over the internet that it can.
+        resources = [{'name': 'Mock Plex', 'clientIdentifier': 'mock-server-1', 'provides': 'server', 'owned': True, 'accessToken': 't',
+                      'connections': [{'uri': 'http://127.0.0.1:9', 'local': True, 'relay': False, 'protocol': 'http'},
+                                      {'uri': MOCK, 'local': False, 'relay': False, 'protocol': 'http'}]}]
+        page.route(re.compile(r'https://(clients\.)?plex\.tv/api/v2/resources.*'),
+                   lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(resources), headers={'Access-Control-Allow-Origin': '*'}))
+        login(page, APP)
+        js(page, "() => import('./js/state.js').then((m) => m.setAuth({ ...m.app.auth, manual: false }))")
+        page.goto(APP + '#/settings/source')
+        page.wait_for_selector('.source-body .row .row-sub:has-text("set up for this app")', timeout=15000)
+        rows = [(r.locator('.row-title').inner_text(), r.locator('.row-sub').inner_text()) for r in page.locator('.source-body .rows > .row').all()]
+        shot(page, 'routes-01-source')
+        check('routes: the server this container is set up for is listed once, as one of yours',
+              rows[:1] == [('Mock Plex', 'Your server · also set up for this app')] and not any(t == 'Server set up for this app' for t, _ in rows), str(rows))
+        page.locator('.source-body .row', has_text='Mock Plex').click()
+        page.wait_for_selector('.section-head h2:has-text("Libraries on")')
+        page.locator('.source-body .row').first.click()
+        page.wait_for_selector('.wide-card:not(.skeleton)')
+        page.goto(APP + '#/settings/debug')
+        page.wait_for_selector('.route-row', timeout=15000)
+        conn = page.locator('.kv', has_text='Connection').first.inner_text()
+        routes = [(r.get_attribute('data-kind'), r.inner_text()) for r in page.locator('.route-row').all()]
+        hint = page.locator('.route-hint').inner_text()
+        shot(page, 'routes-02-connection')
+        page.locator('.routes').scroll_into_view_if_needed()
+        shot(page, 'routes-03-routes')
+        check('routes: through this container when its address on the network doesn\'t answer, saying why',
+              'Through this container' in conn and 'set up for Mock Plex too' in conn and [k for k, _ in routes] == ['local', 'proxy', 'remote']
+              and '(in use)' in routes[1][1] and 'Didn’t answer this browser' in routes[0][1] and ' ms' in routes[2][1] and 'Chrome asks you first' in hint,
+              f'{conn!r} {routes} {hint!r}')
+        page.click('.radio-row:has(.row-title:text-is("Straight to the server"))')
+        page.wait_for_selector('.toast:has-text("Now connected over the internet")')
+        page.wait_for_selector('.route-row.in-use[data-kind=remote]', timeout=15000)
+        direct = (js(page, "() => import('./js/state.js').then((m) => [m.app.source.kind, m.app.settings.route])"), page.locator('.kv', has_text='Connection').first.inner_text())
+        check('routes: "Straight to the server" goes there, over the internet here', direct[0] == ['remote', 'direct'] and 'Remote' in direct[1], str(direct))
+        page.click('.radio-row:has(.row-title:text-is("Best that answers"))')
+        page.wait_for_selector('.toast:has-text("Now connected through this container")')
+        page.wait_for_selector('.route-row.in-use[data-kind=proxy]', timeout=15000)
+        # The test of the connection: through this container, which part
+        # doesn't answer.
+        no_plex = re.compile(r'/pms/identity')
+        page.route(no_plex, lambda route: route.abort())
+        page.click('button:has-text("Test connection")')
+        page.wait_for_selector('.kv:has-text("Response time") .kv-v:not(:has-text("Testing"))')
+        said = page.locator('.kv', has_text='Response time').inner_text()
+        page.unroute(no_plex)
+        check('routes: a test that gets no answer through this container says this container answered', 'This container answers, but Mock Plex didn’t answer through it' in said, said)
+        page.click('button:has-text("Test connection")')
+        page.wait_for_selector('.kv:has-text("Response time") .kv-v:has-text(" ms")')
+        check('routes: ...and the time it takes when it answers', re.search(r'\d ms', page.locator('.kv', has_text='Response time').inner_text()) is not None)
+        ctx.close()
+
+    # ---------- np: the player's sleep timer and converted tracks ----------
+    if run('np'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'np')
+        login(page, APP)
+        play_first_album_track(page, APP, album=1, track=0)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        sleep_btn = page.locator('.np-tool[data-tool=sleep]')
+        hidden = sleep_btn.is_hidden()
+        settings(page, {'sleepTimer': True})
+        page.wait_for_timeout(200)
+        shown = sleep_btn.is_visible()
+        player(page, 'p.setSleep(30)')
+        settings(page, {'sleepTimer': False})
+        page.wait_for_timeout(200)
+        check('np: the sleep timer is off to begin with, shown once turned on, and turned off with it',
+              hidden and shown and sleep_btn.is_hidden() and not player(page, 'p.sleepActive'), f'{hidden} {shown}')
+        # Converted by the server (Streaming quality): a mark says so, and
+        # why. (The mock's converted streams aren't real audio, so the player
+        # is told it's converting the track that plays.)
+        settings(page, {'quality': '320'})
+        player(page, "(p.transcoding = true, p.emit('track'), true)")
+        page.wait_for_selector('.np.open .np-converted', timeout=10000)
+        label = page.locator('.np-converted').get_attribute('aria-label')
+        quality = page.locator('.np-quality').inner_text()
+        page.click('.np-converted')
+        page.wait_for_selector('.toast:has-text("Converted to 320 kbps")')
+        told = page.locator('.toast').inner_text()
+        shot(page, 'np-01-converted')
+        check('np: a converted track is marked, saying why (as its tooltip and when tapped)',
+              quality.strip() == '320 kbps' and 'Streaming quality is set to High (320 kbps)' in label and 'The file is FLAC' in label
+              and 'Streaming quality' in told and 'Settings' in told, f'{label!r} {quality!r} {told!r}')
+        settings(page, {'quality': 'original'})
+        player(page, "p.emit('track')")
+        page.wait_for_timeout(300)
+        label = page.locator('.np-converted').get_attribute('aria-label') or ''
+        check('np: ...or, converted as the file didn\'t play as it is, says that', 'the file didn’t play as it is here' in label and 'Streaming quality' not in label, label)
+        kinds = js(page, """() => Promise.all([import('./js/player.js'), import('./js/state.js')]).then(([{ player: p }, s]) => {
+            s.saveSettings({ quality: '320' });
+            const out = [p.sourceFor({ id: '1', codec: 'mp3', bitrate: 128, partKey: '/library/parts/1/file.mp3' }).hls,
+                         p.sourceFor({ id: '1', codec: 'flac', bitrate: 1411, partKey: '/library/parts/1/file.flac' }).hls];
+            s.saveSettings({ quality: 'original' });
+            return out; })""")
+        check('np: ...and a track already at the quality asked for, or lower, plays as it is', kinds == [False, True], str(kinds))
+        player(page, "(p.transcoding = false, p.emit('track'), true)")
+        page.wait_for_timeout(300)
+        check('np: ...and the original file isn\'t marked', page.locator('.np-converted').count() == 0)
+        ctx.close()
 
     # ---------- cast: playing on another Plex player, and AirPlay/Cast ----------
     # The mock runs a Plex player ("Living Room", like Plexamp on a Pi) that

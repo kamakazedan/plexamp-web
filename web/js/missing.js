@@ -233,11 +233,13 @@ function cell(v) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-// With a byte-order mark, so spreadsheet apps read it as UTF-8 ("—", "é").
+// A spreadsheet (CSV), with a byte-order mark, so spreadsheet apps read it
+// as UTF-8 ("—", "é").
+export const toCsv = (head, rows) => `\ufeff${[head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`;
+
 export function missingCsv(list = missingList()) {
   const head = ['Artist', 'Title', 'Missing', 'Times suggested', 'Last suggested', 'Library', 'Asked for'];
-  const rows = list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', m.times || 1, day(m.last), m.library, m.prompt]);
-  return `\ufeff${[head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`;
+  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', m.times || 1, day(m.last), m.library, m.prompt]));
 }
 
 export function missingText(list = missingList()) {

@@ -15,6 +15,7 @@ export function on(name, fn) {
 
 export const DEFAULT_SETTINGS = {
   quality: 'original', // 'original' or a transcode bitrate in kbps, e.g. '320'
+  route: 'best', // to the server: 'best', 'container' or 'direct' (see plex.js ROUTE_RANKS)
   gapless: true,
   fades: 'smart', // crossfade between tracks: off | smart (where the music ends; not within albums) | always
   fadeLength: 5, // seconds
@@ -58,6 +59,7 @@ export const DEFAULT_SETTINGS = {
   showFullPlayer: false,
   playbackSpeed: false,
   speed: 1,
+  sleepTimer: false, // the sleep timer's button in the player
   longForm: false,
   quickSkip: false,
   skipBack: 10,

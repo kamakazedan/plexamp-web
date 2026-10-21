@@ -1,7 +1,7 @@
 // Entry point: wires the router, shell, player bar and backdrop together.
 import './debug.js';
 import { app, setSource, on, proxyUri } from './state.js';
-import { PlexServer, listServers, pickConnection, CONNECTION_RANK } from './plex.js';
+import { PlexServer, listServers, pickConnection, routeRank, ROUTE_KINDS } from './plex.js';
 import { route, startRouter, navigate, goTab, parseHash, refresh, dropCached, overlayDepth } from './router.js';
 import { h, icon } from './ui.js';
 import { player } from './player.js';
@@ -136,11 +136,15 @@ const where = (kind) => (kind === 'proxy' ? 'this container’s /pms/ proxy' : `
 async function bestRoute(src) {
   const servers = await listServers(app.auth.token);
   const srv = servers.find((s) => s.id === src.serverId);
-  const conn = srv && (await pickConnection(srv, { proxy: proxyUri() }));
+  const conn = srv && (await pickConnection(srv, { proxy: proxyUri(), prefer: app.settings.route }));
   return conn ? { ...conn, srv } : null;
 }
 
-const pickable = (src) => !app.auth?.manual && src.kind in CONNECTION_RANK;
+const rank = (kind) => routeRank(kind, app.settings.route);
+const pickable = (src) => !app.auth?.manual && ROUTE_KINDS.includes(src.kind);
+// The server set up for this app, chosen as such in Settings › Source: it
+// stays the route while it answers.
+const pinned = (src) => src.kind === 'proxy' && !src.connections?.length;
 
 // Check the saved server still answers; if not, look for another route to
 // it (e.g. we left the house and the local address stopped working). And
@@ -152,10 +156,11 @@ async function ensureConnection() {
   try {
     await app.server.identity({ timeout: 5000 });
     debugLog('connection', `${src.serverName} answers at ${where(src.kind)}`);
-    if (pickable(src) && CONNECTION_RANK[src.kind] > CONNECTION_RANK.proxy) {
+    // A better route may answer now (back home, say).
+    if (pickable(src) && !pinned(src) && rank(src.kind) > 0) {
       bestRoute(src)
         .then((conn) => {
-          if (!conn || CONNECTION_RANK[conn.kind] >= CONNECTION_RANK[src.kind] || app.source !== src) return;
+          if (!conn || rank(conn.kind) >= rank(src.kind) || app.source !== src) return;
           debugLog('connection', `${src.serverName} also answers at ${where(conn.kind)}: switched to it`);
           setSource({ ...src, uri: conn.uri, kind: conn.kind, token: conn.srv.token, connections: conn.srv.connections });
         })

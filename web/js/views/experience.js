@@ -187,6 +187,7 @@ export function playerSettingsView({ el }) {
       toggleRow({ title: 'Show album year', subtitle: 'Show the year after the album’s name.', checked: s.showAlbumYear, onChange: set('showAlbumYear') }),
       toggleRow({ title: 'Show full player', subtitle: 'Open the player when you start playing something.', checked: s.showFullPlayer, onChange: set('showFullPlayer') }),
       toggleRow({ title: 'Music playback speed', subtitle: 'Add a speed button to the player, from 0.5× to 2×.', checked: s.playbackSpeed, onChange: set('playbackSpeed') }),
+      toggleRow({ title: 'Sleep timer', subtitle: 'Add a sleep timer button to the player, to stop playing after a while or at the end of a track.', checked: s.sleepTimer, onChange: set('sleepTimer') }),
       toggleRow({
         title: 'Use long-form controls',
         subtitle: 'For tracks over 20 minutes, like DJ mixes and audiobooks: show skip buttons, and carry on where you stopped.',

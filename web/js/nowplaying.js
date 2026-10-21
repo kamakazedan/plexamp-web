@@ -3,6 +3,7 @@
 import { app, on } from './state.js';
 import { player } from './player.js';
 import { pushOverlay, popOverlay, describeError, navigate } from './router.js';
+import { canPlayCodec } from './plex.js';
 import { h, icon, iconButton, art, avatar, skipIcon, fmt, toast, sheet } from './ui.js';
 import { trackMenu, queueMenu } from './actions.js';
 import { trackRow } from './components.js';
@@ -324,6 +325,35 @@ export function openNowPlaying({ queue = false } = {}) {
 }
 
 const kHz = (hz) => (hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
+
+const QUALITY_NAMES = { 320: 'High (320 kbps)', 192: 'Normal (192 kbps)', 128: 'Data saver (128 kbps)' };
+
+// A track your server converts as it plays (Settings › Playback › Streaming
+// quality, or a format this browser can't play): a mark by its bitrate
+// saying so, and why, as its tooltip and, tapped (touch screens have no
+// hover), in a message.
+function convertedMark(t, q, kbps) {
+  const format = fmt.codec(t.codec);
+  const why =
+    q !== 'original'
+      ? `Converted to ${kbps} kbps by your server as it plays, as Streaming quality is set to ${QUALITY_NAMES[kbps] || `${kbps} kbps`} in Settings › Playback.${format ? ` The file is ${format}.` : ''}`
+      : t.codec && !canPlayCodec(t.codec)
+        ? `Converted to ${kbps} kbps by your server as it plays: this browser can’t play ${format} files as they are.`
+        : `Converted to ${kbps} kbps by your server as it plays: the file didn’t play as it is here.`;
+  return h(
+    'button.np-converted',
+    {
+      type: 'button',
+      title: why,
+      'aria-label': why,
+      onclick: (e) => {
+        e.stopPropagation();
+        toast(why, q === 'original' ? { timeout: 7000 } : { timeout: 7000, action: 'Settings', onAction: () => popOverlay().then(() => navigate('/settings/playback')) });
+      },
+    },
+    icon('convert', 16),
+  );
+}
 
 function toolButton(name, label, onClick, tool) {
   return h('button.np-tool', { type: 'button', 'aria-label': label, title: label, onclick: onClick, dataset: { tool } }, icon(name, 26));
@@ -751,9 +781,10 @@ function buildNowPlaying() {
     stars.set(t.userRating);
     codec.textContent = fmt.codec(t.codec);
     const q = app.settings.quality;
-    const converted = player.transcoding ? `${q === 'original' ? 320 : q} kbps` : '';
-    quality.textContent = converted || (t.bitrate && !['flac', 'alac', 'wav', 'pcm'].includes(t.codec) ? `${fmt.number(t.bitrate)} kbps` : '');
-    quality.title = converted ? 'Converted by your server' : '';
+    const converted = player.transcoding;
+    const kbps = q === 'original' ? 320 : Number(q) || 320;
+    if (converted) quality.replaceChildren(convertedMark(t, q, kbps), `${kbps} kbps`);
+    else quality.textContent = t.bitrate && !['flac', 'alac', 'wav', 'pcm'].includes(t.codec) ? `${fmt.number(t.bitrate)} kbps` : '';
     try {
       const d = await app.server.trackDetail(t.id);
       if (mine !== detailToken || !d) return;
@@ -806,6 +837,7 @@ function buildNowPlaying() {
     setToggle(repeatBtn, player.repeat !== 'off', remote ? 'Repeat (not available while listening together)' : { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat]);
     repeatBtn.classList.toggle('unavailable', remote);
     setToggle(sleepBtn, player.sleepActive, player.sleepActive ? 'Sleep timer (on)' : 'Sleep timer');
+    sleepBtn.hidden = !app.settings.sleepTimer;
     const dj = guestDJ.active;
     setToggle(djBtn, !!dj, remote ? 'Guest DJ (not available while listening together)' : dj ? `Guest DJ: ${dj.name}` : 'Guest DJ');
     djBtn.classList.toggle('unavailable', remote);

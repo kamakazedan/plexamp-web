@@ -2142,8 +2142,31 @@ a.np-album[href]:hover {
 
 .np-quality {
   justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* Converted by the server as it plays: says why (tooltip, or tapped). */
+.np-converted {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: -4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  cursor: help;
+}
+
+.np-converted:hover,
+.np-converted:focus-visible {
+  background: rgba(255, 255, 255, 0.22);
 }
 
 .np-stars {
@@ -2789,6 +2812,27 @@ body.np-open #toasts {
   line-height: 1.5;
 }
 
+.import-missing li + li {
+  margin-top: 4px;
+}
+
+.import-missing-song,
+.import-missing-where {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.import-missing-where {
+  color: var(--muted);
+  font-size: calc(13px * var(--fs, 1));
+}
+
+.import-missing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
 /* ---------- AI playlist ---------- */
 
 .ai-box .ic {
@@ -3062,6 +3106,27 @@ body.np-open #toasts {
 
 .kv-note:empty {
   display: none;
+}
+
+/* Settings › Connection: each route to the server, tried. */
+.route-row {
+  cursor: default;
+}
+
+.route-row .row-sub {
+  overflow-wrap: anywhere;
+}
+
+.route-row.in-use .row-title {
+  font-weight: 650;
+}
+
+.route-hint:empty {
+  display: none;
+}
+
+.routes .route-hint {
+  margin: 8px var(--gutter) 0;
 }
 
 .hint.warn,
