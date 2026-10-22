@@ -1015,7 +1015,9 @@ class Player extends EventTarget {
     const plan = this.transition ? null : this.nextPlan();
     const needed = plan ? Math.min(d, plan.at + (plan.kind === 'fade' ? plan.fade : 0)) : d;
     const reach = stuck ? t : end;
-    if (this.transition || (d > 0 && reach > 0 && reach >= needed - END_SLACK)) {
+    // (In Play Together, a track ends when the session's clock says so: one
+    // this device can't play is started again, then left to the others.)
+    if (this.transition || (d > 0 && reach > 0 && reach >= needed - END_SLACK && !(stuck && this.remote))) {
       this.rescue = null;
       if (stuck) {
         this.endNow();
