@@ -3,6 +3,31 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.18.2 - 2026-10-22
+
+### Fixed
+
+Converted tracks, when their stream fails (new in 0.18.1):
+
+- A stream started again that failed again before it played anything
+  started the track over from the top. It starts where the track got to.
+- A problem decoding the stream (rather than a dropped connection) could
+  leave the track silent, with play and pause doing nothing. The stream
+  starts again from there instead.
+- In Play Together, a track this device couldn't play as it is, with the
+  session paused, could stop the player working until the page was
+  reloaded.
+- A track that came in through a gapless change or a crossfade only got
+  one try at starting its stream again, not three.
+- Moving back in a track whose stream had stopped a few seconds short of
+  its end got stuck; it starts again from there. Moving in a track while
+  its stream was being started again was undone.
+- A stream that stopped close to a crossfade could start again in the
+  middle of the fade. The track ends where what's buffered does, and the
+  fade carries on.
+- Play reports for a queue of one track on repeat, or for a converted
+  track sent to AirPlay from Safari, could name the wrong playback.
+
 ## 0.18.1 - 2026-10-22
 
 ### Fixed

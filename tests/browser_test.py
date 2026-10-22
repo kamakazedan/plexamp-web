@@ -2891,7 +2891,7 @@ with sync_playwright() as pw:
 
         def now():
             return player(page, "({ id: p.current?.id, title: p.current?.title, t: p.time, state: p.state, hls: !!p.deck.hls,"
-                                " playback: p.deck.playback, rescue: p.rescue && { tries: p.rescue.tries, soft: p.rescue.soft } })")
+                                " playback: p.deck.playback, rescue: p.rescue && { tries: p.rescue.tries, soft: p.rescue.soft, from: p.rescue.from } })")
 
         def play_errors():
             return js(page, '() => window.__playErrors || []')
@@ -2932,6 +2932,35 @@ with sync_playwright() as pw:
               after['id'] == tr['id'] and after['t'] > 10 and after['state'] == 'playing' and len(mine) == 2
               and mine[0]['playback'] == mine[1]['playback'] == tr['playback'] and stopped and not play_errors(),
               f'{after} {mine} {len(stopped)} {play_errors()}')
+
+        # ...and when the stream started again stops too, before it's played
+        # anything (at its first part), the next one still starts where the
+        # track got to (the end of its first part, 4 seconds in), not at the
+        # top.
+        play_track(1, 1, rules='&kill=1,0')
+        tr = now()
+        seen = []
+        wait_for(lambda: seen.append(now()) or (len(sessions_of(tr['id'])) >= 3 and seen[-1]['t'] > 6) or seen[-1]['id'] != tr['id'], 45, 0.25)
+        after = seen[-1]
+        mine = sessions_of(tr['id'])
+        lowest = min((x['t'] for x in seen if x['id'] == tr['id'] and (x['rescue'] or {}).get('tries')), default=0)
+        check('stream: ...and when that one stops too, before it plays, the next still starts where the track got to',
+              after['id'] == tr['id'] and after['t'] > 6 and len(mine) == 3 and after['rescue'] and after['rescue']['from'] > 3.5 and lowest > 3.5
+              and len({s['playback'] for s in mine}) == 1 and not play_errors(), f'{after} {lowest} {mine} {play_errors()}')
+
+        # A problem decoding the stream (as the browser or hls.js reports it,
+        # with the stream's end not yet buffered: its parts come slowly): a
+        # new stream at once, from there, and it plays on.
+        play_track(1, 2, rules='&slow=2.5')
+        tr = now()
+        wait_for(lambda: now()['t'] > 1, 10, 0.1)
+        player(page, "(p.onStreamError(p.deck, { type: 'mediaError', details: 'bufferAppendError', fatal: true }), true)")
+        wait_for(lambda: now()['t'] > 13 or now()['id'] != tr['id'], 30, 0.25)
+        after = now()
+        mine = sessions_of(tr['id'])
+        check('stream: a decoding problem: the stream starts again at once from there, and plays on',
+              after['id'] == tr['id'] and after['t'] > 13 and after['state'] == 'playing' and len(mine) == 2
+              and mine[0]['playback'] == mine[1]['playback'] and not play_errors(), f'{after} {mine} {play_errors()}')
 
         # Dropped connections (no answer at all, as through a proxy that
         # drops them): its playlist and parts are tried again, on the same

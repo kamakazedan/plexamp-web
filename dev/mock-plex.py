@@ -45,13 +45,16 @@ testing, these endpoints need no token:
                                   in silence (for testing transitions)
     /__mock/player[?reset=1]      the mock Plex player: what it's playing and
                                   the commands it got
-    /__mock/hls?reset=1&kill=N&sessions=K&track=ID&short=S
+    /__mock/hls?reset=1&kill=N&sessions=K&track=ID&how=stop|corrupt&short=S&slow=S
                                   converted streams (real HLS: silent MP3 in
                                   MPEG-TS, 4-second parts): the next K started
                                   (of that track, if given) stop at part N
                                   (its parts from there answer 404, as from a
-                                  server that stopped the stream), every
-                                  stream's last S seconds are missing; and
+                                  server that stopped the stream; corrupt:
+                                  they're nothing a browser can play;
+                                  kill=N1,N2,...: each its own part), every
+                                  stream's last S seconds are missing, every
+                                  part after the first is S seconds slow; and
                                   the streams started, their requests, and
                                   play reports since the reset
 
@@ -749,7 +752,7 @@ def tone_wav(rk):
 HLS_PART = 4  # seconds in each part
 MP3_FRAME = b'\xff\xfb\x10\xc0' + bytes(100)  # MPEG-1 layer III, 32 kbps, 44.1 kHz, mono: 104 bytes
 MP3_FRAME_SECONDS = 1152 / 44100
-HLS = {'sessions': {}, 'order': [], 'requests': [], 'timelines': [], 'kill': None, 'short': 0}
+HLS = {'sessions': {}, 'order': [], 'requests': [], 'timelines': [], 'kill': None, 'short': 0, 'slow': 0}
 HLS_LOCK = threading.Lock()
 
 
@@ -1533,11 +1536,14 @@ class Handler(BaseHTTPRequestHandler):
         started (as the container's tests ask for) is a 20-second track.
         /__mock/hls?kill=N&sessions=K&track=ID: the next K streams started
         (of that track, if given) are stopped at part N, as a server stops a
-        stream (its parts from there answer 404); short=S: every stream's
-        last S seconds are missing."""
+        stream (its parts from there answer 404), or with how=corrupt, their
+        parts from there are nothing a browser can play (kill=N1,N2,...: the
+        first at part N1, the next at N2...); short=S: every stream's last S
+        seconds are missing; slow=S: every part after the first takes S
+        seconds to come."""
         with HLS_LOCK:
             s = HLS['sessions'].get(sid) or {}
-            short = HLS['short']
+            short, slow = HLS['short'], HLS['slow']
         t = items.get(s.get('track', ''))
         seconds = (t['duration'] / 1000) if t and t.get('duration') else TRACK_SECONDS
         status = 200
@@ -1546,8 +1552,12 @@ class Handler(BaseHTTPRequestHandler):
             body, ctype = hls_playlist(seconds).encode(), 'application/vnd.apple.mpegurl'
         elif m and int(m.group(1)) * HLS_PART < seconds:
             index = int(m.group(1))
+            if slow and index:
+                time.sleep(slow)
             stopped = s.get('killAt') is not None and index >= s['killAt']
-            if stopped or (short and (index + 1) * HLS_PART > seconds - short):
+            if stopped and s.get('how') == 'corrupt':
+                body, ctype = b'\x00' * 2048, 'video/mp2t'  # not a transport stream: the browser can't play it
+            elif stopped or (short and (index + 1) * HLS_PART > seconds - short):
                 status, body, ctype = 404, b'', 'text/plain'
             else:
                 body, ctype = hls_part(index, seconds), 'video/mp2t'
@@ -1633,15 +1643,20 @@ class Handler(BaseHTTPRequestHandler):
             # started and asked for since the last reset.
             with HLS_LOCK:
                 if q.get('reset'):
-                    HLS.update({'sessions': {}, 'order': [], 'requests': [], 'timelines': [], 'kill': None, 'short': 0})
+                    HLS.update({'sessions': {}, 'order': [], 'requests': [], 'timelines': [], 'kill': None, 'short': 0, 'slow': 0})
                 if 'kill' in q:
-                    at = q['kill'][0]
-                    HLS['kill'] = {'at': int(at), 'sessions': int(q.get('sessions', ['1'])[0]), 'track': q.get('track', [''])[0]} if at else None
+                    # kill=N&sessions=K, or kill=N1,N2,...: one part for each stream.
+                    at = [int(x) for x in q['kill'][0].split(',') if x]
+                    if len(at) == 1:
+                        at *= int(q.get('sessions', ['1'])[0])
+                    HLS['kill'] = {'at': at, 'track': q.get('track', [''])[0], 'how': q.get('how', ['stop'])[0]} if at else None
                 if 'short' in q:
                     HLS['short'] = float(q['short'][0] or 0)
+                if 'slow' in q:
+                    HLS['slow'] = float(q['slow'][0] or 0)
                 return self.send_json({'sessions': [dict(HLS['sessions'][sid], id=sid) for sid in HLS['order']],
                                        'requests': HLS['requests'], 'timelines': HLS['timelines'],
-                                       'kill': HLS['kill'], 'short': HLS['short']})
+                                       'kill': HLS['kill'], 'short': HLS['short'], 'slow': HLS['slow']})
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
@@ -1706,11 +1721,10 @@ class Handler(BaseHTTPRequestHandler):
             with HLS_LOCK:
                 kill = HLS['kill']
                 doomed = None
-                if kill and kill['sessions'] > 0 and kill['track'] in ('', rk):
-                    kill['sessions'] -= 1
-                    doomed = kill['at']
+                if kill and kill['at'] and kill['track'] in ('', rk):
+                    doomed = kill['at'].pop(0)
                 HLS['sessions'][sid] = {'track': rk, 'playback': q.get('X-Plex-Session-Identifier', [''])[0], 'killAt': doomed,
-                                        'bitrate': q.get('musicBitrate', [''])[0]}
+                                        'how': kill['how'] if doomed is not None else None, 'bitrate': q.get('musicBitrate', [''])[0]}
                 HLS['order'].append(sid)
             return self.send_text(f'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS="mp4a.40.34"\nsession/{sid}/base/index.m3u8\n',
                                   'application/vnd.apple.mpegurl')
