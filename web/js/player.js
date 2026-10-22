@@ -93,6 +93,12 @@ function streamTrouble(data) {
   return `${data.details || data.type || 'stream error'}${part}${answer}`;
 }
 
+// A converted stream's element that won't play on from where it is: after
+// a decoding problem (the browser's or hls.js's), or with nothing loaded.
+function isStuck(el, data) {
+  return data?.type === 'mediaError' || !!el.error || el.readyState < 1;
+}
+
 // Where what's buffered from `t` on ends (`t` itself if nothing is).
 function bufferedEnd(el, t) {
   const b = el.buffered;
@@ -1002,12 +1008,21 @@ class Player extends EventTarget {
     const t = this.time;
     const end = bufferedEnd(el, t);
     const d = this.duration;
+    // After a decoding problem, or with nothing loaded yet, the element
+    // doesn't play on: what's buffered isn't heard.
+    const stuck = isStuck(el, data);
     debugLog('player', `converted stream of “${track.title}” stopped at ${t.toFixed(1)} s of ${d.toFixed(1)} (buffered to ${end.toFixed(1)}): ${streamTrouble(data)}`, 'warn');
     const plan = this.transition ? null : this.nextPlan();
     const needed = plan ? Math.min(d, plan.at + (plan.kind === 'fade' ? plan.fade : 0)) : d;
-    if (this.transition || (d > 0 && end > 0 && end >= needed - END_SLACK)) {
-      deck.endsAt = Math.max(end, t);
-      this.endReached(deck, 1);
+    const reach = stuck ? t : end;
+    if (this.transition || (d > 0 && reach > 0 && reach >= needed - END_SLACK)) {
+      this.rescue = null;
+      if (stuck) {
+        this.endNow();
+      } else {
+        deck.endsAt = Math.max(end, t);
+        this.endReached(deck, 1);
+      }
       return;
     }
     const r = this.rescueFor(track, deck, t);
@@ -1021,8 +1036,8 @@ class Player extends EventTarget {
       return;
     }
     // A dropped connection: what's buffered plays first (starting again
-    // stops it). After other problems the element doesn't play on.
-    const left = data.type === 'networkError' && !el.paused ? (end - t - RESCUE_LEFT) / (el.playbackRate || 1) : 0;
+    // stops it).
+    const left = !stuck && !el.paused ? (end - t - RESCUE_LEFT) / (el.playbackRate || 1) : 0;
     const wait = Math.max(RESCUE_WAITS[r.tries] ?? RESCUE_WAITS[RESCUE_WAITS.length - 1], left * 1000);
     r.tries += 1;
     const go = () => {
@@ -1033,8 +1048,12 @@ class Player extends EventTarget {
       const at = this.time;
       if (this.transition) {
         // The change to the next track has started meanwhile.
-        deck.endsAt = Math.max(bufferedEnd(el, at), at);
-        this.endReached(deck, 1);
+        if (isStuck(el, data)) {
+          this.endNow();
+        } else {
+          deck.endsAt = Math.max(bufferedEnd(el, at), at);
+          this.endReached(deck, 1);
+        }
         return;
       }
       r.from = at;
@@ -1059,10 +1078,11 @@ class Player extends EventTarget {
   }
 
   // How starting the stream again has gone for this track; it starts
-  // afresh once the track has got RESCUE_PROGRESS seconds further.
+  // afresh once the track has got RESCUE_PROGRESS seconds further, or been
+  // moved back.
   rescueFor(track, deck, t) {
     let r = this.rescue;
-    if (!r || r.qid !== track.qid || t - r.from >= RESCUE_PROGRESS) {
+    if (!r || r.qid !== track.qid || t - r.from >= RESCUE_PROGRESS || t < r.from - 1) {
       r = this.rescue = { qid: track.qid, from: t, tries: 0, played: false, soft: false };
     }
     r.played ||= deck.played;
@@ -1083,15 +1103,20 @@ class Player extends EventTarget {
   endReached(deck, slack = 0.4) {
     if (deck.endsAt == null || deck !== this.deck || deck.el.paused || deck.el.currentTime < deck.endsAt - slack) return false;
     deck.endsAt = null;
+    this.endNow();
+    return true;
+  }
+
+  // The track has ended where its stream stopped.
+  endNow() {
     if (this.repeat === 'one' && !this.transition && !this.sleepEndOfTrack && !this.remote) {
       // From the top, from a new stream (this one stopped).
       this.report('stopped', this.current, this.duration, true);
       this.clearProgress(this.current);
       this.load(this.index, { startAt: 0, reportPrev: false });
-      return true;
+      return;
     }
     this.onEnded();
-    return true;
   }
 
   // iOS only lets an element start playback on its own once it has played

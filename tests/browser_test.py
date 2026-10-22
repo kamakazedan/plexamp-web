@@ -2962,6 +2962,18 @@ with sync_playwright() as pw:
               after['id'] == tr['id'] and after['t'] > 13 and after['state'] == 'playing' and len(mine) == 2
               and mine[0]['playback'] == mine[1]['playback'] and not play_errors(), f'{after} {mine} {play_errors()}')
 
+        # Loaded to start near its end, and its stream fails before anything
+        # loads (nothing to play on from): the track ends there, and the
+        # next one plays.
+        play_track(2, 1, rules='&kill=4,4')
+        tr = now()
+        player(page, '(p.load(p.index, { startAt: 17 }), true)')
+        wait_for(lambda: now()['id'] != tr['id'] and now()['state'] == 'playing', 30, 0.25)
+        after = now()
+        check('stream: a track started near its end whose stream fails before it plays ends there, and the next one plays',
+              after['id'] != tr['id'] and after['state'] == 'playing' and len(sessions_of(tr['id'])) == 2 and not play_errors(),
+              f'{after} {sessions_of(tr["id"])} {play_errors()}')
+
         # Dropped connections (no answer at all, as through a proxy that
         # drops them): its playlist and parts are tried again, on the same
         # stream.
