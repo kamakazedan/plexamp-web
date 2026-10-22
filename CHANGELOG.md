@@ -3,6 +3,44 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.18.3 - 2026-10-22
+
+### Fixed
+
+- **Playback cutting out in a track's last 30 seconds** on a slow
+  connection (playing from home at work, say), then skipping: that's when
+  the next track starts loading, for a crossfade or a gapless change, and
+  its download took what the track still playing needed. The next track
+  now waits until the one playing has loaded to its end (or has plenty
+  buffered), and a converted next track loads only its first seconds
+  until it plays.
+- **Converted tracks cutting out now and then**: a dropped connection with
+  plenty still buffered is now tried again on the same stream up to four
+  times, rather than once, before the stream is started again (which is
+  heard as a gap). (0.18.1 said converted tracks would buffer a minute
+  ahead: for music, hls.js already loads the whole track, or ten minutes
+  of it, as it still does.)
+- **Changing Streaming quality takes effect straight away.** Switching back
+  to Original (say) left the track playing converted, and the next one too
+  if it had started loading; a converted stream started again after a
+  failure stayed converted. The track playing now carries on from where it
+  is, the new way, and so does the next one, from one bitrate to another
+  too (High to Data saver, say). A track the server converts because the
+  file doesn't play as it is here stays converted, at the new bitrate.
+  During a crossfade, the change waits until it's done; while paused,
+  until you play again (nothing loads meanwhile).
+- **A crossfade into a track that hasn't loaded yet** (on a slow
+  connection) no longer fades the track playing out into silence: it plays
+  on until the next one sounds (or holds, if the next one stops for data
+  part-way), and the fade fits into what's left. With Smart crossfade, a
+  converted next track loads far enough to start where its music does.
+- A track playing as it is (FLAC, say) whose connection drops is loaded
+  again from where it was, once, before the server is asked to convert it
+  (then only until Streaming quality is changed).
+- With `DEBUG=true`, the container's log says when playback had to wait
+  for data part-way through a track: for how long, how much was buffered,
+  and whether the next track was loading.
+
 ## 0.18.2 - 2026-10-22
 
 ### Fixed

@@ -73,6 +73,6 @@ If something doesn't work, set `DEBUG=true` on the container, restart it, and wa
 - every request as a path and status code (`GET /pms/library/sections 502`), without query strings;
 - nginx's own errors for the Plex proxy (timeouts, refused connections, TLS problems), with tokens removed;
 - what the service does (sign-in checks, Play Together sessions);
-- problems from browsers: failed requests, tracks that won't play, converted streams that fail part-way (which part, what the server answered, and what the player did about it), script errors, and which connection and live-update route each device uses (a limited number of lines a minute, as anyone who can open the player could send them).
+- problems from browsers: failed requests, tracks that won't play, converted streams that fail part-way (which part, what the server answered, and what the player did about it), playback waiting for data part-way through a track (for how long, and how much was buffered), script errors, and which connection and live-update route each device uses (a limited number of lines a minute, as anyone who can open the player could send them).
 
 Tokens and keys are replaced with `[redacted]` everywhere, but the log does show server addresses, people's names and the names of tracks: share it with care, and turn debug mode off when you're done. **Settings › Connection** in the app shows whether it's on.

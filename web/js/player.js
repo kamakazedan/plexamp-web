@@ -17,6 +17,13 @@ import { debugLog, debugOn } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
 
 const PRELOAD_AT = 25; // seconds before the next track starts
+// ...once this one has loaded to its end, or has this much buffered (and,
+// playing a file as it is, the browser isn't still fetching it): on a slow
+// connection the next track's download would take what this one needs.
+const PRELOAD_AHEAD = 15;
+// A converted next track loads this many seconds while it waits its turn
+// (past where its music starts, for a smart crossfade).
+const PRELOAD_BUFFER = 10;
 // An element takes a moment to start sounding, so for a gapless change the
 // next track is started this much before the current one ends.
 const GAPLESS_LEAD = 0.06;
@@ -41,9 +48,10 @@ const RESCUE_TRIES = 3;
 const RESCUE_PROGRESS = 20;
 const RESCUE_WAITS = [250, 3000, 6000];
 const RESCUE_LEFT = 3;
-// A dropped connection with at least this much still to play is first
-// tried again on the same stream (nothing is heard of it).
+// A dropped connection with at least this much still to play is tried
+// again on the same stream (nothing is heard of it), up to this many times.
 const RESCUE_AHEAD = 10;
+const RESCUE_SOFT = 4;
 
 // How hls.js fetches a stream the server converts. Left to itself, it gives
 // up on a stream at the start if the browser calls the first request a
@@ -70,11 +78,15 @@ const loadPolicy = (maxTimeToFirstByteMs, maxLoadTimeMs, timeoutRetry, errorRetr
   default: { maxTimeToFirstByteMs, maxLoadTimeMs, timeoutRetry, errorRetry },
 });
 export const HLS_CONFIG = {
-  // A minute ahead (a converted track is about 2.4 MB a minute at 320
-  // kbps), to ride out a slow patch; and half a minute behind the playhead
-  // (by default hls.js keeps everything already played, which for a long
-  // mix adds up).
-  maxBufferLength: 60,
+  // How far ahead: hls.js loads until it has maxBufferLength seconds or
+  // maxBufferSize bytes, whichever is more, up to maxMaxBufferLength
+  // seconds; for music that's the whole track, or ten minutes of it (these
+  // are hls.js's own). Half a minute is kept behind the playhead (by
+  // default hls.js keeps everything already played, which for a long mix
+  // adds up).
+  maxBufferLength: 30,
+  maxBufferSize: 60 * 1000 * 1000,
+  maxMaxBufferLength: 600,
   backBufferLength: 30,
   manifestLoadPolicy: loadPolicy(Infinity, 30000, retries(2, 0, 0), retries(3, 1000, 4000)),
   playlistLoadPolicy: loadPolicy(15000, 30000, retries(2, 0, 0), retries(3, 1000, 4000)),
@@ -107,6 +119,17 @@ function bufferedEnd(el, t) {
   }
   return t;
 }
+
+// Whether a deck has its track loaded as `src` (see sourceFor) would load
+// it: as the file, or converted at the same bitrate.
+function sameSource(deck, src) {
+  return deck.isHls === src.hls && (!src.hls || deck.kbps === src.kbps);
+}
+
+// An element with what it needs to play from where it is (not still
+// moving there: some browsers lower readyState only once a seek is under
+// way).
+const canSound = (el) => el.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && !el.seeking;
 
 let hlsLoader = null;
 function loadHls() {
@@ -141,23 +164,33 @@ export class Deck {
     this.onFatal = null;
     this.gain = 1; // this element's part in a crossfade (its volume is the player's times this)
     this.playback = null; // the track's playback, as Plex knows it (see playbackId)
+    this.kbps = null; // a converted stream's bitrate
     this.endsAt = null; // a stream that stopped short: where its sound ends (see onStreamError)
     this.played = false; // has played since it was loaded
+    // Converted whatever Streaming quality says: true as the file doesn't
+    // play as it is here, 'network' as its connection kept dropping (see
+    // onError).
+    this.forced = false;
+    this.stall = null; // debug mode: playback waiting for data, since when
     this.gen = 0;
   }
 
   // `playback`: the track's playback (see playbackId); `startAt`: where a
-  // converted stream starts (seconds).
-  async load(url, isHls, { playback = null, startAt = 0 } = {}) {
+  // converted stream starts (seconds); `ahead`: if set, it loads only that
+  // many seconds ahead (until loadAhead); `kbps`: a converted stream's
+  // bitrate.
+  async load(url, isHls, { playback = null, startAt = 0, ahead = null, kbps = null } = {}) {
     this.reset();
     const gen = this.gen;
     this.isHls = isHls;
+    this.kbps = isHls ? kbps : null;
     this.playback = playback;
     if (isHls && !canPlayHlsNatively()) {
       const Hls = await loadHls();
       if (gen !== this.gen) throw new DOMException('Another track was loaded.', 'AbortError');
       if (!Hls.isSupported()) throw new Error('This browser cannot play converted streams.');
-      const hls = new Hls({ ...HLS_CONFIG, startPosition: startAt > 0 ? startAt : -1 });
+      const limit = ahead ? { maxBufferLength: ahead, maxBufferSize: 0 } : {};
+      const hls = new Hls({ ...HLS_CONFIG, ...limit, startPosition: startAt > 0 ? startAt : -1 });
       this.hls = hls;
       // Called once hls.js has decided (it's tried again by then, as far as
       // it will): a fatal error goes to the player, the rest to the debug log.
@@ -178,6 +211,14 @@ export class Deck {
     return !!(this.el.getAttribute('src') || this.hls);
   }
 
+  // A converted stream loaded as the next track, now playing: it loads as
+  // far ahead as usual.
+  loadAhead() {
+    if (!this.hls) return;
+    this.hls.config.maxBufferLength = HLS_CONFIG.maxBufferLength;
+    this.hls.config.maxBufferSize = HLS_CONFIG.maxBufferSize;
+  }
+
   reset() {
     this.gen += 1;
     if (this.hls) {
@@ -193,8 +234,11 @@ export class Deck {
     this.isHls = false;
     this.gain = 1;
     this.playback = null;
+    this.kbps = null;
     this.endsAt = null;
     this.played = false;
+    this.forced = false;
+    this.stall = null;
   }
 }
 
@@ -218,10 +262,11 @@ class Player extends EventTarget {
     this.errorsInRow = 0;
     // A converted stream being started again (see onStreamError): how it's
     // gone for this track, and the wait before the next start.
-    this.rescue = null; // { qid, from, tries, played, soft }
+    this.rescue = null; // { qid, from, tries, played, soft (times carried on on the same stream) }
     this.rescueTimer = null;
     this.rescueOnline = null;
     this.rescueGo = null;
+    this.directRetry = null; // the track whose original file was loaded again after its connection dropped
     this.restoredAt = 0;
     this.pendingSeek = null; // seconds, or a function returning seconds (see setPendingSeek)
     this.startingAt = null; // where it was when set, in seconds
@@ -280,10 +325,17 @@ class Player extends EventTarget {
       this.useMediaToken = false;
       this.reset();
     });
+    this.quality = app.settings.quality;
+    this.qualityLater = false; // a change of Streaming quality waiting for a change of track to finish
+    this.resumeAs = null; // { qid, playback, forced }: a paused track's source, dropped as Streaming quality changed (see qualityChanged)
     on('settings', (s) => {
       if (!s.playbackSpeed && this.speed !== 1) this.setSpeed(1);
       // Its button gone, a sleep timer that's set goes too.
       if (!s.sleepTimer && this.sleepActive) this.setSleep(null);
+      if (s.quality !== this.quality) {
+        this.quality = s.quality;
+        this.qualityChanged();
+      }
       this.setupMediaSession();
       this.updateMediaSession();
     });
@@ -358,6 +410,7 @@ class Player extends EventTarget {
       if (!mine()) return;
       this.switching = false;
       this.errorsInRow = 0;
+      this.noteStall(deck, true);
       this.setState('playing');
     });
     el.addEventListener('pause', () => {
@@ -377,6 +430,7 @@ class Player extends EventTarget {
     });
     el.addEventListener('waiting', () => {
       if (!mine() || this.endReached(deck, 1)) return;
+      this.noteStall(deck);
       this.setState('loading');
       // A stream waiting to be started again (see onStreamError) that's
       // run out of what's buffered, or been moved past it: now. One that
@@ -466,25 +520,38 @@ class Player extends EventTarget {
     // MP3, say) play as they are; converting them would only use more data.
     const already = quality !== 'original' && !isLossless(track.codec) && track.bitrate > 0 && track.bitrate <= (Number(quality) || 320);
     const direct = (quality === 'original' || already) && !forceTranscode && track.partKey && (!track.codec || canPlayCodec(track.codec));
-    if (direct) return { url: s.directUrl(track, token), hls: false };
-    return { url: s.transcodeUrl(track, quality === 'original' ? 320 : Number(quality) || 320, token, playback), hls: true };
+    if (direct) return { url: s.directUrl(track, token), hls: false, kbps: null };
+    const kbps = quality === 'original' ? 320 : Number(quality) || 320;
+    return { url: s.transcodeUrl(track, kbps, token, playback), hls: true, kbps };
   }
 
-  // `resume`: the same track again, as the same playback (a stream started
-  // again, or the server converting a file that didn't play as it is).
+  // `transcode`: converted whatever Streaming quality says (see
+  // Deck.forced); `resume`: the same track again, as the same playback (a
+  // stream started again, or the server converting a file that didn't play
+  // as it is).
   async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true, resume = false } = {}) {
     this.cancelTransition();
     this.cancelRescue();
-    if (!resume) this.rescue = null;
+    this.qualityLater = false; // (it loads as Streaming quality now says)
+    if (!resume) {
+      this.rescue = null;
+      this.directRetry = null;
+    }
     const prev = this.current;
-    if (reportPrev && prev && this.deck.hasSource() && this.state !== 'idle') this.report('stopped', prev, this.time, true);
+    // A track paused as Streaming quality changed (see qualityChanged): its
+    // playback ends here too, unless it's this one played again.
+    const held = this.resumeAs?.qid === prev?.qid ? this.resumeAs : null;
+    if (reportPrev && prev && (this.deck.hasSource() || held) && this.state !== 'idle') this.report('stopped', prev, this.time, true);
+    this.resumeAs = null;
     this.saveProgress(true);
     this.index = index;
     const track = this.current;
     if (!track || !app.server) return this.reset();
 
     const token = ++this.loadToken;
-    const playback = (resume && this.deck.qid === track.qid && this.deck.playback) || playbackId();
+    const quality = app.settings.quality;
+    const playback =
+      (resume && this.deck.qid === track.qid && this.deck.playback) || (resume && held?.qid === track.qid && held.playback) || playbackId();
     const src = this.sourceFor(track, transcode, playback);
     this.triedTranscode = src.hls;
     this.transcoding = src.hls;
@@ -501,25 +568,35 @@ class Player extends EventTarget {
     this.updateMediaSession();
 
     const spare = this.spare;
-    if (!transcode && !this.routed && spare.qid === track.qid && spare.isHls === src.hls) {
+    if (!transcode && !this.routed && spare.qid === track.qid && sameSource(spare, src)) {
       // Already buffered by the preloader: switch decks. Its metadata has
       // loaded already, so a start position is applied here.
       this.deck.el.pause();
       this.deck.reset();
       this.active ^= 1;
-      if (this.pendingSeek != null && this.audio.readyState >= 1) {
-        try {
-          this.audio.currentTime = resolve(this.pendingSeek);
-        } catch {
-          /* not seekable yet */
+      this.deck.loadAhead();
+      if (this.pendingSeek != null) {
+        if (this.audio.readyState >= 1) {
+          try {
+            this.audio.currentTime = resolve(this.pendingSeek);
+          } catch {
+            /* not seekable yet */
+          }
+          this.setPendingSeek(null);
         }
-        this.setPendingSeek(null);
+      } else if (this.audio.currentTime > 0.3) {
+        // Waiting where a change of track would have started it: from the top.
+        try {
+          this.audio.currentTime = 0;
+        } catch {
+          /* not seekable */
+        }
       }
     } else {
       this.deck.el.pause();
       spare.reset();
       try {
-        await this.deck.load(src.url, src.hls, { playback, startAt: this.startingAt || 0 });
+        await this.deck.load(src.url, src.hls, { playback, startAt: this.startingAt || 0, kbps: src.kbps });
       } catch (err) {
         if (token === this.loadToken && err?.name !== 'AbortError') {
           this.loadingQid = null;
@@ -529,6 +606,7 @@ class Player extends EventTarget {
       }
       if (token !== this.loadToken) return;
       this.deck.qid = track.qid;
+      this.deck.forced = transcode || false;
     }
     this.loadingQid = null;
     this.applyVolume();
@@ -536,6 +614,8 @@ class Player extends EventTarget {
     this.persist();
     if (this.loadAutoplay) this._play();
     else this.setState('paused');
+    // Streaming quality changed while it loaded: the new way, from here.
+    if (app.settings.quality !== quality) this.qualityChanged();
   }
 
   get fades() {
@@ -552,17 +632,113 @@ class Player extends EventTarget {
     if ((plan ? plan.at : this.duration) - this.time > PRELOAD_AT) return;
     const next = this.queue[ni];
     const spare = this.spare;
-    if (spare.qid === next.qid || spare.loadingQid === next.qid) return;
+    if (spare.qid === next.qid || spare.loadingQid === next.qid || !this.roomToPreload()) return;
     const playback = playbackId();
     const src = this.sourceFor(next, false, playback);
-    spare
-      .load(src.url, src.hls, { playback })
+    // From the top (it may be played from there), as far as where the
+    // change of track would start it and some way past.
+    const ahead = PRELOAD_BUFFER + (plan?.startAt || 0);
+    const loading = spare.load(src.url, src.hls, { playback, ahead, kbps: src.kbps });
+    const gen = spare.gen;
+    spare.loadingQid = next.qid;
+    loading
       .then(() => {
+        if (spare.gen !== gen) return;
         spare.qid = next.qid;
         this.applyVolume();
       })
-      .catch(() => spare.reset());
-    spare.loadingQid = next.qid;
+      .catch(() => spare.gen === gen && spare.reset());
+  }
+
+  // Streaming quality changed: the track playing carries on from where it
+  // is, the new way (converted as the file doesn't play here, at the new
+  // bitrate), and a next track loaded the old way is loaded again when due.
+  // During a change of track, once it's done (changing either track then
+  // would be heard); paused, once it's played again.
+  qualityChanged() {
+    if (this.cast) return;
+    if (this.transition) {
+      this.qualityLater = true;
+      return;
+    }
+    this.qualityLater = false;
+    const ni = this.nextIndex();
+    const next = ni === -1 ? null : this.queue[ni];
+    const spare = this.spare;
+    const preloaded = spare.qid ?? spare.loadingQid;
+    if (preloaded != null && next && preloaded === next.qid && !sameSource(spare, this.sourceFor(next, false))) spare.reset();
+    const t = this.current;
+    const deck = this.deck;
+    if (!t || this.routed) return;
+    if (!deck.hasSource()) {
+      // Paused after an earlier change (see below): it still loads the new way when played.
+      if (this.resumeAs?.qid === t.qid) this.transcoding = this.sourceFor(t, this.resumeAs.forced).hls;
+      return;
+    }
+    if (deck.qid !== t.qid) return;
+    const forced = deck.forced === true;
+    if (sameSource(deck, this.sourceFor(t, forced))) return;
+    const at = this.time;
+    const playing = this.isPlaying && !deck.el.paused;
+    if (!playing && !this.remote) {
+      // Paused: it loads the new way when played, from where it is, as the
+      // same playback (still converted, if the file doesn't play here).
+      // Nothing is fetched meanwhile, or shown to your other devices as
+      // playing.
+      this.savePosition();
+      this.saveProgress(true);
+      this.cancelRescue();
+      this.setPendingSeek(null);
+      this.resumeAs = { qid: t.qid, playback: deck.playback, forced };
+      deck.reset();
+      this.restoredAt = at;
+      this.transcoding = this.sourceFor(t, forced).hls;
+      this.queueTime();
+      return;
+    }
+    this.load(this.index, {
+      autoplay: playing,
+      startAt: this.remote ? () => this.remote?.expectedTime(t.sid) ?? at : at,
+      transcode: forced,
+      reportPrev: false,
+      resume: true,
+    });
+  }
+
+  // Debug mode: how long playback waited for data part-way through a track
+  // (`over`: it plays again), how much was buffered, and whether the next
+  // track was loading meanwhile.
+  noteStall(deck, over = false) {
+    if (!debugOn()) return;
+    const el = deck.el;
+    if (!over) {
+      if (deck.played && !deck.stall) deck.stall = { since: performance.now(), t: el.currentTime, ahead: bufferedEnd(el, el.currentTime) - el.currentTime };
+      return;
+    }
+    const s = deck.stall;
+    deck.stall = null;
+    const waited = s ? (performance.now() - s.since) / 1000 : 0;
+    if (waited < 0.3) return;
+    const spare = this.spare;
+    const next = spare.loadingQid != null || spare.qid != null ? 'the next track loading' : 'nothing else loading';
+    debugLog(
+      'player',
+      `waited ${waited.toFixed(1)} s for “${this.current?.title}” at ${s.t.toFixed(1)} s of ${this.duration.toFixed(1)} (${deck.isHls ? 'converted' : 'original file'}, ${s.ahead.toFixed(1)} s buffered, ${next})`,
+    );
+  }
+
+  // Whether the next track can start loading without taking what this one
+  // still needs: this one has loaded to its end, or has PRELOAD_AHEAD
+  // seconds buffered (playing a file as it is, with the browser no longer
+  // fetching it: it has what it wants for now).
+  roomToPreload() {
+    const el = this.audio;
+    const t = el.currentTime || 0;
+    const ahead = bufferedEnd(el, t) - t;
+    const left = this.duration - t;
+    if (ahead >= left - 0.5) return true;
+    if (this.deck.isHls) return ahead >= Math.min(PRELOAD_AHEAD, left);
+    return ahead >= PRELOAD_AHEAD && el.networkState !== HTMLMediaElement.NETWORK_LOADING;
   }
 
   // ---------- transitions ----------
@@ -658,11 +834,13 @@ class Player extends EventTarget {
     if (!plan || this.transition || this.state !== 'playing' || inn.qid !== plan.next.qid || !inn.hasSource()) return;
     const now = out.el.currentTime;
     if (plan.at - now > 0.25) return; // not yet (it moved): planned again on the next time update
-    if (plan.kind === 'cut' || (plan.kind === 'fade' && now >= plan.at + plan.fade)) {
+    const ready = canSound(inn.el) && Math.abs((inn.el.currentTime || 0) - plan.startAt) <= 0.3;
+    if (plan.kind === 'cut' || (plan.kind === 'fade' && now >= plan.at + plan.fade && ready)) {
       this.switchToSpare(plan.ni, { startAt: plan.startAt });
       return;
     }
-    this.transition = { plan, out, inn };
+    // `from` and `p`: the fade's timing (see stepFade), and how far it's got.
+    this.transition = { plan, out, inn, from: null, p: 0 };
     try {
       if (Math.abs((inn.el.currentTime || 0) - plan.startAt) > 0.3) inn.el.currentTime = plan.startAt;
     } catch {
@@ -685,15 +863,36 @@ class Player extends EventTarget {
 
   // Equal-power crossfade, driven by how far the outgoing track has played
   // (so pausing pauses the fade, and the playback speed is allowed for).
+  // It goes on only while the next track sounds: until it does, or while
+  // it waits for data part-way (its stream still on its way, on a slow
+  // connection), the fade holds where it's got to (this one at full
+  // volume, before it starts), and then fits into what's left before this
+  // one's music ends.
   stepFade() {
     const tr = this.transition;
     if (!tr || tr.out.el.paused) return;
-    const p = (tr.out.el.currentTime - tr.plan.at) / tr.plan.fade;
-    if (p >= 1 || tr.out.el.ended) {
+    if (tr.out.el.ended) {
+      this.finishTransition();
+      return;
+    }
+    const now = tr.out.el.currentTime;
+    const end = tr.plan.at + tr.plan.fade;
+    if (tr.inn.el.paused || !canSound(tr.inn.el)) {
+      tr.from = null; // worked out again when it sounds
+      return;
+    }
+    if (tr.from == null) {
+      // Timed so that it's `p` of the way through now, and done at `end`.
+      const t = Math.max(now, tr.plan.at);
+      tr.from = (t - tr.p * end) / (1 - tr.p);
+    }
+    const p = end > tr.from ? (now - tr.from) / (end - tr.from) : 1;
+    if (p >= 1) {
       this.finishTransition();
       return;
     }
     const x = Math.max(0, Math.min(1, p));
+    tr.p = x;
     tr.out.gain = Math.cos((x * Math.PI) / 2);
     tr.inn.gain = Math.sin((x * Math.PI) / 2);
     this.applyVolume();
@@ -729,6 +928,9 @@ class Player extends EventTarget {
     tr.out.gain = 1;
     tr.inn.gain = 1;
     this.applyVolume();
+    // Streaming quality changed during it: now, once what called it off is
+    // done (see qualityChanged).
+    if (this.qualityLater) queueMicrotask(() => this.qualityLater && !this.transition && this.qualityChanged());
   }
 
   // After the queue changes: a change to a track that's no longer next is
@@ -756,6 +958,7 @@ class Player extends EventTarget {
     this.index = ni;
     const deck = this.deck;
     deck.gain = 1;
+    deck.loadAhead();
     this.transcoding = deck.isHls;
     this.triedTranscode = deck.isHls;
     this.lastReport = 0;
@@ -771,9 +974,13 @@ class Player extends EventTarget {
     this.applyVolume();
     this.applySpeed();
     if (deck.el.paused) this.audio.play()?.catch((err) => this.onPlayError(err));
+    // Waiting for data already (it says when it plays: see bind).
+    else if (deck.el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) this.setState('loading');
     this.emit('track');
     this.updateMediaSession();
     this.persist();
+    // Streaming quality changed during the change of track: now.
+    if (this.qualityLater) this.qualityChanged();
   }
 
   // ---------- transport ----------
@@ -791,7 +998,8 @@ class Player extends EventTarget {
     if (!this.current || this.cast) return;
     this.unlock();
     if (!this.deck.hasSource()) {
-      this.load(this.index, { startAt: this.restoredAt || 0, reportPrev: false });
+      const held = this.resumeAs?.qid === this.current.qid ? this.resumeAs : null;
+      this.load(this.index, { startAt: this.restoredAt || 0, reportPrev: false, transcode: held?.forced || false, resume: !!held });
       return;
     }
     this.transition?.inn.el.play()?.catch(() => {});
@@ -960,13 +1168,19 @@ class Player extends EventTarget {
       'warn',
     );
     if (!this.triedTranscode && track.partKey) {
-      // The browser couldn't decode the original file: ask the server to convert it.
-      this.load(this.index, {
-        startAt: this.remote ? () => this.remote?.expectedTime(track.sid) ?? this.time : this.time,
-        transcode: true,
-        reportPrev: false,
-        resume: true,
-      });
+      const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? this.time : this.time;
+      const network = media?.code === MediaError.MEDIA_ERR_NETWORK;
+      if (network && this.directRetry !== track.qid) {
+        // The connection to the original file dropped: the file again,
+        // from there, once.
+        this.directRetry = track.qid;
+        this.load(this.index, { startAt, reportPrev: false, resume: true });
+        return;
+      }
+      // The browser couldn't decode the original file, or its connection
+      // dropped again: ask the server to convert it (for the second, only
+      // until Streaming quality changes).
+      this.load(this.index, { startAt, transcode: network ? 'network' : true, reportPrev: false, resume: true });
       return;
     }
     this.errorsInRow += 1;
@@ -1028,8 +1242,8 @@ class Player extends EventTarget {
       return;
     }
     const r = this.rescueFor(track, deck, t);
-    if (data.type === 'networkError' && deck.hls && !r.soft && !(data.response?.code >= 400) && end - t >= RESCUE_AHEAD) {
-      r.soft = true;
+    if (data.type === 'networkError' && deck.hls && r.soft < RESCUE_SOFT && !(data.response?.code >= 400) && end - t >= RESCUE_AHEAD) {
+      r.soft += 1;
       deck.hls.startLoad(end, true);
       return;
     }
@@ -1063,7 +1277,9 @@ class Player extends EventTarget {
       this.load(this.index, {
         autoplay: !el.paused || this.loadAutoplay,
         startAt: this.remote ? () => this.remote?.expectedTime(track.sid) ?? at : at,
-        transcode: true,
+        // Converted as the file doesn't play here (or its connection kept
+        // dropping), or as Streaming quality says.
+        transcode: deck.forced,
         reportPrev: false,
         resume: true,
       });
@@ -1085,7 +1301,7 @@ class Player extends EventTarget {
   rescueFor(track, deck, t) {
     let r = this.rescue;
     if (!r || r.qid !== track.qid || t - r.from >= RESCUE_PROGRESS || t < r.from - 1) {
-      r = this.rescue = { qid: track.qid, from: t, tries: 0, played: false, soft: false };
+      r = this.rescue = { qid: track.qid, from: t, tries: 0, played: false, soft: 0 };
     }
     r.played ||= deck.played;
     return r;
@@ -1594,6 +1810,7 @@ class Player extends EventTarget {
       this.restoredAt = this.time;
       this.setPendingSeek(null);
       this.cancelRescue();
+      this.resumeAs = null;
       this.loadToken += 1;
       this.loadingQid = null;
       this.switching = false;
@@ -1668,7 +1885,8 @@ class Player extends EventTarget {
     // As the track's playback, which its stream was started with (the
     // playing one's, if both have it: a queue of one track, repeated).
     const deck = this.deck.qid === track.qid ? this.deck : this.decks.find((d) => d.qid != null && d.qid === track.qid);
-    app.server.timeline(track, state, time * 1000, deck?.playback);
+    const playback = deck?.playback || (this.resumeAs?.qid === track.qid ? this.resumeAs.playback : null);
+    app.server.timeline(track, state, time * 1000, playback);
   }
 
   // ---------- lock screen / media keys ----------
@@ -1792,6 +2010,8 @@ class Player extends EventTarget {
   reset() {
     this.cancelTransition();
     this.cancelRescue();
+    this.qualityLater = false;
+    this.resumeAs = null;
     this.loadToken += 1;
     this.loadingQid = null;
     this.setPendingSeek(null);

@@ -2827,11 +2827,10 @@ with sync_playwright() as pw:
         page.wait_for_timeout(200)
         check('np: the sleep timer is off to begin with, shown once turned on, and turned off with it',
               hidden and shown and sleep_btn.is_hidden() and not player(page, 'p.sleepActive'), f'{hidden} {shown}')
-        # Converted by the server (Streaming quality): a mark says so, and
-        # why. (The player is told it's converting the track that plays;
-        # converted streams themselves are the stream section's.)
+        # Converted by the server (Streaming quality, which applies to the
+        # track playing at once): a mark says so, and why. (Converted streams
+        # themselves are the stream section's.)
         settings(page, {'quality': '320'})
-        player(page, "(p.transcoding = true, p.emit('track'), true)")
         page.wait_for_selector('.np.open .np-converted', timeout=10000)
         label = page.locator('.np-converted').get_attribute('aria-label')
         quality = page.locator('.np-quality').inner_text()
@@ -2842,9 +2841,12 @@ with sync_playwright() as pw:
         check('np: a converted track is marked, saying why (as its tooltip and when tapped)',
               quality.strip() == '320 kbps' and 'Streaming quality is set to High (320 kbps)' in label and 'The file is FLAC' in label
               and 'Streaming quality' in told and 'Settings' in told, f'{label!r} {quality!r} {told!r}')
+        # Back to Original, it plays the file itself; told it's converting
+        # anyway (as when the file doesn't play as it is), it says that.
         settings(page, {'quality': 'original'})
-        player(page, "p.emit('track')")
-        page.wait_for_timeout(300)
+        wait_for(lambda: player(page, '!p.deck.isHls && !p.transcoding'), 10, 0.2)
+        player(page, "(p.transcoding = true, p.emit('track'), true)")
+        page.wait_for_selector('.np.open .np-converted', timeout=10000)
         label = page.locator('.np-converted').get_attribute('aria-label') or ''
         check('np: ...or, converted as the file didn\'t play as it is, says that', 'the file didn’t play as it is here' in label and 'Streaming quality' not in label, label)
         kinds = js(page, """() => Promise.all([import('./js/player.js'), import('./js/state.js')]).then(([{ player: p }, s]) => {
@@ -2911,7 +2913,7 @@ with sync_playwright() as pw:
         config = player(page, "p.deck.hls && [p.deck.hls.config.maxBufferLength, p.deck.hls.config.fragLoadPolicy.default.errorRetry.maxNumRetry,"
                               " !!p.deck.hls.config.manifestLoadPolicy.default.errorRetry.shouldRetry?.(null, 0, false, { code: 0 })]")
         check('stream: a converted track plays, through hls.js, with the stream settings here',
-              playing and first['hls'] and now()['t'] > 3 and config == [60, 5, True], f'{first} {config}')
+              playing and first['hls'] and now()['t'] > 3 and config == [30, 5, True], f'{first} {config}')
         check('stream: ...its stream and its play reports carry its own playback; the next track\'s stream, preloaded, another',
               len(mine) == 1 and mine[0]['playback'] == first['playback'] and reports and all(x['playback'] == first['playback'] for x in reports)
               and others and all(s['playback'] and s['playback'] != first['playback'] for s in others), f'{first["playback"]} {h["sessions"]} {reports}')
@@ -2961,6 +2963,23 @@ with sync_playwright() as pw:
         check('stream: a decoding problem: the stream starts again at once from there, and plays on',
               after['id'] == tr['id'] and after['t'] > 13 and after['state'] == 'playing' and len(mine) == 2
               and mine[0]['playback'] == mine[1]['playback'] and not play_errors(), f'{after} {mine} {play_errors()}')
+
+        # On a slow connection (its parts come slowly here), the next
+        # track's stream waits until this one's has loaded to its end, and
+        # loads only its first seconds until it plays.
+        play_track(3, 1, rules='&slow=1.5')
+        tr = now()
+        wait_for(lambda: now()['t'] > 17 or now()['id'] != tr['id'], 30, 0.25)
+        h = hls()
+        cur = [x for x in h['sessions'] if x['track'] == tr['id']]
+        nxt = [x for x in h['sessions'] if x['track'] != tr['id']]
+        files = [(r['session'], r['file']) for r in h['requests']]
+        last_part = max((i for i, (sid, f) in enumerate(files) if cur and sid == cur[0]['id'] and f == '00004.ts'), default=None)
+        next_first = min((i for i, (sid, f) in enumerate(files) if nxt and sid == nxt[0]['id']), default=None)
+        next_parts = [f for sid, f in files if nxt and sid == nxt[0]['id'] and f.endswith('.ts')]
+        check('stream: on a slow connection the next track waits until this one has loaded to its end, then loads only its first seconds',
+              now()['id'] == tr['id'] and last_part is not None and next_first is not None and next_first > last_part and 1 <= len(next_parts) <= 3,
+              f'{now()} {last_part} {next_first} {next_parts}')
 
         # Loaded to start near its end, and its stream fails before anything
         # loads (nothing to play on from): the track ends there, and the
@@ -3049,6 +3068,162 @@ with sync_playwright() as pw:
         check('stream: a stream whose last seconds are missing ends where its sound does, and the next track plays',
               15 <= last <= 16.5 and samples[-1]['id'] != tr['id'] and samples[-1]['state'] == 'playing' and not play_errors(),
               f'{last} {samples[-1]} {play_errors()}')
+
+        # Streaming quality changed while a converted track plays: it carries
+        # on from where it was, as the file itself, and so does the next one.
+        play_track(4, 1)
+        tr = now()
+        wait_for(lambda: now()['t'] > 2, 10, 0.2)
+        settings(page, {'quality': 'original'})
+        state = lambda: player(page, "({ id: p.current?.id, t: p.time, isHls: p.deck.isHls, transcoding: p.transcoding, state: p.state,"
+                                     " spare: p.spare.qid != null ? p.spare.isHls : null })")
+        seen = []
+        wait_for(lambda: seen.append(state()) or (not seen[-1]['isHls'] and seen[-1]['state'] == 'playing' and seen[-1]['t'] > 3), 15, 0.2)
+        after = seen[-1]
+        check('stream: back to Original while a converted track plays, it carries on from where it was, as the file itself (and so does the next)',
+              after['id'] == tr['id'] and not after['isHls'] and not after['transcoding'] and after['state'] == 'playing'
+              and min(x['t'] for x in seen) > 1.5 and after['spare'] in (None, False), f'{after} {min(x["t"] for x in seen)}')
+        settings(page, {'quality': '320'})
+
+        # ...and from one converted quality to another (Data saver, say):
+        # the new bitrate, from where it was, and the next track's too.
+        rate = lambda: player(page, "({ id: p.current?.id, t: p.time, kbps: p.deck.kbps, forced: p.deck.forced, isHls: p.deck.isHls,"
+                                    " state: p.state, spare: p.spare.qid != null ? p.spare.kbps : null })")
+        play_track(4, 2)
+        tr = now()
+        wait_for(lambda: now()['t'] > 2 and player(page, 'p.spare.qid != null'), 10, 0.2)
+        settings(page, {'quality': '128'})
+        seen = []
+        wait_for(lambda: seen.append(rate()) or (seen[-1]['kbps'] == 128 and seen[-1]['state'] == 'playing' and seen[-1]['t'] > 3
+                                                 and seen[-1]['spare'] == 128), 15, 0.2)
+        after = seen[-1]
+        mine = sessions_of(tr['id'])
+        nxt = [s for s in hls()['sessions'] if s['track'] != tr['id']]
+        check('stream: ...and from one converted quality to another, the new bitrate, from where it was (and the next track\'s too)',
+              after['id'] == tr['id'] and after['kbps'] == 128 and [s['bitrate'] for s in mine] == ['320', '128']
+              and min(x['t'] for x in seen) > 1.5 and [s['bitrate'] for s in nxt] == ['320', '128'], f'{after} {min(x["t"] for x in seen)} {mine} {nxt}')
+
+        # Paused, a change waits until it's played again (nothing loads
+        # meanwhile, or says it's playing): then the new way, from where it
+        # was, as the same playback.
+        player(page, 'p.pause()')
+        wait_for(lambda: player(page, "p.state === 'paused'"), 5, 0.1)
+        held = player(page, 'p.time')
+        old = player(page, 'p.deck.playback')
+        started = len(hls()['sessions'])
+        settings(page, {'quality': '320'})
+        page.wait_for_timeout(1000)
+        paused = player(page, "({ t: p.time, src: p.deck.hasSource(), state: p.state, playing: p.isPlaying, transcoding: p.transcoding })")
+        quiet = len(hls()['sessions']) == started
+        ended = [x for x in hls()['timelines'] if x['playback'] == old and x['state'] == 'stopped']
+        player(page, 'p.play()')
+        wait_for(lambda: rate()['kbps'] == 320 and rate()['state'] == 'playing', 10, 0.2)
+        resumed = rate()
+        same = player(page, 'p.deck.playback') == old
+        mine = sessions_of(tr['id'])
+        check('stream: paused, a change of quality waits until it plays again (nothing loads or says it plays meanwhile), then applies from where it was',
+              not paused['src'] and paused['state'] == 'paused' and not paused['playing'] and paused['transcoding'] and abs(paused['t'] - held) < 0.3
+              and quiet and not ended and resumed['id'] == tr['id'] and resumed['t'] >= held - 0.5 and same
+              and [s['bitrate'] for s in mine] == ['320', '128', '320'] and mine[-1]['playback'] == old, f'{held} {paused} {quiet} {ended} {resumed} {same} {mine}')
+
+        # ...and left for another track while it waits so, its playback ends
+        # there, as a paused track's does.
+        player(page, 'p.pause()')
+        wait_for(lambda: player(page, "p.state === 'paused'"), 5, 0.1)
+        old = player(page, 'p.deck.playback')
+        settings(page, {'quality': '128'})
+        wait_for(lambda: player(page, '!p.deck.hasSource()'), 5, 0.1)
+        player(page, 'p.next()')
+        wait_for(lambda: now()['id'] != tr['id'] and now()['state'] == 'playing', 10, 0.2)
+        ended = [x for x in hls()['timelines'] if x['playback'] == old and x['state'] == 'stopped']
+        check('stream: ...and left for another track while it waits so, its playback ends there', len(ended) == 1 and now()['id'] != tr['id'], f'{ended} {now()}')
+        settings(page, {'quality': '320'})
+
+        # A file whose connection drops, and drops again once loaded again,
+        # is converted (at 320 kbps, as for Original) only until Streaming
+        # quality changes.
+        settings(page, {'quality': 'original'})
+        play_track(4, 3)
+        tr = now()
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_NETWORK }) }), p.onError(), true)")
+        wait_for(lambda: player(page, "p.directRetry === p.current?.qid && p.state === 'playing' && p.deck.hasSource() && !p.deck.isHls"), 10, 0.2)
+        again = rate()
+        player(page, '(p.onError(), true)')
+        wait_for(lambda: rate()['isHls'] and rate()['state'] == 'playing', 10, 0.2)
+        fell = rate()
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        settings(page, {'quality': '128'})
+        wait_for(lambda: rate()['kbps'] == 128 and rate()['state'] == 'playing', 10, 0.2)
+        lower = rate()
+        settings(page, {'quality': 'original'})
+        wait_for(lambda: not rate()['isHls'] and rate()['state'] == 'playing', 10, 0.2)
+        back = rate()
+        check('stream: a file whose connection keeps dropping is converted, until Streaming quality changes',
+              not again['isHls'] and fell['isHls'] and fell['forced'] == 'network' and fell['kbps'] == 320 and lower['kbps'] == 128
+              and lower['forced'] is False and not back['isHls'] and back['id'] == tr['id'] and not play_errors(), f'{again} {fell} {lower} {back}')
+
+        # ...whereas one that doesn't play as it is here stays converted, at
+        # the bitrate asked for (paused when it's changed, too).
+        play_track(4, 4)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        player(page, '(p.load(p.index, { startAt: p.time, transcode: true, reportPrev: false, resume: true }), true)')
+        wait_for(lambda: rate()['isHls'] and rate()['state'] == 'playing', 10, 0.2)
+        settings(page, {'quality': '128'})
+        wait_for(lambda: rate()['kbps'] == 128 and rate()['state'] == 'playing', 10, 0.2)
+        lower = rate()
+        player(page, 'p.pause()')
+        wait_for(lambda: player(page, "p.state === 'paused'"), 5, 0.1)
+        settings(page, {'quality': 'original'})
+        player(page, 'p.play()')
+        wait_for(lambda: rate()['kbps'] == 320 and rate()['state'] == 'playing', 10, 0.2)
+        back = rate()
+        check('stream: ...and one that doesn\'t play as it is stays converted, at the bitrate asked for (paused when it\'s changed, too)',
+              lower['forced'] is True and lower['kbps'] == 128 and back['forced'] is True and back['kbps'] == 320 and back['isHls'] and not play_errors(),
+              f'{lower} {back} {play_errors()}')
+        settings(page, {'quality': '320'})
+
+        # Smart crossfade into a converted track whose music starts part-way
+        # in: it's preloaded from the top to some way past there, and fades
+        # in from there.
+        settings(page, {'fades': 'smart'})
+        listed = mock('/__mock/tracks')['MediaContainer']['Metadata']
+        x = listed[10]
+        y = next(t for t in listed if t['album'] != x['album'])
+
+        def smart_pair():
+            player(page, 'p.pause()')
+            hls('?reset=1')
+            js(page, "() => Promise.all([import('./js/state.js'), import('./js/plex.js'), import('./js/player.js')]).then(async ([{ app }, { normTrack }, { player: p }]) => {"
+                     f" const list = await Promise.all({json.dumps([x['ratingKey'], y['ratingKey']])}.map(async (id) => normTrack(await app.server.metadata(id))));"
+                     " p.spans.set(list[0].id, { start: 0, end: list[0].duration / 1000, quietFrom: {} });"
+                     " p.spans.set(list[1].id, { start: 9, end: list[1].duration / 1000, quietFrom: {} });"
+                     " p.playTracks(list, 0, { context: { title: 'Smart', href: null } }); })")
+            return wait_for(lambda: player(page, "p.state === 'playing' && p.spare.qid != null && p.spare.el.readyState >= 1"), 15, 0.2)
+        smart_pair()
+        pre = player(page, "({ ahead: p.spare.hls?.config.maxBufferLength, at: p.spare.el.currentTime, plan: p.nextPlan()?.startAt })")
+        h = hls()
+        nxt = [s for s in h['sessions'] if s['track'] == y['ratingKey']]
+        parts = [r['file'] for r in h['requests'] if nxt and r['session'] == nxt[0]['id'] and r['file'].endswith('.ts')]
+        player(page, 'p.seek(13)')
+        wait_for(lambda: player(page, f"p.current?.id === '{y['ratingKey']}' && p.state === 'playing'"), 15, 0.2)
+        took = player(page, 'p.time')
+        check('stream: with smart crossfade, a converted next track is preloaded to past where its music starts, and fades in from there',
+              pre['ahead'] == 19 and pre['at'] < 0.5 and pre['plan'] == 9 and parts and parts[0] == '00000.ts' and 9 <= took <= 16 and not play_errors(),
+              f'{pre} {parts} {took} {play_errors()}')
+
+        # ...whereas Next starts it from the top (even after a fade called
+        # off, which leaves it waiting where the fade would have started it).
+        smart_pair()
+        player(page, 'p.seek(14.5)')
+        wait_for(lambda: player(page, "p.transition?.plan.kind === 'fade'"), 8, 0.1)
+        player(page, 'p.seek(5)')
+        waiting = player(page, 'p.spare.el.currentTime')
+        player(page, 'p.next()')
+        wait_for(lambda: player(page, f"p.current?.id === '{y['ratingKey']}' && p.state === 'playing'"), 10, 0.1)
+        top = player(page, 'p.time')
+        check('stream: ...whereas Next starts it from the top (after a fade called off too)', 8.5 <= waiting <= 9.5 and top < 1.5, f'{waiting} {top}')
+        settings(page, {'fades': 'off'})
 
         # A stream that never plays, started again and failing again: the
         # track is skipped, as before, saying so.
@@ -3533,6 +3708,54 @@ with sync_playwright() as pw:
         now = watch(0.3)[-1]
         check('fades: seeking back calls the fade off', now['cur'] == a['ratingKey'] and now['playing'] == 1 and not now['kind']
               and now['vols'][now['active']] == 1 and now['t'] < 6, json.dumps(now))
+
+        # The next track's data is late (as on a slow connection): this one
+        # plays on at full volume until the next one sounds, and the fade
+        # fits into what's left of this one's music. (Here the next track
+        # says it has nothing to play from until told otherwise.)
+        queue([a['ratingKey'], b['ratingKey']], 6)
+        wait_for(lambda: player(page, 'p.spare.qid != null && p.spare.qid === p.queue[1]?.qid'), 6, 0.1)
+        player(page, "(Object.defineProperty(p.spare.el, 'readyState', { configurable: true, get: () => 1 }), true)")
+        wait_for(lambda: player(page, "p.transition?.plan.kind === 'fade'"), 8, 0.1)
+        page.wait_for_timeout(1200)
+        held = watch(0.8)
+        player(page, '(p.decks.forEach((d) => delete d.el.readyState), true)')
+        got = watch(10, b['ratingKey'])
+        mid = [x for x in got if x['kind'] == 'fade' and 0.15 < min(x['vols']) and max(x['vols']) < 0.97]
+        last, first = switch_point(got, a['ratingKey'], b['ratingKey'])
+        check('fades: a next track whose data is late: this one plays on at full volume until it sounds, then the fade fits into what\'s left',
+              held and all(x['kind'] == 'fade' and x['cur'] == a['ratingKey'] and x['vols'][x['active']] == 1 and x['vols'][x['active'] ^ 1] == 0 for x in held)
+              and mid and last is not None and last < 15.5 and got[-1]['vols'][got[-1]['active']] == 1, f'{held} {len(mid)} {last} -> {first}')
+
+        # ...and one that waits for data part-way through the fade: the fade
+        # holds where it's got to until it sounds again.
+        queue([a['ratingKey'], b['ratingKey']], 7)
+        wait_for(lambda: player(page, "p.transition?.plan.kind === 'fade' && p.transition.p > 0.2"), 8, 0.05)
+        player(page, "(Object.defineProperty(p.transition.inn.el, 'readyState', { configurable: true, get: () => 2 }), true)")
+        page.wait_for_timeout(400)
+        held = watch(0.8)
+        player(page, '(p.decks.forEach((d) => delete d.el.readyState), true)')
+        got = watch(10, b['ratingKey'])
+        last, first = switch_point(got, a['ratingKey'], b['ratingKey'])
+        check('fades: ...and one that waits for data part-way through the fade: the fade holds where it\'s got to until it sounds again',
+              len(held) >= 3 and all(x['kind'] == 'fade' and x['vols'] == held[0]['vols'] for x in held) and 0.05 < held[0]['vols'][held[0]['active']] < 0.97
+              and last is not None and got[-1]['cur'] == b['ratingKey'] and got[-1]['vols'][got[-1]['active']] == 1, f'{held} {last} -> {first}')
+
+        # Streaming quality changed during a fade: the fade carries on, and
+        # the next track changes to the new way once it's done.
+        queue([a['ratingKey'], b['ratingKey']], 7)
+        wait_for(lambda: player(page, "p.transition?.plan.kind === 'fade'"), 8, 0.1)
+        settings(page, {'quality': '320'})
+        got = watch(10, b['ratingKey'])
+        last, first = switch_point(got, a['ratingKey'], b['ratingKey'])
+        before = [x for x in got if x['cur'] == a['ratingKey']]
+        converted = wait_for(lambda: player(page, f"p.current?.id === '{b['ratingKey']}' && p.deck.isHls && p.deck.kbps === 320 && p.state === 'playing'"), 15, 0.2)
+        check('fades: Streaming quality changed during a fade: the fade carries on, and the next track then plays the new way',
+              before and all(x['kind'] == 'fade' for x in before) and last is not None and last < 15.5 and first is not None and 5 <= first <= 10.5
+              and converted, f'{len(before)} {[x["kind"] for x in before]} {last} -> {first} {converted}')
+        settings(page, {'quality': 'original'})
+        wait_for(lambda: player(page, '!p.deck.isHls && p.state === "playing"'), 10, 0.2)
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
 
         # A quiet ending (its last 8 seconds about 23 dB down, a beat still
         # ticking): Smart starts the fade where it begins, not 5 seconds
