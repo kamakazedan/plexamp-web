@@ -11,9 +11,9 @@
 // plays nothing: transport and queue changes go to that player, and what it
 // does comes back through castUpdate().
 import { app, on } from './state.js';
-import { store, canPlayCodec, canPlayHlsNatively, isLossless } from './plex.js';
+import { store, canPlayCodec, canPlayHlsNatively, isLossless, playbackId } from './plex.js';
 import { shuffleArray } from './ui.js';
-import { debugLog } from './debug.js';
+import { debugLog, debugOn } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
 
 const PRELOAD_AT = 25; // seconds before the next track starts
@@ -28,6 +28,78 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAI
 const HLS_JS = 'vendor/hls.min.js';
 // Tracks at least this long count as long-form (DJ mixes, audiobooks).
 export const LONG_FORM_MS = 20 * 60000;
+
+// A converted stream that fails part-way (see onStreamError): with no more
+// than this missing at the end, the track ends where its sound does.
+const END_SLACK = 5;
+// Otherwise it's started again where it got to: at most this many times
+// without getting this many seconds further (once for a track that never
+// started), after these waits, and not while there's more than this left
+// of what's buffered to play.
+const RESCUE_TRIES = 3;
+const RESCUE_PROGRESS = 20;
+const RESCUE_WAITS = [250, 3000, 6000];
+const RESCUE_LEFT = 3;
+// A dropped connection with at least this much still to play is first
+// tried again on the same stream (nothing is heard of it).
+const RESCUE_AHEAD = 10;
+
+// How hls.js fetches a stream the server converts. Left to itself, it gives
+// up on a stream at the start if the browser calls the first request a
+// network error, or the server answers it with an error (a proxy that drops
+// a connection now and then, Plex still starting the conversion): that ends
+// the track. These try again, and give up at once only when the server
+// refuses (signed out, no access).
+function retries(maxNumRetry, retryDelayMs, maxRetryDelayMs) {
+  return {
+    maxNumRetry,
+    retryDelayMs,
+    maxRetryDelayMs,
+    shouldRetry: (_config, count, _timeout, res) => retryable(res?.code, count, maxNumRetry),
+  };
+}
+// The decision, by the status of the answer (0 or none: no answer at all).
+export function retryable(code, count, most) {
+  if (code === 401 || code === 403) return false;
+  // Other client errors (a playlist that isn't there): one more try.
+  if (code >= 400 && code < 500 && code !== 408 && code !== 425 && code !== 429) return count < Math.min(1, most);
+  return count < most;
+}
+const loadPolicy = (maxTimeToFirstByteMs, maxLoadTimeMs, timeoutRetry, errorRetry) => ({
+  default: { maxTimeToFirstByteMs, maxLoadTimeMs, timeoutRetry, errorRetry },
+});
+export const HLS_CONFIG = {
+  // A minute ahead (a converted track is about 2.4 MB a minute at 320
+  // kbps), to ride out a slow patch; and half a minute behind the playhead
+  // (by default hls.js keeps everything already played, which for a long
+  // mix adds up).
+  maxBufferLength: 60,
+  backBufferLength: 30,
+  manifestLoadPolicy: loadPolicy(Infinity, 30000, retries(2, 0, 0), retries(3, 1000, 4000)),
+  playlistLoadPolicy: loadPolicy(15000, 30000, retries(2, 0, 0), retries(3, 1000, 4000)),
+  // A part of the stream: hls.js tries it again whatever went wrong (the
+  // stream has no alternatives), this many times.
+  fragLoadPolicy: loadPolicy(15000, 120000, retries(3, 0, 0), retries(5, 500, 2000)),
+};
+
+// For the debug log: what went wrong in a converted stream (never its
+// address, which names the stream's session).
+function streamTrouble(data) {
+  if (!data) return 'stream error';
+  const part = Number.isInteger(data.frag?.sn) ? ` (part ${data.frag.sn})` : '';
+  const code = data.response?.code;
+  const answer = code ? `, HTTP ${code}` : code === 0 ? ', no answer' : '';
+  return `${data.details || data.type || 'stream error'}${part}${answer}`;
+}
+
+// Where what's buffered from `t` on ends (`t` itself if nothing is).
+function bufferedEnd(el, t) {
+  const b = el.buffered;
+  for (let i = 0; i < (b?.length || 0); i++) {
+    if (b.start(i) <= t + 0.5 && b.end(i) > t) return b.end(i);
+  }
+  return t;
+}
 
 let hlsLoader = null;
 function loadHls() {
@@ -61,20 +133,34 @@ export class Deck {
     this.isHls = false;
     this.onFatal = null;
     this.gain = 1; // this element's part in a crossfade (its volume is the player's times this)
+    this.playback = null; // the track's playback, as Plex knows it (see playbackId)
+    this.endsAt = null; // a stream that stopped short: where its sound ends (see onStreamError)
+    this.played = false; // has played since it was loaded
+    this.gen = 0;
   }
 
-  async load(url, isHls) {
+  // `playback`: the track's playback (see playbackId); `startAt`: where a
+  // converted stream starts (seconds).
+  async load(url, isHls, { playback = null, startAt = 0 } = {}) {
     this.reset();
+    const gen = this.gen;
     this.isHls = isHls;
+    this.playback = playback;
     if (isHls && !canPlayHlsNatively()) {
       const Hls = await loadHls();
+      if (gen !== this.gen) throw new DOMException('Another track was loaded.', 'AbortError');
       if (!Hls.isSupported()) throw new Error('This browser cannot play converted streams.');
-      // Keep 30 seconds behind the playhead as well as ahead: by default
-      // hls.js keeps everything already played, which for a long mix adds up.
-      this.hls = new Hls({ maxBufferLength: 30, backBufferLength: 30 });
-      this.hls.on(Hls.Events.ERROR, (_, data) => data?.fatal && this.onFatal?.());
-      this.hls.loadSource(url);
-      this.hls.attachMedia(this.el);
+      const hls = new Hls({ ...HLS_CONFIG, startPosition: startAt > 0 ? startAt : -1 });
+      this.hls = hls;
+      // Called once hls.js has decided (it's tried again by then, as far as
+      // it will): a fatal error goes to the player, the rest to the debug log.
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (this.hls !== hls) return;
+        if (data?.fatal) this.onFatal?.(data);
+        else if (data?.type === 'networkError' && debugOn()) debugLog('player', `converted stream: ${streamTrouble(data)}, trying again`);
+      });
+      hls.loadSource(url);
+      hls.attachMedia(this.el);
     } else {
       this.el.src = url;
       this.el.load();
@@ -86,6 +172,7 @@ export class Deck {
   }
 
   reset() {
+    this.gen += 1;
     if (this.hls) {
       this.hls.destroy();
       this.hls = null;
@@ -98,6 +185,9 @@ export class Deck {
     this.loadingQid = null;
     this.isHls = false;
     this.gain = 1;
+    this.playback = null;
+    this.endsAt = null;
+    this.played = false;
   }
 }
 
@@ -119,6 +209,12 @@ class Player extends EventTarget {
     this.transcoding = false;
     this.triedTranscode = false;
     this.errorsInRow = 0;
+    // A converted stream being started again (see onStreamError): how it's
+    // gone for this track, and the wait before the next start.
+    this.rescue = null; // { qid, from, tries, played, media (when hls.js's recovery was tried), soft }
+    this.rescueTimer = null;
+    this.rescueOnline = null;
+    this.rescueGo = null;
     this.restoredAt = 0;
     this.pendingSeek = null; // seconds, or a function returning seconds
     this.loadToken = 0;
@@ -205,13 +301,18 @@ class Player extends EventTarget {
   }
   get time() {
     if (this.cast) return this.cast.time();
+    // Starting part-way (a stream started again, say): there until it's
+    // ready to be moved there.
+    if (this.pendingSeek != null && (!this.deck.hasSource() || this.audio.readyState < 1)) return resolve(this.pendingSeek) || 0;
     if (!this.deck.hasSource()) return this.restoredAt || 0;
     return this.audio.currentTime || 0;
   }
   get duration() {
     const d = this.cast ? this.cast.duration() : this.audio.duration;
-    if (Number.isFinite(d) && d > 0) return d;
-    return (this.current?.duration || 0) / 1000;
+    const length = Number.isFinite(d) && d > 0 ? d : (this.current?.duration || 0) / 1000;
+    // A converted stream that stopped short ends where its sound does.
+    const end = this.cast ? null : this.deck.endsAt;
+    return end != null && end > 0 && end < length ? end : length;
   }
   // Playing through AirPlay or Google Cast (the browser's own picker): the
   // browser sends this element's sound to the device, so playback stays on
@@ -241,11 +342,13 @@ class Player extends EventTarget {
       if (this.transition?.inn === deck) this.cancelTransition();
       deck.reset();
     };
-    deck.onFatal = () => (mine() ? this.onError() : spareFailed());
+    deck.onFatal = (data) => (mine() ? this.onStreamError(deck, data) : spareFailed());
     el.addEventListener('playing', () => {
       if (!mine()) return;
       this.switching = false;
       this.errorsInRow = 0;
+      deck.played = true;
+      if (this.rescue && this.rescue.qid === deck.qid) this.rescue.played = true;
       this.setState('playing');
     });
     el.addEventListener('pause', () => {
@@ -263,7 +366,13 @@ class Player extends EventTarget {
       this.setState('paused');
       this.saveProgress(true);
     });
-    el.addEventListener('waiting', () => mine() && this.setState('loading'));
+    el.addEventListener('waiting', () => {
+      if (!mine() || this.endReached(deck, 1)) return;
+      this.setState('loading');
+      // A stream waiting to be started again (see onStreamError) that's
+      // run out of what's buffered (or been moved past it): now.
+      if (this.rescueTimer) this.rescueGo?.();
+    });
     el.addEventListener('timeupdate', () => mine() && this.onTime());
     el.addEventListener('durationchange', () => mine() && this.queueTime());
     el.addEventListener('loadedmetadata', () => {
@@ -279,8 +388,9 @@ class Player extends EventTarget {
     el.addEventListener('ended', () => mine() && this.onEnded());
     el.addEventListener('error', () => {
       if (!deck.hasSource()) return;
-      if (mine()) this.onError();
-      else spareFailed(); // a failed preload: just load it normally later
+      if (!mine()) spareFailed(); // a failed preload: just load it normally later
+      else if (deck.isHls) this.onStreamError(deck, { type: 'mediaError', details: `media error ${el.error?.code ?? ''}`.trim() });
+      else this.onError();
     });
   }
 
@@ -295,6 +405,7 @@ class Player extends EventTarget {
 
   onTime() {
     if (this.sleepAt && Date.now() >= this.sleepAt) this.fireSleep();
+    if (this.endReached(this.deck)) return;
     this.queueTime();
     this.learnSpans();
     this.maybePreload();
@@ -329,7 +440,8 @@ class Player extends EventTarget {
     this.mediaToken = app.server ? { value, key: tokenKey(app.server) } : null;
   }
 
-  sourceFor(track, forceTranscode) {
+  // `playback`: the track's playback, for a converted stream (see playbackId).
+  sourceFor(track, forceTranscode, playback) {
     const s = app.server;
     const quality = app.settings.quality;
     // On AirPlay or Cast, a temporary token for another server or account
@@ -341,11 +453,15 @@ class Player extends EventTarget {
     const already = quality !== 'original' && !isLossless(track.codec) && track.bitrate > 0 && track.bitrate <= (Number(quality) || 320);
     const direct = (quality === 'original' || already) && !forceTranscode && track.partKey && (!track.codec || canPlayCodec(track.codec));
     if (direct) return { url: s.directUrl(track, token), hls: false };
-    return { url: s.transcodeUrl(track, quality === 'original' ? 320 : Number(quality) || 320, token), hls: true };
+    return { url: s.transcodeUrl(track, quality === 'original' ? 320 : Number(quality) || 320, token, playback), hls: true };
   }
 
-  async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true } = {}) {
+  // `resume`: the same track again, as the same playback (a stream started
+  // again, or the server converting a file that didn't play as it is).
+  async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true, resume = false } = {}) {
     this.cancelTransition();
+    this.cancelRescue();
+    if (!resume) this.rescue = null;
     const prev = this.current;
     if (reportPrev && prev && this.deck.hasSource() && this.state !== 'idle') this.report('stopped', prev, this.time, true);
     this.saveProgress(true);
@@ -354,7 +470,8 @@ class Player extends EventTarget {
     if (!track || !app.server) return this.reset();
 
     const token = ++this.loadToken;
-    const src = this.sourceFor(track, transcode);
+    const playback = (resume && this.deck.qid === track.qid && this.deck.playback) || playbackId();
+    const src = this.sourceFor(track, transcode, playback);
     this.triedTranscode = src.hls;
     this.transcoding = src.hls;
     this.restoredAt = 0;
@@ -388,9 +505,9 @@ class Player extends EventTarget {
       this.deck.el.pause();
       spare.reset();
       try {
-        await this.deck.load(src.url, src.hls);
+        await this.deck.load(src.url, src.hls, { playback, startAt: resolve(this.pendingSeek) || 0 });
       } catch (err) {
-        if (token === this.loadToken) {
+        if (token === this.loadToken && err?.name !== 'AbortError') {
           this.loadingQid = null;
           this.onError(err);
         }
@@ -422,9 +539,10 @@ class Player extends EventTarget {
     const next = this.queue[ni];
     const spare = this.spare;
     if (spare.qid === next.qid || spare.loadingQid === next.qid) return;
-    const src = this.sourceFor(next, false);
+    const playback = playbackId();
+    const src = this.sourceFor(next, false, playback);
     spare
-      .load(src.url, src.hls)
+      .load(src.url, src.hls, { playback })
       .then(() => {
         spare.qid = next.qid;
         this.applyVolume();
@@ -611,6 +729,8 @@ class Player extends EventTarget {
   // The other element (with the next track loaded, and perhaps playing)
   // becomes the current one.
   switchToSpare(ni, { reported = false, startAt = null } = {}) {
+    this.cancelRescue();
+    this.rescue = null;
     const prev = this.current;
     if (!reported) {
       this.clearProgress(prev);
@@ -776,6 +896,7 @@ class Player extends EventTarget {
     }
     if (this.repeat === 'one') {
       this.report('stopped', track, this.duration, true);
+      this.rescue = null;
       this.audio.currentTime = 0;
       this._play();
       return;
@@ -815,7 +936,12 @@ class Player extends EventTarget {
     );
     if (!this.triedTranscode && track.partKey) {
       // The browser couldn't decode the original file: ask the server to convert it.
-      this.load(this.index, { startAt: this.remote ? () => this.remote.expectedTime(track.sid) ?? this.time : this.time, transcode: true, reportPrev: false });
+      this.load(this.index, {
+        startAt: this.remote ? () => this.remote.expectedTime(track.sid) ?? this.time : this.time,
+        transcode: true,
+        reportPrev: false,
+        resume: true,
+      });
       return;
     }
     this.errorsInRow += 1;
@@ -833,6 +959,114 @@ class Player extends EventTarget {
       return;
     }
     setTimeout(() => this.current === track && this.next(), 1200);
+  }
+
+  // A stream the server converts failed part-way, after hls.js had tried
+  // again as far as it would (or the browser gave up on it). A network that
+  // drops connections now and then (some office proxies), or a server that
+  // stopped the stream (after a long pause, say), shouldn't cost the track:
+  //   - with no more than its last few seconds missing, it ends where its
+  //     sound does;
+  //   - a decoding problem: hls.js's own recovery, once;
+  //   - a dropped connection with plenty still to play: the same stream,
+  //     from where it stopped loading (nothing is heard of it), once;
+  //   - otherwise a new stream from the server, from where it got to
+  //     (RESCUE_TRIES times without getting further).
+  // Only then is it skipped, as before.
+  onStreamError(deck, data = {}) {
+    const track = this.current;
+    if (!track || deck !== this.deck || this.cast || this.rescueTimer || this.rescueOnline) return;
+    const el = deck.el;
+    const t = el.currentTime || 0;
+    const end = bufferedEnd(el, t);
+    const d = this.duration;
+    debugLog('player', `converted stream of “${track.title}” stopped at ${t.toFixed(1)} s of ${d.toFixed(1)} (buffered to ${end.toFixed(1)}): ${streamTrouble(data)}`, 'warn');
+    if (d > 0 && end >= d - END_SLACK) {
+      deck.endsAt = end;
+      this.endReached(deck, 1);
+      return;
+    }
+    const r = this.rescueFor(track, deck, t);
+    // (The element and hls.js can both report the same problem, moments apart.)
+    if (data.type === 'mediaError' && r.media && performance.now() - r.media < 250) return;
+    if (data.type === 'mediaError' && deck.hls && !r.media) {
+      r.media = performance.now();
+      deck.hls.recoverMediaError();
+      return;
+    }
+    if (data.type === 'networkError' && deck.hls && !r.soft && !(data.response?.code >= 400) && end - t >= RESCUE_AHEAD) {
+      r.soft = true;
+      deck.hls.startLoad(end, true);
+      return;
+    }
+    if (r.tries >= (r.played ? RESCUE_TRIES : 1)) {
+      this.onError(new Error(`the converted stream kept stopping (${streamTrouble(data)})`));
+      return;
+    }
+    // What's buffered plays first: starting again stops it.
+    const left = el.paused ? 0 : (end - t - RESCUE_LEFT) / (el.playbackRate || 1);
+    const wait = Math.max(RESCUE_WAITS[r.tries] ?? RESCUE_WAITS[RESCUE_WAITS.length - 1], left * 1000);
+    r.tries += 1;
+    const go = () => {
+      if (this.rescueGo !== go) return;
+      this.cancelRescue();
+      if (this.current !== track || this.deck !== deck || deck.qid !== track.qid) return;
+      // Where it is now (it may have played on, or been moved, meanwhile),
+      // and playing unless it was paused.
+      const at = el.currentTime || t;
+      r.from = at;
+      debugLog('player', `starting the converted stream of “${track.title}” again at ${at.toFixed(1)} s (${r.tries} of ${RESCUE_TRIES})`);
+      this.load(this.index, {
+        autoplay: !el.paused || this.loadAutoplay,
+        startAt: this.remote ? () => this.remote.expectedTime(track.sid) ?? at : at,
+        transcode: true,
+        reportPrev: false,
+        resume: true,
+      });
+    };
+    this.rescueGo = go;
+    if (navigator.onLine === false) {
+      // Offline: once the connection is back.
+      this.rescueOnline = go;
+      window.addEventListener('online', go, { once: true });
+    } else {
+      // (Sooner if it runs out first: see the waiting event in bind.)
+      this.rescueTimer = setTimeout(go, wait);
+    }
+  }
+
+  // How starting the stream again has gone for this track; it starts
+  // afresh once the track has got RESCUE_PROGRESS seconds further.
+  rescueFor(track, deck, t) {
+    let r = this.rescue;
+    if (!r || r.qid !== track.qid || t - r.from >= RESCUE_PROGRESS) {
+      r = this.rescue = { qid: track.qid, from: t, tries: 0, played: false, media: 0, soft: false };
+    }
+    r.played ||= deck.played;
+    return r;
+  }
+
+  cancelRescue() {
+    clearTimeout(this.rescueTimer);
+    this.rescueTimer = null;
+    if (this.rescueOnline) window.removeEventListener('online', this.rescueOnline);
+    this.rescueOnline = null;
+    this.rescueGo = null;
+  }
+
+  // A stream that stopped short (see onStreamError): once it's played to
+  // where its sound ends, the track has ended. `slack`: how close counts.
+  endReached(deck, slack = 0.4) {
+    if (deck.endsAt == null || deck !== this.deck || deck.el.paused || deck.el.currentTime < deck.endsAt - slack) return false;
+    deck.endsAt = null;
+    if (this.repeat === 'one' && !this.transition) {
+      // From the top, from a new stream (this one stopped).
+      this.clearProgress(this.current);
+      this.load(this.index, { startAt: 0 });
+      return true;
+    }
+    this.onEnded();
+    return true;
   }
 
   // iOS only lets an element start playback on its own once it has played
@@ -1306,6 +1540,8 @@ class Player extends EventTarget {
     this.cancelTransition();
     if (c) {
       this.restoredAt = this.time;
+      this.pendingSeek = null;
+      this.cancelRescue();
       this.loadToken += 1;
       this.loadingQid = null;
       this.switching = false;
@@ -1377,7 +1613,9 @@ class Player extends EventTarget {
     const now = Date.now();
     if (!force && now - this.lastReport < 10000) return;
     this.lastReport = now;
-    app.server.timeline(track, state, time * 1000);
+    // As the track's playback, which its stream was started with.
+    const deck = this.decks.find((d) => d.qid != null && d.qid === track.qid);
+    app.server.timeline(track, state, time * 1000, deck?.playback);
   }
 
   // ---------- lock screen / media keys ----------
@@ -1500,8 +1738,10 @@ class Player extends EventTarget {
 
   reset() {
     this.cancelTransition();
+    this.cancelRescue();
     this.loadToken += 1;
     this.loadingQid = null;
+    this.pendingSeek = null;
     for (const d of this.decks) {
       d.el.pause();
       d.reset();

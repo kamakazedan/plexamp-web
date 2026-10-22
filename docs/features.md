@@ -139,7 +139,7 @@ Kept per device, and they stay when you sign out, but for the ones that are your
 
 ## Good to know
 
-- **Formats.** Files play as they are when the browser supports them (FLAC, MP3, AAC, Opus and WAV in current browsers; ALAC mostly in Safari). Anything else is converted by your server, and played with the browser's built-in HLS support or [hls.js](https://github.com/video-dev/hls.js), which is bundled into the image.
+- **Formats.** Files play as they are when the browser supports them (FLAC, MP3, AAC, Opus and WAV in current browsers; ALAC mostly in Safari). Anything else is converted by your server, and played with the browser's built-in HLS support or [hls.js](https://github.com/video-dev/hls.js), which is bundled into the image. A converted stream that fails part-way (a dropped connection, or the server stopping it) is tried again and then started again from where it got to; a track is only skipped if its stream keeps failing at the same place.
 - **Sonic features** (similar tracks, Sonic path, sonically similar artists, artist radio and the sound-based Guest DJs) need sonic analysis turned on for the library in Plex.
 - **Smart crossfade needs Plex's loudness analysis** (Plex's **Settings › Library › Analyze audio tracks for loudness**, which runs during the server's maintenance period). It tells the player where a track's music really ends, and where it ends quietly. Without it, Smart fades at the very end of each track. The waveform in the seek bar comes from the same analysis.
 - **Crossfades on iPhone and iPad.** Safari there doesn't let pages change the volume of audio, so it can't fade: tracks change where the music ends instead.

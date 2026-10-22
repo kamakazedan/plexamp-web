@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.18.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.18.1' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -60,6 +60,14 @@ export function clientId() {
   }
   return id;
 }
+
+// One track's playback, as Plex knows it: X-Plex-Session-Identifier, which
+// Plex's API describes as unique per playback, for clients that can play
+// more than one thing at once (a browser with several tabs). A track's
+// stream and its play reports carry the same one, and no other track's do:
+// this browser's client ID is the same in every tab, and while one track
+// ends, the next one's stream is already starting.
+export const playbackId = () => (crypto.randomUUID ? crypto.randomUUID() : randomId());
 
 function browserName() {
   const ua = navigator.userAgent;
@@ -816,8 +824,9 @@ export class PlexServer {
   }
 
   // Tell the server what is playing. This drives play counts, "recent plays"
-  // and the Now Playing view on the Plex dashboard.
-  timeline(track, state, timeMs) {
+  // and the Now Playing view on the Plex dashboard. `playback`: the
+  // track's playback (see playbackId), as its stream was started with.
+  timeline(track, state, timeMs, playback) {
     const url = this.url('/:/timeline', {
       ratingKey: track.id,
       key: `/library/metadata/${track.id}`,
@@ -825,6 +834,7 @@ export class PlexServer {
       state,
       time: Math.max(0, Math.round(timeMs)),
       duration: track.duration || undefined,
+      'X-Plex-Session-Identifier': playback || undefined,
     });
     return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true }).catch(() => {});
   }
@@ -846,7 +856,9 @@ export class PlexServer {
 
   // Server-side conversion for formats the browser can't decode, or to save
   // data. Uses the same universal transcoder endpoint as python-plexapi.
-  transcodeUrl(track, bitrate = 320, token = this.token) {
+  // `playback`: the track's playback (see playbackId); a stream started
+  // again part-way through the track keeps it (it's the same playback).
+  transcodeUrl(track, bitrate = 320, token = this.token, playback = playbackId()) {
     // A stream's files are fetched by its session id alone (no token: see
     // pms-proxy.inc), so it's one nobody could guess, in both the names Plex
     // servers take it by.
@@ -865,7 +877,7 @@ export class PlexServer {
         musicBitrate: bitrate,
         session,
         transcodeSessionId: session,
-        'X-Plex-Session-Identifier': clientId(),
+        'X-Plex-Session-Identifier': playback,
         'X-Plex-Client-Profile-Extra':
           'add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=aac,mp3)',
       },

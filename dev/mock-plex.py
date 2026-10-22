@@ -45,6 +45,15 @@ testing, these endpoints need no token:
                                   in silence (for testing transitions)
     /__mock/player[?reset=1]      the mock Plex player: what it's playing and
                                   the commands it got
+    /__mock/hls?reset=1&kill=N&sessions=K&track=ID&short=S
+                                  converted streams (real HLS: silent MP3 in
+                                  MPEG-TS, 4-second parts): the next K started
+                                  (of that track, if given) stop at part N
+                                  (its parts from there answer 404, as from a
+                                  server that stopped the stream), every
+                                  stream's last S seconds are missing; and
+                                  the streams started, their requests, and
+                                  play reports since the reset
 
 It also runs a Plex player (like Plexamp on a Raspberry Pi) on the next port
 up from the server's plus 100 (32500), controlled with Plex's remote-control
@@ -729,6 +738,67 @@ def tone_wav(rk):
         b'data' + struct.pack('<I', len(frames))
     audio_cache[rk] = header + bytes(frames)
     return audio_cache[rk]
+
+
+# ---------------------------------------------------------------- converted streams
+
+# A converted track is an HLS stream, as from a real server: a playlist in
+# the stream's session listing its parts, each an MPEG transport stream of
+# MP3 frames (silent ones here: a frame header and nothing in it). Browsers
+# without built-in HLS play it with hls.js.
+HLS_PART = 4  # seconds in each part
+MP3_FRAME = b'\xff\xfb\x10\xc0' + bytes(100)  # MPEG-1 layer III, 32 kbps, 44.1 kHz, mono: 104 bytes
+MP3_FRAME_SECONDS = 1152 / 44100
+HLS = {'sessions': {}, 'order': [], 'requests': [], 'timelines': [], 'kill': None, 'short': 0}
+HLS_LOCK = threading.Lock()
+
+
+def mpeg_crc32(data):
+    crc = 0xffffffff
+    for b in data:
+        crc ^= b << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04c11db7) & 0xffffffff if crc & 0x80000000 else (crc << 1) & 0xffffffff
+    return crc
+
+
+def ts_section(pid, table):
+    """A PAT or PMT in a packet of its own."""
+    body = table + struct.pack('>I', mpeg_crc32(table))
+    head = bytes([0x47, 0x40 | (pid >> 8), pid & 0xff, 0x10])
+    return (head + b'\x00' + body).ljust(188, b'\xff')
+
+
+PAT = ts_section(0, bytes([0x00, 0xb0, 13, 0, 1, 0xc1, 0, 0, 0, 1, 0xf0, 0x00]))
+PMT = ts_section(0x1000, bytes([0x02, 0xb0, 18, 0, 1, 0xc1, 0, 0, 0xe1, 0x01, 0xf0, 0, 0x03, 0xe1, 0x01, 0xf0, 0]))
+
+
+def pes_packet(frame, pts, cc):
+    """One MP3 frame in a PES packet, in one transport stream packet (the
+    rest of it stuffing)."""
+    stamp = bytes([0x21 | ((pts >> 29) & 0x0e), (pts >> 22) & 0xff, 0x01 | ((pts >> 14) & 0xfe), (pts >> 7) & 0xff, 0x01 | ((pts << 1) & 0xfe)])
+    pes = b'\x00\x00\x01\xc0' + struct.pack('>H', 8 + len(frame)) + b'\x80\x80\x05' + stamp + frame
+    room = 184 - len(pes)
+    adaptation = bytes([room - 1]) + (b'\x00' + b'\xff' * (room - 2) if room > 1 else b'')
+    return bytes([0x47, 0x41, 0x01, 0x30 | (cc & 0x0f)]) + adaptation + pes
+
+
+def hls_part(index, seconds):
+    """Part `index` of a stream `seconds` long."""
+    first = math.ceil(index * HLS_PART / MP3_FRAME_SECONDS)
+    last = min(math.ceil((index + 1) * HLS_PART / MP3_FRAME_SECONDS), math.ceil(seconds / MP3_FRAME_SECONDS))
+    out = [PAT, PMT]
+    for n, k in enumerate(range(first, last)):
+        out.append(pes_packet(MP3_FRAME, int(126000 + k * MP3_FRAME_SECONDS * 90000), n))
+    return b''.join(out)
+
+
+def hls_playlist(seconds):
+    parts = math.ceil(seconds / HLS_PART)
+    lines = ['#EXTM3U', '#EXT-X-VERSION:3', f'#EXT-X-TARGETDURATION:{HLS_PART}', '#EXT-X-MEDIA-SEQUENCE:0', '#EXT-X-PLAYLIST-TYPE:VOD']
+    for i in range(parts):
+        lines += [f'#EXTINF:{min(HLS_PART, seconds - i * HLS_PART):.3f},', f'{i:05d}.ts']
+    return '\n'.join(lines + ['#EXT-X-ENDLIST', ''])
 
 
 # ---------------------------------------------------------------- notifications
@@ -1458,6 +1528,41 @@ class Handler(BaseHTTPRequestHandler):
                     listeners.remove(me)
         self.close_connection = True
 
+    def hls_file(self, sid, name):
+        """A converted stream's playlist or part. A session that wasn't
+        started (as the container's tests ask for) is a 20-second track.
+        /__mock/hls?kill=N&sessions=K&track=ID: the next K streams started
+        (of that track, if given) are stopped at part N, as a server stops a
+        stream (its parts from there answer 404); short=S: every stream's
+        last S seconds are missing."""
+        with HLS_LOCK:
+            s = HLS['sessions'].get(sid) or {}
+            short = HLS['short']
+        t = items.get(s.get('track', ''))
+        seconds = (t['duration'] / 1000) if t and t.get('duration') else TRACK_SECONDS
+        status = 200
+        m = re.fullmatch(r'(\d{5})\.ts', name)
+        if name == 'index.m3u8':
+            body, ctype = hls_playlist(seconds).encode(), 'application/vnd.apple.mpegurl'
+        elif m and int(m.group(1)) * HLS_PART < seconds:
+            index = int(m.group(1))
+            stopped = s.get('killAt') is not None and index >= s['killAt']
+            if stopped or (short and (index + 1) * HLS_PART > seconds - short):
+                status, body, ctype = 404, b'', 'text/plain'
+            else:
+                body, ctype = hls_part(index, seconds), 'video/mp2t'
+        else:
+            status, body, ctype = 404, b'', 'text/plain'
+        with HLS_LOCK:
+            HLS['requests'].append({'session': sid, 'file': name, 'status': status})
+            del HLS['requests'][:-300]
+        self.send_response(status)
+        self.cors()
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_text(self, text, ctype, status=200):
         body = text.encode()
         self.send_response(status)
@@ -1523,6 +1628,20 @@ class Handler(BaseHTTPRequestHandler):
             if 'hidden' in q:
                 MOCK['hidden'] = [x for x in q['hidden'][0].split(',') if x]
             return self.send_json(dict(MOCK, listeners=len(listeners)))
+        if p == '/__mock/hls':
+            # Converted streams: the rules (see hls_file), and what's been
+            # started and asked for since the last reset.
+            with HLS_LOCK:
+                if q.get('reset'):
+                    HLS.update({'sessions': {}, 'order': [], 'requests': [], 'timelines': [], 'kill': None, 'short': 0})
+                if 'kill' in q:
+                    at = q['kill'][0]
+                    HLS['kill'] = {'at': int(at), 'sessions': int(q.get('sessions', ['1'])[0]), 'track': q.get('track', [''])[0]} if at else None
+                if 'short' in q:
+                    HLS['short'] = float(q['short'][0] or 0)
+                return self.send_json({'sessions': [dict(HLS['sessions'][sid], id=sid) for sid in HLS['order']],
+                                       'requests': HLS['requests'], 'timelines': HLS['timelines'],
+                                       'kill': HLS['kill'], 'short': HLS['short']})
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0])
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
@@ -1578,16 +1697,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'machineIdentifier': 'mock-server-1', 'version': '1.41.0', 'claimed': True},
                                   cors=bool(token) or not self.headers.get('Origin'))
         # A converted stream's playlists live inside its session and are
-        # fetched without a token, as on a real server. (The segments here
-        # aren't real audio; this is for testing the proxy.)
-        if p.startswith('/audio/:/transcode/universal/session/'):
-            if p.endswith('/index.m3u8'):
-                return self.send_text('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\n00000.ts\n#EXT-X-ENDLIST\n',
-                                      'application/vnd.apple.mpegurl')
-            return self.send_bytes(b'\x47' + b'\xff' * 187, 'video/mp2t')
+        # fetched without a token, as on a real server.
+        if p.startswith('/audio/:/transcode/universal/session/') and len(parts) == 8:
+            return self.hls_file(parts[5], parts[7])
         if p == '/audio/:/transcode/universal/start.m3u8' and pms_token_ok(token):
             sid = q.get('transcodeSessionId', ['mock'])[0].replace('/', '')
-            return self.send_text(f'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS="mp4a.40.2"\nsession/{sid}/base/index.m3u8\n',
+            rk = q.get('path', [''])[0].rsplit('/', 1)[-1]
+            with HLS_LOCK:
+                kill = HLS['kill']
+                doomed = None
+                if kill and kill['sessions'] > 0 and kill['track'] in ('', rk):
+                    kill['sessions'] -= 1
+                    doomed = kill['at']
+                HLS['sessions'][sid] = {'track': rk, 'playback': q.get('X-Plex-Session-Identifier', [''])[0], 'killAt': doomed,
+                                        'bitrate': q.get('musicBitrate', [''])[0]}
+                HLS['order'].append(sid)
+            return self.send_text(f'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS="mp4a.40.34"\nsession/{sid}/base/index.m3u8\n',
                                   'application/vnd.apple.mpegurl')
         if not pms_token_ok(token) and not p.startswith('/library/parts'):
             return self.send_json({'error': 'Unauthorized'}, 401)
@@ -1817,6 +1942,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/:/timeline':
             t = items.get(q.get('ratingKey', [''])[0])
             state = q.get('state', [''])[0]
+            with HLS_LOCK:
+                HLS['timelines'].append({'ratingKey': q.get('ratingKey', [''])[0], 'state': state,
+                                         'playback': q.get('X-Plex-Session-Identifier', [''])[0]})
+                del HLS['timelines'][:-200]
             if t and state == 'stopped' and int(q.get('time', ['0'])[0]) >= t['duration'] * 0.9:
                 t['viewCount'] = t.get('viewCount', 0) + 1
                 t['lastViewedAt'] = int(time.time())

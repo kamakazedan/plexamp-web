@@ -3,6 +3,36 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.18.1 - 2026-10-22
+
+### Fixed
+
+- **Tracks the server converts were skipped part-way** ("Can't play …
+  Skipping."), on networks that drop a connection now and then (office
+  proxies in particular), or when the server stopped the stream: one
+  hiccup was enough. Now:
+  - the stream's playlist is tried again when the connection drops, or
+    the server is slow to start the conversion, rather than given up on
+    at once (its parts already were);
+  - a stream that stops part-way is started again from where it got to,
+    after what's already buffered has played, so you hear at most a moment's
+    gap; with plenty still buffered, a dropped connection carries on on
+    the same stream, without a gap at all;
+  - a stream that stops a few seconds short of the end ends there, and the
+    next track plays;
+  - a track is only skipped if its stream keeps failing at the same place
+    (three times, or twice for one that never started), as before.
+- Each track now plays as **its own playback** for the server: its stream
+  and its play reports say which (Plex's `X-Plex-Session-Identifier`).
+  Every track (and every tab) had the same one, and the next track's
+  stream starts while one ends, so a server could take that as the
+  playback moving on and stop the stream still playing.
+- A converted track buffers a minute ahead (it was 30 seconds), to ride
+  out a slow patch.
+- With `DEBUG=true`, the container's log says what went wrong in a
+  converted stream (which part, and what the server answered) and what
+  the player did about it.
+
 ## 0.18.0 - 2026-10-21
 
 ### Added

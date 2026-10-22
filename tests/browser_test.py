@@ -25,8 +25,8 @@ and t3 (Alex, a friend without access).
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
 Sections: core ws ai dj djs nows blocked poll custom desktop nav library edit
-lists pictures missing files sharing routes privacy np cast ratings devices
-fades together settings home debug memory (default: all).
+lists pictures missing files sharing routes privacy np stream cast ratings
+devices fades together settings home spotify debug memory (default: all).
 """
 
 import json
@@ -2828,8 +2828,8 @@ with sync_playwright() as pw:
         check('np: the sleep timer is off to begin with, shown once turned on, and turned off with it',
               hidden and shown and sleep_btn.is_hidden() and not player(page, 'p.sleepActive'), f'{hidden} {shown}')
         # Converted by the server (Streaming quality): a mark says so, and
-        # why. (The mock's converted streams aren't real audio, so the player
-        # is told it's converting the track that plays.)
+        # why. (The player is told it's converting the track that plays;
+        # converted streams themselves are the stream section's.)
         settings(page, {'quality': '320'})
         player(page, "(p.transcoding = true, p.emit('track'), true)")
         page.wait_for_selector('.np.open .np-converted', timeout=10000)
@@ -2857,6 +2857,170 @@ with sync_playwright() as pw:
         player(page, "(p.transcoding = false, p.emit('track'), true)")
         page.wait_for_timeout(300)
         check('np: ...and the original file isn\'t marked', page.locator('.np-converted').count() == 0)
+        ctx.close()
+
+    # ---------- stream: tracks the server converts, and streams that fail ----------
+    # The mock's converted streams are real HLS (silent MP3 in 4-second
+    # parts, played with hls.js as from a real server); /__mock/hls stops
+    # them part-way or cuts their ends off, and says what was asked for.
+    if run('stream'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'stream')
+        login(page, APP)
+        settings(page, {'quality': '320', 'gapless': True, 'fades': 'off', 'reportPlays': True})
+        js(page, "() => import('./js/player.js').then(({ player }) => player.addEventListener('playerror', (e) => (window.__playErrors ||= []).push(e.detail.track.title)))")
+
+        def hls(q=''):
+            return mock('/__mock/hls' + q)['MediaContainer']
+
+        def play_track(album, track=0, rules='', wait=25):
+            """Play an album's track, with new rules for converted streams
+            (see /__mock/hls) from here: a stream stopped part-way is that
+            track's. (The player is paused first, so nothing it preloads
+            meanwhile is started under the new rules.)"""
+            player(page, 'p.pause()')
+            page.goto(APP + '#/browse/albums')
+            page.wait_for_selector('.grid .card')
+            page.locator('.grid .card').nth(album).click()
+            page.wait_for_selector('.hero-album')
+            row = page.locator('.track').nth(track)
+            hls(f'?reset=1{rules}&track={row.get_attribute("data-track-id")}')
+            row.locator('.track-main').click()
+            return wait_for(lambda: player(page, "p.state === 'playing'"), wait, 0.2)
+
+        def now():
+            return player(page, "({ id: p.current?.id, title: p.current?.title, t: p.time, state: p.state, hls: !!p.deck.hls,"
+                                " playback: p.deck.playback, rescue: p.rescue && { tries: p.rescue.tries, soft: p.rescue.soft } })")
+
+        def play_errors():
+            return js(page, '() => window.__playErrors || []')
+
+        def sessions_of(track_id):
+            return [s for s in hls()['sessions'] if s['track'] == track_id]
+
+        # As it should be: through hls.js, each track its own playback (the
+        # one preloaded to follow it too), its play reports saying which.
+        playing = play_track(0)
+        first = now()
+        wait_for(lambda: now()['t'] > 3, 10, 0.2)
+        h = hls()
+        mine = [s for s in h['sessions'] if s['track'] == first['id']]
+        others = [s for s in h['sessions'] if s['track'] != first['id']]
+        reports = [x for x in h['timelines'] if x['ratingKey'] == first['id']]
+        config = player(page, "p.deck.hls && [p.deck.hls.config.maxBufferLength, p.deck.hls.config.fragLoadPolicy.default.errorRetry.maxNumRetry,"
+                              " !!p.deck.hls.config.manifestLoadPolicy.default.errorRetry.shouldRetry?.(null, 0, false, { code: 0 })]")
+        check('stream: a converted track plays, through hls.js, with the stream settings here',
+              playing and first['hls'] and now()['t'] > 3 and config == [60, 5, True], f'{first} {config}')
+        check('stream: ...its stream and its play reports carry its own playback; the next track\'s stream, preloaded, another',
+              len(mine) == 1 and mine[0]['playback'] == first['playback'] and reports and all(x['playback'] == first['playback'] for x in reports)
+              and others and all(s['playback'] and s['playback'] != first['playback'] for s in others), f'{first["playback"]} {h["sessions"]} {reports}')
+        policy = js(page, """() => import('./js/player.js').then(({ retryable: r }) => r && [r(401, 0, 3), r(403, 0, 3), r(404, 0, 3), r(404, 1, 3),
+            r(0, 2, 3), r(0, 3, 3), r(503, 2, 3), r(undefined, 2, 3), r(429, 2, 3)])""")
+        check('stream: a request that fails is tried again (more for no answer or a server error than a client error), never when refused',
+              policy == [False, False, True, False, True, False, True, True, True], str(policy))
+
+        # The server stops the stream part-way (as Plex can): it's started
+        # again where it got to, as the same playback, and plays on.
+        play_track(1, rules='&kill=2&sessions=1')
+        tr = now()
+        wait_for(lambda: now()['t'] > 10 or now()['id'] != tr['id'], 30, 0.25)
+        after = now()
+        mine = sessions_of(tr['id'])
+        stopped = [r for r in hls()['requests'] if mine and r['session'] == mine[0]['id'] and r['status'] == 404]
+        check('stream: a stream the server stops part-way starts again where it got to, as the same playback, and plays on',
+              after['id'] == tr['id'] and after['t'] > 10 and after['state'] == 'playing' and len(mine) == 2
+              and mine[0]['playback'] == mine[1]['playback'] == tr['playback'] and stopped and not play_errors(),
+              f'{after} {mine} {len(stopped)} {play_errors()}')
+
+        # Dropped connections (no answer at all, as through a proxy that
+        # drops them): its playlist and parts are tried again, on the same
+        # stream.
+        dropped = {'start': 0, 'part': 0}
+
+        def drop_start(route):
+            if dropped['start'] < 1:
+                dropped['start'] += 1
+                return route.abort('connectionreset')
+            return route.continue_()
+
+        def drop_part(route):
+            if dropped['part'] < 2:
+                dropped['part'] += 1
+                return route.abort('connectionreset')
+            return route.continue_()
+
+        def is_start(url):
+            return '/transcode/universal/start.m3u8?' in url
+
+        def is_part(n):
+            return lambda url: '/transcode/universal/session/' in url and url.endswith(f'/base/{n:05d}.ts')
+        part1 = is_part(1)
+        page.route(is_start, drop_start)
+        page.route(part1, drop_part)
+        settings(page, {'gapless': False})  # nothing preloaded: only this track's requests are dropped
+        play_track(2)
+        tr = now()
+        wait_for(lambda: now()['t'] > 6, 20, 0.25)
+        after = now()
+        page.unroute(is_start)
+        page.unroute(part1)
+        check('stream: a dropped connection is tried again, on the same stream (its playlist, and its parts)',
+              dropped == {'start': 1, 'part': 2} and after['id'] == tr['id'] and after['t'] > 6 and len(sessions_of(tr['id'])) == 1
+              and not after['rescue'] and not play_errors(), f'{dropped} {after} {sessions_of(tr["id"])}')
+
+        # Its connection keeps dropping while plenty is still buffered (its
+        # fourth part, 12 seconds in): the same stream again, from where it
+        # stopped loading (nothing is heard of it).
+        dropped['part'] = 0
+
+        def drop_last(route):
+            dropped['part'] += 1
+            return route.abort('connectionreset') if dropped['part'] <= 6 else route.continue_()
+        part3 = is_part(3)
+        page.route(part3, drop_last)
+        play_track(3)
+        tr = now()
+        player(page, 'p.pause()')
+        wait_for(lambda: (now()['rescue'] or {}).get('soft') and dropped['part'] >= 7, 20, 0.25)
+        soft = now()
+        page.unroute(part3)
+        player(page, 'p.play()')
+        wait_for(lambda: now()['id'] != tr['id'], 30, 0.25)
+        settings(page, {'gapless': True})
+        check('stream: ...and when that keeps happening, with plenty left to play, the same stream carries on from where it stopped loading',
+              soft['id'] == tr['id'] and (soft['rescue'] or {}).get('soft') and soft['rescue']['tries'] == 0 and len(sessions_of(tr['id'])) == 1
+              and dropped['part'] == 7 and now()['id'] != tr['id'] and not play_errors(), f'{soft} {dropped} {sessions_of(tr["id"])} {play_errors()}')
+
+        # The stream's end is missing (the server stopped it a little short):
+        # the track ends where its sound does, and the next one plays.
+        play_track(0, 1, rules='&short=3')
+        tr = now()
+        player(page, 'p.seek(11)')
+        samples = []
+        end = time.time() + 25
+        while time.time() < end:
+            samples.append(now())
+            if samples[-1]['id'] != tr['id'] and samples[-1]['state'] == 'playing':
+                break
+            time.sleep(0.25)
+        last = max((x['t'] for x in samples if x['id'] == tr['id']), default=0)
+        check('stream: a stream whose last seconds are missing ends where its sound does, and the next track plays',
+              15 <= last <= 16.5 and samples[-1]['id'] != tr['id'] and samples[-1]['state'] == 'playing' and not play_errors(),
+              f'{last} {samples[-1]} {play_errors()}')
+
+        # A stream that never plays, started again and failing again: the
+        # track is skipped, as before, saying so.
+        play_track(4, 0, rules='&kill=0&sessions=2', wait=1)
+        tr = now()
+        wait_for(play_errors, 40, 0.25)
+        told = page.locator('.toast').all_text_contents()
+        wait_for(lambda: now()['id'] != tr['id'] and now()['state'] == 'playing', 20, 0.25)
+        check('stream: a track whose stream never plays, even started again, is skipped, saying so',
+              play_errors() == [tr['title']] and len(sessions_of(tr['id'])) == 2 and now()['id'] != tr['id'] and now()['state'] == 'playing'
+              and any(f'Can\'t play “{tr["title"]}”. Skipping.' in x for x in told), f'{play_errors()} {sessions_of(tr["id"])} {now()} {told}')
+        hls('?reset=1')
+        player(page, 'p.pause()')
         ctx.close()
 
     # ---------- cast: playing on another Plex player, and AirPlay/Cast ----------

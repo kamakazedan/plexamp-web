@@ -15,6 +15,7 @@ Start with [debug mode](configuration.md#debug-mode): most set-up problems show 
 ## Listening
 
 - **Some tracks won't play**: check **Settings › Connection › Browser formats**. Formats the browser can't play need your server to convert them.
+- **"Can't play … Skipping." part-way through tracks the server converts** (a Streaming quality below Original, or a format the browser can't play): before 0.18.1, one dropped connection (some office proxies drop them now and then) or a stream the server stopped was enough. Update. A stream that fails is now tried again, then started again from where it got to (at most a moment's gap), and a track is only skipped if its stream keeps failing at the same place. If it still happens, turn on [debug mode](configuration.md#debug-mode): the container's log says which part of the stream failed, what the server answered (`HTTP 404`: the server stopped the stream; `no answer`: the connection dropped), and what the player did. Blocked WebSockets don't affect playback: only live updates use them.
 - **Playback stops when the phone locks**: add the player to your home screen, and check the browser isn't held back by battery-saving settings.
 - **Smart crossfade waits for the very end of tracks**: it needs Plex's loudness analysis (see [features.md](features.md#good-to-know)).
 - **The browser uses a lot of memory**: open an issue saying which browser, how big your library is and what you were doing; in Firefox, the numbers from `about:memory` (Measure) help most.
