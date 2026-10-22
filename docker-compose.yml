@@ -25,6 +25,8 @@
 #   CASTING             "false" turns off Play on (other Plex players on your
 #                       network, for your server's owner: needs PLEX_SERVER_URL).
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends.
+#   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
+#                       here, so they follow it to every browser it signs in on.
 #   SPOTIFY_IMPORT      "true": Search › From Spotify makes a playlist from a
 #                       Spotify playlist's link, with the tracks you have. Off
 #                       unless set: it reads Spotify's public page for the
@@ -33,8 +35,8 @@
 #   DEBUG               "true" writes extra detail to the log, with tokens and
 #                       keys removed. Turn it off when you're done.
 #
-# Shared playlists are kept in /data: the volume below, or a folder of your
-# own (./plexamp-web-data:/data). To build from this folder instead of using
+# Shared playlists and each account's settings are kept in /data: the volume
+# below, or a folder of your own (./plexamp-web-data:/data). To build from this folder instead of using
 # the published image, replace the image line with:  build: .
 
 services:
@@ -53,6 +55,7 @@ services:
       PLAY_TOGETHER: "true"
       CASTING: "true"
       PLAYLIST_SHARING: "true"
+      SYNC_SETTINGS: "true"
       SPOTIFY_IMPORT: ""
       DEBUG: ""
     volumes:

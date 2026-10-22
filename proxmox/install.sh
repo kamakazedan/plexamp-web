@@ -182,6 +182,9 @@ OLLAMA_AUTH=plex
 PLAY_TOGETHER=true
 CASTING=true
 PLAYLIST_SHARING=true
+# Each Plex account's settings kept by the player, so they follow it to every
+# browser it signs in on (false: each browser keeps its own).
+SYNC_SETTINGS=true
 # MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org
 # (the public service) or your own mirror. Empty: no checks.
 MUSICBRAINZ_URL=

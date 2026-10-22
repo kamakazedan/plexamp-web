@@ -14,7 +14,7 @@ import { together } from './together.js';
 import { levelSamples } from './transitions.js';
 import { cast, openCastSheet, castLabel } from './cast.js';
 import { devices } from './devices.js';
-import { rateTrack, ratingEvents } from './ratings.js';
+import { rateTrack, ratingEvents, ratingMode, LOVED, LOVED_TITLE } from './ratings.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
@@ -519,17 +519,28 @@ function waveform() {
   };
 }
 
-// Ratings on Plex's 0–10 scale, shown the way Settings › Experience says:
-// five stars, five stars in halves, thumbs up/down, or not at all. Tapping
-// the current rating clears it.
+// Ratings on Plex's 0–10 scale, shown the way Settings › Experience says: a
+// favourite tick (ticked is 10), five stars, thumbs up/down, or not at all.
+// Tapping the current rating clears it.
 function ratingControl() {
   let value = 0;
   const el = h('div.np-stars', { role: 'group', 'aria-label': 'Rating' });
 
   function paint() {
-    const mode = app.settings.ratingSystem || 'stars';
+    const mode = ratingMode();
     el.hidden = mode === 'off';
     el.dataset.mode = mode;
+    if (mode === 'tick') {
+      const on = value === LOVED;
+      const b = h(
+        'button.np-fav',
+        { type: 'button', 'aria-label': 'Favourite', title: on ? `Favourite: in ${LOVED_TITLE}` : `Favourite: add to ${LOVED_TITLE}`, 'aria-pressed': String(on), onclick: () => choose(on ? 0 : LOVED) },
+        icon(on ? 'favourited' : 'favourite', 28),
+      );
+      b.classList.toggle('on', on);
+      el.replaceChildren(b);
+      return;
+    }
     if (mode === 'thumbs') {
       const up = h('button.thumb', { type: 'button', 'aria-label': 'Thumbs up', 'aria-pressed': String(value >= 6), onclick: () => choose(value >= 6 ? 0 : 10) }, icon('thumbUp', 24));
       const down = h('button.thumb', { type: 'button', 'aria-label': 'Thumbs down', 'aria-pressed': String(value > 0 && value <= 4), onclick: () => choose(value > 0 && value <= 4 ? 0 : 2) }, icon('thumbDown', 24));
@@ -538,18 +549,11 @@ function ratingControl() {
       el.replaceChildren(down, up);
       return;
     }
-    const halves = mode === 'half';
     el.replaceChildren(
       ...[1, 2, 3, 4, 5].map((n) => {
         const full = value >= n * 2;
-        const half = !full && halves && value === n * 2 - 1;
-        const b = h(`button.star${full ? '.on' : ''}${half ? '.half' : ''}`, { type: 'button', 'aria-label': `Rate ${n} star${n > 1 ? 's' : ''}`, 'aria-pressed': String(full && value < n * 2 + (halves ? 1 : 2)) }, icon(half ? 'starHalf' : 'star', 24));
-        b.addEventListener('click', (e) => {
-          // In halves, the left half of a star is half a star.
-          const r = b.getBoundingClientRect();
-          const target = halves && e.clientX && e.clientX < r.left + r.width / 2 ? n * 2 - 1 : n * 2;
-          choose(target === value ? 0 : target);
-        });
+        const b = h(`button.star${full ? '.on' : ''}`, { type: 'button', 'aria-label': `Rate ${n} star${n > 1 ? 's' : ''}`, 'aria-pressed': String(full && value < n * 2 + 2) }, icon('star', 24));
+        b.addEventListener('click', () => choose(n * 2 === value ? 0 : n * 2));
         return b;
       }),
     );
@@ -581,10 +585,10 @@ function ratingControl() {
   const api = {
     el,
     set(rating) {
-      const mode = app.settings.ratingSystem || 'stars';
       const v = Math.max(0, Math.min(10, Math.round(rating || 0)));
-      // Whole stars round to the nearest star; halves keep Plex's own value.
-      value = mode === 'half' || mode === 'thumbs' ? v : Math.round(v / 2) * 2;
+      // Stars round to the nearest star (a half-star rating from another Plex
+      // app); the tick and thumbs keep Plex's own value.
+      value = ratingMode() === 'stars' ? Math.round(v / 2) * 2 : v;
       paint();
     },
   };
@@ -848,7 +852,7 @@ function buildNowPlaying() {
     // The format and quality, and the rating, each if they're wanted.
     const info = main.querySelector('.np-info');
     const showCodec = app.settings.showCodec !== false;
-    const showRating = app.settings.showRating !== false && (app.settings.ratingSystem || 'stars') !== 'off';
+    const showRating = app.settings.showRating !== false && ratingMode() !== 'off';
     info.hidden = !showCodec && !showRating;
     info.classList.toggle('no-codec', !showCodec);
     info.classList.toggle('no-rating', !showRating);

@@ -40,7 +40,7 @@ All optional, as environment variables on the container (on Proxmox: `pct exec <
 | `PLEX_SERVER_URL` | Your Plex server's address, such as `http://192.168.1.10:32400`, for the container to reach it for browsers that can't. It also keeps the player's shared features to people who can use that server. |
 | `OLLAMA_URL`, `OLLAMA_MODEL` | An [Ollama](https://ollama.com) server, and its model, for AI playlists and the AI DJ, shared with everyone who uses the player. |
 | `MUSICBRAINZ_URL` | `https://musicbrainz.org` (or your own mirror), to check AI suggestions are real songs. Not set: nothing goes to MusicBrainz. |
-| `PLAY_TOGETHER`, `CASTING`, `PLAYLIST_SHARING` | `false` turns off Play Together, Play on with Plex players (for the server's owner, with `PLEX_SERVER_URL`), or shared playlists. |
+| `PLAY_TOGETHER`, `CASTING`, `PLAYLIST_SHARING`, `SYNC_SETTINGS` | `false` turns off Play Together, Play on with Plex players (for the server's owner, with `PLEX_SERVER_URL`), shared playlists, or settings that follow each Plex account. |
 | `SPOTIFY_IMPORT` | `true` turns on making a playlist from a Spotify playlist's link, read from Spotify's public page for it (off unless set: see [docs/configuration.md](docs/configuration.md)). |
 | `DISABLE_WEBSOCKETS` | `true` for networks that block WebSockets. |
 | `DEBUG` | `true` writes extra detail to the container log, with tokens removed. |
@@ -50,13 +50,14 @@ Every setting, and how the app reaches your server: [docs/configuration.md](docs
 ## What it does
 
 - **Browse and search** your library: artists, albums, genres, moods, decades, collections, with live search that narrows word by word.
-- **Now Playing** with a waveform from your server's loudness analysis, ratings that save to Plex, Up next, gapless playback and Smart crossfades.
+- **Now Playing** with a waveform from your server's loudness analysis, a favourite tick (or stars, or thumbs) that saves to Plex, Up next, gapless playback, Smart crossfades, loudness levelling and tracks loaded ahead for slow connections.
 - **Playlists and collections**: make and edit them, sort them, change their pictures, export them to a file and import them again, or bring one over from Spotify by its link (if you turn that on).
 - **Shared playlists** with your Plex friends, kept the same for everyone, and **Play Together**, to listen in sync with them.
 - **Your devices** share what's playing: control your computer from your phone, or move the music to the device in your hand.
 - **Play on** Plexamp and other Plex players on your network, or AirPlay and Google Cast speakers.
 - **Guest DJs** that play along with your queue, and **AI playlists** from a description, with a model on your own hardware.
-- **Live updates** from other Plex apps, a home screen you arrange, and themes from album artwork.
+- **Radio** from an artist, a playlist, your favourites or the whole library.
+- **Live updates** from other Plex apps, a home screen you arrange, themes from album artwork, and settings that follow your Plex account to every browser.
 
 How each part works, and the settings in the app: [docs/features.md](docs/features.md). AI playlists, the AI DJ and Ollama: [docs/ai.md](docs/ai.md).
 

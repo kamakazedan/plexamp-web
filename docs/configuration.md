@@ -5,7 +5,7 @@
 - [Live updates](#live-updates)
 - [Debug mode](#debug-mode)
 
-Settings in the app itself are kept per device: see [features.md](features.md#settings-in-the-app).
+Settings in the app itself follow each Plex account (but those that are each device's own): see [features.md](features.md#settings-in-the-app).
 
 ## Container settings
 
@@ -23,8 +23,9 @@ All optional. Set them as environment variables on the container; on Proxmox VE,
 | `PLAY_TOGETHER` | `true` (default) or `false` | Play Together and its tab. |
 | `CASTING` | `true` (default) or `false` | Playing on other Plex players from the app, for the server's owner: it needs `PLEX_SERVER_URL`. AirPlay and Cast, which are the browser's own, aren't affected. |
 | `PLAYLIST_SHARING` | `true` (default) or `false` | Sharing playlists with Plex friends. |
+| `SYNC_SETTINGS` | `true` (default) or `false` | Each Plex account's settings kept here, so they follow it to every browser it signs in on (but those that are each device's own: see [features.md](features.md#settings-in-the-app)). For Plex accounts that can use the server the app is on, and with `PLEX_SERVER_URL` set, that server. Kept in `DATA_DIR`. |
 | `SPOTIFY_IMPORT` | `true`, or `false` (default) | **Search › From Spotify**: paste a Spotify playlist's link, and the tracks you have make a playlist here (see [features.md](features.md#from-spotify)). Off unless you turn it on: Spotify's API only gives a playlist's tracks to the account that owns it, so the container reads them from the page Spotify shows anyone for the playlist instead. That page lists the first 100 tracks at most, Spotify's terms don't allow reading it like this, and it can stop working whenever Spotify changes it. For the people who can use your server, as the shared AI model is. |
-| `DATA_DIR` | `/data` (default) | Where shared playlists are kept: a folder of their own (give the container a volume there). |
+| `DATA_DIR` | `/data` (default) | Where shared playlists and each account's settings are kept: a folder of their own (give the container a volume there). |
 | `DEBUG` | `true` | Writes extra detail to the container log, with tokens removed (see [Debug mode](#debug-mode)). |
 
 The container stops with a clear message in its log if a value doesn't make sense, for example an address without `http://`.

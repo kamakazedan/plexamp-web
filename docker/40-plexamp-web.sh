@@ -23,13 +23,16 @@
 #                       turns them off; "true" alone means musicbrainz.org.)
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends
 #                       (on by default)
+#   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
+#                       here, for all of its devices (on by default)
 #   SPOTIFY_IMPORT      "true" turns on Search › From Spotify: a playlist made
 #                       from a Spotify playlist's link, read from Spotify's
 #                       public page for it (off by default: see
 #                       server/spotify.js)
-#   DATA_DIR            where shared playlists are kept (default /data: give
-#                       the container a volume there). A folder of its own:
-#                       it's made the service's alone.
+#   DATA_DIR            where shared playlists and each account's settings
+#                       are kept (default /data: give the container a volume
+#                       there). A folder of its own: it's made the service's
+#                       alone.
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
 set -eu
@@ -95,32 +98,38 @@ data_dir_problem() {
             echo "DATA_DIR ($DATA_DIR) is in a folder others can change: give it one only root can"
             return
         fi
-        # Only a folder holding nothing but shared playlists is given to the
-        # service (a new or empty one, or a volume for them), never one with
+        # Only a folder holding nothing but the service's own files is given
+        # to it (a new or empty one, or a volume for them), never one with
         # anything else in it (a home folder given by mistake, say).
         for e in "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?*; do
             [ -e "$e" ] || [ -L "$e" ] || continue
             case "${e##*/}" in
                 # (and what file systems and file browsers leave around)
-                shares.json | shares.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
+                shares.json | shares.json.tmp | settings.json | settings.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
                 *)
-                    echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give shared playlists a folder of their own (a new or empty one, or a volume)"
+                    echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give it a folder of its own (a new or empty one, or a volume)"
                     return
                     ;;
             esac
         done
-        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp"; do
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json" "$DATA_DIR/settings.json.tmp"; do
             if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; } || { [ -f "$f" ] && [ "$(stat -c %h "$f")" != 1 ]; }; then
                 echo "$f must be a file of its own (not a link, or a folder)"
                 return
             fi
         done
-        rm -f "$DATA_DIR/shares.json.tmp"
+        rm -f "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json.tmp"
         d_group="$(id -gn "$d_user")"
-        if ! chown -h "$d_user:$d_group" "$DATA_DIR" || { [ -f "$DATA_DIR/shares.json" ] && ! chown -h "$d_user:$d_group" "$DATA_DIR/shares.json"; }; then
+        if ! chown -h "$d_user:$d_group" "$DATA_DIR"; then
             echo "$d_user can't own DATA_DIR ($DATA_DIR)"
             return
         fi
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/settings.json"; do
+            if [ -f "$f" ] && ! chown -h "$d_user:$d_group" "$f"; then
+                echo "$d_user can't own $f"
+                return
+            fi
+        done
     fi
     chmod 700 "$DATA_DIR" 2>/dev/null || true
 }
@@ -269,11 +278,14 @@ if ! truthy PLAY_TOGETHER "${PLAY_TOGETHER:-}" true; then TOGETHER=false; fi
 CAST=true
 if ! truthy CASTING "${CASTING:-}" true; then CAST=false; fi
 
-# ---------- shared playlists ----------
+# ---------- shared playlists, and settings that follow each account ----------
 
-# Kept in a file in DATA_DIR, the service's own (see server/shares.js).
+# Kept in files in DATA_DIR, the service's own (see server/shares.js and
+# server/settings.js).
 SHARING=true
 if ! truthy PLAYLIST_SHARING "${PLAYLIST_SHARING:-}" true; then SHARING=false; fi
+SETTINGS_SYNC=true
+if ! truthy SYNC_SETTINGS "${SYNC_SETTINGS:-}" true; then SETTINGS_SYNC=false; fi
 DATA_DIR="${DATA_DIR:-/data}"
 DATA_DIR="${DATA_DIR%/}"
 plain_path DATA_DIR "$DATA_DIR" /data
@@ -553,20 +565,23 @@ CONF
     if [ -n "${SERVICE_USER:-}" ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
         fail "SERVICE_USER $SERVICE_USER doesn't exist"
     fi
-    # Shared playlists: their folder is the service's, and no one else's.
-    # Nothing in it is ever followed through a link, or changed through one
-    # (the service can write there, so anything there could be one). What's
-    # wrong with it turns shared playlists off (and says why), not the app.
-    if [ "$SHARING" = true ]; then
+    # Shared playlists and account settings: their folder is the service's,
+    # and no one else's. Nothing in it is ever followed through a link, or
+    # changed through one (the service can write there, so anything there
+    # could be one). What's wrong with it turns them off (and says why),
+    # not the app.
+    if [ "$SHARING" = true ] || [ "$SETTINGS_SYNC" = true ]; then
         why="$(data_dir_problem)"
         if [ -n "$why" ]; then
-            say "shared playlists are off: $why"
+            if [ "$SHARING" = true ]; then say "shared playlists are off: $why"; fi
+            if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each account are off: $why"; fi
             SHARING=false
+            SETTINGS_SYNC=false
         else
             # In a container, a folder that isn't a volume goes when the
-            # container is replaced (an update, say), and the shares with it.
+            # container is replaced (an update, say), and what's in it.
             if [ -f /.dockerenv ] && ! is_mount "$DATA_DIR"; then
-                say "shared playlists are kept in $DATA_DIR, which isn't a volume, so they'd be lost when this container is replaced (by an update, say). Give the container a volume there (see docker-compose.yml)."
+                say "shared playlists and account settings are kept in $DATA_DIR, which isn't a volume, so they'd be lost when this container is replaced (by an update, say). Give the container a volume there (see docker-compose.yml)."
             fi
         fi
     fi
@@ -582,6 +597,7 @@ CONF
     if [ "$MB" = true ]; then add_config "musicbrainz: \"$MB_KIND\""; fi
     add_config 'devices: true'
     if [ "$SHARING" = true ]; then add_config 'sharing: true'; fi
+    if [ "$SETTINGS_SYNC" = true ]; then add_config 'settingsSync: true'; fi
     if [ "$SPOTIFY" = true ]; then add_config 'spotify: true'; fi
     if [ "$DEBUG_ON" = true ]; then add_config 'debug: true'; fi
 else
@@ -591,10 +607,12 @@ else
     CAST=false
     MB=false
     SHARING=false
+    SETTINGS_SYNC=false
     SPOTIFY=false
 fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
 if [ "$SHARING" = true ]; then say "shared playlists are kept in $DATA_DIR"; fi
+if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each Plex account are kept in $DATA_DIR"; fi
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi
@@ -654,6 +672,7 @@ if [ "$SERVICE" = true ]; then
   "version": "$(json "$APP_VERSION")",
   "devices": $SERVICE,
   "sharing": $SHARING,
+  "settingsSync": $SETTINGS_SYNC,
   "dataDir": "$(json "$DATA_DIR")",
   "spotify": $SPOTIFY,
   "spotifyUrl": "$(json "$SPOTIFY_URL")",
@@ -711,7 +730,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  SPOTIFY_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  SYNC_SETTINGS=$SETTINGS_SYNC  SPOTIFY_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.

@@ -22,6 +22,7 @@ import { Devices, DevicesError } from './devices.js';
 import { SharedModel, AIRequestError, cleanChat, errorText, AI_LIMITS } from './ai.js';
 import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
 import { Shares, ShareError } from './shares.js';
+import { SettingsStore, SettingsError } from './settings.js';
 import { Spotify, SpotifyError, playlistId, NOT_A_LINK } from './spotify.js';
 import { listenForNginx } from './syslog.js';
 import { plainPath, clientIp } from './paths.js';
@@ -47,6 +48,9 @@ function loadConfig() {
     // Shared playlists (PLAYLIST_SHARING), kept in a file in dataDir (none:
     // in memory only, for development).
     sharing: env.PW_SERVICE_SHARING ? env.PW_SERVICE_SHARING === 'true' : cfg.sharing !== false,
+    // Settings that follow each Plex account (SYNC_SETTINGS), kept in a file
+    // in dataDir too.
+    settingsSync: env.PW_SERVICE_SETTINGS_SYNC ? env.PW_SERVICE_SETTINGS_SYNC === 'true' : cfg.settingsSync !== false,
     dataDir: env.PW_SERVICE_DATA_DIR ?? cfg.dataDir ?? '',
     // Search › From Spotify (SPOTIFY_IMPORT): off unless it's turned on. Its
     // address is for tests (the mock's).
@@ -85,6 +89,7 @@ const spotify = config.spotify ? new Spotify({ base: config.spotifyUrl || 'https
 // Read once the service has given up root (see started()), as the user
 // that keeps the file.
 let shares = null;
+let accountSettings = null;
 
 // ---------- rate limits ----------
 
@@ -640,13 +645,20 @@ async function friendsOf(user, token, serverId) {
 // account can use. With PLEX_SERVER_URL set, only for people who can use
 // that server (on it, or another of theirs): this service is theirs, not
 // anyone's with a Plex account.
-async function serverAllowed(token, serverId) {
+async function serverAllowed(token, serverId, { strict = false } = {}) {
+  // `strict`: plex.tv not answering is said (503), rather than taken as no.
+  const can = (id) =>
+    auth.canUseServer(token, id).catch((err) => {
+      if (!strict) return false;
+      if (err instanceof AuthError) throw new HttpError(401, err.message);
+      throw new HttpError(503, 'plex.tv didn’t answer just now. Try again in a minute.');
+    });
   if (config.plexServerUrl) {
     const id = await auth.loadServerId();
     if (!id) throw new HttpError(503, 'This player’s Plex server isn’t answering. Try again in a minute.');
-    if (!(await auth.canUseServer(token, id).catch(() => false))) return false;
+    if (!(await can(id))) return false;
   }
-  return auth.canUseServer(token, String(serverId || '')).catch(() => false);
+  return can(String(serverId || ''));
 }
 
 function serverAccessMessage(server) {
@@ -980,6 +992,35 @@ async function sharesRoute(req, res, parts, url) {
   throw new HttpError(404, 'Not found.');
 }
 
+// ---------- settings that follow an account ----------
+
+// GET: this account's settings ({ settings, rev, off }); PUT { set: { name:
+// value } }: some of them changed, or { off }; DELETE: forget them here.
+// Only for the account behind the request's sign-in, on a Plex server it
+// can use (?server=, the one the app is on), and with PLEX_SERVER_URL set
+// only for people who can use that one, as the rest of the service is.
+async function settingsRoute(req, res, parts, url) {
+  if (!accountSettings) throw new HttpError(404, 'This player doesn’t keep settings for each account.');
+  if (parts.length) throw new HttpError(404, 'Not found.');
+  const { user, token } = await signedIn(req);
+  if (!allow(`set|${user.id}`, 120)) throw new HttpError(429, 'Too many changes in a short time. Wait a minute.');
+  // (A brief plex.tv outage isn't a no: the app tries again later.)
+  if (!(await serverAllowed(token, String(url.searchParams.get('server') || ''), { strict: true })))
+    throw new HttpError(403, 'Settings are kept for Plex accounts that can use this player’s Plex server, and yours can’t.');
+  try {
+    if (req.method === 'GET') return send(res, 200, accountSettings.get(user.id));
+    if (req.method === 'PUT') return send(res, 200, accountSettings.update(user.id, await readBody(req, 64 * 1024)));
+    if (req.method === 'DELETE') {
+      accountSettings.forget(user.id);
+      return send(res, 200, { ok: true });
+    }
+  } catch (err) {
+    if (err instanceof SettingsError) throw new HttpError(err.status, err.message);
+    throw err;
+  }
+  throw new HttpError(405, 'Not allowed.');
+}
+
 // Which way nginx passed a request on (X-PW-Route, which it sets itself and
 // clears from everyone else's): its sign-in checks for /pms/ ("internal"),
 // the shared AI model at /ollama/ ("ai"), or neither.
@@ -1000,7 +1041,8 @@ async function handle(req, res) {
   try {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
-    if (area === 'health') return send(res, 200, { ok: true, together: config.together, cast: config.cast && !!config.plexServerUrl, devices: config.devices, sharing: !!shares, spotify: !!spotify, debug: config.debug });
+    if (area === 'health')
+      return send(res, 200, { ok: true, together: config.together, cast: config.cast && !!config.plexServerUrl, devices: config.devices, sharing: !!shares, settings: !!accountSettings, spotify: !!spotify, debug: config.debug });
     if (area === 'internal' && rest[0] === 'pms-auth' && routeOf(req) === 'internal') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
@@ -1009,6 +1051,7 @@ async function handle(req, res) {
     if (area === 'ai' && routeOf(req) === 'ai') return await aiRoute(req, res, rest);
     if (area === 'musicbrainz') return await musicbrainzRoute(req, res, rest);
     if (area === 'shares') return await sharesRoute(req, res, rest, url);
+    if (area === 'settings') return await settingsRoute(req, res, rest, url);
     if (area === 'spotify') return await spotifyRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
@@ -1071,11 +1114,13 @@ function started() {
     process.exit(1);
   }
   startSharing();
+  startSettings();
   const off = [
     !config.together && 'Play Together',
     !config.cast && 'playing on other devices',
     !config.devices && 'sharing playback between devices',
     !shares && 'shared playlists',
+    !accountSettings && 'settings that follow each account',
   ].filter(Boolean);
   log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${spotify ? ', importing from Spotify on' : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
@@ -1094,6 +1139,21 @@ function startSharing() {
     }
   }
   shares = new Shares({ dir: config.dataDir || null, log });
+}
+
+// Settings that follow each Plex account, kept in the data folder too (it
+// has to be this service's to write, or they're off).
+function startSettings() {
+  if (!config.settingsSync) return;
+  if (config.dataDir) {
+    try {
+      accessSync(config.dataDir, fsConstants.W_OK);
+    } catch {
+      log.error(`settings that follow each account are off: ${config.dataDir} can't be written to by this service`);
+      return;
+    }
+  }
+  accountSettings = new SettingsStore({ dir: config.dataDir || null, log });
 }
 
 server.on('error', (err) => {
@@ -1117,6 +1177,7 @@ if (config.port) {
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     shares?.flush();
+    accountSettings?.flush();
     server.close();
     process.exit(0);
   });

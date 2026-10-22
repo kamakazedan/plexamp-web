@@ -19,6 +19,8 @@ export const DEFAULT_SETTINGS = {
   gapless: true,
   fades: 'smart', // crossfade between tracks: off | smart (where the music ends; not within albums) | always
   fadeLength: 5, // seconds
+  loudness: false, // loudness levelling: louder tracks turned down to match (player.js levelFor)
+  loadAhead: 0, // tracks loaded in full ahead, into memory (prefetch.js); 0: off (the next starts loading shortly before it's due)
   quietEndings: 'quiet', // smart fades start over a quiet ending: off | soft | quiet | hushed (transitions.js)
   shareDevices: true, // your devices share what's playing; one plays (devices.js)
   reportPlays: true, // "Sync recent plays": tell Plex what's played
@@ -29,7 +31,7 @@ export const DEFAULT_SETTINGS = {
   // Experience
   gridSize: 'normal', // small | normal | large
   fontSize: 'normal', // small | normal | large | larger
-  ratingSystem: 'stars', // stars | half | thumbs | off
+  ratingSystem: 'tick', // tick (favourite) | stars | thumbs | off
   listRatings: true, // ratings in track lists too
   lovedPlaylist: true, // five-star / thumbs-up tracks kept in ❤️ Tracks
   codecBadges: true,
@@ -65,9 +67,31 @@ export const DEFAULT_SETTINGS = {
   skipBack: 10,
   skipForward: 30,
 
-  // Home screen, per library: { [serverId:sectionKey]: { order, hidden, options } }
+  // Home screen, one for every library: { '*': { order, hidden, options, seen } }
   home: {},
 };
+
+// Settings kept by an earlier version, as they are now. (`version` is
+// what they were last saved by.)
+export const SETTINGS_VERSION = 2;
+export function migrateSettings(s) {
+  if (!(Number(s.version) >= 2)) {
+    // 0.19.0: half stars went, and the favourite tick is the rating system
+    // to start with (it was five stars, which most never changed).
+    if (s.ratingSystem === 'stars' || s.ratingSystem === 'half') s.ratingSystem = 'tick';
+    // ...and one Home layout for every library: the one for the library
+    // chosen now, or else the one changed last.
+    if (s.home && typeof s.home === 'object' && !s.home['*']) {
+      const src = store.get('source');
+      const layouts = Object.entries(s.home);
+      const mine = src && s.home[`${src.serverId || src.uri}:${src.sectionKey}`];
+      const layout = mine || layouts[layouts.length - 1]?.[1];
+      s.home = layout ? { '*': layout } : {};
+    }
+  }
+  s.version = SETTINGS_VERSION;
+  return s;
+}
 
 export const app = {
   config: window.PW_CONFIG || {},
@@ -85,7 +109,7 @@ function storedSettings() {
     s.showRating ??= false;
   }
   delete s.showCodecRating;
-  return s;
+  return migrateSettings(s);
 }
 
 setDeviceName(app.settings.playerName);
@@ -94,6 +118,8 @@ export function saveSettings(patch) {
   Object.assign(app.settings, patch);
   store.set('settings', app.settings);
   if ('playerName' in patch) setDeviceName(app.settings.playerName);
+  // (What changed, for settings that follow your account: see sync.js.)
+  emit('settings-patch', patch);
   emit('settings', app.settings);
 }
 
@@ -102,12 +128,27 @@ export function saveSettings(patch) {
 export const playlistScope = () => (app.settings.playlistsAllLibraries === false ? app.source?.sectionKey : undefined);
 export const searchScope = () => (app.settings.searchAllLibraries ? undefined : app.source?.sectionKey);
 
-// Home screen layouts are kept per library.
-export function homeKey(src = app.source) {
-  return src ? `${src.serverId || src.uri}:${src.sectionKey}` : 'none';
-}
+// One Home screen layout, for every server and library (each library had
+// its own until 0.19.0).
+export const homeKey = () => '*';
+
+// Set once this browser's settings may not be its next account's own (see
+// sync.js): they've followed an account, or someone signed out here (any
+// version: settings kept from before a sign-in are someone's), or signed in
+// over someone else.
+export const SYNCED_BEFORE = 'syncedBefore';
+// (sync.js: changes here not yet kept for the account, and the account's
+// settings as this browser last had them. Not the next account's.)
+export const SYNC_PENDING = 'syncPending';
+export const SYNC_REV = 'syncRev';
 
 export function setAuth(auth) {
+  const over = app.auth?.token && app.auth.token !== auth?.token;
+  if (over || (!app.auth?.token && store.get('settings'))) store.set(SYNCED_BEFORE, true);
+  if (over) {
+    store.set(SYNC_PENDING, null);
+    store.set(SYNC_REV, null);
+  }
   app.auth = auth;
   store.set('auth', auth);
 }
@@ -128,9 +169,12 @@ export function setSource(source) {
 // layouts). How the app looks and plays stays. Then the page loads afresh,
 // so nothing of yours is left in it either.
 export function signOut() {
+  // (Settings that follow your account stay as they are for it: see sync.js.)
+  emit('signing-out');
   const { ai, playerName } = DEFAULT_SETTINGS;
   saveSettings({ ai: { ...ai, mode: app.settings.ai?.mode === 'off' ? 'off' : ai.mode }, playerName, home: {} });
-  store.clear(['clientId', 'settings']);
+  store.set(SYNCED_BEFORE, true);
+  store.clear(['clientId', 'settings', SYNCED_BEFORE]);
   // Nothing more is kept from here on (what's playing, say, as the page goes).
   store.freeze();
   app.auth = null;

@@ -128,7 +128,11 @@ const ICONS = {
   together: S('<circle cx="9" cy="8.6" r="3.2"/><path d="M3.4 19.2a5.6 5.6 0 0 1 11.2 0"/><circle cx="16.9" cy="9.4" r="2.6"/><path d="M15.4 14.3a4.6 4.6 0 0 1 5.2 4.9"/>'),
   thumbUp: S('<path d="M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5"/>'),
   thumbDown: `<g transform="rotate(180 12 12)">${S('<path d="M7.5 10.6v9h-3v-9zM7.5 10.6l3.7-6.3c1-.4 2.1.3 2 1.4l-.6 3.9h5.3a2 2 0 0 1 2 2.4l-1.3 6.1a2 2 0 0 1-2 1.5H7.5"/>')}</g>`,
-  starHalf: `${F('<path d="M12 3.8 9.55 8.85 4 9.6l4.05 3.85-1 5.5L12 16.3z"/>')}${S('<path d="M12 3.8l2.45 5.05 5.55.75-4.05 3.85 1 5.5L12 16.3l-4.95 2.65 1-5.5L4 9.6l5.55-.75z"/>')}`,
+  // Favourite (the rating system's tick): a circle, and a filled circle with
+  // a tick once it's a favourite (coloured by the button: see .np-fav.on).
+  favourite: S('<circle cx="12" cy="12" r="8.6"/>'),
+  heart: S('<path d="M12 19.6s-7.3-4.5-7.3-10A4.1 4.1 0 0 1 12 7.2a4.1 4.1 0 0 1 7.3 2.4c0 5.5-7.3 10-7.3 10z"/>'),
+  favourited: `${F('<circle cx="12" cy="12" r="9.5"/>')}<path d="m7.9 12.3 2.8 2.8 5.4-5.7" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>`,
   flame: S('<path d="M12 21.2a6.2 6.2 0 0 0 6.2-6.2c0-3.6-2.6-5.7-3.7-8.7-.3 2.3-1.6 3.4-2.7 3.9.2-3-1-5.6-3.4-7 .2 3.3-2.6 5.8-2.6 9.8a6.2 6.2 0 0 0 6.2 8.2z"/>'),
   headphones: S('<path d="M4.5 15.5v-3a7.5 7.5 0 0 1 15 0v3"/><rect x="3.5" y="14" width="4.2" height="6.2" rx="1.6"/><rect x="16.3" y="14" width="4.2" height="6.2" rx="1.6"/>'),
   grip: F('<circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/>'),
@@ -464,9 +468,9 @@ export function avatar(url, name, cls = '') {
 // ---------- settings rows ----------
 
 // An on/off setting.
-export function toggleRow({ title, subtitle, checked, onChange }) {
-  const input = h('input.switch', { type: 'checkbox', role: 'switch', checked, onchange: (e) => onChange(e.target.checked) });
-  return h('label.row.toggle-row', null, h('div.row-main', null, h('div.row-title', null, title), subtitle ? h('div.row-sub', null, subtitle) : null), input);
+export function toggleRow({ title, subtitle, checked, onChange, disabled = false }) {
+  const input = h('input.switch', { type: 'checkbox', role: 'switch', checked: checked && !disabled, disabled, onchange: (e) => onChange(e.target.checked) });
+  return h(`label.row.toggle-row${disabled ? '.disabled' : ''}`, null, h('div.row-main', null, h('div.row-title', null, title), subtitle ? h('div.row-sub', null, subtitle) : null), input);
 }
 
 // A setting with a few choices: shows the current one, and a sheet to pick.

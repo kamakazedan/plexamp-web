@@ -3,6 +3,52 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.19.0 - 2026-10-22
+
+### New
+
+- **A favourite tick to rate tracks**, as the rating system to start with:
+  a ring beside each track and in Now Playing. Ticked (green), a track is
+  five stars in Plex and goes in ❤️ Tracks; unticked, it has no rating
+  and comes out. Five stars and thumbs are still in Settings › Experience
+  › Rating system; half stars are gone. Settings on five stars or half
+  stars move to the tick: choose Five stars again there to keep stars.
+- **Your settings follow your Plex account**: any browser you sign in on
+  with the same player has them, the Home screen too, kept for your
+  account by the container (`settings.json` in `/data`; `SYNC_SETTINGS=false`
+  turns it off). Streaming quality, connection settings, the player name,
+  sharing with your devices, playback speed, Load ahead and your own AI
+  server stay each device's own. The first time a browser has them, what
+  you'd changed on it stays (and goes to your other devices); a change
+  made offline, or as a tab closed, is sent next time, unless it's been
+  changed elsewhere since; after someone signs out of a browser, what it
+  has never goes to the next account. Settings › Account › On all your
+  devices turns it off for your account.
+- **One Home screen layout** for every library and server (each library
+  had its own): the one for the library you're in carries on.
+- **Load ahead** (Settings › Playback, each device's own): the next 1 to 3
+  tracks loaded in full, so a dropped or slow connection doesn't stop the
+  music at the next track. They load only while the track playing has
+  what it needs (waiting whenever it needs more), a part at a time, and
+  the browser keeps them only while they're wanted (300 MB at most; not
+  saved, nor in its cache).
+- **Loudness levelling** (Settings › Playback, off to start with): louder
+  tracks turned down to match quieter ones, from your server's loudness
+  analysis, to the level Spotify and TIDAL play at. Nothing is turned up,
+  so nothing distorts, and no preamp or limiter is needed. Albums played
+  in order keep their own ups and downs. Not on iPhone or iPad.
+- **Playlist radio**, on a playlist's page and in its menu: some of the
+  playlist, mixed with tracks that sound like it (or more from its
+  artists), and **Favourites radio** in Home › Stations: the artists in
+  ❤️ Tracks, and artists like them.
+
+### Fixed
+
+- **Play Together told Plex the wrong track had stopped** when a session
+  changed track (joining it, or anyone skipping): the new track, at the
+  old one's position, which Plex could count as a play. The track left is
+  now the one, as its own playback.
+
 ## 0.18.3 - 2026-10-22
 
 ### Fixed

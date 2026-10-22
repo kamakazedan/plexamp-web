@@ -33,6 +33,7 @@ import {
   playPlaylist,
   playCollection,
   artistRadio,
+  playlistRadio,
   albumMenu,
   artistMenu,
   playlistMenu,
@@ -590,6 +591,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
         actionButtons([
           { icon: 'play', label: 'Play', primary: true, onClick: () => playPlaylist(pl) },
           { icon: 'shuffle', label: 'Shuffle', onClick: () => playPlaylist(pl, { shuffle: true }) },
+          { icon: 'radio', label: 'Radio', onClick: () => playlistRadio(pl) },
         ]),
       ),
     ),

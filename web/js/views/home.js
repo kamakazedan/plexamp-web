@@ -2,7 +2,7 @@ import { app, playlistScope } from '../state.js';
 import { normTrack } from '../plex.js';
 import { h, icon, card, pageHeader, backHeader, sectionHeader, shelf, grid, wideCard, skeletonShelf, emptyState, fmt } from '../ui.js';
 import { albumCard, playlistCard, collectionCard, trackRow, playlistArt } from '../components.js';
-import { artistRadio, playArtist, playList, shuffleLibrary, deepCutsRadio, timeTravelRadio, randomAlbum } from '../actions.js';
+import { artistRadio, playArtist, playList, shuffleLibrary, deepCutsRadio, timeTravelRadio, randomAlbum, favouritesRadio } from '../actions.js';
 import { openSourceSheet } from './settings.js';
 import { live } from '../live.js';
 import { homeLayout, sectionById, PERIODS, GAPS } from '../home-sections.js';
@@ -188,6 +188,7 @@ const SECTION_VIEWS = {
       return {
         content: shelf([
           tile('radio', 'Library radio', `Anything from ${src.sectionTitle}`, () => shuffleLibrary()),
+          tile('heart', 'Favourites radio', 'The artists you love, and more like them', () => favouritesRadio()),
           tile('disc', 'Deep cuts radio', 'What you’ve played least', () => deepCutsRadio()),
           tile('refresh', 'Time travel radio', 'A random decade', () => timeTravelRadio()),
           tile('shuffle', 'Random album', 'Start to finish', () => randomAlbum()),

@@ -60,15 +60,18 @@ mock pwb-plex-big 32401 mock-plex.py 32401 --big 3000 --quiet
 mock pwb-ollama 11434 mock-ollama.py --port 11434 --quiet
 mock pwb-ollama2 11435 mock-ollama.py --port 11435 --reject-think --quiet
 TV=PLEX_TV_URL=http://pwb-plex:32400
-docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" \
+# Every test signs in as the same few accounts, so settings that follow an
+# account would carry one section's changes into the next: only the
+# DEBUG=true app keeps them (its sections test that).
+docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" -e SYNC_SETTINGS=false \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e OLLAMA_URL=http://pwb-ollama:11434 -e OLLAMA_MODEL=llama3.1:8b \
     -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pwb-plex:32400 "$IMAGE" >/dev/null
-docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 -e "$TV" \
+docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 -e "$TV" -e SYNC_SETTINGS=false \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 docker run -d --name pwb-web3 --network "$NET" -p 127.0.0.1:8083:80 -e "$TV" \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DEBUG=true \
     -e OLLAMA_URL=http://pwb-ollama2:11435 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
-docker run -d --name pwb-web4 --network "$NET" -p 127.0.0.1:8084:80 -e PLEX_TV_URL=http://pwb-plex-big:32401 \
+docker run -d --name pwb-web4 --network "$NET" -p 127.0.0.1:8084:80 -e PLEX_TV_URL=http://pwb-plex-big:32401 -e SYNC_SETTINGS=false \
     -e PLEX_SERVER_URL=http://pwb-plex-big:32401 "$IMAGE" >/dev/null
 
 for url in "http://127.0.0.1:32400/identity" "http://127.0.0.1:32401/identity" http://127.0.0.1:11434/api/version \

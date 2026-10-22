@@ -5,6 +5,7 @@ import { defaultDeviceName } from '../plex.js';
 import { popOverlay, dropCached } from '../router.js';
 import { h, icon, backHeader, row, sheet, toast, toggleRow, choiceRow, enableDrag } from '../ui.js';
 import { homeLayout, saveHomeLayout, resetHomeLayout, sectionById } from '../home-sections.js';
+import { ratingMode } from '../ratings.js';
 
 const set = (key) => (v) => saveSettings({ [key]: v });
 // Home and lists read these settings when they're built, so cached pages
@@ -26,8 +27,8 @@ const FONT = [
   ['larger', 'Larger'],
 ];
 const RATINGS = [
+  ['tick', 'Favourite', 'Tick the tracks you love (five stars in Plex). Untick to take the rating off.'],
   ['stars', 'Five stars', 'Rate tracks from one to five stars.'],
-  ['half', 'Half stars', 'Five stars in halves: tap the left half of a star for half.'],
   ['thumbs', 'Thumbs', 'Thumbs up or down.'],
   ['off', 'Off', 'Don’t show ratings.'],
 ];
@@ -90,11 +91,11 @@ export function experienceView({ el }) {
       row({ href: '/settings/home', title: 'Home screen', subtitle: 'Choose and order the sections on Home.' }),
       choiceRow({ title: 'Grid size', subtitle: 'Size of albums and playlists in grids and shelves.', options: GRID, value: s.gridSize, onChange: set('gridSize') }),
       choiceRow({ title: 'Font size', subtitle: 'Size of text throughout the app.', options: FONT, value: s.fontSize, onChange: set('fontSize') }),
-      choiceRow({ title: 'Rating system', subtitle: 'How you rate tracks, in the player and in track lists.', options: RATINGS, value: s.ratingSystem, onChange: set('ratingSystem') }),
+      choiceRow({ title: 'Rating system', subtitle: 'How you rate tracks, in the player and in track lists.', options: RATINGS, value: ratingMode(), onChange: set('ratingSystem') }),
       toggleRow({ title: 'Ratings in track lists', subtitle: 'Rate tracks right in album, playlist and other track lists.', checked: s.listRatings, onChange: set('listRatings') }),
       toggleRow({
         title: 'Keep ❤️ Tracks up to date',
-        subtitle: 'Tracks you give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out if they lose that rating.',
+        subtitle: 'Tracks you favourite, give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out if they lose that rating.',
         checked: s.lovedPlaylist,
         onChange: set('lovedPlaylist'),
       }),
@@ -334,7 +335,12 @@ export function homeEditorView({ el }) {
 
   el.append(
     backHeader('Home screen', { fallback: '/settings/experience' }),
-    h('div.home-editor-source', null, h('div.home-editor-title', null, `Editing ${src.sectionTitle} (on ${src.serverName})`), h('div.home-editor-sub', null, 'Changes here apply to this library only. Drag to reorder; tap a section to show, hide or change it.')),
+    h(
+      'div.home-editor-source',
+      null,
+      h('div.home-editor-title', null, 'Your Home screen'),
+      h('div.home-editor-sub', null, `For every library and server${app.config.settingsSync ? ', and every device you sign in on' : ''}. Drag to reorder; tap a section to show, hide or change it.`),
+    ),
     list,
     h(
       'div.pad.home-editor-reset',

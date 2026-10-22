@@ -1,9 +1,10 @@
 // Rating tracks. Plex keeps ratings from 0 to 10 (10 is five stars), shown
-// the way Settings › Experience says: five stars, five stars in halves,
-// thumbs (up is 10, down is 2) or not at all. Every rating goes through
-// rateTrack(), so every control showing a track agrees, and loved tracks
-// (five stars, or thumbs up) are kept in the ❤️ Tracks playlist, as in
-// Plexamp: in when they get that rating, out when they lose it.
+// the way Settings › Experience says: a favourite tick (ticked is 10,
+// unticked no rating), five stars, thumbs (up is 10, down is 2) or not at
+// all. Every rating goes through rateTrack(), so every control showing a
+// track agrees, and loved tracks (ticked, five stars or thumbs up: all 10)
+// are kept in the ❤️ Tracks playlist, as in Plexamp: in when they get that
+// rating, out when they lose it.
 import { app, on } from './state.js';
 import { describeError } from './router.js';
 import { h, toast } from './ui.js';
@@ -11,7 +12,8 @@ import { refreshLists } from './editing.js';
 
 export const LOVED = 10;
 export const LOVED_TITLE = '❤️ Tracks';
-export const ratingMode = () => app.settings.ratingSystem || 'stars';
+export const RATING_MODES = ['tick', 'stars', 'thumbs', 'off'];
+export const ratingMode = () => (RATING_MODES.includes(app.settings.ratingSystem) ? app.settings.ratingSystem : 'tick');
 
 // 'rated' { id, rating }: a track's rating changed in this app.
 export const ratingEvents = new EventTarget();
@@ -44,7 +46,7 @@ export const isLovedTitle = (title) => /^(?:❤️?|♥️?|<3)\s*tracks$/iu.tes
 
 // The playlist, from every library: Plexamp's own is a smart playlist, which
 // Plex keeps up to date itself; otherwise a regular one this app looks after.
-async function lovedPlaylist() {
+export async function lovedPlaylist() {
   app.server.forgetPlaylists();
   const all = (await app.server.playlists()).filter((p) => isLovedTitle(p.title) && (p.playlistType || 'audio') === 'audio');
   return all.find((p) => p.smart) || all[0] || null;
@@ -83,7 +85,8 @@ async function updateLoved(track) {
   if (loved) {
     if (!pl) {
       await s.createPlaylist(LOVED_TITLE, [id]);
-      toast(`Added “${track.title}” to ${LOVED_TITLE}, a new playlist for your five-star tracks`);
+      const yours = { tick: 'favourites', thumbs: 'thumbs-up tracks' }[ratingMode()] || 'five-star tracks';
+      toast(`Added “${track.title}” to ${LOVED_TITLE}, a new playlist for your ${yours}`);
     } else if (!(await entriesFor(pl, id)).length) {
       await s.addToPlaylist(pl.ratingKey, [id]);
       toast(`Added to ${pl.title}`);
@@ -98,14 +101,15 @@ async function updateLoved(track) {
 
 // ---------- ratings in track lists ----------
 
-// One small control per row: stars (one element, drawn by CSS from the
-// value) or two thumbs. Rows can number in thousands, so it's kept to a few
-// elements, its track is held here rather than in closures, and taps, keys
-// and hovering are handled once for the whole page (below).
+// One small control per row: a tick, stars (one element, drawn by CSS from
+// the value) or two thumbs. Rows can number in thousands, so it's kept to a
+// few elements, its track is held here rather than in closures, and taps,
+// keys and hovering are handled once for the whole page (below).
 const rowTracks = new WeakMap(); // control -> track
 let modeVersion = 0;
 
-// Five-star modes show whole stars; halves and thumbs keep Plex's own value.
+// Stars show whole stars (a half-star rating from another Plex app, to the
+// nearest); the tick and thumbs keep Plex's own value.
 function shown(mode, v) {
   return mode === 'stars' ? Math.round(v / 2) * 2 : v;
 }
@@ -129,6 +133,19 @@ function paintRow(el) {
     el.replaceChildren();
     el.removeAttribute('role');
     el.removeAttribute('tabindex');
+    return;
+  }
+  if (mode === 'tick') {
+    el.removeAttribute('role');
+    el.removeAttribute('tabindex');
+    el.removeAttribute('aria-valuenow');
+    let tick = el.querySelector('.rr-tick');
+    if (!tick || el.children.length !== 1) {
+      tick = h('button.rr-tick', { type: 'button', 'aria-label': `Favourite ${track.title}` });
+      el.replaceChildren(tick);
+    }
+    tick.classList.toggle('on', v === LOVED);
+    tick.setAttribute('aria-pressed', String(v === LOVED));
     return;
   }
   if (mode === 'thumbs') {
@@ -158,11 +175,10 @@ function paintRow(el) {
   el.style.setProperty('--v', String(v / 10));
 }
 
-// What a tap on the stars at clientX would set (1 to 10).
+// What a tap on the stars at clientX would set (2 to 10).
 function starsAt(el, clientX) {
   const r = el.getBoundingClientRect();
   const frac = Math.min(1, Math.max(0, (clientX - r.left) / (r.width || 1)));
-  if (ratingMode() === 'half') return Math.max(1, Math.ceil(frac * 10));
   return Math.max(1, Math.ceil(frac * 5)) * 2;
 }
 
@@ -172,7 +188,10 @@ function onRowClick(el, e) {
   const mode = ratingMode();
   const v = shown(mode, shownRating(track) || 0);
   let next;
-  if (mode === 'thumbs') {
+  if (mode === 'tick') {
+    if (!e.target.closest('.rr-tick')) return;
+    next = v === LOVED ? 0 : LOVED;
+  } else if (mode === 'thumbs') {
     const btn = e.target.closest('.rr-thumb');
     if (!btn) return;
     next = btn.classList.contains('rr-up') ? (v >= 6 ? 0 : 10) : v > 0 && v <= 4 ? 0 : 2;
@@ -184,10 +203,11 @@ function onRowClick(el, e) {
   setRating(track, next);
 }
 
+// (Stars only: the tick and thumbs are buttons.)
 function onRowKey(el, e) {
   const track = rowTracks.get(el);
-  if (!track || ratingMode() === 'thumbs' || ratingMode() === 'off') return;
-  const step = ratingMode() === 'half' ? 1 : 2;
+  if (!track || ratingMode() !== 'stars') return;
+  const step = 2;
   const v = shown(ratingMode(), shownRating(track) || 0);
   const keys = { ArrowRight: v + step, ArrowUp: v + step, ArrowLeft: v - step, ArrowDown: v - step, Home: 0, End: 10, Delete: 0, Backspace: 0 };
   if (!(e.key in keys)) return;

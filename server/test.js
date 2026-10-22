@@ -11,6 +11,7 @@ import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic } from './musicbrainz.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
+import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -949,6 +950,107 @@ test('shared playlists: kept in a file only the service can read, without anyone
     assert.equal(new Shares({ dir }).list.size, 1);
     writeFileSync(file, '{ not json');
     assert.equal(new Shares({ dir }).list.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- settings that follow an account ----------
+
+test('account settings: each account its own, changed a few at a time, never a device\'s own', () => {
+  const store = new SettingsStore();
+  assert.deepEqual(store.get(dan.id), { settings: {}, changed: {}, rev: 0, off: false });
+  const kept = store.update(dan.id, {
+    set: { ratingSystem: 'tick', gridSize: 'large', home: { '*': { order: ['mixes', 'stations'], hidden: [], options: { topAlbums: { period: 'month' } }, seen: ['mixes'] } } },
+  });
+  assert.equal(kept.rev, 1);
+  store.update(dan.id, { set: { gridSize: 'small', ai: { apiKey: 'secret', url: 'http://x' }, playerName: 'Kitchen', quality: '128', route: 'direct', version: 9 } });
+  const now = store.get(dan.id);
+  assert.equal(now.rev, 2);
+  assert.deepEqual(Object.keys(now.settings).sort(), ['gridSize', 'home', 'ratingSystem']);
+  assert.equal(now.settings.gridSize, 'small');
+  assert.equal(now.settings.home['*'].options.topAlbums.period, 'month');
+  // When each last changed: a browser that couldn't send a change can tell
+  // whether it's been overtaken.
+  assert.deepEqual(now.changed, { ratingSystem: 1, gridSize: 2, home: 1 });
+  assert.deepEqual(store.get(sam.id), { settings: {}, changed: {}, rev: 0, off: false });
+  // Turned off for the account: nothing kept, nothing more taken, until it's on again.
+  assert.deepEqual(store.update(dan.id, { off: true }), { settings: {}, changed: {}, rev: 3, off: true });
+  assert.throws(() => store.update(dan.id, { set: { gridSize: 'large' } }), (e) => e.status === 409);
+  assert.equal(store.update(dan.id, { off: false }).off, false);
+  assert.equal(store.update(dan.id, { set: { gridSize: 'large' } }).rev, 5);
+  store.forget(dan.id);
+  assert.deepEqual(store.get(dan.id), { settings: {}, changed: {}, rev: 0, off: false });
+});
+
+test('account settings: only those that follow an account, each the kind of value it is, and not too many', () => {
+  const store = new SettingsStore();
+  const bad = (set) => assert.throws(() => store.update(dan.id, { set }), (e) => e.status === 400 || e.status === 413);
+  bad(null);
+  bad(['ratingSystem']);
+  bad({ gapless: 'yes' });
+  bad({ fadeLength: Infinity });
+  bad({ gridSize: { large: true } });
+  bad({ fades: 'not one of them!' });
+  bad({ ratingSystem: 'x'.repeat(41) });
+  bad({ home: JSON.parse('{"__proto__": {"polluted": true}}') });
+  bad({ home: { 'bad key!': 1 } });
+  bad({ home: { '*': { title: 'x'.repeat(SETTINGS_LIMITS.text + 1) } } });
+  bad({ home: { a: { b: { c: { d: { e: { f: 1 } } } } } } });
+  bad({ home: { '*': { order: Array.from({ length: SETTINGS_LIMITS.items + 1 }, () => 'x') } } });
+  bad({ home: ['mixes'] });
+  assert.equal({}.polluted, undefined);
+  const lots = { '*': { options: Object.fromEntries(Array.from({ length: 115 }, (_, i) => [`k${i}`, 'x'.repeat(SETTINGS_LIMITS.text)])) } };
+  assert.throws(() => store.update(dan.id, { set: { home: lots } }), (e) => e.status === 413);
+  assert.deepEqual(store.get(dan.id), { settings: {}, changed: {}, rev: 0, off: false });
+  // Anything else (a device's own, a setting that isn't one, an object's own
+  // __proto__) isn't kept, and changes nothing.
+  assert.deepEqual(store.update(dan.id, { set: { ...JSON.parse('{"__proto__": {"x": 1}}'), quality: '128', made: 'up', ai: { apiKey: 'k' } } }), { settings: {}, changed: {}, rev: 0, off: false });
+  assert.equal(store.accounts.size, 0);
+  assert.deepEqual(cleanValue({ a: [true, 1, 'x', null] }), { a: [true, 1, 'x', null] });
+  // So many accounts kept: no more.
+  const full = new SettingsStore();
+  for (let i = 1; i <= SETTINGS_LIMITS.accounts; i++) full.accounts.set(i, { settings: {}, rev: 1, at: 0 });
+  assert.throws(() => full.update(SETTINGS_LIMITS.accounts + 1, { set: { gridSize: 'large' } }), (e) => e.status === 507);
+  assert.equal(full.update(1, { set: { gridSize: 'large' } }).rev, 2);
+});
+
+test('account settings: the same ones follow an account here as in the app (web/js/sync.js)', () => {
+  const src = readFileSync(new URL('../web/js/sync.js', import.meta.url), 'utf8');
+  const list = src.match(/export const SYNCED_SETTINGS = Object\.freeze\(\[([^\]]*)\]\)/);
+  assert.ok(list, 'SYNCED_SETTINGS in web/js/sync.js');
+  const app = [...list[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  assert.deepEqual([...app].sort(), Object.keys(SYNCED_SETTINGS).sort());
+  const device = src.match(/export const DEVICE_SETTINGS = Object\.freeze\(\[([^\]]*)\]\)/);
+  const own = [...device[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  for (const k of ['quality', 'route', 'playerName', 'ai', 'loadAhead', 'shareDevices', 'speed', 'liveUpdates']) {
+    assert.ok(own.includes(k), `${k} is a device's own`);
+    assert.ok(!(k in SYNCED_SETTINGS), `${k} isn't kept for an account`);
+  }
+});
+
+test('account settings: kept in a file only the service can read, and read back (what doesn\'t check out left out)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-settings-'));
+  try {
+    const store = new SettingsStore({ dir });
+    store.update(dan.id, { set: { ratingSystem: 'stars' } });
+    store.update(sam.id, { set: { gridSize: 'large' } });
+    store.flush();
+    const file = join(dir, 'settings.json');
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    const again = new SettingsStore({ dir });
+    assert.deepEqual(again.get(dan.id), { settings: { ratingSystem: 'stars' }, changed: { ratingSystem: 1 }, rev: 1, off: false });
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    data.accounts['abc'] = { settings: { gridSize: 'large' }, rev: 1 };
+    data.accounts['7'] = { settings: { ai: { apiKey: 'secret' }, gridSize: 'large', gapless: 'not a yes or no', made: 'up' }, rev: 3 };
+    data.accounts['8'] = { settings: { home: { a: { b: { c: { d: { e: { f: 1 } } } } } } }, rev: 1 };
+    writeFileSync(file, JSON.stringify(data));
+    const read = new SettingsStore({ dir });
+    assert.deepEqual([...read.accounts.keys()].sort(), [1, 2, 7, 8]);
+    assert.deepEqual(read.get(7), { settings: { gridSize: 'large' }, changed: { gridSize: 3 }, rev: 3, off: false });
+    assert.deepEqual(read.get(8).settings, {});
+    writeFileSync(file, '{ not json');
+    assert.equal(new SettingsStore({ dir }).accounts.size, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

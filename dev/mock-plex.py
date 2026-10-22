@@ -535,11 +535,17 @@ def track_detail(t):
     d = public(t)
     d['Media'] = [dict(t['Media'][0])]
     hires = t.get('_hires', int(t['ratingKey']) % 2 == 1)
+    # Loudness analysis, as Plex gives it: gains in dB to ReplayGain's -18
+    # LUFS. Tracks with an even id are loud masters (-8 LUFS), the others
+    # quiet (-16 LUFS); every album's gain is -7 dB.
+    loud = int(t['ratingKey']) % 2 == 0
+    loudness = -8.0 if loud else -16.0
     d['Media'][0]['Part'] = [dict(t['Media'][0]['Part'][0], Stream=[
         {'id': int(t['ratingKey']) * 10 + 1, 'streamType': 2, 'codec': 'flac',
          'bitDepth': 24 if hires else 16,
          'samplingRate': 96000 if hires else 44100, 'channels': 2,
-         'loudness': -11.5, 'peak': 0.98}])]
+         'loudness': loudness, 'gain': -18.0 - loudness, 'albumGain': -7.0,
+         'peak': 0.98 if loud else 0.6, 'albumPeak': 0.99}])]
     return d
 
 

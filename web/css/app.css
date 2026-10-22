@@ -13,6 +13,7 @@
   --tint-hi: hsl(222 42% 62%);
   --tint-deep: hsl(222 24% 12%);
   --danger: #ff8a80;
+  --fav: #2fbf71; /* a favourite's tick */
   --gutter: 16px;
   --tab-h: 58px;
   --pb-h: 64px;
@@ -891,6 +892,14 @@ label.row:hover {
 .toggle-row,
 .radio-row {
   cursor: pointer;
+}
+
+.toggle-row.disabled {
+  cursor: default;
+}
+
+.toggle-row.disabled .switch {
+  opacity: 0.4;
 }
 
 .switch {
@@ -3768,8 +3777,23 @@ body.bare #toasts {
   background: rgba(255, 255, 255, 0.16);
 }
 
-.star.half {
+.np-fav {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+}
+
+.np-fav:hover {
   color: #fff;
+}
+
+.np-fav.on {
+  color: var(--fav);
 }
 
 .np-transport .np-jump {
@@ -3978,6 +4002,37 @@ body.no-list-ratings .row-rating {
 .rr-thumb:hover,
 .rr-thumb.on {
   color: var(--rr-on);
+}
+
+/* The favourite tick: a ring, filled with a tick once it's a favourite. */
+.rr-tick {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.rr-tick::before {
+  content: '';
+  box-sizing: border-box;
+  width: 19px;
+  height: 19px;
+  border: 1.7px solid currentColor;
+  border-radius: 50%;
+}
+
+.rr-tick:hover {
+  color: var(--rr-on);
+}
+
+.rr-tick.on::before {
+  border-color: var(--fav);
+  background: var(--fav) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 12.4 3.6 3.6 7.4-7.6'/%3E%3C/svg%3E") center / 13px 13px no-repeat;
 }
 
 /* Narrow phones: the time makes way for the rating. */

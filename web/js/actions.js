@@ -8,6 +8,7 @@ import { navigate, describeError } from './router.js';
 import { sheet, toast, shuffleArray, fmt } from './ui.js';
 import { addToPlaylist, addToCollection, isAdminNow, tracksOf } from './editing.js';
 import { exportPlaylistFile } from './views/playlistfiles.js';
+import { lovedPlaylist, LOVED_TITLE } from './ratings.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 
@@ -56,27 +57,32 @@ export const playArtist = (artist, { shuffle = false } = {}) =>
     playList(list, 0, ctx(artist.title, `/artist/${artist.ratingKey}`), { shuffle });
   });
 
+// A playlist's items: from `start`, at most `limit` of them, or (`sample`)
+// that many from all over a bigger one.
+async function playlistItems(pl, { start = 0, limit = PLAYLIST_PLAY_LIMIT, sample = false } = {}) {
+  const s = app.server;
+  const total = pl.leafCount || 0;
+  if (sample && total > limit) {
+    const pages = 5;
+    const size = Math.ceil(limit / pages);
+    const starts = Array.from({ length: pages }, () => Math.floor(Math.random() * Math.max(1, total - size)));
+    const chunks = await Promise.all(starts.map((st) => s.playlistItems(pl.ratingKey, { start: st, size })));
+    const seen = new Set();
+    return chunks.flatMap((c) => c.items).filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey));
+  }
+  const items = [];
+  for (let off = start; off < start + limit; off += 250) {
+    const { items: page, total: t } = await s.playlistItems(pl.ratingKey, { start: off, size: Math.min(250, start + limit - off) });
+    items.push(...page);
+    if (!page.length || off + page.length >= (t || total)) break;
+  }
+  return items;
+}
+
 // Large playlists are sampled rather than loaded whole.
 export const playPlaylist = (pl, { shuffle = false, start = 0 } = {}) =>
   guard(async () => {
-    const s = app.server;
-    const total = pl.leafCount || 0;
-    let items = [];
-    if (shuffle && total > PLAYLIST_PLAY_LIMIT) {
-      const pages = 5;
-      const size = Math.ceil(PLAYLIST_PLAY_LIMIT / pages);
-      const starts = Array.from({ length: pages }, () => Math.floor(Math.random() * Math.max(1, total - size)));
-      const chunks = await Promise.all(starts.map((st) => s.playlistItems(pl.ratingKey, { start: st, size })));
-      const seen = new Set();
-      items = chunks.flatMap((c) => c.items).filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey));
-    } else {
-      const from = shuffle ? 0 : start;
-      for (let off = from; off < from + PLAYLIST_PLAY_LIMIT; off += 250) {
-        const { items: page, total: t } = await s.playlistItems(pl.ratingKey, { start: off, size: 250 });
-        items.push(...page);
-        if (!page.length || off + page.length >= (t || total)) break;
-      }
-    }
+    const items = await playlistItems(pl, { start: shuffle ? 0 : start, sample: shuffle });
     const tracks = items.filter((m) => m.type === 'track').map(normTrack);
     playList(tracks, 0, ctx(pl.title, `/playlist/${pl.ratingKey}`), { shuffle });
   });
@@ -133,6 +139,68 @@ export const similarRadio = (track) =>
     } else {
       playList([track, ...similar], 0, context);
     }
+  });
+
+// ---------- radio from your music ----------
+
+const pick = (list, n) => shuffleArray(list.slice()).slice(0, n);
+const once = (list) => {
+  const seen = new Set();
+  return list.filter((m) => m?.type === 'track' && !seen.has(String(m.ratingKey)) && seen.add(String(m.ratingKey)));
+};
+
+// The artists of these tracks, the most frequent first.
+function artistsOf(tracks, n) {
+  const count = new Map();
+  for (const m of tracks) {
+    const id = m.grandparentRatingKey && String(m.grandparentRatingKey);
+    if (id) count.set(id, (count.get(id) || 0) + 1);
+  }
+  return [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([id]) => id);
+}
+
+// Tracks from these artists: their best-known (or, where Plex doesn't know
+// which those are, any of theirs).
+async function tracksFrom(artists, each) {
+  const s = app.server;
+  const section = app.source.sectionKey;
+  return (
+    await Promise.all(
+      artists.map(async (a) => {
+        const popular = await s.popularTracks(section, a, each).catch(() => []);
+        return popular.length >= Math.min(3, each) ? popular : pick(await s.allLeaves(a).catch(() => []), each);
+      }),
+    )
+  ).flat();
+}
+
+// Playlist radio: some of the playlist, mixed with tracks that sound like
+// it (with sonic analysis), or else with more from its artists.
+export const playlistRadio = (pl) =>
+  guard(async () => {
+    const s = app.server;
+    const own = (await playlistItems(pl, { limit: 400, sample: true })).filter((m) => m.type === 'track');
+    if (!own.length) return toast('That playlist has no tracks to start a radio from.');
+    let more = (await Promise.all(pick(own, 8).map((t) => s.nearest(t.ratingKey, { limit: 12 }).catch(() => [])))).flat();
+    if (once(more).length < 20) more = more.concat(await tracksFrom(artistsOf(own, 8), 6));
+    const list = shuffleArray(once([...pick(own, 40), ...more])).slice(0, 100).map(normTrack);
+    playList(list, 0, ctx(`${pl.title} radio`, `/playlist/${pl.ratingKey}`));
+  });
+
+// Favourites radio: the artists in ❤️ Tracks (those loved most, first),
+// some of their best-known tracks, and artists like them.
+export const favouritesRadio = () =>
+  guard(async () => {
+    const s = app.server;
+    const pl = await lovedPlaylist();
+    const loved = pl ? (await playlistItems(pl, { limit: 500, sample: true })).filter((m) => m.type === 'track') : [];
+    if (!loved.length) return toast(`Favourite a few tracks first: this radio plays their artists, from ${LOVED_TITLE}.`);
+    const artists = artistsOf(loved, 12);
+    const near = (await Promise.all(artists.slice(0, 4).map((a) => s.nearest(a, { limit: 4 }).catch(() => [])))).flat();
+    const alike = [...new Set(near.filter((m) => m.type === 'artist').map((m) => String(m.ratingKey)))].filter((id) => !artists.includes(id)).slice(0, 8);
+    const [theirs, others] = await Promise.all([tracksFrom(artists, 6), tracksFrom(alike, 4)]);
+    const list = shuffleArray(once([...pick(loved, 20), ...theirs, ...others])).slice(0, 100).map(normTrack);
+    playList(list, 0, ctx('Favourites radio', `/playlist/${pl.ratingKey}`));
   });
 
 export const shuffleLibrary = () =>
@@ -272,6 +340,7 @@ export function playlistMenu(pl, { edit = null, picture = null, extra = [] } = {
     actions: [
       { icon: 'play', label: 'Play', onSelect: () => playPlaylist(pl) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playPlaylist(pl, { shuffle: true }) },
+      { icon: 'radio', label: 'Playlist radio', onSelect: () => playlistRadio(pl) },
       ...queueActions(() => tracksOf([pl], { limit: PLAYLIST_PLAY_LIMIT })),
       { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: pl.title, load: tracks }) },
       isAdminNow() && {

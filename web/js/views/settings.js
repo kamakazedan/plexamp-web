@@ -9,6 +9,7 @@ import { missingTracksView } from './missingtracks.js';
 import { missingCount, mbOffered, mbWhere } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
+import { setAccountSync, accountSyncState } from '../sync.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -85,7 +86,9 @@ function accountView({ el }) {
           onclick: () =>
             sheet({
               title: 'Sign out?',
-              subtitle: 'Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layouts. How the app looks and plays stays.',
+              subtitle: app.config.settingsSync
+                ? 'Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays. Settings kept for your account stay with it, for when you sign in again.'
+                : 'Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays.',
               actions: [
                 {
                   icon: 'signOut',
@@ -105,6 +108,37 @@ function accountView({ el }) {
       ),
     ),
   );
+  el.append(h('div.section-head', null, h('h2', null, 'Your settings')), accountSyncRows());
+}
+
+// Whether settings follow the account (sync.js), with a switch for it.
+function accountSyncRows() {
+  const rows = h('div.rows');
+  const mine = 'Streaming quality, connection settings, this device’s name, sharing with your devices, playback speed, loading ahead and your own AI server stay this device’s own.';
+  if (!app.config.settingsSync) {
+    rows.append(row({ title: 'Kept on this device', subtitle: 'This player doesn’t keep settings for each Plex account, so they’re this browser’s own.' }));
+    return rows;
+  }
+  const paint = (on) =>
+    rows.replaceChildren(
+      toggleRow({
+        title: 'On all your devices',
+        subtitle: `${on === null ? 'Couldn’t check with this player just now. ' : ''}Your settings follow your Plex account: any browser you sign in on with this player has them, the Home screen too. ${mine} Off: each device has its own.`,
+        checked: on !== false,
+        onChange: async (v) => {
+          try {
+            await setAccountSync(v);
+            toast(v ? 'Your settings follow your Plex account again.' : 'Your settings aren’t kept for your account any more: each device has its own.');
+          } catch (err) {
+            toast(`Couldn’t change that. ${describeError(err)}`);
+            paint(!v);
+          }
+        },
+      }),
+    );
+  paint(true);
+  accountSyncState().then((on) => rows.isConnected !== false && paint(on));
+  return rows;
 }
 
 // ---------- Source (server + library) ----------
@@ -316,6 +350,12 @@ const FADES = [
   ['off', 'Off', 'One track after another, as they are.'],
 ];
 const FADE_LENGTHS = [2, 3, 4, 5, 6, 8, 10, 12].map((v) => [v, `${v} seconds`]);
+const LOAD_AHEAD = [
+  [0, 'Off', 'Tracks load as they play: the next one starts loading shortly before it’s due (for a gapless change or a crossfade), once this one has loaded.'],
+  [1, '1 track', 'The next track is loaded in full as soon as this one has loaded.'],
+  [2, '2 tracks', 'The next two tracks are loaded in full, one after the other.'],
+  [3, '3 tracks', 'The next three tracks are loaded in full, one after the other. Uses the most memory.'],
+];
 // How far under the rest of a track its ending has to drop (transitions.js).
 const QUIET_ENDINGS = [
   ['soft', 'When it softens', 'Starts the next track as soon as the ending drops well down (15 dB under the rest of the track). Can cut a quiet last verse short.'],
@@ -372,6 +412,22 @@ function playbackView({ el }) {
       }),
       length,
       quiet,
+      choiceRow({
+        title: 'Load ahead',
+        subtitle: 'On this device: how many tracks load in full ahead of time, so a dropped or slow connection doesn’t stop the music at the next one. They load while the track playing has what it needs, and this browser keeps them only while they’re wanted (300 MB at most; not saved, nor in its cache).',
+        options: LOAD_AHEAD,
+        value: Number(s.loadAhead) || 0,
+        onChange: (v) => saveSettings({ loadAhead: v }),
+      }),
+      toggleRow({
+        title: 'Loudness levelling',
+        subtitle: canFade
+          ? 'Turns louder tracks down to match quieter ones, never up, so nothing distorts. Uses your server’s loudness analysis (albums played in order keep their own ups and downs). Tracks it hasn’t analysed play as they are.'
+          : 'This browser doesn’t let pages set the volume (as on iPhone and iPad), so tracks can’t be levelled here.',
+        checked: !!s.loudness,
+        disabled: !canFade,
+        onChange: (v) => saveSettings({ loudness: v }),
+      }),
     ),
   );
   if (app.config.devices) {

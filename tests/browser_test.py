@@ -37,6 +37,7 @@ import struct
 import sys
 import time
 import zlib
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -321,9 +322,11 @@ with sync_playwright() as pw:
         page.wait_for_selector('.np.open')
         page.wait_for_timeout(800)
         cur = player(page, 'p.current.id')
+        settings(page, {'ratingSystem': 'stars'})
         mock(f'/:/rate?key={cur}&rating=6&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
         check('ws: rating made in another app appears', wait_for(lambda: page.locator('.star.on').count() == 3, 10),
               f"{page.locator('.star.on').count()} stars")
+        settings(page, {'ratingSystem': 'tick'})
         page.keyboard.press('Escape')
         page.wait_for_timeout(400)
 
@@ -993,7 +996,14 @@ with sync_playwright() as pw:
             page.click(f'#tabs .tab[data-tab={name}]')
             page.wait_for_timeout(700)
 
-        page.locator('section[data-section=recentlyAdded] .card').first.click()
+        # (Clicked again if Home was drawn again just as it was clicked.)
+        for _ in range(3):
+            page.locator('section[data-section=recentlyAdded] .card').first.click()
+            try:
+                page.wait_for_selector('.hero-album', timeout=10000)
+                break
+            except Exception:
+                pass
         settle('.hero-album')
         home_album = where()
         tap_tab('search')
@@ -1762,10 +1772,17 @@ with sync_playwright() as pw:
         counts = lambda: (page.locator('.view .tracks.numbered > .track').count(), page.locator('.view .tracks.numbered > .track .track-pos').count())
         # (Waiting out a reload of the list, after the Undo above.)
         all_numbered = wait_for(lambda: counts() == (want_n, want_n), 10)
-        narrow = page.locator('.view .tracks .track-album').first.evaluate('e => getComputedStyle(e).display')
+        # (Read again if the list was being drawn again just then: an element
+        # it's let go of has no style.)
+        def album_col():
+            try:
+                return page.locator('.view .tracks .track-album').first.evaluate('e => e.isConnected ? [getComputedStyle(e).display, e.textContent] : null')
+            except Exception:
+                return None
+        narrow = (wait_for(album_col, 5, 0.2) or [''])[0]
         page.set_viewport_size({'width': 1280, 'height': 860})
         page.wait_for_timeout(500)
-        wide = page.locator('.view .tracks .track-album').first.evaluate('e => [getComputedStyle(e).display, e.textContent]')
+        wide = wait_for(album_col, 5, 0.2)
         shot(page, 'lists-04-numbered-wide')
         page.set_viewport_size(MOBILE['viewport'])
         page.wait_for_timeout(300)
@@ -2788,13 +2805,15 @@ with sync_playwright() as pw:
         page.wait_for_selector('.sheet.open')
         said = page.locator('.sheet.open').inner_text()
         shot(page, 'privacy-01-sign-out')
+        # (The page loads afresh a moment after the login page shows: waited
+        # for, so what's read below is the new page's.)
         with page.expect_request(re.compile(r'/signed-out$')) as forgot:
-            with page.expect_navigation():
+            with page.expect_event('load', timeout=15000):
                 page.locator('.sheet.open .sheet-action', has_text='Sign out').click()
         page.wait_for_selector('text=Use a server address and token instead')
         kept = js(page, "() => JSON.parse(localStorage.getItem('pw.settings'))")
         keys = js(page, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.')).sort()")
-        check('privacy: signing out says what goes and what stays', 'AI settings' in said and 'Home layouts' in said and 'How the app looks and plays stays' in said, said)
+        check('privacy: signing out says what goes and what stays', 'AI settings' in said and 'Home layout' in said and 'How the app looks and plays stays' in said, said)
         check('privacy: ...clears what\'s yours, and keeps the device\'s',
               kept.get('playerName') == '' and kept.get('home') == {} and kept.get('ai') == {'mode': 'auto', 'url': '', 'apiKey': '', 'model': '', 'notes': ''}
               and kept.get('gridSize') == 'large' and not any(k in keys for k in ('pw.auth', 'pw.source', 'pw.aiMissing')) and 'pw.clientId' in keys, f'{kept} {keys}')
@@ -3225,6 +3244,118 @@ with sync_playwright() as pw:
         check('stream: ...whereas Next starts it from the top (after a fade called off too)', 8.5 <= waiting <= 9.5 and top < 1.5, f'{waiting} {top}')
         settings(page, {'fades': 'off'})
 
+        # Loading ahead (Settings › Playback): the next tracks' streams are
+        # loaded in full, into memory, once this one's has loaded, and the
+        # next plays from memory, even with the connection to the server
+        # gone. What's played is let go.
+        # (Gapless off to start with: the tracks here are short enough for the
+        # next one's own preload to be due at once.)
+        settings(page, {'loadAhead': 2, 'gapless': False})
+        play_track(5, 0)
+        tr = now()
+        ahead = lambda: player(page, 'p.ahead.summary()')
+        loaded = wait_for(lambda: len([e for e in ahead() if e['state'] == 'done']) == 2, 30, 0.3)
+        got = ahead()
+        h = hls()
+        parts = {s['track']: sorted({r['file'] for r in h['requests'] if r['session'] == s['id'] and r['file'].endswith('.ts')}) for s in h['sessions']}
+        # (The next two in the queue, in its order: what's loaded ahead is
+        # listed in the order it was loaded.)
+        nexts = player(page, 'p.queue.slice(p.index + 1, p.index + 3).map((t) => t.id)')
+        check('stream: loading ahead, the next tracks\' streams are loaded in full, into memory, after this one\'s',
+              loaded and len(got) == 2 and sorted(e['id'] for e in got) == sorted(nexts) and all(e['hls'] and e['bytes'] > 0 for e in got)
+              and all(len(parts.get(i, [])) == 5 for i in nexts) and tr['id'] not in nexts and now()['id'] == tr['id'],
+              f'{got} {nexts} {parts}')
+        # The next track's preload, for a gapless change, takes it from memory.
+        settings(page, {'gapless': True})
+        spare = wait_for(lambda: player(page, 'p.spare.prefetched ? p.spare.prefetched.track.id : null') == nexts[0], 10, 0.25)
+        check('stream: ...and the next one, preloaded for a gapless change, comes from memory', spare, str(player(page, '({ qid: p.spare.qid, pre: !!p.spare.prefetched })')))
+        # The same server at another address (the connection changed: on the
+        # move, or at work) keeps what's loaded.
+        js(page, "() => import('./js/state.js').then((m) => m.setSource({ ...m.app.source }))")
+        page.wait_for_timeout(400)
+        kept = ahead()
+        check('stream: ...and kept when the connection to the same server changes', sorted(e['id'] for e in kept if e['state'] == 'done') == sorted(nexts), str(kept))
+        # A track still loading ahead is waited for only if it'll be there in
+        # time (going as it has), after a moment to get going.
+        # (How fast it's gone not counting time waiting for the connection;
+        # just started, on time if it can go on now.)
+        timing = player(page, """(() => { const t = performance.now(); const e = (o) => ({ waited: 0, waitingSince: 0, ...o }); const out = [
+            p.ahead.onTime(e({ started: t - 10000, bytes: 1e6, expected: 2e6 }), 15),
+            p.ahead.onTime(e({ started: t - 10000, bytes: 1e4, expected: 2e6 }), 15),
+            p.ahead.onTime(e({ started: t - 20000, waited: 15000, bytes: 1e6, expected: 2.5e6 }), 15)];
+            p.roomToFetch = () => true; out.push(p.ahead.onTime(e({ started: t - 1000, bytes: 0, expected: 2e6 }), 15));
+            p.roomToFetch = () => false; out.push(p.ahead.onTime(e({ started: t - 1000, bytes: 0, expected: 2e6 }), 15));
+            delete p.roomToFetch; return out; })()""")
+        check('stream: ...a track still loading ahead is waited for only if it\'ll be there in time', timing == [True, False, True, True, False], str(timing))
+        # The next track's own stream, as it was loaded: its playback, and the
+        # session its parts are under. Only its requests count as played from
+        # the network (once it's on, the one after it starts loading ahead,
+        # and that's cut too).
+        own = player(page, f"(() => {{ const e = [...p.ahead.entries.values()].find((e) => e.track.id === {json.dumps(nexts[0])});"
+                           " return e && { playback: e.playback, urls: [...(e.data ? e.data.keys() : [])] }; })()") or {'playback': '?', 'urls': []}
+        sids = {u.split('/session/')[1].split('/')[0] for u in own['urls'] if '/session/' in u}
+        cut = {'urls': []}
+
+        def no_server(route):
+            cut['urls'].append(route.request.url)
+            return route.abort('connectionreset')
+
+        def its(url):
+            return own['playback'] in url or url in own['urls'] or any(f'/session/{s}/' in url for s in sids)
+
+        def converted(url):
+            return '/transcode/universal/' in url
+        page.route(converted, no_server)
+        player(page, 'p.next()')
+        seen = []
+
+        def on_air_now():
+            n = now()
+            n['memory'] = player(page, 'p.deck.prefetched ? p.deck.prefetched.track.id : null')
+            if not seen or (seen[-1]['id'], seen[-1]['state']) != (n['id'], n['state']):
+                seen.append({k: n[k] for k in ('id', 'state', 't', 'memory')})
+            return n
+        played = wait_for(lambda: (lambda n: n['id'] == nexts[0] and n['state'] == 'playing' and n['t'] > 3)(on_air_now()), 15, 0.25)
+        on_air = on_air_now()
+        page.unroute(converted, no_server)
+        theirs = [u.split('?')[0].rsplit('/', 1)[-1] for u in cut['urls'] if its(u)]
+        player(page, 'p.next()')
+        wait_for(lambda: now()['id'] == nexts[1] and now()['state'] == 'playing', 15, 0.25)
+        gone = wait_for(lambda: nexts[0] not in [e['id'] for e in ahead()], 10, 0.3)
+        check('stream: ...the next plays from memory, with the server out of reach, and what\'s played is let go',
+              played and own['urls'] and on_air['memory'] == nexts[0] and not theirs and on_air['hls'] and gone and not play_errors(),
+              f'{played} {on_air} {seen} {theirs} {len(cut["urls"])} {ahead()} {play_errors()}')
+
+        # A file played as it is, loaded ahead too: a part at a time, waiting
+        # part-way while the track playing needs the connection (here, told
+        # it does once a part is in), and carrying on once it doesn't.
+        # (Gapless off: with the connection taken, the next track's own
+        # preload, due at once on tracks this short, would stream it instead.)
+        settings(page, {'quality': 'original', 'loadAhead': 1, 'gapless': False})
+        part = 512 * 1024
+        player(page, f"(p.roomToFetch = () => !p.ahead.busy || p.ahead.busy.bytes < {part}, true)")
+        play_track(5, 2)
+        tr = now()
+        held_at = wait_for(lambda: [(e['state'], e['bytes']) for e in ahead()] == [('loading', part)], 20, 0.3)
+        page.wait_for_timeout(2000)
+        still = ahead()
+        player(page, '(delete p.roomToFetch, true)')
+        loaded = wait_for(lambda: [e['state'] for e in ahead()] == ['done'], 20, 0.3)
+        got = ahead()
+        check('stream: loading a file ahead waits part-way while the track playing needs the connection, and carries on after',
+              held_at and [(e['state'], e['bytes']) for e in still] == [('loading', part)] and loaded and got[0]['bytes'] > part, f'{still} {got}')
+        settings(page, {'gapless': True})
+        page.route('**/library/parts/**', no_server)
+        player(page, 'p.next()')
+        played = wait_for(lambda: now()['id'] == got[0]['id'] and now()['state'] == 'playing' and now()['t'] > 2, 15, 0.25)
+        blob = player(page, "p.audio.getAttribute('src') || ''").startswith('blob:')
+        page.unroute('**/library/parts/**')
+        check('stream: ...a file played as it is too (it plays from memory, with the server out of reach)',
+              loaded and not got[0]['hls'] and got[0]['bytes'] > 100000 and played and blob and not play_errors(), f'{got} {now()} {blob}')
+        settings(page, {'quality': '320', 'loadAhead': 0})
+        page.wait_for_timeout(500)
+        check('stream: ...and none is kept once it\'s turned off', wait_for(lambda: ahead() == [] or all(e['id'] == now()['id'] for e in ahead()), 8, 0.3), str(ahead()))
+
         # A stream that never plays, started again and failing again: the
         # track is skipped, as before, saying so.
         play_track(4, 0, rules='&kill=0&sessions=2', wait=1)
@@ -3426,6 +3557,11 @@ with sync_playwright() as pw:
         page.wait_for_selector('.view .tracks .track .row-rating')
         rows = page.locator('.view .tracks .track')
         n = rows.count()
+        ticks = page.locator('.view .tracks .track .rr-tick[aria-pressed]').count()
+        check('ratings: the favourite tick is the rating system to start with', ticks == n and n > 4
+              and js(page, "() => import('./js/state.js').then(({ app }) => app.settings.ratingSystem)") == 'tick', f'{ticks} of {n}')
+        settings(page, {'ratingSystem': 'stars'})
+        page.wait_for_timeout(300)
         check('ratings: every track in an album can be rated in the list', n > 4 and page.locator('.view .tracks .track .row-rating[role=slider]').count() == n, n)
         check('ratings: the rating is to the left of the track\'s length', rows.first.evaluate("""(r) => {
             const a = r.querySelector('.row-rating').getBoundingClientRect(), b = r.querySelector('.track-dur').getBoundingClientRect();
@@ -3501,6 +3637,37 @@ with sync_playwright() as pw:
         tap_star(rows.nth(4), 5)
         page.wait_for_timeout(1200)
         check('ratings: with ❤️ Tracks turned off in settings, no playlist changes', loved() is None and rating_of(rows.nth(4).get_attribute('data-track-id')) == 10)
+
+        # The favourite tick: ticked is five stars, and in ❤️ Tracks;
+        # unticked, no rating, and out of it.
+        settings(page, {'lovedPlaylist': True, 'ratingSystem': 'tick'})
+        page.wait_for_timeout(300)
+        fifth = rows.nth(5)
+        tid5 = fifth.get_attribute('data-track-id')
+        touched.add(tid5)
+        fifth.evaluate("(e) => e.scrollIntoView({ block: 'center' })")
+        fifth.locator('.rr-tick').click()
+        ticked = wait_for(lambda: rating_of(tid5) == 10, 5) and wait_for(lambda: loved_ids() == [tid5], 6)
+        shown_on = fifth.locator('.rr-tick.on[aria-pressed=true]').count() == 1
+        shot(page, 'ratings-03-ticks')
+        fifth.locator('.rr-tick').click()
+        unticked = wait_for(lambda: rating_of(tid5) is None, 5) and wait_for(lambda: loved_ids() == [], 6)
+        check('ratings: ticking a track favourites it (five stars, into ❤️ Tracks), and unticking takes that off (and out)',
+              ticked and shown_on and unticked and fifth.locator('.rr-tick[aria-pressed=false]').count() == 1, f'{rating_of(tid5)} {loved_ids()}')
+        fifth.locator('.track-main').click()
+        wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open .np-fav')
+        page.click('.np-fav')
+        np_ticked = wait_for(lambda: rating_of(tid5) == 10, 5) and wait_for(lambda: page.locator('.np-fav.on[aria-pressed=true]').count() == 1, 3)
+        follows = wait_for(lambda: fifth.locator('.rr-tick.on').count() == 1, 3)
+        shot(page, 'ratings-04-np-tick')
+        page.click('.np-fav')
+        np_unticked = wait_for(lambda: rating_of(tid5) is None, 5) and wait_for(lambda: loved_ids() == [], 6)
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.np.open', state='detached')
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+        check('ratings: ...in Now Playing too, and the list follows', np_ticked and follows and np_unticked, f'{np_ticked} {follows} {np_unticked}')
         for t in touched:
             mock(f'/:/rate?key={t}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
         mock('/__mock/config?loved=none')
@@ -3820,6 +3987,110 @@ with sync_playwright() as pw:
         mock('/__mock/config?quiet=')
         ctx.close()
 
+    # ---------- loudness: levelling, from the server's loudness analysis ----------
+    # Mock tracks with an even id are loud (-8 LUFS, a gain of -10 dB), the
+    # others quiet (-16 LUFS, -2 dB); every album's gain is -7 dB.
+    if run('loudness'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'loudness')
+        login(page, APP)
+        tracks = mock('/__mock/tracks')['MediaContainer']['Metadata']
+        loud = next(t for t in tracks if int(t['ratingKey']) % 2 == 0)
+        quiet = next(t for t in tracks if int(t['ratingKey']) % 2 == 1 and t['album'] != loud['album'])
+        c, d = next((x, y) for x, y in zip(tracks, tracks[1:]) if x['album'] == y['album'] and y['index'] == x['index'] + 1)
+
+        def play(ids):
+            js(page, "() => Promise.all([import('./js/state.js'), import('./js/plex.js'), import('./js/player.js')])"
+                     ".then(async ([{ app }, { normTrack }, { player }]) => {"
+                     f" const list = await Promise.all({json.dumps(ids)}.map(async (id) => normTrack(await app.server.metadata(id))));"
+                     " player.playTracks(list, 0, { context: { title: 'Loudness', href: null } }); })")
+            return wait_for(lambda: player(page, "p.state === 'playing'"), 10, 0.1)
+
+        level = lambda: player(page, '({ level: p.deck.level, volume: p.audio.volume, spare: p.spare.qid != null ? p.spare.level : null })')
+        settings(page, {'loudness': False, 'fades': 'off', 'gapless': True})
+        play([loud['ratingKey']])
+        off = level()
+        settings(page, {'loudness': True})
+        page.wait_for_timeout(400)
+        on = level()
+        check('loudness: off to start with; on, a loud track is turned down to -14 LUFS (by 6 dB here), at once',
+              off['level'] == 1 and abs(on['level'] - 10 ** (-6 / 20)) < 0.01 and abs(on['volume'] - on['level']) < 0.01, f'{off} {on}')
+        play([quiet['ratingKey']])
+        q = level()
+        check('loudness: ...a quiet one isn\'t turned up', q['level'] == 1 and q['volume'] == 1, str(q))
+        play([c['ratingKey'], d['ratingKey']])
+        first = level()
+        wait_for(lambda: player(page, 'p.spare.qid != null && p.spare.level < 1'), 10, 0.2)
+        album = level()
+        check('loudness: an album played in order uses its album\'s gain (3 dB down here), for the next track too, before it plays',
+              abs(first['level'] - 10 ** (-3 / 20)) < 0.01 and album['spare'] is not None and abs(album['spare'] - 10 ** (-3 / 20)) < 0.01, f'{first} {album}')
+        settings(page, {'loudness': False})
+        page.wait_for_timeout(300)
+        back = level()
+        check('loudness: ...and off again, everything plays as it is', back['level'] == 1 and back['spare'] in (None, 1), str(back))
+        page.goto(APP + '#/settings/playback')
+        page.wait_for_selector('label.toggle-row:has-text("Loudness levelling")')
+        row_text = page.locator('label.toggle-row', has_text='Loudness levelling').inner_text()
+        check('loudness: it\'s in Settings › Playback, saying it only ever turns tracks down', 'never up' in row_text, row_text)
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+        ctx.close()
+
+    # ---------- radio: playlist radio and favourites radio ----------
+    if run('radio'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'radio')
+        login(page, APP)
+        queue_now = lambda: player(page, '({ context: p.context?.title, ids: p.queue.map((t) => t.id), artists: p.queue.map((t) => t.artistId), state: p.state })')
+
+        # A playlist's radio: some of it, and more like it.
+        pls = mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+        pl = next(p for p in pls if not p.get('smart') and p.get('leafCount', 0) >= 5)
+        own = [m['ratingKey'] for m in mock(f'/playlists/{pl["ratingKey"]}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])]
+        page.goto(APP + f'#/playlist/{pl["ratingKey"]}')
+        page.wait_for_selector('.hero button:has-text("Radio")')
+        page.locator('.hero button:has-text("Radio")').first.click()
+        wait_for(lambda: queue_now()['context'] == f'{pl["title"]} radio' and queue_now()['state'] == 'playing', 10, 0.2)
+        q = queue_now()
+        mine = [i for i in q['ids'] if i in own]
+        check('radio: a playlist\'s radio plays some of it, mixed with more like it',
+              q['context'] == f'{pl["title"]} radio' and len(q['ids']) >= 10 and mine and len(mine) < len(q['ids']) and len(set(q['ids'])) == len(q['ids']),
+              f'{q["context"]} {len(q["ids"])} {len(mine)} of the playlist\'s {len(own)}')
+        page.click('.view button[aria-label="More options"]')
+        page.wait_for_selector('.sheet.open')
+        listed = page.locator('.sheet.open .sheet-action', has_text='Playlist radio').count()
+        page.keyboard.press('Escape')
+        check('radio: ...from its menu too', listed == 1, listed)
+
+        # Favourites radio: nothing loved yet says so; then the artists of
+        # ❤️ Tracks (Plexamp's smart one here, which Plex fills from ratings).
+        mock('/__mock/config?loved=none')
+        page.goto(APP + '#/')
+        page.wait_for_selector('button.station[aria-label="Play Favourites radio"]')
+        page.locator('button.station[aria-label="Play Favourites radio"]').scroll_into_view_if_needed()
+        shot(page, 'radio-01-stations')
+        page.click('button.station[aria-label="Play Favourites radio"]')
+        told = wait_for(lambda: page.locator('.toast', has_text='Favourite a few tracks first').count() > 0, 6)
+        tracks = mock('/__mock/tracks')['MediaContainer']['Metadata']
+        loved = [t['ratingKey'] for t in tracks[:40:13]]
+        for t in loved:
+            mock(f'/:/rate?key={t}&rating=10&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        mock('/__mock/config?loved=smart')
+        loved_artists = {mock(f'/library/metadata/{t}?X-Plex-Token=t')['MediaContainer']['Metadata'][0]['grandparentRatingKey'] for t in loved}
+        page.click('button.station[aria-label="Play Favourites radio"]')
+        wait_for(lambda: queue_now()['context'] == 'Favourites radio' and queue_now()['state'] == 'playing', 10, 0.2)
+        q = queue_now()
+        theirs = [a for a in q['artists'] if a in loved_artists]
+        check('radio: favourites radio, with nothing loved yet, says so; then it plays the artists you love, and more like them',
+              told and q['context'] == 'Favourites radio' and len(q['ids']) >= 10 and theirs and len(theirs) < len(q['artists']),
+              f'{told} {q["context"]} {len(q["ids"])} {len(theirs)}')
+        for t in loved:
+            mock(f'/:/rate?key={t}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        mock('/__mock/config?loved=none')
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+        ctx.close()
+
     # ---------- together: Play Together, Dan (host) and Sam (friend) ----------
     if run('together'):
         dan_ctx = browser.new_context(**MOBILE)
@@ -3858,6 +4129,12 @@ with sync_playwright() as pw:
         login(sam, APP, 't2')
         check('together: invitation shows on the tab',
               wait_for(lambda: sam.locator('#tabs .tab[data-tab=together] .tab-dot:not([hidden])').count() == 1, 15))
+        # Sam was listening to something of their own (paused now).
+        play_first_album_track(sam, APP, album=3, track=0)
+        wait_for(lambda: player(sam, 'p.time > 1'), 8, 0.2)
+        player(sam, 'p.pause()')
+        own = player(sam, '({ id: p.current.id, playback: p.deck.playback })')
+        mock('/__mock/hls?reset=1')
         sam.goto(APP + '#/together')
         sam.wait_for_selector('.together-card:has-text("Dan invited you")')
         shot(sam, 'together-03-invitation')
@@ -3865,6 +4142,10 @@ with sync_playwright() as pw:
         sam.wait_for_selector('.together-session')
         same = lambda: player(sam, 'p.current && p.current.sid') == player(dan, 'p.current && p.current.sid')
         check('together: joining plays the same track', wait_for(lambda: same() and player(sam, 'p.state') == 'playing', 10))
+        stops = [x for x in mock('/__mock/hls')['MediaContainer']['timelines'] if x['state'] == 'stopped']
+        mine = [x for x in stops if x['ratingKey'] == own['id']]
+        check('together: ...and Plex hears that what was playing here stopped, as its own playback (and nothing else as no playback)',
+              own['playback'] and [x['playback'] for x in mine] == [own['playback']] and not [x for x in stops if not x['playback']], f'{own} {stops}')
         in_sync = lambda: abs(drift(dan)) < 0.5 and abs(drift(sam)) < 0.5
         check('together: both players on the session clock', wait_for(in_sync, 10), f'{drift(dan):.2f}s, {drift(sam):.2f}s')
         gap = abs(player(dan, 'p.time') - player(sam, 'p.time'))
@@ -4118,7 +4399,7 @@ with sync_playwright() as pw:
         check('home: a collection plays', wait_for(lambda: player(page, "p.state === 'playing' && p.context.href.startsWith('/collection/')"), 10))
         page.goto(APP + '#/')
         page.wait_for_selector('section[data-section=stations] .station')
-        check('home: Stations', page.locator('section[data-section=stations] .station').count() == 4)
+        check('home: Stations', page.locator('section[data-section=stations] .station').count() == 5)
         page.click('section[data-section=stations] .station:has-text("Time travel radio")')
         check('home: a station plays', wait_for(lambda: player(page, "p.state === 'playing' && p.context.title.startsWith('Time travel')"), 10))
 
@@ -4292,6 +4573,206 @@ with sync_playwright() as pw:
         page.click('button:has-text("Test the model")')
         check('debug: a shared model that won\'t take "think" still answers', page.wait_for_selector('text=It works', timeout=20000) is not None)
         ctx.close()
+
+    # ---------- sync: settings that follow your Plex account ----------
+    # On the DEBUG=true app, the only one here that keeps them (every test
+    # signs in as the same few accounts: see tests/run-browser-tests.sh).
+    if run('sync') and APP_DEBUG:
+        def account(token, method='GET', body=None):
+            req = urllib.request.Request(APP_DEBUG + 'api/settings?server=mock-server-1', method=method, data=json.dumps(body).encode() if body is not None else None,
+                                         headers={'X-Plex-Token': token, 'Content-Type': 'application/json', 'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read() or b'{}')
+
+        def device(name, token='t', before=None, signed_in=None):
+            c = browser.new_context(**MOBILE)
+            if before is not None:
+                # A browser that's had the app before, with these settings (as
+                # an earlier version kept them), and (`signed_in`: { auth,
+                # source }) still signed in.
+                kept = {'pw.settings': before, **({f'pw.{k}': v for k, v in signed_in.items()} if signed_in else {})}
+                c.add_init_script("if (!sessionStorage.getItem('pw-test-seeded')) { sessionStorage.setItem('pw-test-seeded', '1');"
+                                  f" for (const [k, v] of Object.entries({json.dumps(kept)})) localStorage.setItem(k, JSON.stringify(v)); }}")
+            pg = c.new_page()
+            attach(pg, name)
+            if signed_in:
+                pg.goto(APP_DEBUG)
+                pg.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+            else:
+                login(pg, APP_DEBUG, token)
+            return c, pg
+
+        def mine(pg):
+            return js(pg, """() => import('./js/state.js').then(({ app }) => ({ grid: app.settings.gridSize, rating: app.settings.ratingSystem,
+                font: app.settings.fontSize, quality: app.settings.quality, name: app.settings.playerName, hidden: app.settings.home?.['*']?.hidden || [],
+                side: app.settings.sideBySide, seek: app.settings.seekbarStyle, tint: app.settings.tintBackground }))""")
+
+        def pull(pg):
+            js(pg, "() => import('./js/sync.js').then(({ pullSettings }) => pullSettings())")
+
+        account('t', 'DELETE')
+        account('t2', 'DELETE')
+        desk_ctx, desk = device('desk')
+        lists = js(desk, """() => Promise.all([import('./js/state.js'), import('./js/sync.js')]).then(([s, y]) => {
+            const keys = Object.keys(s.DEFAULT_SETTINGS), synced = new Set(y.SYNCED_SETTINGS), own = new Set(y.DEVICE_SETTINGS);
+            return { neither: keys.filter((k) => !synced.has(k) && !own.has(k)), both: keys.filter((k) => synced.has(k) && own.has(k)),
+                     unknown: [...synced].filter((k) => !keys.includes(k)) }; })""")
+        check('sync: every setting either follows the account or is each device\'s own, never both', lists == {'neither': [], 'both': [], 'unknown': []}, str(lists))
+        defaults = js(desk, """() => Promise.all([import('./js/state.js'), import('./js/sync.js')]).then(([s, y]) =>
+            Object.fromEntries(y.SYNCED_SETTINGS.map((k) => [k, s.DEFAULT_SETTINGS[k]])))""")
+        try:
+            kinds = account('t2', 'PUT', {'set': defaults})['settings']
+        except urllib.error.HTTPError as err:
+            kinds = f'HTTP {err.code}'
+        account('t2', 'DELETE')
+        check('sync: ...and the player keeps each as the kind of value it is in the app', kinds == defaults, str(kinds)[:300])
+        desk.wait_for_timeout(1500)
+        check('sync: a new browser, as it starts, sends nothing (so it can\'t undo another device\'s settings)', account('t')['rev'] == 0, json.dumps(account('t')))
+        settings(desk, {'gridSize': 'large', 'ratingSystem': 'thumbs', 'quality': '128', 'playerName': 'Desk', 'loadAhead': 2})
+        js(desk, """() => import('./js/home-sections.js').then(({ homeLayout, saveHomeLayout }) => {
+            const l = homeLayout(); l.hidden.add('recentPlays'); saveHomeLayout(l); })""")
+        kept = wait_for(lambda: account('t')['settings'].get('gridSize') == 'large' and 'recentPlays' in account('t')['settings'].get('home', {}).get('*', {}).get('hidden', []), 10, 0.3)
+        stored = account('t')['settings']
+        check('sync: a device\'s settings are kept for its account, never its own ones (Streaming quality, its name)',
+              kept and stored.get('ratingSystem') == 'thumbs' and 'quality' not in stored and 'playerName' not in stored and 'ai' not in stored
+              and 'loadAhead' not in stored,
+              json.dumps({k: stored.get(k) for k in ('gridSize', 'ratingSystem', 'quality', 'playerName')}))
+        phone_ctx, phone = device('phone')
+        got = {}
+        wait_for(lambda: got.update(mine(phone)) or (got['grid'] == 'large' and 'recentPlays' in got['hidden']), 10, 0.3)
+        order = sections_on_home(phone)
+        check('sync: ...so another device signed in to it has them, the Home screen too, but keeps its own Streaming quality and name',
+              got['grid'] == 'large' and got['rating'] == 'thumbs' and got['quality'] == 'original' and got['name'] == '' and 'recentPlays' in got['hidden']
+              and 'recentPlays' not in order, f'{got} {order}')
+        settings(desk, {'fontSize': 'large'})
+        wait_for(lambda: account('t')['settings'].get('fontSize') == 'large', 10, 0.3)
+        pull(phone)
+        check('sync: ...and a change made later on one turns up on the other', wait_for(lambda: mine(phone)['font'] == 'large', 8, 0.3), str(mine(phone)))
+
+        # A change on its way to the account isn't undone by what another
+        # device changed meanwhile, read back before it's there.
+        held = []
+
+        def hold(route):
+            if route.request.method == 'PUT':
+                held.append(route)
+            else:
+                route.continue_()
+        phone.route('**/api/settings?*', hold)
+        settings(phone, {'gridSize': 'small'})
+        wait_for(lambda: phone.wait_for_timeout(50) or held, 5, 0.1)
+        settings(desk, {'sideBySide': False})
+        wait_for(lambda: account('t')['settings'].get('sideBySide') is False, 10, 0.3)
+        pull(phone)
+        during = mine(phone)
+        for r in held:
+            r.continue_()
+        phone.unroute('**/api/settings?*', hold)
+        there = wait_for(lambda: account('t')['settings'].get('gridSize') == 'small', 10, 0.3)
+        check('sync: a change on its way isn\'t undone by another device\'s, read back meanwhile', held and during['grid'] == 'small' and during['side'] is False
+              and there and mine(phone)['grid'] == 'small', f'{during} {mine(phone)} {account("t")["settings"].get("gridSize")}')
+
+        # A browser that had settings of its own already (before 0.19.0, say):
+        # its choices are kept, for the account too, and it takes the
+        # account's for the rest.
+        was = js(desk, "() => import('./js/state.js').then(({ app }) => ({ auth: app.auth, source: app.source }))")
+        laptop_ctx, laptop = device('laptop', before={'gridSize': 'normal', 'ratingSystem': 'stars', 'seekbarStyle': 'bars', 'tintBackground': False}, signed_in=was)
+        merged = wait_for(lambda: account('t')['settings'].get('seekbarStyle') == 'bars' and account('t')['settings'].get('tintBackground') is False, 10, 0.3)
+        lap = mine(laptop)
+        acc = account('t')['settings']
+        check('sync: a browser with settings of its own keeps its choices (kept for the account too), and takes the account\'s for the rest',
+              merged and lap['seek'] == 'bars' and lap['tint'] is False and lap['grid'] == 'small' and lap['rating'] == 'thumbs' and acc.get('gridSize') == 'small'
+              and acc.get('ratingSystem') == 'thumbs', f'{lap} {json.dumps({k: acc.get(k) for k in ("gridSize", "ratingSystem", "seekbarStyle", "tintBackground")})}')
+        laptop_ctx.close()
+        # Settings left in a browser by someone who signed out of an earlier
+        # version: theirs, never sent to the next account signed in there.
+        account('t2', 'DELETE')
+        left_ctx, left = device('left', 't2', before={'version': 2, 'fontSize': 'larger', 'seekbarStyle': 'simple', 'tintBackground': False})
+        left.wait_for_timeout(2000)
+        check('sync: settings left by someone who signed out of an earlier version aren\'t sent to the next account', account('t2')['rev'] == 0, json.dumps(account('t2')))
+        left_ctx.close()
+
+        # A change that couldn't be sent (offline, or the tab closed first) is
+        # sent next time, and not undone meanwhile; one the account has had
+        # changed since, elsewhere, gives way to that.
+        def unsent(patch):
+            cut = lambda r: r.abort() if r.request.method == 'PUT' else r.continue_()
+            phone.route('**/api/settings?*', cut)
+            settings(phone, patch)
+            phone.wait_for_timeout(1800)
+            js(phone, "() => import('./js/sync.js').then((m) => m.stop())")  # (as if the tab closed)
+            phone.unroute('**/api/settings?*', cut)
+            return js(phone, "() => JSON.parse(localStorage.getItem('pw.syncPending') || 'null')")
+
+        def reopen():
+            phone.reload()
+            phone.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+        kept_back = unsent({'showAlbumYear': False})
+        reopen()
+        sent_later = wait_for(lambda: account('t')['settings'].get('showAlbumYear') is False, 10, 0.3)
+        stays = js(phone, "() => import('./js/state.js').then(({ app }) => app.settings.showAlbumYear)")
+        check('sync: a change that couldn\'t be sent is kept, sent next time, and not undone', bool(kept_back) and 'showAlbumYear' in kept_back and sent_later and stays is False
+              and js(phone, "() => localStorage.getItem('pw.syncPending')") is None, f'{kept_back} {stays} {account("t")["settings"].get("showAlbumYear")}')
+        unsent({'skipBack': 15})
+        settings(desk, {'skipBack': 20})
+        wait_for(lambda: account('t')['settings'].get('skipBack') == 20, 10, 0.3)
+        reopen()
+        mine_now = wait_for(lambda: (lambda v: v if v == 20 else None)(js(phone, "() => import('./js/state.js').then(({ app }) => app.settings.skipBack)")), 10, 0.3)
+        phone.wait_for_timeout(1500)
+        check('sync: ...but one changed for the account since, elsewhere, takes that', mine_now == 20 and account('t')['settings'].get('skipBack') == 20,
+              f'{mine_now} {account("t")["settings"].get("skipBack")}')
+        # The same with the tab left open: offline, then back, and the next
+        # thing sent (another change here) doesn't take the overtaken one
+        # with it.
+        cut = lambda r: r.abort() if r.request.method == 'PUT' else r.continue_()
+        phone.route('**/api/settings?*', cut)
+        settings(phone, {'skipForward': 45})
+        phone.wait_for_timeout(1800)
+        settings(desk, {'skipForward': 60})
+        wait_for(lambda: account('t')['settings'].get('skipForward') == 60, 10, 0.3)
+        phone.unroute('**/api/settings?*', cut)
+        settings(phone, {'quickSkip': True})
+        back = wait_for(lambda: (lambda v: v if v == 60 else None)(js(phone, "() => import('./js/state.js').then(({ app }) => app.settings.skipForward)")), 10, 0.3)
+        sent_too = wait_for(lambda: account('t')['settings'].get('quickSkip') is True, 10, 0.3)
+        phone.wait_for_timeout(1500)
+        check('sync: ...and with the tab left open, offline and back', back == 60 and sent_too and account('t')['settings'].get('skipForward') == 60,
+              f'{back} {account("t")["settings"].get("skipForward")} {account("t")["settings"].get("quickSkip")}')
+        sam_ctx, sam = device('sam-sync', 't2')
+        sam.wait_for_timeout(1500)
+        check('sync: someone else\'s account has its own settings', mine(sam)['grid'] == 'normal' and account('t2')['settings'].get('gridSize') is None, str(mine(sam)))
+
+        # Off for the account (Settings › Account): nothing kept, and each
+        # device has its own; on again, this device's are kept again.
+        phone.goto(APP_DEBUG + '#/settings/account')
+        phone.wait_for_selector('label.toggle-row:has-text("On all your devices") input:checked')
+        shot(phone, 'sync-01-account')
+        toggle(phone, 'On all your devices', False)
+        off = wait_for(lambda: account('t').get('off') is True and account('t')['settings'] == {}, 8, 0.3)
+        settings(phone, {'gridSize': 'large'})
+        phone.wait_for_timeout(1500)
+        stayed = account('t')['settings'] == {} and account('t')['off'] is True
+        toggle(phone, 'On all your devices', True)
+        back_on = wait_for(lambda: account('t').get('off') is False and account('t')['settings'].get('gridSize') == 'large', 8, 0.3)
+        check('sync: it can be turned off for the account (nothing kept, nothing sent), and on again (this device\'s kept)', off and stayed and back_on,
+              json.dumps(account('t')))
+
+        # Signing out on one device leaves what's kept for the account...
+        before = account('t')['settings'].get('home')
+        desk.goto(APP_DEBUG + '#/settings/account')
+        desk.click('.account-card button:has-text("Sign out")')
+        desk.click('.sheet.open .sheet-action:has-text("Sign out")')
+        desk.wait_for_url('**#/login')
+        desk.wait_for_timeout(1500)
+        check('sync: signing out leaves the account\'s settings (its Home screen too) as they were', account('t')['settings'].get('home') == before and before, str(account('t')['settings'].get('home')))
+        # ...and what that browser still has isn't the next account's to keep.
+        account('t2', 'DELETE')
+        login(desk, APP_DEBUG, 't2')
+        desk.wait_for_timeout(2000)
+        check('sync: signed in as someone else after that, nothing that browser had goes to their account', account('t2')['rev'] == 0, json.dumps(account('t2')))
+        for c in (desk_ctx, phone_ctx, sam_ctx):
+            c.close()
+        account('t', 'DELETE')
+        account('t2', 'DELETE')
 
     # ---------- memory: a big library ----------
     # Waits here poll with evaluate() rather than using locators or

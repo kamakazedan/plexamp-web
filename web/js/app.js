@@ -26,6 +26,7 @@ import { cast } from './cast.js';
 import { devices } from './devices.js';
 import { refreshRows } from './ratings.js';
 import { initSharing, invitations } from './sharing.js';
+import { startSync } from './sync.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
@@ -295,6 +296,8 @@ function boot() {
   startRouter({ mainEl: document.getElementById('main'), changed: onRouteChange });
 
   if (app.server) {
+    // Settings that follow your account (sync.js), as early as can be.
+    startSync();
     player.restore();
     // Still playing on another Plex player since the page was opened last?
     cast.resume();
@@ -313,6 +316,7 @@ function boot() {
     on('shares', playlistsBadge);
   }
   on('source', () => app.config.together && !together.inviteTimer && together.watch());
+  on('source', () => app.server && startSync());
   // Whether menus offer collection changes (only the server's admin can).
   on('source', () => app.server && isAdmin().catch(() => {}));
 
