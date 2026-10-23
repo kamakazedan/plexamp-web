@@ -116,7 +116,9 @@ export async function checkSuggestions(list, { signal, onProgress } = {}) {
   return verdicts;
 }
 
-// The most recent of each server's, of each kind (see MISSING_LIMITS).
+// The most recent of each server's, of each kind (see MISSING_LIMITS): by
+// when each was last noted, and of those noted the same second, the last
+// noted (the list is in the order they were), kept in that order.
 function trim(list) {
   const groups = new Map();
   for (const m of list) {
@@ -127,10 +129,31 @@ function trim(list) {
   const out = [];
   for (const g of groups.values()) {
     const cap = MISSING_LIMITS[sourceOf(g[0])];
-    out.push(...(g.length > cap ? g.sort((a, b) => (b.last || 0) - (a.last || 0)).slice(0, cap) : g));
+    if (g.length <= cap) {
+      out.push(...g);
+      continue;
+    }
+    const kept = new Set(
+      g
+        .map((m, i) => [m, i])
+        .sort(([a, i], [b, j]) => (b.last || 0) - (a.last || 0) || j - i)
+        .slice(0, cap)
+        .map(([m]) => m),
+    );
+    out.push(...g.filter((m) => kept.has(m)));
   }
   return out;
 }
+
+// A Spotify playlist, by its name, in a few characters: a track's `lists`
+// count the playlists it was in (each once, however often it's imported)
+// without keeping their names.
+function listId(name) {
+  let x = 0x811c9dc5;
+  for (const ch of String(name || '').trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
+  return x.toString(36);
+}
+const LISTS = 100;
 
 // What an AI playlist found missing (and found there), for the request
 // `prompt`: new ones are added, ones seen before counted again (once a
@@ -138,12 +161,14 @@ function trim(list) {
 // go, as are those in `drop` (what MusicBrainz says isn't real, kept from
 // before it was asked). Those MusicBrainz knows come with mb: 'real'. `via`:
 // where they came from instead ('spotify', with the playlist's name as
-// `prompt`): real songs, never asked about on MusicBrainz. Returns how many
-// of them there are ({ of }), and how many are on the list now ({ kept }:
-// all, unless there wasn't room).
+// `prompt`): real songs, never asked about on MusicBrainz, counted once for
+// each playlist they're in. One from somewhere else now is counted afresh.
+// Returns how many of them there are ({ of }), and how many are on the list
+// now ({ kept }: all, unless there wasn't room), with their `keys`, to count
+// again later (keptCounter: a later import can push them out).
 export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [], via = '' } = {}) {
   const src = app.source;
-  if (!src) return { kept: 0, of: 0 };
+  if (!src) return { kept: 0, of: 0, keys: [] };
   const now = Math.round(Date.now() / 1000);
   const here = (m) => sameLibrary(m, src);
   const foundKeys = new Set([
@@ -151,8 +176,12 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
     ...(seen.artists || []).map((a) => keyOf({ kind: 'artist', artist: a, title: '' })),
     ...drop.map((m) => keyOf({ kind: m.kind, artist: m.artist || '', title: m.kind === 'track' ? m.title || '' : '' })),
   ]);
-  let list = load().filter((m) => !(here(m) && foundKeys.has(keyOf(m))));
+  const list = load().filter((m) => !(here(m) && foundKeys.has(keyOf(m))));
+  const index = new Map();
+  for (const m of list) if (here(m)) index.set(keyOf(m), m);
   const noted = new Set();
+  // Those noted now, in the order they are: last in the list (see trim).
+  const noting = [];
   for (const m of missing) {
     const entry = { kind: m.kind, artist: String(m.artist || '').slice(0, 120), title: m.kind === 'track' ? String(m.title || '').slice(0, 160) : '' };
     if (!entry.artist && !entry.title) continue;
@@ -160,22 +189,56 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
     const k = keyOf(entry);
     if (noted.has(k)) continue;
     noted.add(k);
-    const have = list.find((x) => here(x) && keyOf(x) === k);
+    const have = index.get(k);
     if (have) {
-      have.times = (have.times || 1) + 1;
+      noting.push(have);
+      if ((have.via || '') !== via) {
+        have.times = 1;
+        delete have.lists;
+        if (via === 'spotify') have.lists = [listId(prompt)];
+      } else if (via === 'spotify') {
+        // (Kept before 0.22.0: the playlist it was last in.)
+        const lists = Array.isArray(have.lists) ? have.lists : [listId(have.prompt)];
+        if (!lists.includes(listId(prompt))) {
+          lists.push(listId(prompt));
+          have.times = (have.times || 1) + 1;
+        }
+        have.lists = lists.slice(-LISTS);
+      } else {
+        have.times = (have.times || 1) + 1;
+      }
       have.last = now;
       have.prompt = String(prompt).slice(0, 200);
       if (entry.mb) have.mb = entry.mb;
       if (via) have.via = via;
       else delete have.via;
     } else {
-      list.push({ ...entry, ...(via ? { via } : {}), times: 1, first: now, last: now, prompt: String(prompt).slice(0, 200), server: src.serverId || src.uri, section: String(src.sectionKey), library: libraryName(src) });
+      noting.push({
+        ...entry,
+        ...(via ? { via } : {}),
+        ...(via === 'spotify' ? { lists: [listId(prompt)] } : {}),
+        times: 1,
+        first: now,
+        last: now,
+        prompt: String(prompt).slice(0, 200),
+        server: src.serverId || src.uri,
+        section: String(src.sectionKey),
+        library: libraryName(src),
+      });
     }
   }
-  save(trim(list));
+  const moved = new Set(noting);
+  save(trim([...list.filter((m) => !moved.has(m)), ...noting]));
   // (What's kept, as read back: a browser out of room keeps nothing new.)
-  const kept = new Set(load().filter(here).map(keyOf));
-  return { kept: [...noted].filter((k) => kept.has(k)).length, of: noted.size };
+  const keys = [...noted];
+  return { kept: keptCounter(src)(keys), of: keys.length, keys };
+}
+
+// How many of noteMissing's `keys` are on this library's list now: read
+// once, to count for each of many.
+export function keptCounter(src = app.source) {
+  const kept = new Set(src ? load().filter((m) => sameLibrary(m, src)).map(keyOf) : []);
+  return (keys = []) => keys.filter((k) => kept.has(k)).length;
 }
 
 export function forgetMissing(entry) {

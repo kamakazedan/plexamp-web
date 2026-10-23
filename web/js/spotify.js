@@ -145,21 +145,31 @@ function localEntry(lt) {
 
 // The playlists in Spotify's playlist files (see sortSpotifyFiles): {
 // playlists: [{ title, tracks: [{ title, artist, albumArtist, album }], of,
-// liked, file }], tooBig: [names], more, files: how many were read }. Your Liked Songs (from
-// YourLibrary.json) come first, then the playlists in Spotify's order. Files
-// come from anyone, so what's read is bounded (FILE_LIMITS): a file too big
-// is passed over (tooBig), playlists past the most that can be read at once
-// are only counted (more), and a playlist past the most tracks has its first
-// ones (`of` is how many it has). What isn't a track (a podcast episode, an
-// audiobook) is left out. Throws (with `file`) for a file that isn't what
-// its name says, or when none could be read.
+// liked, file, alone }], tooBig: [names], more, moreIn: [names], moreAlone,
+// files: [names read] }. Your Liked Songs (from YourLibrary.json) come
+// first, then the playlists in Spotify's order. Files come from anyone, so
+// what's read is bounded (FILE_LIMITS): a file too big is passed over
+// (tooBig), playlists past the most that can be read at once are only
+// counted (more, in the files moreIn), and a playlist past the most tracks
+// has its first ones (`of` is how many it has). Which would come over in
+// full with their file chosen on its own: `alone`, for a playlist cut short
+// by the most in all, and moreAlone, for those passed over (none of their
+// files has more playlists than can be read at once). What isn't a track (a
+// podcast episode, an audiobook) is left out. Throws (with `file`) for a
+// file that isn't what its name says, or when none could be read.
 export async function readSpotifyFiles(files) {
   const order = (f) => (LIBRARY_FILE.test(f.name) ? -1 : Number(PLAYLIST_FILE.exec(f.name)?.[1] || 0));
-  const out = { playlists: [], tooBig: [], more: 0, files: 0 };
+  const out = { playlists: [], tooBig: [], more: 0, moreIn: [], moreAlone: true, files: [] };
   let total = 0;
+  // Each file's tracks, as they'd be read with it on its own; the playlists
+  // in each; the files with playlists passed over.
+  const alone = new Map();
+  const lists = new Map();
+  const passed = new Set();
   const take = (title, items, read, file, liked = false) => {
     if (out.playlists.length >= FILE_LIMITS.playlists) {
       out.more += 1;
+      passed.add(file);
       return;
     }
     const tracks = [];
@@ -173,7 +183,9 @@ export async function readSpotifyFiles(files) {
         total += 1;
       }
     }
-    out.playlists.push({ title, tracks, of, liked, file });
+    const own = (alone.get(file) || 0) + Math.min(of, FILE_LIMITS.tracks);
+    alone.set(file, own);
+    out.playlists.push({ title, tracks, of, liked, file, alone: own <= FILE_LIMITS.total });
   };
   for (const file of [...files].sort((a, b) => order(a) - order(b))) {
     if (file.size > FILE_LIMITS.bytes) {
@@ -186,15 +198,17 @@ export async function readSpotifyFiles(files) {
     } catch {
       data = null;
     }
-    out.files += 1;
+    out.files.push(file.name);
     if (LIBRARY_FILE.test(file.name)) {
       if (!data || typeof data !== 'object' || !Array.isArray(data.tracks)) throw fileError(`${file.name} isn’t Spotify’s list of your library.`);
+      lists.set(file.name, 1);
       take(LIKED_SONGS, data.tracks, (t) => (t && typeof t === 'object' ? entryOf(t.track, t.artist, t.album) : null), file.name, true);
       continue;
     }
     if (!data || typeof data !== 'object' || !Array.isArray(data.playlists)) throw fileError(`${file.name} isn’t one of Spotify’s playlist files.`);
-    for (const p of data.playlists) {
-      if (!p || typeof p !== 'object' || !Array.isArray(p.items)) continue;
+    const valid = data.playlists.filter((p) => p && typeof p === 'object' && Array.isArray(p.items));
+    lists.set(file.name, valid.length);
+    for (const p of valid) {
       take(
         words(p.name, 200) || 'A playlist from Spotify',
         p.items,
@@ -210,5 +224,7 @@ export async function readSpotifyFiles(files) {
   if (!out.playlists.length && out.tooBig.length) {
     throw fileError(`${out.tooBig.join(', ')} ${out.tooBig.length === 1 ? 'is' : 'are'} too big to be Spotify’s playlist files (over ${FILE_LIMITS.bytes / 1024 / 1024} MB).`);
   }
+  out.moreIn = [...passed];
+  out.moreAlone = out.moreIn.every((f) => (lists.get(f) || 0) <= FILE_LIMITS.playlists);
   return out;
 }

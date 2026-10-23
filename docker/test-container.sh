@@ -354,6 +354,15 @@ expect "open server: the owner still gets in" 200 "$(c "http://pw-web5/pms/libra
 expect "open server: friends are refused (they'd act as the owner)" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
 expect "open server: ...and can't change things" 403 "$(c -X PUT "http://pw-web5/pms/playlists/999999?title=x&X-Plex-Token=t2")"
 expect "open server: the owner can change things" 404 "$(c -X PUT "http://pw-web5/pms/playlists/999999?title=x&X-Plex-Token=t")"
+# The check is given only the token (see nginx.conf), the query string's
+# first, from wherever it is in it, or from the header.
+expect "open server: the token after what's searched for" 200 "$(c "http://pw-web5/pms/hubs/search?query=Atlas&X-Plex-Token=t")"
+expect "open server: ...a friend's refused there too" 403 "$(c "http://pw-web5/pms/hubs/search?query=Atlas&X-Plex-Token=t2")"
+expect "open server: an encoded token" 200 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=%74")"
+expect "open server: the owner's token in the header" 200 "$(c -H 'X-Plex-Token: t' "http://pw-web5/pms/library/sections")"
+expect "open server: ...a friend's refused" 403 "$(c -H 'X-Plex-Token: t2' "http://pw-web5/pms/library/sections")"
+expect "open server: an empty token first isn't passed over for the next" 401 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=&X-Plex-Token=t")"
+expect "open server: a token in the path isn't the query string's" 403 "$(c --path-as-is "http://pw-web5/pms/library/sections&X-Plex-Token=t?X-Plex-Token=t2")"
 expect "open server: shared AI not opened up by it" 401 "$(c -H 'X-Plex-Token: made-up-token' http://pw-web5/ollama/api/tags)"
 docker logs pw-web5 2>&1 | grep -q "lets this container in without signing in" && pass "open server: the log explains" || fail "open server: the log explains"
 c "http://pw-plex:32400/__mock/config?open=0" >/dev/null

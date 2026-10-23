@@ -26,6 +26,8 @@ const NOT_A_LINK = 'That isn’t a link to a Spotify playlist. In Spotify, choos
 const names = (list) => (list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}` : list[0] || '');
 const notOpened = (refused) =>
   refused.length ? `${names(refused)} ${refused.length === 1 ? 'wasn’t opened, as it isn’t a playlist file' : 'weren’t opened, as they aren’t playlist files'}.` : '';
+const notRead = (tooBig) => (tooBig.length ? `${names(tooBig)} ${tooBig.length === 1 ? 'is' : 'are'} too big to read (over ${FILE_LIMITS.bytes / 1024 / 1024} MB).` : '');
+const sentences = (...list) => list.filter(Boolean).join(' ');
 
 export function importFromSpotify() {
   let found = null; // the playlists read, once the guide has closed
@@ -50,16 +52,7 @@ export function importFromSpotify() {
   const step = (title, ...text) => h('li', null, h('span.spotify-step-title', null, title), h('span.spotify-step-text', null, ...text));
   const guide = h(
     'div.ask-form.import-form.spotify-guide',
-    {
-      // Files dropped here are taken as chosen (and the browser doesn't
-      // open them in the page instead).
-      ondragover: (e) => e.preventDefault(),
-      ondrop: (e) => {
-        e.preventDefault();
-        const files = [...(e.dataTransfer?.files || [])];
-        if (files.length && !reading) gotFiles(files);
-      },
-    },
+    null,
     h(
       'p.ask-message',
       null,
@@ -95,7 +88,7 @@ export function importFromSpotify() {
     // (SPOTIFY_IMPORT on the container.)
     linkBtn ? h('div.spotify-or', null, h('p.ask-message', null, 'Or bring over a public playlist from its link, straight away: only its first 100 tracks, though.'), linkBtn) : null,
   );
-  sheet({
+  const { panel } = sheet({
     title: 'From Spotify',
     content: guide,
     variant: 'dialog',
@@ -106,6 +99,15 @@ export function importFromSpotify() {
       if (found) Promise.resolve().then(() => choosePlaylists(found));
       else if (byLink) Promise.resolve().then(() => fromLink());
     },
+  });
+  // Files dropped anywhere on it (the dialog, or the page around it) are
+  // taken as chosen. (Elsewhere, a file dropped does nothing: app.js.)
+  const scrim = panel.parentElement;
+  scrim.addEventListener('dragover', (e) => e.preventDefault());
+  scrim.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const files = [...(e.dataTransfer?.files || [])];
+    if (files.length && !reading && !closed) gotFiles(files);
   });
 
   function say(text, warn = false) {
@@ -135,7 +137,7 @@ export function importFromSpotify() {
     try {
       const read = await readSpotifyFiles(wanted);
       if (closed) return;
-      if (!read.playlists.some((p) => p.of)) return say(`There are no tracks in ${wanted.length === 1 ? 'that file' : 'those files'}. ${notOpened(refused)}`.trim(), true);
+      if (!read.playlists.some((p) => p.of)) return say(sentences(`There are no tracks in ${names(read.files)}.`, notRead(read.tooBig), notOpened(refused)), true);
       // The names of the playlists you have, to choose by (null: they
       // couldn't be had).
       let have = null;
@@ -148,7 +150,7 @@ export function importFromSpotify() {
       found = { ...read, refused, have };
       popOverlay();
     } catch (err) {
-      if (!closed) say(`${err.file ? err.message : `${wanted.length === 1 ? 'That file' : 'Those files'} couldn’t be read.`} ${notOpened(refused)}`.trim(), true);
+      if (!closed) say(sentences(err.file ? err.message : `${wanted.length === 1 ? 'That file' : 'Those files'} couldn’t be read.`, notOpened(refused)), true);
     } finally {
       busy(false);
     }
@@ -186,39 +188,54 @@ function freeName(title, taken) {
   }
 }
 
+// How many tracks a playlist has, and how many come over, if not all: cut
+// short at the most for one playlist, or at the most in all, when choosing
+// its file on its own (`alone`) may bring the rest.
+function sizeOf(p, files) {
+  if (!p.of) return 'No tracks';
+  if (p.tracks.length === p.of) return fmt.count(p.of, 'track', 'tracks');
+  const most = Math.min(p.of, FILE_LIMITS.tracks);
+  if (p.tracks.length === most) return `The first ${fmt.number(most)} of its ${fmt.count(p.of, 'track', 'tracks')}, the most one playlist can bring over`;
+  const how = p.alone && files.length > 1 ? `with the rest. Choose ${p.file} on its own for ${most < p.of ? `its first ${fmt.number(most)}` : 'it'}` : 'at once';
+  return p.tracks.length
+    ? `The first ${fmt.number(p.tracks.length)} of its ${fmt.count(p.of, 'track', 'tracks')}, as many as can come over ${how}`
+    : `${fmt.count(p.of, 'track', 'tracks')}: more than can come over ${how}`;
+}
+
 // Which playlists to make: those with tracks, and not the name of one you
-// have already, to begin with. Each made gets a name of its own (freeName).
-function choosePlaylists({ playlists, tooBig, more, files, refused, have }) {
+// have already, to begin with. Each made gets a name of its own (freeName),
+// shown as they're chosen.
+function choosePlaylists({ playlists, tooBig, more, moreIn, moreAlone, files, refused, have }) {
   const taken = have || new Set();
   const counts = new Map();
   for (const p of playlists) counts.set(nameKey(p.title), (counts.get(nameKey(p.title)) || 0) + 1);
   const boxes = playlists.map((p) => {
     const mine = taken.has(nameKey(p.title));
     const input = h('input', { type: 'checkbox', checked: !mine && p.tracks.length > 0, disabled: !p.tracks.length });
-    const size = !p.of
-      ? 'No tracks'
-      : p.tracks.length === p.of
-        ? fmt.count(p.of, 'track', 'tracks')
-        : p.tracks.length
-          ? `The first ${fmt.number(p.tracks.length)} of its ${fmt.count(p.of, 'track', 'tracks')}, as many as can come over at once`
-          : `${fmt.count(p.of, 'track', 'tracks')}: more than can come over ${files > 1 ? `with the rest. Choose ${p.file} on its own for it` : 'at once'}`;
-    const sub = [
-      p.liked ? 'The songs you’ve liked' : '',
-      size,
-      mine ? `you have one by this name: this would be “${freeName(p.title, taken)}”` : '',
-      counts.get(nameKey(p.title)) > 1 ? 'another of these has the same name' : '',
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    const row = h('label.import-choice', null, input, h('span.import-choice-text', null, h('span.import-choice-title', null, p.title), h('span.import-choice-sub', null, sub)));
-    return { p, input, row };
+    const sub = h('span.import-choice-sub');
+    const why = [mine ? 'you have one by this name' : '', counts.get(nameKey(p.title)) > 1 ? 'another of these has the same name' : ''].filter(Boolean).join(', and ');
+    const row = h('label.import-choice', null, input, h('span.import-choice-text', null, h('span.import-choice-title', null, p.title), sub));
+    return { p, input, sub, why, name: p.title, row };
   });
+  // The name each would have, chosen as they are now: what you have, and
+  // what those before it that are chosen have, is taken (as the import
+  // names them). One not chosen: what it would have, chosen.
+  const nameEach = () => {
+    const used = new Set(taken);
+    for (const b of boxes) {
+      b.name = freeName(b.p.title, used);
+      if (b.input.checked) used.add(nameKey(b.name));
+      const note = b.name !== b.p.title ? `${b.why || 'another of these would have this name'}: this would be “${b.name}”` : b.why;
+      b.sub.textContent = [b.p.liked ? 'The songs you’ve liked' : '', sizeOf(b.p, files), note].filter(Boolean).join(' · ');
+    }
+  };
   const keep = h('input', { type: 'checkbox', checked: true });
   let chosen = null;
   const go = h('button.btn.btn-primary', {
     type: 'button',
     onclick: () => {
-      chosen = boxes.filter((b) => b.input.checked).map((b) => b.p);
+      nameEach();
+      chosen = boxes.filter((b) => b.input.checked).map((b) => ({ p: b.p, title: b.name }));
       popOverlay();
     },
   });
@@ -236,17 +253,20 @@ function choosePlaylists({ playlists, tooBig, more, files, refused, have }) {
     go.textContent = n ? `Import ${fmt.count(n, 'playlist', 'playlists')}` : 'Choose some to import';
     go.disabled = !n;
     all.textContent = usable.every((b) => b.input.checked) ? 'Choose none' : 'Choose all';
+    nameEach();
   };
   boxes.forEach((b) => b.input.addEventListener('change', paint));
   paint();
   const lists = playlists.filter((p) => !p.liked).length;
   // What wasn't read: files turned away, or too big, and playlists past
-  // the most that can be read at once.
-  const passed = [
+  // the most that can be read at once (and where to find them, when
+  // choosing their files on their own would list them).
+  const passed = sentences(
     notOpened(refused),
-    tooBig.length ? `${names(tooBig)} ${tooBig.length === 1 ? 'is' : 'are'} too big to read (over ${FILE_LIMITS.bytes / 1024 / 1024} MB).` : '',
-    more ? `${fmt.count(more, 'more playlist isn’t', 'more playlists aren’t')} listed: there are more than can be read at once. Choose their files on their own for them.` : '',
-  ].filter(Boolean);
+    notRead(tooBig),
+    more ? `${fmt.count(more, 'more playlist isn’t', 'more playlists aren’t')} listed: there are more than can be read at once.` : '',
+    more && moreAlone && moreIn.length ? `Choose ${moreIn.length === 1 ? moreIn[0] : `each of ${names(moreIn)}`} on its own for ${more === 1 ? 'it' : 'them'}.` : '',
+  );
   sheet({
     title: 'Your playlists from Spotify',
     subtitle: [lists ? fmt.count(lists, 'playlist', 'playlists') : '', playlists.some((p) => p.liked) ? LIKED_SONGS : ''].filter(Boolean).join(' and '),
@@ -258,7 +278,7 @@ function choosePlaylists({ playlists, tooBig, more, files, refused, have }) {
         null,
         `Their tracks are looked for in ${where()} by title, artist and album, and those found make a playlist here, in the same order.${have ? ' Ones with the name of a playlist you have already aren’t chosen to begin with.' : ''}`,
       ),
-      passed.length ? h('p.spotify-refused', null, passed.join(' ')) : null,
+      passed ? h('p.spotify-refused', null, passed) : null,
       usable.length > 1 ? all : null,
       h('div.import-choices', null, boxes.map((b) => b.row)),
       h(
@@ -273,12 +293,7 @@ function choosePlaylists({ playlists, tooBig, more, files, refused, have }) {
     closeLabel: 'Cancel',
     onClose: () => {
       if (!chosen?.length) return;
-      const used = new Set(taken);
-      const jobs = chosen.map((p) => {
-        const title = freeName(p.title, used);
-        used.add(nameKey(title));
-        return { p: { title: p.title, tracks: p.tracks }, title, from: p.title };
-      });
+      const jobs = chosen.map(({ p, title }) => ({ p: { title: p.title, tracks: p.tracks }, title, from: p.title }));
       Promise.resolve().then(() => runImport(jobs, { remember: keep.checked ? { via: 'spotify' } : null }));
     },
   });

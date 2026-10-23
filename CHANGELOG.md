@@ -18,8 +18,9 @@ you're running is shown in **Settings › About**.
   the browser; any other, the ZIP included, is turned away unread, as the
   rest of the download is your personal details. Of them, only playlist
   names and each track's title, artist and album are kept. You choose
-  which playlists to make; those found in your library make them, and
-  what isn't goes on Missing tracks, as before.
+  which playlists to make (the files can be dropped on the guide, too);
+  those found in your library make them, and what isn't goes on Missing
+  tracks, as before.
 - The link import (`SPOTIFY_IMPORT`) is still there where it's on, as
   **Use a link instead**, for one public playlist straight away (its
   first 100 tracks).
@@ -32,9 +33,18 @@ you're running is shown in **Settings › About**.
   needn't have had.
 - **Missing tracks keeps the latest 500 that AI playlists suggested, and
   apart from those the latest 1,000 from Spotify, for each server**, so
-  a big Spotify import can't push the rest out. It was 500 in all. An
-  import says when there wasn't room for all it didn't find: its
-  spreadsheet has them all.
+  a big Spotify import can't push the rest out. It was 500 in all. Each
+  playlist imported says how many of its are on the list once the rest
+  have come in, when there wasn't room for them all: its spreadsheet has
+  them all.
+- A song from Spotify on Missing tracks counts once for each playlist
+  it's in, however often a playlist is imported (it counted each time it
+  was imported), and a song from one place that comes from another (from
+  a playlist, then suggested by an AI) is counted afresh there.
+- An import's playlist with none of its tracks found (so not made) lists
+  them too, to copy or save as a spreadsheet.
+- A file dropped on the page by mistake isn't opened in its place, which
+  left the player.
 
 ## 0.21.0 - 2026-10-23
 

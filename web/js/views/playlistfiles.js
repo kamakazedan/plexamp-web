@@ -4,7 +4,7 @@
 import { app } from '../state.js';
 import { navigate, describeError, popOverlay, refresh, parseHash } from '../router.js';
 import { h, sheet, toast, askText, fmt, download, fileDate } from '../ui.js';
-import { copyText, noteMissing, MISSING_LIMITS } from '../missing.js';
+import { copyText, noteMissing, keptCounter, MISSING_LIMITS } from '../missing.js';
 import { refreshLists } from '../editing.js';
 import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine, entryWhere, entryText, entriesCsv } from '../playlistio.js';
 
@@ -185,6 +185,9 @@ export function runImport(jobs, { remember = null } = {}) {
   const closeBtn = box.panel.querySelector('.dialog-close');
   (async () => {
     const done = [];
+    // Each row as shown, and how many of its it said were on Missing tracks
+    // (a row is drawn again only when that changes, so one opened stays so).
+    const shown = [];
     for (const [k, job] of jobs.entries()) {
       if (ctrl.signal.aborted) break;
       const lead = jobs.length > 1 ? `${fmt.number(k + 1)} of ${fmt.number(jobs.length)}, “${job.title}”: ` : '';
@@ -198,11 +201,10 @@ export function runImport(jobs, { remember = null } = {}) {
         if (remember) {
           const gone = new Set(r.missing);
           const song = (e) => ({ kind: 'track', artist: e.artist || e.albumArtist || '', title: e.title });
-          const { kept, of } = noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, {
+          const { keys } = noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, {
             via: remember.via,
           });
-          r.remembered = kept;
-          r.unremembered = of - kept;
+          r.keys = keys;
           r.via = remember.via;
         }
         done.push({ job, ...r });
@@ -211,7 +213,23 @@ export function runImport(jobs, { remember = null } = {}) {
         if (ctrl.signal.aborted) break;
         done.push({ job, error: err });
       }
-      results.replaceChildren(...done.map(resultRow));
+      // How many of each's are on Missing tracks now: a later playlist's
+      // can push an earlier one's out, where there isn't room for all.
+      if (remember) {
+        const count = keptCounter();
+        for (const d of done) {
+          if (!d.keys) continue;
+          d.remembered = count(d.keys);
+          d.unremembered = d.keys.length - d.remembered;
+        }
+      }
+      for (const [i, d] of done.entries()) {
+        if (shown[i] && shown[i].remembered === d.remembered) continue;
+        const row = resultRow(d);
+        if (shown[i]) shown[i].row.replaceWith(row);
+        else results.append(row);
+        shown[i] = { row, remembered: d.remembered };
+      }
     }
     if (ctrl.signal.aborted) {
       if (made) toast(`Stopped: ${fmt.count(made, 'playlist', 'playlists')} imported`);
@@ -236,9 +254,41 @@ function rememberedNote(r) {
   const text = !r.unremembered
     ? `${r.remembered === 1 ? 'It’s' : 'They’re'} on Missing tracks now, to go and find. `
     : r.remembered
-      ? `${fmt.number(r.remembered)} of the ${fmt.number(r.remembered + r.unremembered)} are on Missing tracks now, to go and find (${room}): the spreadsheet has them all. `
-      : `There wasn’t room for them on Missing tracks (${room}): the spreadsheet has them all. `;
+      ? `${fmt.number(r.remembered)} of them ${r.remembered === 1 ? 'is' : 'are'} on Missing tracks now, to go and find (${room}): the spreadsheet has them all. `
+      : `There isn’t room for them on Missing tracks (${room}): the spreadsheet has them all. `;
   return h('p.import-remembered', null, text, r.remembered ? h('button.link-btn', { type: 'button', onclick: () => navigate('/settings/missing') }, 'See Missing tracks') : null);
+}
+
+// What wasn't found, to look at, copy or save.
+function notFound(r, title) {
+  if (!r.missing.length) return null;
+  return h(
+    'details.import-missing',
+    null,
+    h('summary', null, `Not found (${fmt.number(r.missing.length)})`),
+    h('ul', null, r.missing.slice(0, SHOWN).map((e) => h('li', null, h('span.import-missing-song', null, entryLine(e)), entryWhere(e) ? h('span.import-missing-where', null, entryWhere(e)) : null))),
+    r.missing.length > SHOWN ? h('p.hint', null, `and ${fmt.number(r.missing.length - SHOWN)} more`) : null,
+    h(
+      'div.import-missing-actions',
+      null,
+      h(
+        'button.link-btn',
+        { type: 'button', onclick: async () => toast((await copyText(`${r.missing.map(entryText).join('\n')}\n`)) ? 'Copied: artist — title — album, one to a line' : 'Couldn’t copy here.') },
+        'Copy the list',
+      ),
+      h(
+        'button.link-btn',
+        {
+          type: 'button',
+          onclick: () => {
+            download(entriesCsv(r.missing), `${playlistFileName(title).replace(/\.playlist\.json$/, '')} - not found.csv`, 'text/csv;charset=utf-8');
+            toast('Saved: artist, title, album, year, number and length of each');
+          },
+        },
+        'Save as a spreadsheet (CSV)',
+      ),
+    ),
+  );
 }
 
 function resultRow(r) {
@@ -250,6 +300,7 @@ function resultRow(r) {
       null,
       h('div.import-result-title', null, title),
       h('div.import-result-sub', null, r.missing.length ? `None of its ${fmt.count(r.missing.length, 'track is', 'tracks are')} in ${where()}, so it wasn’t made.` : 'It has no tracks, so it wasn’t made.'),
+      notFound(r, title),
       rememberedNote(r),
     );
   }
@@ -260,39 +311,7 @@ function resultRow(r) {
     null,
     h('button.link-btn.import-result-title', { type: 'button', onclick: () => navigate(`/playlist/${id}`) }, title),
     h('div.import-result-sub', null, r.missing.length ? `${fmt.number(r.found)} of ${fmt.count(of, 'track', 'tracks')} found; ${fmt.number(r.missing.length)} not in ${where()}` : `All ${fmt.count(of, 'track', 'tracks')} found`),
-    r.missing.length
-      ? h(
-          'details.import-missing',
-          null,
-          h('summary', null, `Not found (${fmt.number(r.missing.length)})`),
-          h(
-            'ul',
-            null,
-            r.missing.slice(0, SHOWN).map((e) => h('li', null, h('span.import-missing-song', null, entryLine(e)), entryWhere(e) ? h('span.import-missing-where', null, entryWhere(e)) : null)),
-          ),
-          r.missing.length > SHOWN ? h('p.hint', null, `and ${fmt.number(r.missing.length - SHOWN)} more`) : null,
-          h(
-            'div.import-missing-actions',
-            null,
-            h(
-              'button.link-btn',
-              { type: 'button', onclick: async () => toast((await copyText(`${r.missing.map(entryText).join('\n')}\n`)) ? 'Copied: artist — title — album, one to a line' : 'Couldn’t copy here.') },
-              'Copy the list',
-            ),
-            h(
-              'button.link-btn',
-              {
-                type: 'button',
-                onclick: () => {
-                  download(entriesCsv(r.missing), `${playlistFileName(title).replace(/\.playlist\.json$/, '')} - not found.csv`, 'text/csv;charset=utf-8');
-                  toast('Saved: artist, title, album, year, number and length of each');
-                },
-              },
-              'Save as a spreadsheet (CSV)',
-            ),
-          ),
-        )
-      : null,
+    notFound(r, title),
     rememberedNote(r),
   );
 }

@@ -5124,6 +5124,10 @@ with sync_playwright() as pw:
         choose_files([('Playlist3.json', twice)])
         page.wait_for_selector('.spotify-choose-form')
         third = page.locator('.spotify-choose-form').inner_text()
+        subs = lambda: page.locator('.spotify-choose-form .import-choices .import-choice-sub').all_inner_texts()
+        page.uncheck('.spotify-choose-form .import-choices input >> nth=1')
+        first_off = subs()
+        page.check('.spotify-choose-form .import-choices input >> nth=1')
         page.check('.spotify-choose-form .import-choices input >> nth=0')
         page.uncheck('.spotify-choose-form .spotify-keep input')
         page.click('.spotify-choose-form .btn-primary')
@@ -5131,9 +5135,11 @@ with sync_playwright() as pw:
         page.click('.dialog-close')
         page.wait_for_timeout(400)
         names = js(page, """() => import('./js/state.js').then(async ({ app }) => { app.server.forgetPlaylists(); return (await app.server.playlists()).map((p) => p.title).filter((t) => t.startsWith('Road songs') || t.startsWith('Twice')).sort(); })""")
-        check('spotify: ...a name taken twice over comes over as "Name (from Spotify 2)", and two of the same name in the files each get one of their own',
+        check('spotify: ...a name taken twice over comes over as "Name (from Spotify 2)", and two of the same name in the files each get one of their own, as the list shows (as they\'re chosen)',
               'this would be “Road songs (from Spotify 2)”' in third and third.count('another of these has the same name') == 2
-              and sorted(names) == sorted(['Road songs', 'Road songs (from Spotify)', 'Road songs (from Spotify 2)', 'Twice', 'Twice (from Spotify)']), f'{names} {third[:500]!r}')
+              and 'another of these has the same name: this would be “Twice (from Spotify)”' in third
+              and first_off[2].endswith('another of these has the same name') and 'this would be' not in first_off[2]
+              and sorted(names) == sorted(['Road songs', 'Road songs (from Spotify)', 'Road songs (from Spotify 2)', 'Twice', 'Twice (from Spotify)']), f'{names} {first_off} {third[:500]!r}')
         js(page, """() => import('./js/state.js').then(async ({ app }) => {
             app.server.forgetPlaylists();
             for (const p of await app.server.playlists()) if (['Liked Songs', 'Old favourites', 'Road songs', 'Twice'].includes(p.title.replace(/ \\(from Spotify( \\d+)?\\)$/, ''))) await app.server.deletePlaylist(p.ratingKey);
@@ -5145,6 +5151,7 @@ with sync_playwright() as pw:
         js(page, "() => import('./js/playlistio.js').then(({ FILE_LIMITS: l }) => { window.__limits = { ...l }; Object.assign(l, { bytes: 1500, tracks: 2, total: 3, playlists: 3 }); })")
         first = json.dumps({'playlists': [
             {'name': 'Long one', 'items': [item('Cinder', 'Kilo Meridian', 'Crate Digger'), item('Drift', 'Juniper & Ash', 'Hearthstone'), item('Echo Velvet', 'Kilo Meridian', 'Crate Digger')]},
+            {'name': 'Cut', 'items': [item('Copper Salt', 'The Wren Collective', 'Paper Boats'), item('Atlas', 'Marisol Vega', 'Noches de Cobre')]},
         ]}).encode()
         second = json.dumps({'playlists': [
             {'name': 'Second', 'items': [item('Copper Salt', 'The Wren Collective', 'Paper Boats')]},
@@ -5152,17 +5159,28 @@ with sync_playwright() as pw:
             {'name': 'Fourth', 'items': [item('Atlas', 'Marisol Vega', 'Noches de Cobre')]},
         ]}).encode()
         sizes = (len(first), len(second))
+        too_big = b'{"playlists": []}' + b' ' * 2000
         guide()
-        choose_files([('Playlist1.json', first), ('Playlist2.json', second), ('Playlist9.json', b'{"playlists": []}' + b' ' * 2000)])
+        choose_files([('Playlist1.json', json.dumps({'playlists': [{'name': 'Nothing in it', 'items': []}]}).encode()), ('Playlist9.json', too_big)])
+        page.wait_for_selector('.spotify-status.warn')
+        none_said = said()
+        choose_files([('Playlist1.json', first), ('Playlist2.json', second), ('Playlist9.json', too_big)])
         page.wait_for_selector('.spotify-choose-form')
         bounded = page.locator('.spotify-choose-form').inner_text()
         bounded_ticked = page.locator('.spotify-choose-form .import-choices input').evaluate_all('els => els.map((e) => e.disabled)')
         js(page, "() => import('./js/playlistio.js').then(({ FILE_LIMITS: l }) => Object.assign(l, window.__limits))")
         page.click('.dialog-close')
         page.wait_for_timeout(400)
-        check('spotify: ...what\'s cut short is said: a file too big, the first tracks of a long playlist, one past the most in all, and playlists past the most',
-              'Playlist9.json is too big to read' in bounded and 'The first 2 of its 3 tracks' in bounded and 'Choose Playlist2.json on its own for it' in bounded
-              and '1 more playlist isn’t listed' in bounded and bounded_ticked == [False, False, True] and max(sizes) < 1500, f'{sizes} {bounded_ticked} {bounded!r}')
+        check('spotify: ...with no tracks in the files read, it says which were read, and which were too big',
+              none_said.startswith('There are no tracks in Playlist1.json. Playlist9.json is too big to read'), none_said)
+        check('spotify: ...what\'s cut short is said, and when choosing its file on its own would bring the rest: a file too big, a playlist past the most tracks for one, '
+              'one past the most in all (in a file that would bring it on its own, and in one that wouldn\'t), and playlists past the most',
+              'Playlist9.json is too big to read' in bounded
+              and 'The first 2 of its 3 tracks, the most one playlist can bring over' in bounded
+              and 'The first 1 of its 2 tracks, as many as can come over at once' in bounded
+              and '1 track: more than can come over with the rest. Choose Playlist2.json on its own for it' in bounded
+              and '2 more playlists aren’t listed: there are more than can be read at once. Choose Playlist2.json on its own for them.' in bounded
+              and bounded_ticked == [False, False, True] and max(sizes) < 1500, f'{sizes} {bounded_ticked} {bounded!r}')
         # Closed while it's still reading, the guide opens nothing after, and
         # the link can't be chosen meanwhile.
         js(page, '() => (window.__slowRead = 1500)')
@@ -5175,34 +5193,87 @@ with sync_playwright() as pw:
         js(page, '() => (window.__slowRead = 0)')
         check('spotify: ...closed while reading, nothing opens after (and the link can\'t be chosen meanwhile)',
               link_off and page.locator('.spotify-choose-form').count() == 0 and page.locator('.sheet.open').count() == 0, f'{link_off} {page.locator(".sheet.open").count()}')
-        # Files dropped on the guide are taken as chosen, by their names too.
-        guide()
-        page.evaluate("""([a, b]) => {
+        # Files dropped on the guide are taken as chosen, by their names too,
+        # wherever on it (or around it) they're dropped; elsewhere, a file
+        # dropped does nothing (the browser doesn't open it instead).
+        drop = """([a, b, where]) => {
             const dt = new DataTransfer();
             dt.items.add(new File([a], 'Playlist2.json', { type: 'application/json' }));
-            dt.items.add(new File([b], 'Userdata.json', { type: 'application/json' }));
-            document.querySelector('.spotify-guide').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
-        }""", [playlist2.decode(), userdata.decode()])
-        page.wait_for_selector('.spotify-choose-form')
-        dropped = page.locator('.spotify-choose-form').inner_text()
-        page.click('.dialog-close')
-        page.wait_for_timeout(400)
-        check('spotify: ...files dropped on it are taken as chosen, and turned away by their names too',
-              'Road songs' in dropped and 'Userdata.json wasn’t opened' in dropped, dropped[:300])
+            if (b) dt.items.add(new File([b], 'Userdata.json', { type: 'application/json' }));
+            const over = new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true });
+            const ev = new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true });
+            const el = document.querySelector(where);
+            el.dispatchEvent(over);
+            el.dispatchEvent(ev);
+            return [over.defaultPrevented, ev.defaultPrevented];
+        }"""
+        dropped = []
+        for where in ('.spotify-guide', '.sheet.dialog .sheet-title', '.sheet.dialog'):
+            guide()
+            page.evaluate(drop, [playlist2.decode(), userdata.decode(), where])
+            page.wait_for_selector('.spotify-choose-form')
+            dropped.append(page.locator('.spotify-choose-form').inner_text())
+            page.click('.dialog-close')
+            page.wait_for_timeout(400)
+        check('spotify: ...files dropped on it are taken as chosen (on the guide, its title or around it), and turned away by their names too',
+              all('Road songs' in d and 'Userdata.json wasn’t opened' in d for d in dropped), str([d[:120] for d in dropped]))
+        elsewhere = page.evaluate(drop, [playlist2.decode(), '', '#main'])
+        check('spotify: ...elsewhere, a file dropped isn\'t opened in the page\'s place', elsewhere == [True, True] and page.locator('.sheet.open').count() == 0, str(elsewhere))
         # Missing tracks keeps the latest 1,000 from Spotify for each server,
         # apart from what AI playlists suggested, and says how many it kept.
         caps = js(page, """() => Promise.all([import('./js/missing.js'), import('./js/state.js')]).then(([m, { app }]) => {
             m.clearMissing();
             m.noteMissing([{ kind: 'track', artist: 'Some Artist', title: 'Suggested Song' }], { songs: [], artists: [] }, 'an AI playlist');
             const many = Array.from({ length: 1200 }, (_, i) => ({ kind: 'track', artist: 'Band ' + i, title: 'Song ' + i }));
-            const r = m.noteMissing([...many, many[0]], { songs: [], artists: [] }, 'Big', { via: 'spotify' });
+            const { keys, ...r } = m.noteMissing([...many, many[0]], { songs: [], artists: [] }, 'Big', { via: 'spotify' });
             const list = m.missingList();
-            const out = { r, spotify: list.filter((x) => x.via === 'spotify').length, ai: list.filter((x) => !x.via).length };
+            const out = { r, keys: keys.length, spotify: list.filter((x) => x.via === 'spotify').length, ai: list.filter((x) => !x.via).length };
             m.clearMissing();
             return out;
         })""")
         check('spotify: Missing tracks keeps the latest 1,000 from Spotify, apart from what AI playlists suggested, saying how many it kept',
-              caps == {'r': {'kept': 1000, 'of': 1200}, 'spotify': 1000, 'ai': 1}, str(caps))
+              caps == {'r': {'kept': 1000, 'of': 1200}, 'keys': 1200, 'spotify': 1000, 'ai': 1}, str(caps))
+        # In one import, a later playlist's can push an earlier one's off
+        # (here with room for 3): each playlist's row says how many of its
+        # are on Missing tracks as it is now. And one with none of its tracks
+        # found isn't made, but lists them, to copy or save, all the same.
+        js(page, """() => Promise.all([import('./js/missing.js'), import('./js/views/playlistfiles.js')]).then(([m, pf]) => {
+            m.clearMissing();
+            window.__caps = { ...m.MISSING_LIMITS };
+            m.MISSING_LIMITS.spotify = 3;
+            const song = (title) => ({ title, artist: 'Nobody Known', albumArtist: '', album: 'Nowhere' });
+            pf.runImport([
+                { p: { title: 'First lost', tracks: [song('Lost One'), song('Lost Two'), song('Lost Three')] }, title: 'First lost', from: 'First lost' },
+                { p: { title: 'Second lost', tracks: [song('Lost Four'), song('Lost Five')] }, title: 'Second lost', from: 'Second lost' },
+            ], { remember: { via: 'spotify' } });
+        })""")
+        page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        rows = [r.inner_text() for r in page.locator('.import-result').all()]
+        lost_actions = page.locator('.import-result >> nth=0').locator('.import-missing-actions button').count()
+        on_list = js(page, """() => import('./js/missing.js').then((m) => { const out = m.missingList().map((x) => x.title).sort(); Object.assign(m.MISSING_LIMITS, window.__caps); m.clearMissing(); return out; })""")
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
+        check('spotify: ...in one import, each playlist\'s row says how many of its are on Missing tracks once a later one has pushed some off',
+              len(rows) == 2 and '1 of them is on Missing tracks now' in rows[0] and 'it keeps the latest 3 from Spotify for each server' in rows[0]
+              and 'They’re on Missing tracks now' in rows[1] and on_list == ['Lost Five', 'Lost Four', 'Lost Three'], f'{rows} {on_list}')
+        check('spotify: ...and a playlist with none of its tracks found lists them all the same, to copy or save (the spreadsheet it speaks of)',
+              'so it wasn’t made' in rows[0] and 'Not found (3)' in rows[0] and lost_actions == 2, f'{rows[0]!r} {lost_actions}')
+        # A song in a playlist from Spotify is counted once for each playlist
+        # it's in, however often it's imported; suggested by an AI after, it's
+        # counted afresh as a suggestion.
+        counts = js(page, """() => import('./js/missing.js').then((m) => {
+            m.clearMissing();
+            const s = [{ kind: 'track', artist: 'Ghost Band', title: 'Counted Once' }];
+            const times = () => m.missingList()[0].times;
+            const out = [];
+            for (const p of ['Road songs', 'Road songs', 'Old favourites', 'Road songs']) { m.noteMissing(s, { songs: [], artists: [] }, p, { via: 'spotify' }); out.push(times()); }
+            m.noteMissing(s, { songs: [], artists: [] }, 'an AI playlist');
+            out.push(times(), m.missingList()[0].via || '');
+            m.clearMissing();
+            return out;
+        })""")
+        check('spotify: ...a song from Spotify counts once for each playlist it\'s in, however often imported (suggested by an AI after, it\'s a suggestion)',
+              counts == [1, 1, 2, 2, 1, ''], str(counts))
         js(page, "() => import('./js/missing.js').then((m) => m.clearMissing?.())")
         page.goto(APP + '#/search')
         page.wait_for_selector('.spotify-row')
