@@ -3,7 +3,7 @@ import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, ro
 import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
-import { aiSettings, sharedAI, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
+import { aiSettings, sharedAI, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { missingTracksView } from './missingtracks.js';
 import { missingCount, mbOffered, mbWhere } from '../missing.js';
@@ -11,7 +11,7 @@ import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
 import { player } from '../player.js';
-import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES } from '../prefetch.js';
+import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -358,19 +358,35 @@ const FADE_LENGTHS = [2, 3, 4, 5, 6, 8, 10, 12].map((v) => [v, `${v} seconds`]);
 const MB_A_TRACK = (kbps) => (kbps * 1000 * 240) / 8 / 1e6;
 const mbText = (mb) => `${fmt.number(mb < 10 ? Math.round(mb * 10) / 10 : Math.round(mb))} MB`;
 const aboutMb = (mb) => `about ${mbText(mb)}`;
+// (n tracks' memory, as Streaming quality has them come in.)
+function memoryFor(n, quality) {
+  const kbps = quality === 'original' ? null : Number(quality) || 320;
+  const big = n * MB_A_TRACK(kbps || 1000);
+  const takes = kbps ? `${aboutMb(n * MB_A_TRACK(kbps))} at ${kbps} kbps` : `${aboutMb(n * MB_A_TRACK(320))} as MP3, ${mbText(big)} as FLAC`;
+  return { takes, big };
+}
+
 export function loadAheadChoices(quality = app.settings.quality) {
   const most = LOAD_AHEAD_BYTES / 1024 / 1024;
-  const kbps = quality === 'original' ? null : Number(quality) || 320;
   const out = [[0, 'Off', 'Tracks load as they play: the next one starts loading shortly before it’s due (for a gapless change or a crossfade), once this one has loaded.']];
   for (let n = 1; n <= LOAD_AHEAD_MAX; n++) {
-    const big = n * MB_A_TRACK(kbps || 1000);
-    const takes = kbps ? `${aboutMb(n * MB_A_TRACK(kbps))} at ${kbps} kbps` : `${aboutMb(n * MB_A_TRACK(320))} as MP3, ${mbText(big)} as FLAC`;
+    const { takes, big } = memoryFor(n, quality);
     out.push([n, fmt.count(n, 'track', 'tracks'), `${n === 1 ? 'The next track' : `The next ${n} tracks`}: ${takes}.${big > most ? ' More than this browser keeps: as many as fit.' : ''}`]);
   }
   return out;
 }
 
-// What's loaded ahead now, for its setting: "2 tracks (61 MB)".
+// Keep played tracks' choices, likewise.
+export function keepPlayedChoices(quality = app.settings.quality) {
+  const out = [[0, 'Off', 'A track played again comes from your server again, as it did the first time.']];
+  for (let n = 1; n <= KEEP_PLAYED_MAX; n++) {
+    const { takes } = memoryFor(n, quality);
+    out.push([n, fmt.count(n, 'track', 'tracks'), `${n === 1 ? 'The last track played' : `The last ${n} tracks played`}: ${takes}.`]);
+  }
+  return out;
+}
+
+// What's in memory now, for these settings: "2 tracks (61 MB)".
 function loadedAhead() {
   const done = player.ahead.summary().filter((e) => e.state === 'done');
   if (!done.length) return '';
@@ -387,11 +403,13 @@ const QUIET_ENDINGS = [
 
 function playbackView({ el }) {
   const s = app.settings;
-  // (Load ahead's estimates follow Streaming quality.)
+  // (Load ahead's estimates, and Keep played tracks', follow Streaming quality.)
   const aheadChoices = loadAheadChoices(s.quality);
+  const keepChoices = keepPlayedChoices(s.quality);
   const qualityList = radioRows('Streaming quality', QUALITIES, s.quality, (v) => {
     saveSettings({ quality: v });
     aheadChoices.splice(0, aheadChoices.length, ...loadAheadChoices(v));
+    keepChoices.splice(0, keepChoices.length, ...keepPlayedChoices(v));
   });
   const length = choiceRow({
     title: 'Crossfade length',
@@ -440,10 +458,18 @@ function playbackView({ el }) {
       quiet,
       choiceRow({
         title: 'Load ahead',
-        subtitle: `On this device: how many tracks load in full ahead of time, so a dropped or slow connection doesn’t stop the music at the next one. While the track playing is still loading, they take half the connection at most (and wait whenever it needs more); once it’s all in, as much as the connection gives. This browser keeps them only while they’re wanted (${fmt.number(LOAD_AHEAD_BYTES / 1024 / 1024)} MB at most; not saved, nor in its cache).${loadedAhead()}`,
+        subtitle: `On this device: how many tracks load in full ahead of time, so a dropped or slow connection doesn’t stop the music at the next one. While the track playing is still loading, they take half the connection at most (and wait whenever it needs more); once it’s all in, as much as the connection gives. This browser keeps them only while they’re wanted (${fmt.number(LOAD_AHEAD_BYTES / 1024 / 1024)} MB at most, with the tracks played it keeps; not saved, nor in its cache).${loadedAhead()}`,
         options: aheadChoices,
         value: Math.min(LOAD_AHEAD_MAX, Math.max(0, Math.round(Number(s.loadAhead) || 0))),
         onChange: (v) => saveSettings({ loadAhead: v }),
+      }),
+      choiceRow({
+        title: 'Keep played tracks',
+        subtitle:
+          'On this device: how many tracks stay in memory once they’ve played, so going back to one plays it at once, even with a slow or dropped connection. One that came in as it played is kept as it came in if it was converted, or, with Load ahead on, read again into memory once the tracks ahead are in. The tracks ahead come first: these make room for them, and one still being read waits while they load.',
+        options: keepChoices,
+        value: Math.min(KEEP_PLAYED_MAX, Math.max(0, Math.round(Number(s.keepPlayed) || 0))),
+        onChange: (v) => saveSettings({ keepPlayed: v }),
       }),
       toggleRow({
         title: 'Loudness levelling',
@@ -731,6 +757,7 @@ function aiSummary() {
   const t = aiTarget(s);
   if (s.mode === 'off') return 'Off';
   if (!t) return 'Not set up';
+  if (t.kind === 'shared' && sharedRefused()) return 'Not for your account';
   if (t.kind === 'shared') return t.model ? `On: ${t.model}` : 'On';
   return t.model ? `Your Ollama: ${t.model}` : 'Your Ollama, no model chosen';
 }
@@ -805,43 +832,100 @@ const gb = (bytes) => (bytes ? `${(bytes / 1e9).toFixed(1)} GB` : '');
 
 function aiView({ el, onDispose }) {
   el.append(backHeader('AI', { fallback: '/settings' }));
-  // A model shared by this player is the only one used: its name and whether
-  // it's ready are all that's shown of the AI server.
-  if (sharedAI()) return sharedAIView(el, onDispose);
-  const settings = aiSettings();
-  const effective = settings.mode === 'custom' ? 'custom' : 'off';
+  // Where the model runs: the one this player shares, if it has one (its
+  // name, and whether it's ready, are all that's shown of that AI server,
+  // and only to people it's for), an Ollama of this device's own (reached
+  // from this browser, never through the player), or nowhere.
+  const shared = sharedAI();
   const options = [
-    ['custom', 'My own Ollama server', 'An Ollama server this device can reach, such as one on this computer.'],
+    ...(shared ? [['auto', 'This player’s model', 'Set up by whoever runs this player, on their own hardware, for people who can use its Plex server.']] : []),
+    ['custom', 'My own Ollama server', 'An Ollama server this device can reach, such as one on this computer. Its address and key stay on this device.'],
     ['off', 'Off', 'Hide AI features on this device.'],
   ];
+  const chosen = () => {
+    const m = aiSettings().mode;
+    if (m === 'custom') return 'custom';
+    return m === 'off' || !shared ? 'off' : 'auto';
+  };
 
+  const sharedBox = h('div.ai-shared');
   const customBox = h('div.ai-custom');
   const modelBox = h('div.ai-models');
   const waitBox = waitRow();
+  const notes = notesSection();
+  const missing = missingSection(onDispose);
 
   el.append(
-    h('p.lede', null, 'AI playlists and the AI DJ use a model running on your own hardware through Ollama. These settings apply to this device.'),
+    h(
+      'p.lede',
+      null,
+      shared
+        ? 'AI playlists and the AI DJ use an AI model running through Ollama: the one this player shares, or one of your own. These settings apply to this device.'
+        : 'AI playlists and the AI DJ use a model running on your own hardware through Ollama. These settings apply to this device.',
+    ),
     h('div.section-head', null, h('h2', null, 'Where the model runs')),
-    radioRows('Where the model runs', options, effective, (v) => {
+    radioRows('Where the model runs', options, chosen(), (v) => {
       saveAI({ mode: v });
       render();
     }),
-    h('p.hint.pad', null, 'This player has no shared model. Whoever runs it can add one with the OLLAMA_URL setting.'),
+    ...(shared ? [] : [h('p.hint.pad', null, 'This player has no shared model. Whoever runs it can add one with the OLLAMA_URL setting.')]),
+    sharedBox,
     customBox,
     modelBox,
     waitBox,
-    notesSection(),
-    missingSection(onDispose),
+    notes,
+    missing,
   );
   render();
 
   function render() {
-    const s = aiSettings();
-    const mode = s.mode === 'custom' ? 'custom' : '';
-    customBox.replaceChildren(...(mode === 'custom' ? customForm(s) : []));
+    const mode = chosen();
+    sharedBox.replaceChildren(...(mode === 'auto' ? sharedParts() : []));
+    customBox.replaceChildren(...(mode === 'custom' ? customForm(aiSettings()) : []));
     modelBox.replaceChildren();
-    waitBox.hidden = mode !== 'custom';
-    if (mode === 'custom' && s.url) loadModels();
+    waitBox.hidden = mode === 'off';
+    notes.hidden = mode === 'off';
+    missing.hidden = mode === 'off' && !missingCount();
+    if (mode === 'custom' && aiSettings().url) loadModels();
+  }
+
+  // The shared model: its name, whether it's ready (or that it isn't for
+  // this Plex account, and what to do instead), and a test. Which model it
+  // is, and where it runs, is up to whoever runs this player.
+  function sharedParts() {
+    const name = h('span', null, shared.model || '…');
+    const status = h('p.hint.pad', { role: 'status' }, 'Checking…');
+    const test = h('p.hint.pad', { role: 'status' });
+    const tester = testButton(test);
+    check();
+    return [
+      h('div.section-head', null, h('h2', null, 'Model')),
+      h('div.rows', null, row({ lead: h('span.tile.tile-plain', null, icon('sparkle', 24)), title: name, subtitle: 'Set up by whoever runs this player', chevron: false, cls: 'ai-model-row' })),
+      status,
+      tester,
+      test,
+    ];
+
+    async function check() {
+      try {
+        const st = await sharedStatus();
+        if (st?.model) name.textContent = st.model;
+        if (st?.ready && st.loading) status.textContent = 'Ready, and loading into memory now.';
+        else if (st?.ready && st.loaded === false) status.textContent = 'Ready. It isn’t in memory right now, so the next request loads it first, which can take a few minutes.';
+        else if (st?.ready) status.textContent = 'Ready.';
+        else if (st?.problem === 'not-installed') status.textContent = `“${st.model}” isn’t installed on the AI server yet.`;
+        else if (st?.problem === 'no-model') status.textContent = 'The AI server has no models installed yet.';
+        else status.textContent = 'The AI server isn’t answering right now.';
+        status.classList.toggle('warn', !st?.ready);
+      } catch (err) {
+        const refused = [401, 403].includes(err?.status);
+        status.textContent = refused
+          ? `${describeAIError(err, aiTarget({ mode: 'auto' }))} You can use an Ollama server of your own instead: choose My own Ollama server above.`
+          : describeAIError(err, aiTarget({ mode: 'auto' }));
+        status.classList.add('warn', ...(refused ? ['ai-refused'] : []));
+        tester.hidden = refused;
+      }
+    }
   }
 
   function customForm(s) {
@@ -916,71 +1000,6 @@ function aiView({ el, onDispose }) {
       testButton(test),
       test,
     );
-  }
-}
-
-// The shared model: its name, whether it's ready, a test, and AI on or off
-// on this device. Which model is used is up to whoever runs this player.
-function sharedAIView(el, onDispose) {
-  const on = aiSettings().mode !== 'off';
-  const name = h('span', null, sharedAI().model || '…');
-  const status = h('p.hint.pad', { role: 'status' });
-  const test = h('p.hint.pad', { role: 'status' });
-  const box = h(
-    'div.ai-shared',
-    { hidden: !on },
-    h('div.section-head', null, h('h2', null, 'Model')),
-    h('div.rows', null, row({ lead: h('span.tile.tile-plain', null, icon('sparkle', 24)), title: name, subtitle: 'Set up by whoever runs this player', chevron: false, cls: 'ai-model-row' })),
-    status,
-    testButton(test),
-    test,
-    waitRow(),
-  );
-  const notes = notesSection();
-  notes.hidden = !on;
-  const missing = missingSection(onDispose);
-  missing.hidden = !on && !missingCount();
-  el.append(
-    h('p.lede', null, 'AI playlists and the AI DJ use an AI model this player shares, running on its owner’s hardware through Ollama.'),
-    h(
-      'div.rows',
-      null,
-      toggleRow({
-        title: 'AI features',
-        subtitle: 'AI playlists and the AI DJ on this device.',
-        checked: on,
-        onChange: (v) => {
-          saveAI({ mode: v ? 'auto' : 'off' });
-          box.hidden = !v;
-          notes.hidden = !v;
-          missing.hidden = !v && !missingCount();
-          if (v) check();
-        },
-      }),
-    ),
-    box,
-    notes,
-    missing,
-  );
-  if (on) check();
-
-  async function check() {
-    status.classList.remove('warn');
-    status.textContent = 'Checking…';
-    try {
-      const st = await sharedStatus();
-      if (st?.model) name.textContent = st.model;
-      if (st?.ready && st.loading) status.textContent = 'Ready, and loading into memory now.';
-      else if (st?.ready && st.loaded === false) status.textContent = 'Ready. It isn’t in memory right now, so the next request loads it first, which can take a few minutes.';
-      else if (st?.ready) status.textContent = 'Ready.';
-      else if (st?.problem === 'not-installed') status.textContent = `“${st.model}” isn’t installed on the AI server yet.`;
-      else if (st?.problem === 'no-model') status.textContent = 'The AI server has no models installed yet.';
-      else status.textContent = 'The AI server isn’t answering right now.';
-      status.classList.toggle('warn', !st?.ready);
-    } catch (err) {
-      status.textContent = describeAIError(err);
-      status.classList.add('warn');
-    }
   }
 }
 

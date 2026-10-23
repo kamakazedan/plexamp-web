@@ -29,20 +29,22 @@ An instruction-tuned model of about 7 to 9 billion parameters, such as `llama3.1
 3. Make sure the player's container can reach it. Ollama only listens on its own machine to begin with: set `OLLAMA_HOST=0.0.0.0` where it runs (see [Ollama's FAQ](https://docs.ollama.com/faq)). On the same machine as Docker, the player can use `http://host.docker.internal:11434` (the bundled `docker-compose.yml` maps that name on Linux); in the same Compose file, the service's name (`http://ollama:11434`).
 4. Set `OLLAMA_URL` (and `OLLAMA_MODEL`) on the player's container, and restart it.
 
-**Settings › AI** in the app then shows the model's name, whether it's ready (and in memory, or loading), and a test button.
+**Settings › AI** in the app then shows **This player's model**: the model's name, whether it's ready (and in memory, or loading), and a test button. Nothing else about the AI server is shown, to anyone.
 
 ### Who can use the shared model
 
 Browsers only ever talk to the player's own address, so this works from anywhere the player does, and Ollama needs no other setup. Requests go through the container's service, which checks each one:
 
-- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app, or see anything else about the AI server. Each device can still turn AI features off.
-- **People with access to your Plex server** (`OLLAMA_AUTH=plex`, the default). Every request is checked with plex.tv. With `PLEX_SERVER_URL` set, Plex accounts that can use that server get through: you, and the friends you share it with. Without it, any signed-in Plex account is accepted, so set it if the player can be reached from the internet. Anyone refused is told why in the app.
+- **One model: yours.** The player uses the model in `OLLAMA_MODEL` (or, if it isn't set, the first one installed), whatever a request asks for. Nobody can choose another in the app, or see anything else about the AI server: not its address, its other models or its settings. Each device can still turn AI features off, or use an Ollama of its own instead (see below).
+- **People with access to your Plex server** (`OLLAMA_AUTH=plex`, the default). Every request is checked with plex.tv. With `PLEX_SERVER_URL` set, Plex accounts that can use that server get through: you, and the friends you share it with. Without it, any signed-in Plex account is accepted, so set it if the player can be reached from the internet. Anyone refused is told why in the app, and that they can use an Ollama of their own instead.
 - **Only chats** are passed on, with just the fields the app uses, each checked. The AI server's other models, its version and its settings can't be reached through the player, and nothing can be downloaded, changed or deleted.
 - **Rate-limited** per person and per address, and the browser's Plex token, cookies and origin aren't passed to Ollama. The container decides how much memory the model takes (how much context, and that it stays loaded for 15 minutes), not the request, and what Ollama says when something goes wrong goes to the container's log rather than the app, as it can say where the AI server is and what's on it. Closing the page or pressing **Stop** stops the model too.
 
 ## Your own Ollama, on one device
 
-Without a shared model, each device can use its own: in **Settings › AI**, choose **My own Ollama server** and enter its address, such as `http://localhost:11434` for Ollama on the same computer. The browser connects to it directly, so Ollama has to allow the player's address: set `OLLAMA_ORIGINS` to it where Ollama runs (the settings page shows the exact value; see [Ollama's FAQ](https://docs.ollama.com/faq)), and restart Ollama.
+Any device can use an Ollama of its own: in **Settings › AI**, choose **My own Ollama server**, enter its address, such as `http://localhost:11434` for Ollama on the same computer (and an API key, if it's behind a proxy that asks for one), then choose one of its models. That's for anyone the player's shared model isn't for (someone signed in to a Plex server of their own, say), for whoever would rather use theirs, and for every device on a player without a shared model.
+
+The browser connects to it directly, never through the player, so it adds nothing to the player's own AI server, and its address and key stay on that device (signing out clears them). Ollama has to allow the player's address: set `OLLAMA_ORIGINS` to it where Ollama runs (the settings page shows the exact value; see [Ollama's FAQ](https://docs.ollama.com/faq)), and restart Ollama. **This player's model**, in the same place, goes back to the shared one.
 
 If the player is served over HTTPS, browsers block plain `http://` addresses other than `localhost`: use an HTTPS address, or the shared setup.
 

@@ -146,11 +146,12 @@ def login(page, app, token='t', app_defaults=False):
     page.fill('input[type=password]', token)
     page.click('button:has-text("Connect")')
     page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
-    # (Most tests were written for loudness levelling and Load ahead off, as
-    # they were before 0.20.0: those that test them, or the app's defaults,
-    # keep the app's own, and APP_DEFAULTS=1 runs them all that way.)
+    # (Most tests were written for loudness levelling, Load ahead and Keep
+    # played tracks off, as they were before 0.20.0 and 0.21.0: those that
+    # test them, or the app's defaults, keep the app's own, and
+    # APP_DEFAULTS=1 runs them all that way.)
     if not (app_defaults or APP_DEFAULTS):
-        settings(page, {'loudness': False, 'loadAhead': 0})
+        settings(page, {'loudness': False, 'loadAhead': 0, 'keepPlayed': 0})
 
 
 def js(page, expr):
@@ -421,11 +422,35 @@ with sync_playwright() as pw:
         page.wait_for_selector('.ai-model-row')
         check('ai: settings show the model in use and that it\'s ready', 'llama3.1:8b' in page.locator('.ai-model-row').inner_text()
               and page.wait_for_selector('.ai-shared p.hint:has-text("Ready")', timeout=15000) is not None)
-        check('ai: no choosing models or servers', page.locator('.ai-models').count() == 0 and page.locator('text=My own Ollama server').count() == 0
-              and page.locator('text=qwen2.5').count() == 0)
+        # (Nothing of the AI server's: not its other models, nor where it is.)
+        shown = page.locator('.view').inner_text()
+        check('ai: nothing else about the AI server: no choosing its models, nor where it is',
+              page.locator('.ai-models .radio-row').count() == 0 and 'qwen2.5' not in shown and '11434' not in shown and 'ollama/' not in shown.lower()
+              and js(page, "() => import('./js/ai.js').then((m) => m.aiTarget().kind)") == 'shared', shown[-300:])
         page.click('button:has-text("Test the model")')
         check('ai: model test through the container', page.wait_for_selector('text=It works', timeout=20000) is not None)
         shot(page, 'ai-04-settings')
+        # Someone can use an Ollama of their own instead (from this browser,
+        # not through the player), and go back to the player's.
+        page.click('.radio-row:has-text("My own Ollama server")')
+        page.fill('.ai-custom input[type=url]', OLLAMA)
+        page.click('.ai-custom button:has-text("Connect")')
+        page.wait_for_selector('.ai-models:has-text("Connected")', timeout=15000)
+        page.click('.ai-models .radio-row:has-text("llama3.1:8b")')
+        own_ai = js(page, "() => import('./js/ai.js').then((m) => { const t = m.aiTarget(); return { kind: t.kind, base: t.base, model: t.model, ready: m.aiReady() }; })")
+        asked_player = []
+        to_player = lambda r: asked_player.append(r.url) if '/ollama/' in r.url else None
+        page.on('request', to_player)
+        page.click('.ai-models button:has-text("Test the model")')
+        own_works = page.wait_for_selector('.ai-models >> text=It works', timeout=20000) is not None
+        page.remove_listener('request', to_player)
+        shot(page, 'ai-04b-own-ollama')
+        page.click('.radio-row:has-text("This player’s model")')
+        page.wait_for_selector('.ai-shared p.hint:has-text("Ready")', timeout=15000)
+        back_shared = js(page, "() => import('./js/ai.js').then((m) => m.aiTarget().kind)")
+        check('ai: with a shared model, someone can use an Ollama of their own instead (straight from the browser), and go back to the player\'s',
+              own_ai == {'kind': 'custom', 'base': OLLAMA, 'model': 'llama3.1:8b', 'ready': True} and own_works and not asked_player and back_shared == 'shared',
+              f'{own_ai} {own_works} {asked_player[:3]} {back_shared}')
 
         # A playlist being made carries on while you're elsewhere, and shows
         # when you come back.
@@ -514,6 +539,24 @@ with sync_playwright() as pw:
         other.goto(APP + '#/ai-playlist')
         check('ai: someone without access to the server is told why, before asking', other.wait_for_selector('.ai-no-access', timeout=10000) is not None
               and refusal in other.locator('.ai-no-access').inner_text() and other.locator('.ai-box input').is_disabled())
+        # ...and that they can use an Ollama of their own instead, which then
+        # works for them.
+        card = other.locator('.ai-no-access').inner_text()
+        other.click('.ai-no-access a:has-text("AI settings")')
+        other.wait_for_selector('.ai-shared .ai-refused', timeout=10000)
+        said = other.locator('.ai-shared').inner_text()
+        no_test = other.locator('.ai-shared button:has-text("Test the model")').is_hidden()
+        other.click('.radio-row:has-text("My own Ollama server")')
+        other.fill('.ai-custom input[type=url]', OLLAMA)
+        other.click('.ai-custom button:has-text("Connect")')
+        other.wait_for_selector('.ai-models:has-text("Connected")', timeout=15000)
+        other.click('.ai-models .radio-row:has-text("llama3.1:8b")')
+        theirs = js(other, "() => import('./js/ai.js').then((m) => ({ kind: m.aiTarget().kind, ready: m.aiReady() }))")
+        other.goto(APP + '#/ai-playlist')
+        other.wait_for_selector('.ai-box input:not([disabled])', timeout=10000)
+        check('ai: ...and that an Ollama of their own can be used instead, which then works for them',
+              'an Ollama server of your own instead' in card and refusal in said and 'My own Ollama server' in said and no_test
+              and theirs == {'kind': 'custom', 'ready': True} and other.locator('.ai-no-access').count() == 0, f'{card!r} {said!r} {no_test} {theirs}')
         other_ctx.close()
 
     # ---------- dj: Guest DJ and the AI DJ ----------
@@ -3420,7 +3463,8 @@ with sync_playwright() as pw:
         # gone. What's played is let go.
         # (Gapless off to start with: the tracks here are short enough for the
         # next one's own preload to be due at once.)
-        settings(page, {'loadAhead': 2, 'gapless': False})
+        # (Played tracks aren't kept here: see Keep played tracks, below.)
+        settings(page, {'loadAhead': 2, 'gapless': False, 'keepPlayed': 0})
         play_track(5, 0)
         tr = now()
         ahead = lambda: player(page, 'p.ahead.summary()')
@@ -3515,7 +3559,7 @@ with sync_playwright() as pw:
         # preload, due at once on tracks this short, would stream it instead.)
         # (Held back, as while the track playing is still loading: parts of
         # 128 KB.)
-        settings(page, {'quality': 'original', 'loadAhead': 1, 'gapless': False})
+        settings(page, {'quality': 'original', 'loadAhead': 1, 'gapless': False, 'keepPlayed': 0})
         part = 128 * 1024
         player(page, f"(p.aheadUnlimited = () => false, p.roomToFetch = () => !p.ahead.busy || p.ahead.busy.bytes < {part}, true)")
         play_track(5, 2)
@@ -3567,6 +3611,203 @@ with sync_playwright() as pw:
         settings(page, {'quality': '320', 'loadAhead': 0})
         page.wait_for_timeout(500)
         check('stream: ...and none is kept once it\'s turned off', wait_for(lambda: ahead() == [] or all(e['id'] == now()['id'] for e in ahead()), 8, 0.3), str(ahead()))
+
+        # Keep played tracks (Settings › Playback): the last ones played stay
+        # in memory, so going back to one plays it at once, with the server
+        # out of reach, as another playback. A converted stream is kept as it
+        # came in (no second stream of it)...
+        settings(page, {'quality': '320', 'loadAhead': 0, 'keepPlayed': 1, 'gapless': True})
+        play_track(7, 0)
+        tr = now()
+        recorded = wait_for(lambda: any(e['id'] == tr['id'] and e['state'] == 'done' and e['hls'] for e in ahead()), 20, 0.3)
+        player(page, 'p.seek(p.duration - 2)')
+        moved = wait_for(lambda: now()['id'] != tr['id'] and now()['state'] == 'playing', 15, 0.25)
+        cut['urls'] = []
+        page.route(converted, no_server)
+        player(page, 'p.prev()')
+        back = wait_for(lambda: now()['id'] == tr['id'] and now()['state'] == 'playing' and now()['t'] > 1, 15, 0.25)
+        again = player(page, '({ memory: !!p.deck.prefetched, playback: p.deck.playback })')
+        page.unroute(converted, no_server)
+        reports = {x['playback'] for x in hls()['timelines'] if x['ratingKey'] == tr['id']}
+        # (Its stream's addresses have the track's id in its session's.)
+        asked = [u for u in cut['urls'] if f'-{tr["id"]}-' in u]
+        check('stream: a converted track played, kept as it came in, plays again from memory when gone back to (as another playback)',
+              recorded and moved and back and again['memory'] and again['playback'] != tr['playback'] and again['playback'] in reports
+              and len(sessions_of(tr['id'])) == 1 and not asked and not play_errors(), f'{recorded} {moved} {back} {again} {tr} {reports} {asked[:3]} {ahead()}')
+        # ...and the one gone back from is kept too, once it's all come in:
+        # forward again, from memory. (Gone back to by choosing it in the
+        # queue, as Previous does in a track's first seconds.)
+        gone_from = player(page, 'p.queue[p.index + 1]?.id')
+        player(page, 'p.next()')
+        wait_for(lambda: now()['id'] == gone_from and now()['state'] == 'playing', 15, 0.25)
+        wait_for(lambda: any(e['id'] == gone_from and e['state'] == 'done' for e in ahead()), 15, 0.3)
+        player(page, 'p.load(p.index - 1)')
+        wait_for(lambda: now()['id'] == tr['id'] and now()['state'] == 'playing', 15, 0.25)
+        page.route(converted, no_server)
+        player(page, 'p.next()')
+        forward = wait_for(lambda: now()['id'] == gone_from and now()['state'] == 'playing' and now()['t'] > 1, 15, 0.25)
+        fwd = player(page, '!!p.deck.prefetched')
+        page.unroute(converted, no_server)
+        check('stream: ...and so is the one gone back from (forward again, from memory)', forward and fwd and not play_errors(), f'{forward} {fwd} {now()} {ahead()}')
+        # A file is read again into memory, once the tracks ahead are in
+        # (with Load ahead on).
+        settings(page, {'quality': 'original', 'loadAhead': 1})
+        play_track(7, 2)
+        tr = now()
+        read = wait_for(lambda: any(e['id'] == tr['id'] and e['state'] == 'done' and not e['hls'] for e in ahead()), 20, 0.3)
+        player(page, 'p.seek(p.duration - 2)')
+        moved = wait_for(lambda: now()['id'] != tr['id'] and now()['state'] == 'playing', 15, 0.25)
+        page.route('**/library/parts/**', no_server)
+        player(page, 'p.prev()')
+        back = wait_for(lambda: now()['id'] == tr['id'] and now()['state'] == 'playing' and now()['t'] > 1, 15, 0.25)
+        src = player(page, "(p.audio.getAttribute('src') || '').slice(0, 5)")
+        page.unroute('**/library/parts/**')
+        check('stream: ...and a file, read again into memory as it played, from memory too', read and moved and back and src == 'blob:' and not play_errors(),
+              f'{read} {moved} {back} {src} {ahead()}')
+        # Kept tracks make room for the tracks ahead, the furthest back
+        # first; one to keep only takes what's free.
+        settings(page, {'keepPlayed': 3})
+        for _ in range(3):
+            cur = now()['id']
+            wait_for(lambda: any(e['id'] == cur and e['state'] == 'done' for e in ahead()), 20, 0.3)
+            player(page, 'p.seek(p.duration - 2)')
+            wait_for(lambda: now()['id'] != cur and now()['state'] == 'playing', 15, 0.25)
+        cur = now()['id']
+        wait_for(lambda: any(e['id'] == cur and e['state'] == 'done' for e in ahead()), 20, 0.3)
+        room = js(page, """() => Promise.all([import('./js/player.js'), import('./js/prefetch.js')]).then(([{ player: p }, { LOAD_AHEAD_BYTES: most }]) => {
+            const a = p.ahead;
+            const kept = a.keptTracks().map((t) => t.id);
+            const es = a.keptTracks().map((t) => a.entries.get(t.qid)).filter(Boolean);
+            // (What else there is, a track ahead loading, say, counts for nothing here.)
+            const others = [...a.entries.values()].filter((e) => !es.includes(e));
+            const real = new Map([...es, ...others].map((e) => [e, e.bytes]));
+            es.forEach((e) => (e.bytes = most / 3));
+            others.forEach((e) => (e.bytes = 0));
+            const keeping = a.makeRoom(most / 3, { keeping: true });
+            const left0 = a.summary().map((x) => x.id).filter((id) => kept.includes(id));
+            const ahead = a.makeRoom(most / 3);
+            const left = a.summary().map((x) => x.id).filter((id) => kept.includes(id));
+            for (const [e, b] of real) if (a.entries.get(e.qid) === e) e.bytes = b;
+            return { kept, keeping, left0, ahead, left }; })""")
+        check('stream: kept tracks make room for the tracks ahead, the furthest back first (a track to keep only takes what\'s free)',
+              len(room['kept']) == 4 and room['keeping'] is False and sorted(room['left0']) == sorted(room['kept'])
+              and room['ahead'] is True and sorted(room['left']) == sorted(room['kept'][:2]), str(room))
+        # A file that was loading ahead, played (Next) before it was all in:
+        # what's in is kept, and the rest comes once the next track ahead is
+        # in (it gives way to it, as a file read again to keep would: it's
+        # played, so it'd only be kept).
+        settings(page, {'keepPlayed': 1, 'loadAhead': 1, 'gapless': False})
+        player(page, f"(p.aheadUnlimited = () => false, p.roomToFetch = () => !p.ahead.busy || p.ahead.busy.bytes < {part}, true)")
+        play_track(7, 0)
+        nxt = player(page, 'p.queue[p.index + 1].id')
+        partway = wait_for(lambda: any(e['id'] == nxt and e['state'] == 'loading' and e['bytes'] == part for e in ahead()), 20, 0.3)
+        player(page, 'p.next()')
+        wait_for(lambda: now()['id'] == nxt and now()['state'] == 'playing', 15, 0.25)
+        after = player(page, 'p.queue[p.index + 1].id')
+        moved_on = wait_for(lambda: any(e['id'] == after for e in ahead()), 15, 0.3)
+        left = ahead()
+        player(page, '(delete p.roomToFetch, delete p.aheadUnlimited, true)')
+        check('stream: a file loading ahead and played before it was all in gives way to the next track ahead, which loads',
+              partway and moved_on and [e for e in left if e['id'] == nxt] == [{'id': nxt, 'state': 'paused', 'bytes': part, 'hls': False, 'used': True, 'keep': True}],
+              f'{partway} {moved_on} {left}')
+        finished = wait_for(lambda: any(e['id'] == nxt and e['state'] == 'done' and e['bytes'] > part for e in ahead())
+                            and any(e['id'] == after and e['state'] == 'done' for e in ahead()), 40, 0.3)
+        check('stream: ...and what was in is kept: the rest comes after it, and it\'s kept once played', finished, str(ahead()))
+        # A file being read again to keep gives way to a track ahead that's
+        # due (here, with Next during it): set aside part-read, while the
+        # track ahead loads, then it goes on from where it got to, and plays
+        # from memory once gone back to. (Held back, it's read 128 KB at a
+        # time: held here after its first part. Rests as short as can be:
+        # the track playing needing nothing.)
+        settings(page, {'quality': 'original', 'loadAhead': 1, 'keepPlayed': 1, 'gapless': False})
+        player(page, "(p.aheadUnlimited = () => false, p.playingBitrate = () => 0, p.roomToFetch = () => !(p.ahead.busy?.keep && p.ahead.busy.bytes > 0), true)")
+        play_track(7, 0)
+        tr = now()
+        nxt = player(page, 'p.queue[p.index + 1].id')
+        rereading = wait_for(lambda: any(e['id'] == nxt and e['state'] == 'done' for e in ahead())
+                             and any(e['id'] == tr['id'] and e['keep'] and e['state'] == 'loading' and e['bytes'] == part for e in ahead()), 25, 0.3)
+        # (What there was as each load started.)
+        player(page, "(p.ahead.loads = [], p.ahead.load = function (t, o) { this.loads.push({ id: t.id, keeping: !!o?.keeping, was: this.summary() });"
+                     " return Object.getPrototypeOf(this).load.call(this, t, o); }, true)")
+        player(page, 'p.next()')
+        wait_for(lambda: now()['id'] == nxt and now()['state'] == 'playing', 15, 0.25)
+        after = player(page, 'p.queue[p.index + 1].id')
+        ahead_in = wait_for(lambda: any(e['id'] == after and e['state'] == 'done' for e in ahead()), 20, 0.3)
+        loads = player(page, 'p.ahead.loads')
+        first = next((x for x in loads if x['id'] == after), None)
+        aside = first and next((e for e in first['was'] if e['id'] == tr['id']), None)
+        part_key = player(page, f"p.queue.find((t) => t.id === '{tr['id']}').partKey")
+        ranges = []
+        def on_request(r):
+            if r.resource_type == 'fetch' and part_key in r.url:
+                ranges.append(r.headers.get('range'))
+        page.on('request', on_request)
+        player(page, '(delete p.roomToFetch, delete p.aheadUnlimited, delete p.playingBitrate, true)')
+        finished = wait_for(lambda: any(e['id'] == tr['id'] and e['state'] == 'done' and e['bytes'] > part for e in ahead()), 20, 0.3)
+        page.remove_listener('request', on_request)
+        loads = player(page, '(() => { const l = p.ahead.loads; delete p.ahead.load; delete p.ahead.loads; return l; })()')
+        page.route('**/library/parts/**', no_server)
+        player(page, 'p.load(p.index - 1)')
+        back = wait_for(lambda: now()['id'] == tr['id'] and now()['state'] == 'playing' and now()['t'] > 1, 15, 0.25)
+        src = player(page, "(p.audio.getAttribute('src') || '').slice(0, 5)")
+        page.unroute('**/library/parts/**')
+        check('stream: a file read again to keep gives way to a track ahead that\'s due: set aside part-read, it goes on from there after',
+              rereading and ahead_in and aside == {'id': tr['id'], 'state': 'paused', 'bytes': part, 'hls': False, 'used': True, 'keep': True}
+              and finished and ranges[:1] and (ranges[0] or '').startswith(f'bytes={part}-'), f'{rereading} {ahead_in} {aside} {finished} {ranges} {loads} {ahead()}')
+        check('stream: ...and the track gone back to plays from memory', back and src == 'blob:' and not play_errors(), f'{back} {src} {now()} {ahead()}')
+        # ...and from a server that won't send parts (here, files are sent
+        # whole to what the app asks for itself): it gives way too, but
+        # can't go on part-way, so what was in goes, and it's read from the
+        # top once the track ahead is in.
+        def whole(route):
+            if route.request.resource_type != 'fetch':
+                return route.continue_()
+            res = route.fetch(headers={k: v for k, v in route.request.headers.items() if k.lower() != 'range'})
+            route.fulfill(status=200, body=res.body(),
+                          headers={k: v for k, v in res.headers.items() if k.lower() not in ('content-range', 'accept-ranges', 'content-length')})
+        page.route('**/library/parts/**', whole)
+        player(page, "(p.playingBitrate = () => 0, p.roomToFetch = () => !(p.ahead.busy?.keep && p.ahead.busy.bytes > 0), true)")
+        play_track(7, 0)
+        tr = now()
+        nxt = player(page, 'p.queue[p.index + 1].id')
+        rereading = wait_for(lambda: any(e['id'] == nxt and e['state'] == 'done' for e in ahead())
+                             and any(e['id'] == tr['id'] and e['keep'] and e['state'] == 'loading' and e['bytes'] > 0 for e in ahead()), 25, 0.3)
+        player(page, "(p.ahead.loads = [], p.ahead.load = function (t, o) { this.loads.push({ id: t.id, keeping: !!o?.keeping, was: this.summary() });"
+                     " return Object.getPrototypeOf(this).load.call(this, t, o); }, true)")
+        player(page, 'p.next()')
+        wait_for(lambda: now()['id'] == nxt and now()['state'] == 'playing', 15, 0.25)
+        after = player(page, 'p.queue[p.index + 1].id')
+        ahead_in = wait_for(lambda: any(e['id'] == after and e['state'] == 'done' for e in ahead()), 20, 0.3)
+        player(page, '(delete p.roomToFetch, delete p.playingBitrate, true)')
+        finished = wait_for(lambda: any(e['id'] == tr['id'] and e['state'] == 'done' and e['bytes'] > part for e in ahead()), 20, 0.3)
+        loads = player(page, '(() => { const l = p.ahead.loads; delete p.ahead.load; delete p.ahead.loads; return l; })()')
+        page.unroute('**/library/parts/**', whole)
+        first = next((x for x in loads if x['id'] == after), None)
+        aside = first and next((e for e in first['was'] if e['id'] == tr['id']), None)
+        check('stream: ...and from a server that sends files whole, it gives way too, read from the top after',
+              rereading and ahead_in and aside == {'id': tr['id'], 'state': 'paused', 'bytes': 0, 'hls': False, 'used': True, 'keep': True} and finished and not play_errors(),
+              f'{rereading} {ahead_in} {aside} {finished} {loads} {ahead()}')
+        # A converted track coming in replaces what didn't finish for it (a
+        # load ahead that failed, say), so it's kept as it comes.
+        settings(page, {'quality': '320'})
+        replaced = player(page, """(() => { const a = p.ahead; const t = p.queue[p.index + 1]; const src = p.sourceFor(t, false);
+            const was = a.entries.get(t.qid); if (was) a.drop(was);
+            const failed = a.entry(t, src, 'pb-1', 'failed'); a.entries.set(t.qid, failed);
+            const rec = a.record(t, src, 'pb-2');
+            const got = { hls: src.hls, rec: !!rec, other: rec !== failed, kept: !!rec && a.entries.get(t.qid) === rec, state: rec?.state };
+            if (rec) a.drop(rec); a.plan(); return got; })()""")
+        check('stream: ...and a converted track coming in is kept as it comes, whatever didn\'t finish for it before',
+              replaced == {'hls': True, 'rec': True, 'other': True, 'kept': True, 'state': 'recording'}, str(replaced))
+        # With Load ahead off, a file isn't read again to keep (only what
+        # comes in once is kept: a converted track, as it came in).
+        settings(page, {'quality': 'original', 'loadAhead': 0, 'gapless': True})
+        play_track(7, 3)
+        tr = now()
+        page.wait_for_timeout(4000)
+        twice = [e for e in ahead() if e['id'] == tr['id']]
+        check('stream: ...with Load ahead off, a file isn\'t read twice to keep it', not twice, str(ahead()))
+        settings(page, {'keepPlayed': 0, 'quality': '320', 'gapless': False})
+        check('stream: ...and none is kept once Keep played tracks is off', wait_for(lambda: all(e['id'] == now()['id'] for e in ahead()), 8, 0.3), str(ahead()))
 
         # A stream that never plays, started again and failing again: the
         # track is skipped, as before, saying so.
@@ -4295,6 +4536,22 @@ with sync_playwright() as pw:
         check('loudness: Load ahead goes from off to 10 tracks, each saying about how much memory it takes (as MP3 and FLAC, or at the bitrate it\'s converted to)',
               'Off' in sheet_text and '10 tracks' in sheet_text and 'The next 10 tracks: about 96 MB as MP3, 300 MB as FLAC.' in sheet_text
               and 'The next 2 tracks: about 19 MB at 320 kbps.' in converted, f'{labels} {sheet_text[-200:]} {converted[-200:]}')
+        # ...and Keep played tracks: off, or 1 to 5, likewise (1 to start with).
+        page.wait_for_timeout(300)
+        page.click('.choice-row:has-text("Keep played tracks")')
+        page.wait_for_selector('.sheet.open')
+        kept_text = page.locator('.sheet.open').inner_text()
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(300)
+        fresh_ctx = browser.new_context(**MOBILE)
+        fresh = fresh_ctx.new_page()
+        attach(fresh, 'loudness-fresh-keep')
+        login(fresh, APP, app_defaults=True)
+        keep_start = js(fresh, "() => import('./js/state.js').then(({ app }) => app.settings.keepPlayed)")
+        fresh_ctx.close()
+        check('loudness: Keep played tracks goes from off to 5, each saying about how much memory it takes (1 to start with)',
+              keep_start == 1 and 'Off' in kept_text and '5 tracks' in kept_text and '6 tracks' not in kept_text
+              and 'The last track played: about 9.6 MB at 320 kbps.' in kept_text and 'The last 5 tracks played: about 48 MB at 320 kbps.' in kept_text, f'{keep_start} {kept_text[-300:]}')
         settings(page, {'quality': 'original'})
         js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
         ctx.close()
@@ -4563,12 +4820,14 @@ with sync_playwright() as pw:
         page.wait_for_selector('.hero-album')
         check('settings: codec badge can be turned off', page.locator('.codec-badge').count() == 0)
         page.locator('.album-tracks .track-main').first.click()  # the reload stopped playback
-        wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+        playing = wait_for(lambda: player(page, "p.state === 'playing' && p.time > 0.3"), 20)
+        how = lambda: player(page, '({ state: p.state, t: p.time, index: p.index, id: p.current?.id })')
+        before = how()
         page.locator('.album-tracks .track-preview').nth(2).click()
         check('settings: preview plays without touching the queue',
-              wait_for(lambda: not player(page, 'p.isPlaying'), 5) and page.locator('.track-preview.on').count() == 1)
+              playing and wait_for(lambda: not player(page, 'p.isPlaying'), 5) and page.locator('.track-preview.on').count() == 1, f'{before} {how()}')
         page.locator('.album-tracks .track-preview.on').click()
-        check('settings: playback carries on after a preview', wait_for(lambda: player(page, 'p.isPlaying'), 5))
+        check('settings: playback carries on after a preview', wait_for(lambda: player(page, 'p.isPlaying'), 5), f'{before} {how()}')
 
         settings(page, {'backgroundStyle': 'artwork'})
         check('settings: blurred artwork background', wait_for(lambda: js(page, "() => !!document.querySelector('#backdrop .ub.on.ub-art')"), 5))

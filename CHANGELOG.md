@@ -3,6 +3,39 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.21.0 - 2026-10-23
+
+### New
+
+- **Keep played tracks** (Settings › Playback, 1 to start with, up to
+  5): the last tracks played stay in memory, so going back to one plays
+  it at once, even with a slow or dropped connection, and so does the one
+  gone back from. What was loaded ahead is kept as it is (a file still
+  loading when it starts playing goes on loading). A converted track is
+  kept as it came in, with no second stream of it; a file that came in as
+  it played is read again into memory once the tracks ahead are in, with
+  Load ahead on (off, it isn't read twice). The tracks ahead come first:
+  those played make room for them, the furthest back first, and one still
+  being read waits, part-read, while a track ahead loads. Played again, a
+  track is another playback as far as Plex is concerned.
+- **Use your own Ollama server even when the player shares a model**
+  (Settings › AI › My own Ollama server): for anyone the player's model
+  isn't for (someone signed in to a Plex server of their own, say), or
+  who'd rather use theirs. The browser talks to it directly, never
+  through the player, and its address and key stay on the device.
+  Someone the player's model isn't for is told so, and pointed there.
+  Nothing about the player's own AI server is shown, as before, but the
+  name of its model and whether it's ready.
+
+### Fixed
+
+- **A track no longer stops, now and then, as it starts** (the first one
+  played after opening the page, and on taking over from another of your
+  devices or joining Play Together), in Chrome, Edge and other browsers
+  built on Chromium. The silent sound that warms up the second player
+  could stop it, so it's muted now, except in Safari and on iPhones and
+  iPads, where it's as before.
+
 ## 0.20.0 - 2026-10-23
 
 ### New

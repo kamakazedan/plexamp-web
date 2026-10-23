@@ -2,10 +2,14 @@
 // the AI DJ.
 //
 // The model can be shared by the container (OLLAMA_URL, reached through the
-// app's own /ollama/ path, so browsers need no CORS setup or direct access).
-// Then it's the only one: the container uses the model set with OLLAMA_MODEL
-// and nothing else. Without a shared model, each device can use an Ollama of
-// its own (Settings > AI).
+// app's own /ollama/ path, so browsers need no CORS setup or direct access),
+// for people who can use its Plex server. The container uses the model set
+// with OLLAMA_MODEL and nothing else, and nothing else about its AI server
+// is shown: only that model's name, and whether it's ready. Instead, any
+// device can use an Ollama of its own (Settings > AI): for someone the
+// shared model isn't for, or who'd rather use theirs. That's reached from
+// the browser directly, never through the container, and its address and
+// key stay on the device.
 //
 // Small local models are poor at recalling exact song titles, so playlists
 // are built in two passes grounded in the library: the model first picks
@@ -51,25 +55,30 @@ export const sharedAI = () => (app.config.ai?.proxy ? app.config.ai : null);
 // first one installed rather than one set with OLLAMA_MODEL).
 let sharedName = '';
 
-// Which Ollama to use, or null when there's none (or AI is off here).
+// Which Ollama to use, or null when there's none (or AI is off here): this
+// device's own, when that's chosen (Settings › AI), or else the shared
+// model, if the player has one.
 export function aiTarget(settings = aiSettings()) {
   if (settings.mode === 'off') return null;
-  const shared = sharedAI();
-  if (shared) {
-    // The container checks these against Plex before passing a request on,
-    // and uses its own model whatever a request names.
-    const headers = {};
-    if (app.auth?.token) headers['X-Plex-Token'] = app.auth.token;
-    if (app.source?.token && app.source.token !== app.auth?.token && !skipServerToken) headers['X-Plex-Server-Token'] = app.source.token;
-    const base = new URL(shared.proxy, location.href).toString().replace(/\/+$/, '');
-    return { kind: 'shared', base, model: shared.model || sharedName, headers };
-  }
-  if (settings.mode === 'custom' && settings.url.trim()) {
+  if (settings.mode === 'custom') {
+    if (!settings.url.trim()) return null;
     const headers = settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {};
     return { kind: 'custom', base: settings.url.trim().replace(/\/+$/, ''), model: settings.model, headers };
   }
-  return null;
+  const shared = sharedAI();
+  if (!shared) return null;
+  // The container checks these against Plex before passing a request on,
+  // and uses its own model whatever a request names.
+  const headers = {};
+  if (app.auth?.token) headers['X-Plex-Token'] = app.auth.token;
+  if (app.source?.token && app.source.token !== app.auth?.token && !skipServerToken) headers['X-Plex-Server-Token'] = app.source.token;
+  const base = new URL(shared.proxy, location.href).toString().replace(/\/+$/, '');
+  return { kind: 'shared', base, model: shared.model || sharedName, headers };
 }
+
+// Whether the shared model is known not to be for this Plex account (the
+// container said so): see checkAIAccess.
+export const sharedRefused = () => allowed === false;
 
 // Whether AI features can be used here: AI is on (Settings › AI), there's
 // a model (the shared one, or this device's own Ollama with one chosen),

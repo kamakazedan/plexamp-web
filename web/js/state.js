@@ -21,6 +21,7 @@ export const DEFAULT_SETTINGS = {
   fadeLength: 5, // seconds
   loudness: true, // loudness levelling: louder tracks turned down to match (player.js levelFor)
   loadAhead: 1, // tracks loaded in full ahead, into memory (prefetch.js); 0: off (the next starts loading shortly before it's due)
+  keepPlayed: 1, // tracks kept in memory once played, to go back to (prefetch.js); 0: off
   quietEndings: 'quiet', // smart fades start over a quiet ending: off | soft | quiet | hushed (transitions.js)
   shareDevices: true, // your devices share what's playing; one plays (devices.js)
   reportPlays: true, // "Sync recent plays": tell Plex what's played

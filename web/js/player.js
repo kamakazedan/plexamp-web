@@ -15,7 +15,7 @@ import { store, canPlayCodec, canPlayHlsNatively, isLossless, playbackId } from 
 import { shuffleArray } from './ui.js';
 import { debugLog, debugOn } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
-import { Prefetcher, cachedLoader } from './prefetch.js';
+import { Prefetcher, cachedLoader, recordingLoader } from './prefetch.js';
 
 const PRELOAD_AT = 25; // seconds before the next track starts
 // ...once this one has loaded to its end, or has this much buffered (and,
@@ -34,6 +34,14 @@ const GAPLESS_LEAD = 0.06;
 const MAX_SKIP_IN = 20; // at most this much silence is skipped at the start of a track
 const MAX_QUIET_LEAD = 15; // a fade starts at most this long before the music ends, over a quiet ending
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+// Apple's browsers (Safari, and every browser on an iPhone or iPad) let an
+// audio element start playback on its own only once it's played after a
+// tap (see Player.unlock). Others mostly go by the page (once it's been
+// tapped, anything on it can play), but not all: an Android app's web view
+// may want a tap for each element too. Elsewhere the silent sound is
+// muted: starting audibly as a track does, it now and then stops the
+// track, in Chrome. (Apple's have it as they always have.)
+const APPLE = /Apple/.test(globalThis.navigator?.vendor || '');
 // Bundled into the image at a pinned version (see the Dockerfile), so no
 // code is ever loaded from another site.
 const HLS_JS = 'vendor/hls.min.js';
@@ -208,14 +216,17 @@ export class Deck {
     this.forced = false;
     this.stall = null; // debug mode: playback waiting for data, since when
     this.prefetched = null; // what was loaded ahead for its track, played from memory (see prefetch.js)
+    this.recording = null; // ...or, a converted stream coming in, what's kept of it as it comes (to play again)
     this.gen = 0;
   }
 
   // `playback`: the track's playback (see playbackId); `startAt`: where a
   // converted stream starts (seconds); `ahead`: if set, it loads only that
   // many seconds ahead (until loadAhead); `kbps`: a converted stream's
-  // bitrate; `prefetched`: the track, loaded ahead (played from memory).
-  async load(url, isHls, { playback = null, startAt = 0, ahead = null, kbps = null, prefetched = null } = {}) {
+  // bitrate; `prefetched`: the track, loaded ahead (played from memory);
+  // `recording`: a converted stream's entry to keep what's read in (see
+  // Prefetcher.record).
+  async load(url, isHls, { playback = null, startAt = 0, ahead = null, kbps = null, prefetched = null, recording = null } = {}) {
     this.reset();
     // (What was loaded ahead, let go of meanwhile: from the network, then,
     // the same way.)
@@ -225,13 +236,14 @@ export class Deck {
     this.kbps = isHls ? kbps : null;
     this.playback = playback;
     this.prefetched = prefetched;
+    this.recording = !prefetched && isHls && !canPlayHlsNatively() ? recording : null;
     if (isHls && !canPlayHlsNatively()) {
       const Hls = await loadHls();
       if (gen !== this.gen) throw new DOMException('Another track was loaded.', 'AbortError');
       if (!Hls.isSupported()) throw new Error('This browser cannot play converted streams.');
       // (From memory, it's all buffered at once.)
       const limit = ahead && !prefetched ? { maxBufferLength: ahead, maxBufferSize: 0 } : {};
-      const from = prefetched ? { loader: cachedLoader(Hls, prefetched) } : {};
+      const from = prefetched ? { loader: cachedLoader(Hls, prefetched) } : this.recording ? { loader: recordingLoader(Hls, this.recording) } : {};
       const hls = new Hls({ ...HLS_CONFIG, ...limit, ...from, startPosition: startAt > 0 ? startAt : -1 });
       this.hls = hls;
       // Called once hls.js has decided (it's tried again by then, as far as
@@ -285,6 +297,7 @@ export class Deck {
     this.forced = false;
     this.stall = null;
     this.prefetched = null;
+    this.recording = null;
   }
 }
 
@@ -602,11 +615,12 @@ class Player extends EventTarget {
 
     const token = ++this.loadToken;
     const quality = app.settings.quality;
-    // Loaded ahead (prefetch.js): from memory, as the playback it was loaded
-    // as. (Not to start a track again, which goes back to its stream.)
+    // Loaded ahead, or kept once played (prefetch.js): from memory, as the
+    // playback it was loaded ahead as (or, played again, another). Not to
+    // start a track again, which goes back to its stream.
     const pre = !resume && !transcode ? this.ahead.ready(track, this.sourceFor(track, false)) : null;
     const playback =
-      pre?.playback || (resume && this.deck.qid === track.qid && this.deck.playback) || (resume && held?.qid === track.qid && held.playback) || playbackId();
+      (pre && this.ahead.playbackFor(pre)) || (resume && this.deck.qid === track.qid && this.deck.playback) || (resume && held?.qid === track.qid && held.playback) || playbackId();
     const src = pre?.src || this.sourceFor(track, transcode, playback);
     this.triedTranscode = src.hls;
     this.transcoding = src.hls;
@@ -650,8 +664,11 @@ class Player extends EventTarget {
     } else {
       this.deck.el.pause();
       spare.reset();
+      // A converted stream played from the top (as Streaming quality has
+      // it): kept as it comes in, to play again (Keep played tracks).
+      const recording = !pre && !transcode && src.hls && this.startingAt == null ? this.ahead.record(track, src, playback, this.deck) : null;
       try {
-        await this.deck.load(src.url, src.hls, { playback, startAt: this.startingAt || 0, kbps: src.kbps, prefetched: pre });
+        await this.deck.load(src.url, src.hls, { playback, startAt: this.startingAt || 0, kbps: src.kbps, prefetched: pre, recording });
       } catch (err) {
         // (Stopped, as the deck was reset, with no other track loading
         // since: nothing's loading now, either.)
@@ -703,12 +720,14 @@ class Player extends EventTarget {
     if (spare.qid === next.qid || spare.loadingQid === next.qid || (!pre && !this.roomToPreload())) return;
     const due = (plan ? plan.at : this.duration) - this.time;
     if (!pre && due > PRELOAD_LAST && this.ahead.waitingFor(next, due - PRELOAD_LAST)) return;
-    const playback = pre?.playback || playbackId();
+    const playback = (pre && this.ahead.playbackFor(pre)) || playbackId();
     const src = pre?.src || this.sourceFor(next, false, playback);
     // From the top (it may be played from there), as far as where the
-    // change of track would start it and some way past.
+    // change of track would start it and some way past. (A converted stream
+    // coming in is kept as it comes, to play again: see Prefetcher.record.)
     const ahead = PRELOAD_BUFFER + (plan?.startAt || 0);
-    const loading = spare.load(src.url, src.hls, { playback, ahead, kbps: src.kbps, prefetched: pre });
+    const recording = pre ? null : this.ahead.record(next, src, playback, spare);
+    const loading = spare.load(src.url, src.hls, { playback, ahead, kbps: src.kbps, prefetched: pre, recording });
     const gen = spare.gen;
     spare.loadingQid = next.qid;
     // Coming in as it plays: it isn't loaded ahead as well.
@@ -1477,16 +1496,18 @@ class Player extends EventTarget {
     this.onEnded();
   }
 
-  // iOS only lets an element start playback on its own once it has played
-  // after a tap, so warm up the second element on the first tap.
-  // `all`: warm up both elements, for a tap whose playback starts only after
-  // some requests (joining a Play Together session).
+  // Apple's browsers, and some Android web views, only let an element start
+  // playback on its own once it has played after a tap, so warm up the
+  // second element on the first tap (muted, except in Apple's browsers: see
+  // APPLE). `all`: warm up both elements, for a tap whose playback starts
+  // only after some requests (joining a Play Together session).
   unlock({ all = false } = {}) {
     if (this.unlocked && !all) return;
     this.unlocked = true;
     for (const deck of all ? this.decks : [this.spare]) {
       const s = deck.el;
       if (s.getAttribute('src') || deck.hls) continue;
+      if (!APPLE) s.muted = true;
       s.src = SILENT_WAV;
       s.play()
         .then(() => s.pause())
@@ -1496,6 +1517,7 @@ class Player extends EventTarget {
             s.removeAttribute('src');
             s.load();
           }
+          s.muted = this.muted;
         });
     }
   }

@@ -4,7 +4,8 @@
 // follow it. The rest are each device's own (DEVICE_SETTINGS): Streaming
 // quality (a work laptop on a slow connection, say), its connection, its
 // name, sharing playback with your devices, playback speed, how far ahead
-// it loads and your own AI server (its key never leaves the browser). A
+// it loads, how many played tracks it keeps in memory, and your own AI
+// server (its key never leaves the browser). A
 // setting new to the app stays each device's own until it's added to
 // SYNCED_SETTINGS, here and in server/settings.js.
 //
@@ -64,7 +65,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'skipForward',
   'home',
 ]);
-export const DEVICE_SETTINGS = Object.freeze(['quality', 'route', 'liveUpdates', 'shareDevices', 'playerName', 'speed', 'ai', 'loadAhead', 'version']);
+export const DEVICE_SETTINGS = Object.freeze(['quality', 'route', 'liveUpdates', 'shareDevices', 'playerName', 'speed', 'ai', 'loadAhead', 'keepPlayed', 'version']);
 const SYNCED = new Set(SYNCED_SETTINGS);
 
 const API = 'api/settings';

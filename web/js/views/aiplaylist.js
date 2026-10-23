@@ -494,6 +494,7 @@ export async function aiPlaylistView({ el, onDispose }) {
   }
 }
 
+// (An Ollama of your own can be used instead: Settings › AI.)
 function noAccessCard(message) {
   return h(
     'div.ai-setup.ai-no-access',
@@ -501,5 +502,7 @@ function noAccessCard(message) {
     h('div.ai-setup-icon', null, icon('sparkle', 34)),
     h('h2', null, 'AI playlists aren’t available to you here'),
     h('p', null, message),
+    h('p', null, 'You can use an Ollama server of your own instead.'),
+    h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings'),
   );
 }

@@ -1023,7 +1023,7 @@ test('account settings: the same ones follow an account here as in the app (web/
   assert.deepEqual([...app].sort(), Object.keys(SYNCED_SETTINGS).sort());
   const device = src.match(/export const DEVICE_SETTINGS = Object\.freeze\(\[([^\]]*)\]\)/);
   const own = [...device[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  for (const k of ['quality', 'route', 'playerName', 'ai', 'loadAhead', 'shareDevices', 'speed', 'liveUpdates']) {
+  for (const k of ['quality', 'route', 'playerName', 'ai', 'loadAhead', 'keepPlayed', 'shareDevices', 'speed', 'liveUpdates']) {
     assert.ok(own.includes(k), `${k} is a device's own`);
     assert.ok(!(k in SYNCED_SETTINGS), `${k} isn't kept for an account`);
   }
