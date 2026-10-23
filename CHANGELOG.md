@@ -41,6 +41,10 @@ you're running is shown in **Settings › About**.
   it's in, however often a playlist is imported (it counted each time it
   was imported), and a song from one place that comes from another (from
   a playlist, then suggested by an AI) is counted afresh there.
+- Fixed: a song on Missing tracks from a Spotify playlist was taken off
+  when an AI playlist suggested it too and MusicBrainz didn't know it,
+  and one an AI suggested after could then be taken off by Check on
+  MusicBrainz. Songs from Spotify are real, and stay so.
 - An import's playlist with none of its tracks found (so not made) lists
   them too, to copy or save as a spreadsheet.
 - A file dropped on the page by mistake isn't opened in its place, which

@@ -5237,27 +5237,64 @@ with sync_playwright() as pw:
         # (here with room for 3): each playlist's row says how many of its
         # are on Missing tracks as it is now. And one with none of its tracks
         # found isn't made, but lists them, to copy or save, all the same.
-        js(page, """() => Promise.all([import('./js/missing.js'), import('./js/views/playlistfiles.js')]).then(([m, pf]) => {
-            m.clearMissing();
-            window.__caps = { ...m.MISSING_LIMITS };
-            m.MISSING_LIMITS.spotify = 3;
+        lost = """([jobs, via]) => Promise.all([import('./js/missing.js'), import('./js/views/playlistfiles.js')]).then(([m, pf]) => {
             const song = (title) => ({ title, artist: 'Nobody Known', albumArtist: '', album: 'Nowhere' });
-            pf.runImport([
-                { p: { title: 'First lost', tracks: [song('Lost One'), song('Lost Two'), song('Lost Three')] }, title: 'First lost', from: 'First lost' },
-                { p: { title: 'Second lost', tracks: [song('Lost Four'), song('Lost Five')] }, title: 'Second lost', from: 'Second lost' },
-            ], { remember: { via: 'spotify' } });
-        })""")
+            pf.runImport(jobs.map(([title, songs]) => ({ p: { title, tracks: songs.map(song) }, title, from: title })), { remember: { via } });
+        })"""
+        js(page, "() => import('./js/missing.js').then((m) => { m.clearMissing(); window.__caps = { ...m.MISSING_LIMITS }; m.MISSING_LIMITS.spotify = 3; })")
+        # (The second playlist's search waits, while the first's list of what
+        # wasn't found is opened: it stays open as its row changes.)
+        held = []
+        hold = lambda url: '/hubs/search' in url and ('query=Lost+Four' in url or 'query=Lost%20Four' in url)
+        page.route(hold, lambda route: held.append(route))
+        page.evaluate(lost, [[['First lost', ['Lost One', 'Lost Two', 'Lost Three']], ['Second lost', ['Lost Four', 'Lost Five']]], 'spotify'])
+        page.wait_for_selector('.import-result')
+        page.click('.import-result >> nth=0 >> summary')
+        for _ in range(100):
+            if held:
+                break
+            page.wait_for_timeout(100)
+        for route in held:
+            route.continue_()
+        page.unroute(hold)
         page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
         rows = [r.inner_text() for r in page.locator('.import-result').all()]
         lost_actions = page.locator('.import-result >> nth=0').locator('.import-missing-actions button').count()
+        still_open = page.locator('.import-result >> nth=0').locator('details').evaluate('(d) => d.open')
         on_list = js(page, """() => import('./js/missing.js').then((m) => { const out = m.missingList().map((x) => x.title).sort(); Object.assign(m.MISSING_LIMITS, window.__caps); m.clearMissing(); return out; })""")
         page.click('.dialog-close')
         page.wait_for_timeout(400)
-        check('spotify: ...in one import, each playlist\'s row says how many of its are on Missing tracks once a later one has pushed some off',
+        check('spotify: ...in one import, each playlist\'s row says how many of its are on Missing tracks once a later one has pushed some off (a list opened staying open)',
               len(rows) == 2 and '1 of them is on Missing tracks now' in rows[0] and 'it keeps the latest 3 from Spotify for each server' in rows[0]
-              and 'They’re on Missing tracks now' in rows[1] and on_list == ['Lost Five', 'Lost Four', 'Lost Three'], f'{rows} {on_list}')
+              and 'They’re on Missing tracks now' in rows[1] and on_list == ['Lost Five', 'Lost Four', 'Lost Three'] and held and still_open, f'{rows} {on_list} {len(held)} {still_open}')
         check('spotify: ...and a playlist with none of its tracks found lists them all the same, to copy or save (the spreadsheet it speaks of)',
               'so it wasn’t made' in rows[0] and 'Not found (3)' in rows[0] and lost_actions == 2, f'{rows[0]!r} {lost_actions}')
+        # A browser that can't keep them says so, not that the list is full.
+        js(page, """() => { window.__setItem = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (k === 'pw.aiMissing') throw new DOMException('full', 'QuotaExceededError'); return window.__setItem.call(this, k, v); }; }""")
+        page.evaluate(lost, [[['Third lost', ['Lost Six']]], 'spotify'])
+        page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        no_room = page.locator('.import-result').inner_text()
+        js(page, '() => { Storage.prototype.setItem = window.__setItem; }')
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
+        check('spotify: ...and where the browser can\'t keep them, it says that, not that Missing tracks is full',
+              'There isn’t room for them on Missing tracks (this browser couldn’t keep more)' in no_room, no_room)
+        # Songs from Spotify are real: an AI's suggestion MusicBrainz doesn't
+        # know doesn't take one off, and one an AI suggests stays real.
+        real = js(page, """() => import('./js/missing.js').then((m) => {
+            m.clearMissing();
+            const s = { kind: 'track', artist: 'Tiny Band', title: 'Basement Tape' };
+            m.noteMissing([s], { songs: [], artists: [] }, 'Road songs', { via: 'spotify' });
+            m.noteMissing([], { songs: [], artists: [] }, 'an AI playlist', { drop: [{ ...s, mb: 'unknown' }] });
+            const after = m.missingList().map((x) => [x.title, x.via || '']);
+            m.noteMissing([s], { songs: [], artists: [] }, 'an AI playlist');
+            const taken = m.missingList()[0];
+            const out = { after, taken: [taken.via || '', taken.mb || '', m.askable(taken)] };
+            m.clearMissing();
+            return out;
+        })""")
+        check('spotify: ...a song from Spotify isn\'t taken off by an AI\'s suggestion MusicBrainz doesn\'t know, and suggested by an AI, it stays a real song',
+              real == {'after': [['Basement Tape', 'spotify']], 'taken': ['', 'real', False]}, str(real))
         # A song in a playlist from Spotify is counted once for each playlist
         # it's in, however often it's imported; suggested by an AI after, it's
         # counted afresh as a suggestion.

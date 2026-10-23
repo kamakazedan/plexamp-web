@@ -4,7 +4,7 @@
 import { app } from '../state.js';
 import { navigate, describeError, popOverlay, refresh, parseHash } from '../router.js';
 import { h, sheet, toast, askText, fmt, download, fileDate } from '../ui.js';
-import { copyText, noteMissing, keptCounter, MISSING_LIMITS } from '../missing.js';
+import { copyText, noteMissing, keptCounter, missingFull, MISSING_LIMITS } from '../missing.js';
 import { refreshLists } from '../editing.js';
 import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine, entryWhere, entryText, entriesCsv } from '../playlistio.js';
 
@@ -214,21 +214,28 @@ export function runImport(jobs, { remember = null } = {}) {
         done.push({ job, error: err });
       }
       // How many of each's are on Missing tracks now: a later playlist's
-      // can push an earlier one's out, where there isn't room for all.
+      // can push an earlier one's out, where there isn't room for all (or
+      // none goes on, with the device out of room).
       if (remember) {
         const count = keptCounter();
+        const full = missingFull(remember.via);
         for (const d of done) {
           if (!d.keys) continue;
           d.remembered = count(d.keys);
           d.unremembered = d.keys.length - d.remembered;
+          d.full = full;
         }
       }
       for (const [i, d] of done.entries()) {
-        if (shown[i] && shown[i].remembered === d.remembered) continue;
+        const said = `${d.remembered}|${d.unremembered && d.full}`;
+        if (shown[i]?.said === said) continue;
         const row = resultRow(d);
-        if (shown[i]) shown[i].row.replaceWith(row);
-        else results.append(row);
-        shown[i] = { row, remembered: d.remembered };
+        if (shown[i]) {
+          // (Its list of what wasn't found stays open, if it was.)
+          if (shown[i].row.querySelector('details')?.open) row.querySelector('details')?.setAttribute('open', '');
+          shown[i].row.replaceWith(row);
+        } else results.append(row);
+        shown[i] = { row, said };
       }
     }
     if (ctrl.signal.aborted) {
@@ -250,7 +257,9 @@ const SHOWN = 200;
 // many as there's room for: the spreadsheet has them all).
 function rememberedNote(r) {
   if (!r.remembered && !r.unremembered) return null;
-  const room = `it keeps the latest ${fmt.number(MISSING_LIMITS[r.via === 'spotify' ? 'spotify' : 'ai'])}${r.via === 'spotify' ? ' from Spotify' : ''} for each server`;
+  const room = r.full
+    ? `it keeps the latest ${fmt.number(MISSING_LIMITS[r.via === 'spotify' ? 'spotify' : 'ai'])}${r.via === 'spotify' ? ' from Spotify' : ''} for each server`
+    : 'this browser couldn’t keep more';
   const text = !r.unremembered
     ? `${r.remembered === 1 ? 'It’s' : 'They’re'} on Missing tracks now, to go and find. `
     : r.remembered

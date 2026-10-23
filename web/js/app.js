@@ -326,9 +326,14 @@ function boot() {
   });
   // A file dropped on the page isn't opened in its place, which would leave
   // the player (and stop what's playing): only From Spotify's guide takes
-  // files dropped (spotifyimport.js).
+  // files dropped (spotifyimport.js), and anywhere else says it can't.
   const files = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
-  for (const type of ['dragover', 'drop']) window.addEventListener(type, (e) => files(e) && e.preventDefault());
+  window.addEventListener('dragover', (e) => {
+    if (!files(e) || e.defaultPrevented) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'none';
+  });
+  window.addEventListener('drop', (e) => files(e) && e.preventDefault());
 }
 
 boot();

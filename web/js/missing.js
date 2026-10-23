@@ -153,7 +153,7 @@ function listId(name) {
   for (const ch of String(name || '').trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
   return x.toString(36);
 }
-const LISTS = 100;
+const LISTS = 20;
 
 // What an AI playlist found missing (and found there), for the request
 // `prompt`: new ones are added, ones seen before counted again (once a
@@ -171,12 +171,15 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
   if (!src) return { kept: 0, of: 0, keys: [] };
   const now = Math.round(Date.now() / 1000);
   const here = (m) => sameLibrary(m, src);
-  const foundKeys = new Set([
+  const inLibrary = new Set([
     ...(seen.songs || []).map((x) => keyOf({ kind: 'track', artist: x.artist || '', title: x.title || '' })),
     ...(seen.artists || []).map((a) => keyOf({ kind: 'artist', artist: a, title: '' })),
-    ...drop.map((m) => keyOf({ kind: m.kind, artist: m.artist || '', title: m.kind === 'track' ? m.title || '' : '' })),
   ]);
-  const list = load().filter((m) => !(here(m) && foundKeys.has(keyOf(m))));
+  // (What MusicBrainz doesn't know stays where it came from a Spotify
+  // playlist: Spotify has it, so it's real.)
+  const notReal = new Set(drop.map((m) => keyOf({ kind: m.kind, artist: m.artist || '', title: m.kind === 'track' ? m.title || '' : '' })));
+  const gone = (m) => here(m) && (inLibrary.has(keyOf(m)) || (notReal.has(keyOf(m)) && m.via !== 'spotify'));
+  const list = load().filter((m) => !gone(m));
   const index = new Map();
   for (const m of list) if (here(m)) index.set(keyOf(m), m);
   const noted = new Set();
@@ -195,7 +198,9 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
       if ((have.via || '') !== via) {
         have.times = 1;
         delete have.lists;
+        // (One from Spotify that an AI suggests now is still a real song.)
         if (via === 'spotify') have.lists = [listId(prompt)];
+        else have.mb = 'real';
       } else if (via === 'spotify') {
         // (Kept before 0.22.0: the playlist it was last in.)
         const lists = Array.isArray(have.lists) ? have.lists : [listId(have.prompt)];
@@ -239,6 +244,14 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
 export function keptCounter(src = app.source) {
   const kept = new Set(src ? load().filter((m) => sameLibrary(m, src)).map(keyOf) : []);
   return (keys = []) => keys.filter((k) => kept.has(k)).length;
+}
+
+// Whether this server's list of those from `via` is as long as it's kept
+// (MISSING_LIMITS): one that isn't on it was pushed off, rather than the
+// device out of room for it.
+export function missingFull(via = '', src = app.source) {
+  const kind = sourceOf({ via });
+  return !!src && load().filter((m) => sameServer(m, src) && sourceOf(m) === kind).length >= MISSING_LIMITS[kind];
 }
 
 export function forgetMissing(entry) {
