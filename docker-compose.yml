@@ -27,11 +27,13 @@
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends.
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
 #                       here, so they follow it to every browser it signs in on.
-#   SPOTIFY_IMPORT      "true": Search › From Spotify makes a playlist from a
-#                       Spotify playlist's link, with the tracks you have. Off
-#                       unless set: it reads Spotify's public page for the
-#                       playlist (the first 100 tracks), which Spotify's terms
-#                       don't allow, and which can stop working.
+#   SPOTIFY_IMPORT      "true": Search › From Spotify can also make a playlist
+#                       from a public Spotify playlist's link, with the tracks
+#                       you have. Off unless set: it reads Spotify's public
+#                       page for the playlist (the first 100 tracks), which
+#                       Spotify's terms don't allow, and which can stop
+#                       working. (Playlists from Spotify's download of your
+#                       data need nothing set.)
 #   DEBUG               "true" writes extra detail to the log, with tokens and
 #                       keys removed. Turn it off when you're done.
 #

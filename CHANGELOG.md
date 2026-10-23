@@ -3,6 +3,27 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.22.0 - 2026-10-23
+
+### New
+
+- **Your Spotify playlists, from Spotify's download of your data**
+  (Search › From Spotify): every playlist you've made, however long, and
+  your Liked Songs, with a free Spotify account and nothing set on the
+  container. Spotify only lets other apps read your playlists through its
+  developer programme (Premium, and five people at most), so the app
+  walks you through asking Spotify for your data instead, and choosing
+  just its playlist files: `Playlist1.json` (and `Playlist2.json` and so
+  on) and `YourLibrary.json`. Only files with those names are opened, in
+  the browser; any other, the ZIP included, is turned away unread, as the
+  rest of the download is your personal details. Of them, only playlist
+  names and each track's title, artist and album are kept. You choose
+  which playlists to make; those found in your library make them, and
+  what isn't goes on Missing tracks, as before.
+- The link import (`SPOTIFY_IMPORT`) is still there where it's on, as
+  **Use a link instead**, for one public playlist straight away (its
+  first 100 tracks).
+
 ## 0.21.0 - 2026-10-23
 
 ### New

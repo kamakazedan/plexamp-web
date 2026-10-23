@@ -162,8 +162,8 @@ function choosePlaylists(list, have) {
 }
 
 // Makes each, saying how it goes, and then what was found. `remember`:
-// what isn't found goes on Missing tracks ({ via, from: what it was in }),
-// and what is comes off it.
+// what isn't found goes on Missing tracks ({ via, from: what it was in }, or
+// each job's own `from`, or its title), and what is comes off it.
 export function runImport(jobs, { remember = null } = {}) {
   const ctrl = new AbortController();
   const status = h('p.ask-message.import-status', { role: 'status' }, 'Looking for the tracks…');
@@ -198,7 +198,7 @@ export function runImport(jobs, { remember = null } = {}) {
         if (remember) {
           const gone = new Set(r.missing);
           const song = (e) => ({ kind: 'track', artist: e.artist || e.albumArtist || '', title: e.title });
-          noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.title, { via: remember.via });
+          noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, { via: remember.via });
           r.remembered = r.missing.length;
         }
         done.push({ job, ...r });
