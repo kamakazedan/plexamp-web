@@ -38,8 +38,8 @@ you're running is shown in **Settings › About**.
   have come in, when there wasn't room for them all: its spreadsheet has
   them all.
 - A song from Spotify on Missing tracks counts once for each playlist
-  it's in, however often a playlist is imported (it counted each time it
-  was imported), and a song from one place that comes from another (from
+  it's in (up to "20+"), however often a playlist is imported (it counted
+  each time it was imported), and a song from one place that comes from another (from
   a playlist, then suggested by an AI) is counted afresh there.
 - Fixed: a song on Missing tracks from a Spotify playlist was taken off
   when an AI playlist suggested it too and MusicBrainz didn't know it,

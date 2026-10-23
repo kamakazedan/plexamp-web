@@ -186,8 +186,13 @@ export function runImport(jobs, { remember = null } = {}) {
   (async () => {
     const done = [];
     // Each row as shown, and how many of its it said were on Missing tracks
-    // (a row is drawn again only when that changes, so one opened stays so).
+    // (a row is drawn again only when that changes, so one opened stays so);
+    // the songs a later playlist found in the library (by key: the last
+    // playlist that did), which aren't missing after all; whether the
+    // browser couldn't keep the list.
     const shown = [];
+    const foundAt = new Map();
+    let unsaved = false;
     for (const [k, job] of jobs.entries()) {
       if (ctrl.signal.aborted) break;
       const lead = jobs.length > 1 ? `${fmt.number(k + 1)} of ${fmt.number(jobs.length)}, “${job.title}”: ` : '';
@@ -201,11 +206,14 @@ export function runImport(jobs, { remember = null } = {}) {
         if (remember) {
           const gone = new Set(r.missing);
           const song = (e) => ({ kind: 'track', artist: e.artist || e.albumArtist || '', title: e.title });
-          const { keys } = noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, {
+          const { keys, found, saved } = noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, {
             via: remember.via,
           });
+          for (const key of found) foundAt.set(key, k);
+          if (!saved) unsaved = true;
           r.keys = keys;
           r.via = remember.via;
+          r.at = k;
         }
         done.push({ job, ...r });
         if (r.playlist) made += 1;
@@ -215,19 +223,21 @@ export function runImport(jobs, { remember = null } = {}) {
       }
       // How many of each's are on Missing tracks now: a later playlist's
       // can push an earlier one's out, where there isn't room for all (or
-      // none goes on, with the device out of room).
+      // none goes on, with the browser out of room).
       if (remember) {
         const count = keptCounter();
         const full = missingFull(remember.via);
         for (const d of done) {
           if (!d.keys) continue;
-          d.remembered = count(d.keys);
-          d.unremembered = d.keys.length - d.remembered;
+          const still = d.keys.filter((key) => !(foundAt.get(key) > d.at));
+          d.remembered = count(still);
+          d.unremembered = still.length - d.remembered;
           d.full = full;
+          d.unsaved = unsaved;
         }
       }
       for (const [i, d] of done.entries()) {
-        const said = `${d.remembered}|${d.unremembered && d.full}`;
+        const said = `${d.remembered}|${d.unremembered ? `${d.full}|${d.unsaved}` : ''}`;
         if (shown[i]?.said === said) continue;
         const row = resultRow(d);
         if (shown[i]) {
@@ -257,14 +267,19 @@ const SHOWN = 200;
 // many as there's room for: the spreadsheet has them all).
 function rememberedNote(r) {
   if (!r.remembered && !r.unremembered) return null;
-  const room = r.full
-    ? `it keeps the latest ${fmt.number(MISSING_LIMITS[r.via === 'spotify' ? 'spotify' : 'ai'])}${r.via === 'spotify' ? ' from Spotify' : ''} for each server`
-    : 'this browser couldn’t keep more';
+  // Why the rest aren't: the most it keeps, or the browser out of room.
+  const why = r.full
+    ? ` (it keeps the latest ${fmt.number(MISSING_LIMITS[r.via === 'spotify' ? 'spotify' : 'ai'])}${r.via === 'spotify' ? ' from Spotify' : ''} for each server)`
+    : r.unsaved
+      ? ' (this browser couldn’t keep more)'
+      : '';
   const text = !r.unremembered
     ? `${r.remembered === 1 ? 'It’s' : 'They’re'} on Missing tracks now, to go and find. `
     : r.remembered
-      ? `${fmt.number(r.remembered)} of them ${r.remembered === 1 ? 'is' : 'are'} on Missing tracks now, to go and find (${room}): the spreadsheet has them all. `
-      : `There isn’t room for them on Missing tracks (${room}): the spreadsheet has them all. `;
+      ? `${fmt.number(r.remembered)} of them ${r.remembered === 1 ? 'is' : 'are'} on Missing tracks now, to go and find${why}: the spreadsheet has them all. `
+      : why
+        ? `There isn’t room for them on Missing tracks${why}: the spreadsheet has them all. `
+        : 'They aren’t on Missing tracks now: the spreadsheet has them all. ';
   return h('p.import-remembered', null, text, r.remembered ? h('button.link-btn', { type: 'button', onclick: () => navigate('/settings/missing') }, 'See Missing tracks') : null);
 }
 

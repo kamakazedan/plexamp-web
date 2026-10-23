@@ -25,13 +25,16 @@ export const store = {
       return fallback;
     }
   },
+  // Whether it was kept.
   set(key, value) {
-    if (frozen) return;
+    if (frozen) return false;
     try {
       if (value === null || value === undefined) localStorage.removeItem(`pw.${key}`);
       else localStorage.setItem(`pw.${key}`, JSON.stringify(value));
+      return true;
     } catch {
       /* storage unavailable (private mode, quota): carry on without it */
+      return false;
     }
   },
   clear(keepKeys = []) {

@@ -17,6 +17,7 @@ import {
   copyText,
   mbOn,
   mbWhere,
+  MISSING_LISTS,
 } from '../missing.js';
 import { aiSettings } from '../ai.js';
 
@@ -56,7 +57,7 @@ export function missingTracksView({ el, onDispose }) {
     // playlist it was in.
     const told = (m) =>
       m.via === 'spotify'
-        ? `${m.times > 1 ? `in ${m.times} playlists from Spotify, last “${m.prompt}”` : `in “${m.prompt}” from Spotify`}, ${fmt.ago(m.last)}`
+        ? `${m.times > 1 ? `in ${m.lists?.length >= MISSING_LISTS ? `${MISSING_LISTS}+` : m.times} playlists from Spotify, last “${m.prompt}”` : `in “${m.prompt}” from Spotify`}, ${fmt.ago(m.last)}`
         : `${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}`;
 
     actions.replaceChildren(

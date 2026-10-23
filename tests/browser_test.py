@@ -5225,14 +5225,14 @@ with sync_playwright() as pw:
             m.clearMissing();
             m.noteMissing([{ kind: 'track', artist: 'Some Artist', title: 'Suggested Song' }], { songs: [], artists: [] }, 'an AI playlist');
             const many = Array.from({ length: 1200 }, (_, i) => ({ kind: 'track', artist: 'Band ' + i, title: 'Song ' + i }));
-            const { keys, ...r } = m.noteMissing([...many, many[0]], { songs: [], artists: [] }, 'Big', { via: 'spotify' });
+            const { kept, of, keys, saved } = m.noteMissing([...many, many[0]], { songs: [], artists: [] }, 'Big', { via: 'spotify' });
             const list = m.missingList();
-            const out = { r, keys: keys.length, spotify: list.filter((x) => x.via === 'spotify').length, ai: list.filter((x) => !x.via).length };
+            const out = { r: { kept, of, saved }, keys: keys.length, spotify: list.filter((x) => x.via === 'spotify').length, ai: list.filter((x) => !x.via).length };
             m.clearMissing();
             return out;
         })""")
         check('spotify: Missing tracks keeps the latest 1,000 from Spotify, apart from what AI playlists suggested, saying how many it kept',
-              caps == {'r': {'kept': 1000, 'of': 1200}, 'keys': 1200, 'spotify': 1000, 'ai': 1}, str(caps))
+              caps == {'r': {'kept': 1000, 'of': 1200, 'saved': True}, 'keys': 1200, 'spotify': 1000, 'ai': 1}, str(caps))
         # In one import, a later playlist's can push an earlier one's off
         # (here with room for 3): each playlist's row says how many of its
         # are on Missing tracks as it is now. And one with none of its tracks
@@ -5279,6 +5279,38 @@ with sync_playwright() as pw:
         page.wait_for_timeout(400)
         check('spotify: ...and where the browser can\'t keep them, it says that, not that Missing tracks is full',
               'There isn’t room for them on Missing tracks (this browser couldn’t keep more)' in no_room, no_room)
+        # A song a later playlist finds (its lookup failed the first time)
+        # isn't missing after all: the first playlist's row doesn't count it.
+        tries = []
+        def flaky(route):
+            tries.append(route.request.url)
+            if len(tries) == 1:
+                route.fulfill(status=500, body='')
+            else:
+                route.continue_()
+        cinder = lambda url: '/hubs/search' in url and re.search(r'[?&]query=Cinder(&|$)', url) is not None
+        page.route(cinder, flaky)
+        js(page, """() => Promise.all([import('./js/missing.js'), import('./js/views/playlistfiles.js')]).then(([m, pf]) => {
+            m.clearMissing();
+            const cinder = { title: 'Cinder', artist: 'Kilo Meridian', albumArtist: '', album: 'Crate Digger' };
+            pf.runImport([['Not found first', [cinder]], ['Found later', [cinder]]].map(([title, tracks]) => ({ p: { title, tracks }, title, from: title })), { remember: { via: 'spotify' } });
+        })""")
+        page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        page.unroute(cinder)
+        later = [r.inner_text() for r in page.locator('.import-result').all()]
+        later_list = js(page, """() => import('./js/missing.js').then(async (m) => {
+            const out = m.missingList().map((x) => x.title);
+            m.clearMissing();
+            const { app } = await import('./js/state.js');
+            app.server.forgetPlaylists();
+            for (const p of await app.server.playlists()) if (p.title === 'Found later') await app.server.deletePlaylist(p.ratingKey);
+            return out;
+        })""")
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
+        check('spotify: ...a song a later playlist finds isn\'t counted as missing from an earlier one\'s (nor its absence put down to room)',
+              len(tries) >= 2 and len(later) == 2 and 'Not found (1)' in later[0] and 'Missing tracks' not in later[0] and 'All 1 track found' in later[1] and later_list == [],
+              f'{len(tries)} {later} {later_list}')
         # Songs from Spotify are real: an AI's suggestion MusicBrainz doesn't
         # know doesn't take one off, and one an AI suggests stays real.
         real = js(page, """() => import('./js/missing.js').then((m) => {
@@ -5306,11 +5338,22 @@ with sync_playwright() as pw:
             for (const p of ['Road songs', 'Road songs', 'Old favourites', 'Road songs']) { m.noteMissing(s, { songs: [], artists: [] }, p, { via: 'spotify' }); out.push(times()); }
             m.noteMissing(s, { songs: [], artists: [] }, 'an AI playlist');
             out.push(times(), m.missingList()[0].via || '');
+            // In more playlists than are counted: "20+", and no more each
+            // time they're imported again.
             m.clearMissing();
+            const many = Array.from({ length: 25 }, (_, i) => 'Playlist ' + i);
+            for (const round of [1, 2]) {
+                for (const p of many) m.noteMissing(s, { songs: [], artists: [] }, p, { via: 'spotify' });
+                out.push(times());
+            }
             return out;
         })""")
-        check('spotify: ...a song from Spotify counts once for each playlist it\'s in, however often imported (suggested by an AI after, it\'s a suggestion)',
-              counts == [1, 1, 2, 2, 1, ''], str(counts))
+        page.goto(APP + '#/settings/missing')
+        page.wait_for_selector('.missing-row')
+        twenty = page.locator('.missing-row').first.inner_text()
+        js(page, "() => import('./js/missing.js').then((m) => m.clearMissing())")
+        check('spotify: ...a song from Spotify counts once for each playlist it\'s in, however often imported, up to "20+" (suggested by an AI after, it\'s a suggestion)',
+              counts == [1, 1, 2, 2, 1, '', 20, 20] and 'in 20+ playlists from Spotify' in twenty, f'{counts} {twenty!r}')
         js(page, "() => import('./js/missing.js').then((m) => m.clearMissing?.())")
         page.goto(APP + '#/search')
         page.wait_for_selector('.spotify-row')

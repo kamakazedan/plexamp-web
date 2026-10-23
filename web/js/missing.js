@@ -36,9 +36,11 @@ function load() {
   return Array.isArray(list) ? list.filter((m) => m && (m.kind === 'track' || m.kind === 'artist') && typeof m.artist === 'string' && m.mb !== 'unknown' && m.mb !== 'album') : [];
 }
 
+// Whether it was kept (the browser may be out of room).
 function save(list) {
-  store.set(KEY, list);
+  const kept = store.set(KEY, list);
   emit('missing', missingCount());
+  return kept;
 }
 
 {
@@ -146,14 +148,14 @@ function trim(list) {
 }
 
 // A Spotify playlist, by its name, in a few characters: a track's `lists`
-// count the playlists it was in (each once, however often it's imported)
-// without keeping their names.
+// count the playlists it was in (each once, however often it's imported,
+// up to MISSING_LISTS) without keeping their names.
 function listId(name) {
   let x = 0x811c9dc5;
   for (const ch of String(name || '').trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
   return x.toString(36);
 }
-const LISTS = 20;
+export const MISSING_LISTS = 20;
 
 // What an AI playlist found missing (and found there), for the request
 // `prompt`: new ones are added, ones seen before counted again (once a
@@ -165,10 +167,12 @@ const LISTS = 20;
 // each playlist they're in. One from somewhere else now is counted afresh.
 // Returns how many of them there are ({ of }), and how many are on the list
 // now ({ kept }: all, unless there wasn't room), with their `keys`, to count
-// again later (keptCounter: a later import can push them out).
+// again later (keptCounter: a later import can push them out); the keys of
+// those found in the library (`found`), and whether the list was kept
+// (`saved`: the browser may be out of room).
 export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [], via = '' } = {}) {
   const src = app.source;
-  if (!src) return { kept: 0, of: 0, keys: [] };
+  if (!src) return { kept: 0, of: 0, keys: [], found: [], saved: false };
   const now = Math.round(Date.now() / 1000);
   const here = (m) => sameLibrary(m, src);
   const inLibrary = new Set([
@@ -203,12 +207,14 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
         else have.mb = 'real';
       } else if (via === 'spotify') {
         // (Kept before 0.22.0: the playlist it was last in.)
+        // At most MISSING_LISTS: past that, it's in "20+" playlists, and
+        // counted no further (so imported again, it isn't counted again).
         const lists = Array.isArray(have.lists) ? have.lists : [listId(have.prompt)];
-        if (!lists.includes(listId(prompt))) {
+        if (!lists.includes(listId(prompt)) && lists.length < MISSING_LISTS) {
           lists.push(listId(prompt));
           have.times = (have.times || 1) + 1;
         }
-        have.lists = lists.slice(-LISTS);
+        have.lists = lists;
       } else {
         have.times = (have.times || 1) + 1;
       }
@@ -233,10 +239,10 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
     }
   }
   const moved = new Set(noting);
-  save(trim([...list.filter((m) => !moved.has(m)), ...noting]));
+  const saved = save(trim([...list.filter((m) => !moved.has(m)), ...noting]));
   // (What's kept, as read back: a browser out of room keeps nothing new.)
   const keys = [...noted];
-  return { kept: keptCounter(src)(keys), of: keys.length, keys };
+  return { kept: keptCounter(src)(keys), of: keys.length, keys, found: [...inLibrary], saved };
 }
 
 // How many of noteMissing's `keys` are on this library's list now: read
