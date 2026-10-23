@@ -7,27 +7,58 @@
 //
 // The track playing comes first: loading ahead only uses the connection
 // while it has what it needs (player.roomToFetch), checked all the while,
-// and waits (reading nothing more) whenever it needs more. One track loads
-// at a time, in queue order, asking the browser to put it after anything
-// else. The next track coming in as it plays (the browser streams it, as
-// it does without this) isn't loaded ahead as well.
+// and waits (reading nothing more) whenever it needs more. Until it has
+// all it'll need (loaded to its end, or played from memory), loading ahead
+// is held back too: small parts, each followed by a rest, so it takes half
+// of what the connection gives at most, and leaves the track playing at
+// least twice its bitrate (see restAfter). After that it goes as fast as
+// the connection allows. One track loads at a time, in queue order, asking
+// the browser to put it after anything else. The next track coming in as
+// it plays (the browser streams it, as it does without this) isn't loaded
+// ahead as well.
 //
 // What's loaded is only kept while it's wanted: it goes once its track has
-// played, when the queue moves on without it, on another server, or on
-// signing out, and there's never more than LOAD_AHEAD_BYTES of it. The app
-// doesn't save it anywhere, and it isn't put in the browser's cache.
+// played (none are kept after), when the queue moves on without it, on
+// another server, or on signing out, and there's never more than
+// LOAD_AHEAD_BYTES of it. The app doesn't save it anywhere, and it isn't
+// put in the browser's cache.
 import { app, on } from './state.js';
 import { playbackId, canPlayHlsNatively } from './plex.js';
 
-export const LOAD_AHEAD_MAX = 3; // tracks
-export const LOAD_AHEAD_BYTES = 300 * 1024 * 1024;
+export const LOAD_AHEAD_MAX = 10; // tracks
+// What this browser keeps at most: as much as the device's memory allows,
+// where the browser says how much it has (Chrome and Edge do, but only
+// over HTTPS: 64 MB a gigabyte, 128 to 512 MB), or else 384 MB, and 256 MB
+// on a phone or tablet (which may have little).
+export const LOAD_AHEAD_BYTES = (() => {
+  const gb = Number(globalThis.navigator?.deviceMemory) || 0;
+  if (gb) return Math.min(512, Math.max(128, gb * 64)) * 1024 * 1024;
+  const touch = !!globalThis.matchMedia?.('(pointer: coarse)').matches;
+  return (touch ? 256 : 384) * 1024 * 1024;
+})();
 const LONG_FORM_MS = 20 * 60000; // long mixes play as they come in (and what's after them waits)
 const RETRY_AFTER = 60000; // a track that didn't load is tried again after this long
 const CHECK_EVERY = 3000;
 const WAIT_EVERY = 500; // waiting for the connection, it's looked at this often
 const GETTING_GOING = 3; // seconds a download has before how fast it goes counts
-const FILE_PART = 512 * 1024; // a file loads this much at a time
+const FILE_PART = 1024 * 1024; // a file loads this much at a time...
+const FILE_PART_HELD = 128 * 1024; // ...or this, held back (see above)
 const RESUMES = 3; // a part of a file is asked for again this many times
+// Held back: what's taken of what the connection gives a part, at most, and
+// how many times its bitrate is left for the track playing, at least. (A
+// connection slower than that waits this long before trying again.)
+const SHARE = 0.5;
+const HEADROOM = 2;
+const SLOW_REST = 30000;
+
+// How long to rest after a part of `bytes` that took `ms`, held back, with
+// the track playing at `kbps`.
+export function restAfter(bytes, ms, kbps) {
+  const speed = (bytes / Math.max(ms, 1)) * 1000; // bytes a second
+  const allowed = Math.min(speed * SHARE, speed - ((kbps * 1000) / 8) * HEADROOM);
+  if (!(allowed > 0)) return SLOW_REST;
+  return Math.min(SLOW_REST, Math.max(0, (bytes / allowed) * 1000 - ms));
+}
 
 // The lines of a playlist that name what it lists.
 const listed = (text) =>
@@ -50,9 +81,22 @@ export class Prefetcher {
     on('settings', () => this.plan());
     on('source', (change) => this.sourceChanged(change));
     on('signout', () => this.clear());
-    // (And once a track's on, playing or paused: what's next can start.)
-    for (const type of ['queue', 'track', 'mode']) player.addEventListener(type, () => this.plan());
-    player.addEventListener('state', () => player.state !== 'loading' && !this.busy && this.pump());
+    // The queue, the track or the order changed: looked at once the player
+    // has finished with it. (A new queue comes a moment before the track to
+    // play from it: what's after the track playing until then is any of it.)
+    let soon = false;
+    const later = () => {
+      if (soon) return;
+      soon = true;
+      queueMicrotask(() => {
+        soon = false;
+        this.plan();
+      });
+    };
+    for (const type of ['queue', 'track', 'mode']) player.addEventListener(type, later);
+    // (And once a track's on, playing or paused: what played from memory
+    // before it goes, and what's next can start.)
+    player.addEventListener('state', () => player.state !== 'loading' && this.plan());
   }
 
   get count() {
@@ -101,11 +145,15 @@ export class Prefetcher {
 
   // (How fast it's gone while it's been loading: not counting the time
   // it's waited for the connection, which the track playing has to itself
-  // by the end. Just started, it's on time if it can go on now.)
+  // by the end, nor its rests once it's no longer held back. While it is,
+  // they go on, so they count. Just started, it's on time if it can go on
+  // now.)
   onTime(e, left) {
     if (!Number.isFinite(left)) return true;
     const now = performance.now();
-    const secs = (now - e.started - e.waited - (e.waitingSince ? now - e.waitingSince : 0)) / 1000;
+    const since = (t) => (t ? now - t : 0);
+    const rests = this.player.aheadUnlimited() ? e.rested + since(e.restingSince) : 0;
+    const secs = (now - e.started - e.waited - since(e.waitingSince) - rests) / 1000;
     if (secs < GETTING_GOING) return this.player.roomToFetch();
     const rate = e.bytes / secs;
     return rate > 0 && Math.max(0, e.expected - e.bytes) / rate <= left;
@@ -133,11 +181,13 @@ export class Prefetcher {
     return e && e.state === 'done' && e.src.hls === src.hls && e.src.kbps === src.kbps ? e : null;
   }
 
-  // Lets go of what's no longer wanted (unless a deck plays it), and loads
+  // Lets go of what's no longer wanted (unless a deck plays it, or the
+  // player is loading its track: from it, maybe, once loaded), and loads
   // what's next.
   plan() {
     const want = new Set(this.wanted().map((t) => t.qid));
     const inUse = new Set(this.player.decks.map((d) => d.prefetched?.qid).filter((q) => q != null));
+    if (this.player.loadingQid != null) inUse.add(this.player.loadingQid);
     const streamed = this.streamed();
     for (const e of [...this.entries.values()]) {
       if (inUse.has(e.qid)) continue;
@@ -184,6 +234,8 @@ export class Prefetcher {
     e.started = performance.now();
     e.waited = 0; // ms waiting for the connection (see room)
     e.waitingSince = 0;
+    e.rested = 0; // ms resting, held back (see pace)
+    e.restingSince = 0;
     e.expected = this.sizeOf(track, src);
     // A file's address for an audio element: in memory.
     e.objectUrl = () => (e.url ||= URL.createObjectURL(e.blob));
@@ -224,16 +276,35 @@ export class Prefetcher {
     if (e.ctrl.signal.aborted) throw stopped();
   }
 
+  // Held back (the track playing still loading): a rest after a part (as
+  // long as restAfter says, or until it's no longer held back).
+  async pace(e, bytes, ms) {
+    if (!bytes || this.player.aheadUnlimited()) return;
+    const until = performance.now() + restAfter(bytes, ms, this.player.playingBitrate());
+    e.restingSince = performance.now();
+    try {
+      while (!e.ctrl.signal.aborted && performance.now() < until && !this.player.aheadUnlimited()) {
+        await new Promise((r) => setTimeout(r, Math.min(WAIT_EVERY, Math.max(0, until - performance.now()))));
+      }
+    } finally {
+      e.rested += performance.now() - e.restingSince;
+      e.restingSince = 0;
+    }
+    if (e.ctrl.signal.aborted) throw stopped();
+  }
+
   request(e, url, headers) {
     return fetch(url, { signal: e.ctrl.signal, cache: 'no-store', credentials: 'omit', priority: 'low', ...(headers ? { headers } : {}) });
   }
 
   async get(e, url, kind) {
     await this.room(e);
+    const t = performance.now();
     const res = await this.request(e, url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    if (kind === 'text') return { body: await res.text(), url: res.url || url };
-    return { body: await res.arrayBuffer(), url: res.url || url };
+    const got = kind === 'text' ? { body: await res.text(), url: res.url || url } : { body: await res.arrayBuffer(), url: res.url || url };
+    await this.pace(e, kind === 'text' ? got.body.length : got.body.byteLength, performance.now() - t);
+    return got;
   }
 
   over() {
@@ -251,10 +322,12 @@ export class Prefetcher {
     for (let tries = 0; ; ) {
       const at = e.bytes;
       await this.room(e);
+      const part = this.player.aheadUnlimited() ? FILE_PART : FILE_PART_HELD;
+      const t = performance.now();
       let res;
       let body = null;
       try {
-        res = await this.request(e, e.src.url, { Range: `bytes=${at}-${at + FILE_PART - 1}` });
+        res = await this.request(e, e.src.url, { Range: `bytes=${at}-${at + part - 1}` });
         if (res.status === 206) body = new Uint8Array(await res.arrayBuffer());
       } catch (err) {
         if (e.ctrl.signal.aborted || ++tries > RESUMES) throw err;
@@ -276,8 +349,9 @@ export class Prefetcher {
         e.bytes += body.byteLength;
         tries = 0;
         this.over();
-        if (size ? Number(to) + 1 >= Number(size) : body.byteLength < FILE_PART) break;
+        if (size ? Number(to) + 1 >= Number(size) : body.byteLength < part) break;
         if (!body.byteLength) throw new Error('Nothing came back.');
+        await this.pace(e, body.byteLength, performance.now() - t);
         continue;
       }
       if (at > 0 || !res.body) throw new Error('The file came back whole, part-way.');
@@ -288,11 +362,13 @@ export class Prefetcher {
       try {
         for (;;) {
           await this.room(e);
+          const t0 = performance.now();
           const { done, value } = await reader.read();
           if (done) break;
           chunks.push(value);
           e.bytes += value.byteLength;
           this.over();
+          await this.pace(e, value.byteLength, performance.now() - t0);
         }
       } catch (err) {
         reader.cancel().catch(() => {});

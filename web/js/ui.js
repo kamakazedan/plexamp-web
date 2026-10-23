@@ -841,9 +841,11 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
       loading = false;
     }
     // Keep going while the end of the list is on screen. Not on a page that
-    // has been put aside: everything off screen measures as on screen, and
-    // the whole library would load into a page nobody is looking at.
-    if (!done && sentinel.isConnected && sentinel.getBoundingClientRect().top < window.innerHeight + 600) load();
+    // has been put aside, or for a list that's hidden (one a search box is
+    // showing what matches in place of): everything not shown measures as on
+    // screen, and the whole library would load into a list nobody can see.
+    // (Shown again, it carries on as it comes into view.)
+    if (!done && sentinel.getClientRects().length && sentinel.getBoundingClientRect().top < window.innerHeight + 600) load();
   }
 
   function finish() {

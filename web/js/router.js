@@ -121,6 +121,16 @@ function setHistory(method, state, hash) {
   }
 }
 
+// Before 0.20.0 what was typed on a page was kept in the browser's record
+// of it too: it goes from any the tab comes back to (see keepState).
+function forgetTyped(st) {
+  if (!st || typeof st !== 'object' || !Object.prototype.hasOwnProperty.call(st, 'saved')) return st;
+  const rest = { ...st };
+  delete rest.saved;
+  setHistory('replaceState', rest, location.hash);
+  return rest;
+}
+
 function pushEntry(tab, hash) {
   const s = stackOf(tab);
   const k = newKey();
@@ -132,11 +142,15 @@ function pushEntry(tab, hash) {
   return k;
 }
 
-function replaceEntry(tab, hash) {
+// (`keep`: what the page on screen wanted back goes to the one taking its
+// place: see navigate.)
+function replaceEntry(tab, hash, keep = false) {
   const s = stackOf(tab);
   const k = newKey();
   if (s.top < 0) s.top = 0;
-  s.entries[s.top] = { k, hash };
+  const was = s.entries[s.top];
+  const saved = keep && was?.k === currentKey ? was.saved : null;
+  s.entries[s.top] = saved ? { k, hash, saved } : { k, hash };
   setHistory('replaceState', { k, t: tab, d: s.top }, hash);
   save();
   return k;
@@ -181,7 +195,7 @@ export function startRouter({ mainEl, changed }) {
     navigate(a.getAttribute('href').slice(1));
   });
 
-  const st = history.state || {};
+  const st = forgetTyped(history.state) || {};
   const saved = loadSaved();
   // A reload: the history and the stacks are as they were (unless they're
   // from a version of the app with other tabs).
@@ -209,10 +223,13 @@ export function startRouter({ mainEl, changed }) {
 
 // ---------- moving around ----------
 
-export function navigate(path, { replace = false } = {}) {
+// `keep` (with `replace`): the new page is the one on screen another way
+// (a list sorted differently, or with a filter fewer), so what it wanted
+// back (keepState: what's typed in its search box, say) carries over.
+export function navigate(path, { replace = false, keep = false } = {}) {
   if (overlays.length) {
     // Close sheets/overlays first, then navigate from the page underneath.
-    closeOverlays().then(() => navigate(path, { replace }));
+    closeOverlays().then(() => navigate(path, { replace, keep }));
     return;
   }
   if (currentKey) scrolls.set(currentKey, window.scrollY);
@@ -237,12 +254,15 @@ export function navigate(path, { replace = false } = {}) {
     switchTab(tab, { push: hash });
     return;
   }
-  render(replace ? replaceEntry(tab, hash) : pushEntry(tab, hash), false);
+  render(replace ? replaceEntry(tab, hash, keep) : pushEntry(tab, hash), false);
 }
 
 // What a page wants back when it's shown again (what's being searched for,
-// say), kept with its place in this tab's history rather than in its
-// address: it stays out of the address bar and the browser's history list.
+// say), kept with its place in this tab's stacks (in the tab's own storage,
+// which signing out clears) rather than in its address or the browser's
+// record of the page: it stays out of the address bar and the browser's
+// history list, and none of it stays in the tab after signing out (no page
+// can clear the browser's record).
 // `key`: the page's own (its view's ctx.key); nothing's kept for a page
 // that isn't the one on screen any more.
 export function keepState(data, key) {
@@ -252,12 +272,11 @@ export function keepState(data, key) {
     top.saved = data;
     save();
   }
-  if (history.state?.k === currentKey) setHistory('replaceState', { ...history.state, saved: data }, location.hash);
 }
 
 function savedFor(k) {
   for (const s of Object.values(stacks)) for (const e of s.entries) if (e.k === k) return e.saved || null;
-  return history.state?.k === k ? history.state.saved || null : null;
+  return null;
 }
 
 // Update the URL without adding a history entry.
@@ -355,7 +374,7 @@ function switchTab(tab, { push = null } = {}) {
 }
 
 function onPop(e) {
-  const st = e.state || {};
+  const st = forgetTyped(e.state) || {};
   if (popHook) {
     popHook();
     return;

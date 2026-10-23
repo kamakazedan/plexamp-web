@@ -3,6 +3,52 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.20.0 - 2026-10-23
+
+### New
+
+- **Load ahead goes up to 10 tracks**, each choice saying about how much
+  memory it takes (as MP3 and FLAC, or at the bitrate tracks are converted
+  to), and it loads the next track to start with. Until the track playing
+  has all it needs, loading ahead is held back: small parts, each with a
+  rest, so it takes half the connection at most and leaves the track
+  playing at least twice its bitrate (on a connection too slow for that,
+  a small part every half a minute). Once it's all in, the next tracks
+  load as fast as the connection allows. A browser keeps up to 512 MB
+  (Chrome and Edge over HTTPS, by how much memory the device has;
+  otherwise 384 MB, or 256 MB on a phone or tablet), and none of a track
+  once it's played.
+- **Loudness levelling is on to start with**: louder tracks turned down to
+  match quieter ones, never up, and each device loads the next track
+  ahead. Both started off in 0.19.0, so where they're still off from then
+  (on a device, or in the settings kept for your account) they're turned
+  on, once; turn either off again in Settings › Playback.
+- **Searching within a list shows what matches as you type**: "strokes"
+  in Artists shows The Strokes, with no "In the name" to choose first. A
+  matching genre, style or mood is still offered above it.
+
+### Fixed
+
+- **A track loaded ahead plays from memory, as it is, when you skip to
+  it.** Pressing Next (or choosing the next track in Up next) well before
+  the change of track, or at any change of track with gapless playback
+  and crossfades both off, what was loaded for it was let go just as it
+  was about to play, and it played converted by the server instead (a
+  converted track, from the network). In 0.19.0 that was only with Load
+  ahead turned on.
+- **Plex hears that a track stopped when you play something else in its
+  place** (an album, a playlist, a mix). 0.19.0 said nothing then, and
+  earlier versions said it of the wrong track, so Plex went on showing it
+  as playing for a while.
+- **Search's library lists no longer jump about as their counts load**:
+  each has its place from the start, and the counts are kept in the
+  browser (just the numbers, until you sign out), so they show at once
+  next time while your server is asked again.
+- **What you'd searched for no longer stays in the tab after signing
+  out.** It was kept with the browser's own history of the tab too, which
+  no page can clear. It's kept only in the tab's own storage now, which
+  signing out clears.
+
 ## 0.19.0 - 2026-10-22
 
 ### New

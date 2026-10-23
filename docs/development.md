@@ -29,6 +29,8 @@ sh docker/test-container.sh plexamp-web:test     # proxies, sign-in checks, logg
 sh tests/run-browser-tests.sh plexamp-web:test   # headless Chromium (needs Playwright)
 ```
 
+Most browser tests turn loudness levelling and Load ahead off as they sign in, as the app had them before 0.20.0. `APP_DEFAULTS=1 sh tests/run-browser-tests.sh plexamp-web:test` runs them all with the app's own settings instead: worth a run before a release.
+
 The version in `web/js/plex.js` (`APP_INFO`) must match the newest entry in [CHANGELOG.md](../CHANGELOG.md).
 
 ## How the code is laid out

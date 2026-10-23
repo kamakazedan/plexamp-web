@@ -19,8 +19,8 @@ export const DEFAULT_SETTINGS = {
   gapless: true,
   fades: 'smart', // crossfade between tracks: off | smart (where the music ends; not within albums) | always
   fadeLength: 5, // seconds
-  loudness: false, // loudness levelling: louder tracks turned down to match (player.js levelFor)
-  loadAhead: 0, // tracks loaded in full ahead, into memory (prefetch.js); 0: off (the next starts loading shortly before it's due)
+  loudness: true, // loudness levelling: louder tracks turned down to match (player.js levelFor)
+  loadAhead: 1, // tracks loaded in full ahead, into memory (prefetch.js); 0: off (the next starts loading shortly before it's due)
   quietEndings: 'quiet', // smart fades start over a quiet ending: off | soft | quiet | hushed (transitions.js)
   shareDevices: true, // your devices share what's playing; one plays (devices.js)
   reportPlays: true, // "Sync recent plays": tell Plex what's played
@@ -73,7 +73,7 @@ export const DEFAULT_SETTINGS = {
 
 // Settings kept by an earlier version, as they are now. (`version` is
 // what they were last saved by.)
-export const SETTINGS_VERSION = 2;
+export const SETTINGS_VERSION = 3;
 export function migrateSettings(s) {
   if (!(Number(s.version) >= 2)) {
     // 0.19.0: half stars went, and the favourite tick is the rating system
@@ -88,6 +88,12 @@ export function migrateSettings(s) {
       const layout = mine || layouts[layouts.length - 1]?.[1];
       s.home = layout ? { '*': layout } : {};
     }
+  }
+  if (!(Number(s.version) >= 3)) {
+    // 0.20.0: loudness levelling on, and the next track loaded ahead, to
+    // start with (0.19.0 had them off).
+    if (s.loudness === false) s.loudness = true;
+    if (s.loadAhead === 0) s.loadAhead = 1;
   }
   s.version = SETTINGS_VERSION;
   return s;

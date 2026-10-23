@@ -217,6 +217,9 @@ export class Deck {
   // bitrate; `prefetched`: the track, loaded ahead (played from memory).
   async load(url, isHls, { playback = null, startAt = 0, ahead = null, kbps = null, prefetched = null } = {}) {
     this.reset();
+    // (What was loaded ahead, let go of meanwhile: from the network, then,
+    // the same way.)
+    if (prefetched && !(isHls ? prefetched.data : prefetched.blob)) prefetched = null;
     const gen = this.gen;
     this.isHls = isHls;
     this.kbps = isHls ? kbps : null;
@@ -650,9 +653,11 @@ class Player extends EventTarget {
       try {
         await this.deck.load(src.url, src.hls, { playback, startAt: this.startingAt || 0, kbps: src.kbps, prefetched: pre });
       } catch (err) {
-        if (token === this.loadToken && err?.name !== 'AbortError') {
+        // (Stopped, as the deck was reset, with no other track loading
+        // since: nothing's loading now, either.)
+        if (token === this.loadToken) {
           this.loadingQid = null;
-          this.onError(err);
+          if (err?.name !== 'AbortError') this.onError(err);
         }
         return;
       }
@@ -817,12 +822,27 @@ class Player extends EventTarget {
     if (this.cast || this.routed || !this.deck.hasSource() || this.state === 'loading' || this.loadingQid != null) return false;
     const spare = this.spare;
     if (spare.loadingQid != null && !spare.prefetched) return false;
+    if (this.aheadUnlimited()) return true;
+    const el = this.audio;
+    const t = el.currentTime || 0;
+    return !this.deck.isHls && bufferedEnd(el, t) - t >= PRELOAD_AHEAD && el.networkState !== HTMLMediaElement.NETWORK_LOADING;
+  }
+
+  // Whether the track playing has all it'll need from the network (it plays
+  // from memory, or has loaded to its end): loading ahead goes as fast as
+  // the connection allows then. (Before, it's held back: see prefetch.js.)
+  aheadUnlimited() {
     if (this.deck.prefetched) return true;
     const el = this.audio;
     const t = el.currentTime || 0;
-    const ahead = bufferedEnd(el, t) - t;
-    if (this.duration > 0 && ahead >= this.duration - t - 0.5) return true;
-    return !this.deck.isHls && ahead >= PRELOAD_AHEAD && el.networkState !== HTMLMediaElement.NETWORK_LOADING;
+    return this.duration > 0 && bufferedEnd(el, t) - t >= this.duration - t - 0.5;
+  }
+
+  // The track playing's bitrate (kbps) as it comes in: its converted
+  // stream's, or its file's (a CD's, if Plex doesn't say).
+  playingBitrate() {
+    if (this.deck.isHls) return this.deck.kbps || 320;
+    return Number(this.current?.bitrate) || 1411;
   }
 
   // ---------- loudness levelling ----------
@@ -1740,13 +1760,16 @@ class Player extends EventTarget {
       list = [first, ...shuffleArray(list.filter((t) => t !== first))];
       start = 0;
     }
+    // What was playing ends here, as its own playback, while it's still the
+    // queue's (once the new queue is in, the track where it was is another).
+    this.endHere(this.current);
     this.shuffle = shuffle;
     this.queue = list;
     this.context = context;
     this.emit('queue');
     this.emit('mode');
     this.emit('started');
-    this.load(Math.min(start, list.length - 1));
+    this.load(Math.min(start, list.length - 1), { reportPrev: false });
   }
 
   playNext(tracks) {

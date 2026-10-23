@@ -3923,6 +3923,24 @@ body.bare #toasts {
   white-space: nowrap;
 }
 
+/* A count on its way: a bar of its own size, so nothing moves when it comes. */
+.browse-count.loading::before {
+  content: '';
+  display: inline-block;
+  width: 64px;
+  height: 0.75em;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  vertical-align: middle;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* A list the library doesn't have, the first time (gone the next). */
+.browse-tile.browse-none {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 /* ---------- ratings in track lists ---------- */
 
 .row-rating {

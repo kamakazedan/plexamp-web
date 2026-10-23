@@ -10,6 +10,8 @@ import { missingCount, mbOffered, mbWhere } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
+import { player } from '../player.js';
+import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES } from '../prefetch.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -350,12 +352,31 @@ const FADES = [
   ['off', 'Off', 'One track after another, as they are.'],
 ];
 const FADE_LENGTHS = [2, 3, 4, 5, 6, 8, 10, 12].map((v) => [v, `${v} seconds`]);
-const LOAD_AHEAD = [
-  [0, 'Off', 'Tracks load as they play: the next one starts loading shortly before it’s due (for a gapless change or a crossfade), once this one has loaded.'],
-  [1, '1 track', 'The next track is loaded in full as soon as this one has loaded.'],
-  [2, '2 tracks', 'The next two tracks are loaded in full, one after the other.'],
-  [3, '3 tracks', 'The next three tracks are loaded in full, one after the other. Uses the most memory.'],
-];
+// Load ahead's choices, each with about how much memory it takes: for
+// four-minute tracks, as Streaming quality has them come in (as they are:
+// MP3 at 320 kbps, or CD-quality FLAC at about 1,000 kbps; or converted).
+const MB_A_TRACK = (kbps) => (kbps * 1000 * 240) / 8 / 1e6;
+const mbText = (mb) => `${fmt.number(mb < 10 ? Math.round(mb * 10) / 10 : Math.round(mb))} MB`;
+const aboutMb = (mb) => `about ${mbText(mb)}`;
+export function loadAheadChoices(quality = app.settings.quality) {
+  const most = LOAD_AHEAD_BYTES / 1024 / 1024;
+  const kbps = quality === 'original' ? null : Number(quality) || 320;
+  const out = [[0, 'Off', 'Tracks load as they play: the next one starts loading shortly before it’s due (for a gapless change or a crossfade), once this one has loaded.']];
+  for (let n = 1; n <= LOAD_AHEAD_MAX; n++) {
+    const big = n * MB_A_TRACK(kbps || 1000);
+    const takes = kbps ? `${aboutMb(n * MB_A_TRACK(kbps))} at ${kbps} kbps` : `${aboutMb(n * MB_A_TRACK(320))} as MP3, ${mbText(big)} as FLAC`;
+    out.push([n, fmt.count(n, 'track', 'tracks'), `${n === 1 ? 'The next track' : `The next ${n} tracks`}: ${takes}.${big > most ? ' More than this browser keeps: as many as fit.' : ''}`]);
+  }
+  return out;
+}
+
+// What's loaded ahead now, for its setting: "2 tracks (61 MB)".
+function loadedAhead() {
+  const done = player.ahead.summary().filter((e) => e.state === 'done');
+  if (!done.length) return '';
+  const mb = done.reduce((n, e) => n + e.bytes, 0) / 1024 / 1024;
+  return ` In memory now: ${fmt.count(done.length, 'track', 'tracks')} (${mbText(mb)}).`;
+}
 // How far under the rest of a track its ending has to drop (transitions.js).
 const QUIET_ENDINGS = [
   ['soft', 'When it softens', 'Starts the next track as soon as the ending drops well down (15 dB under the rest of the track). Can cut a quiet last verse short.'],
@@ -366,7 +387,12 @@ const QUIET_ENDINGS = [
 
 function playbackView({ el }) {
   const s = app.settings;
-  const qualityList = radioRows('Streaming quality', QUALITIES, s.quality, (v) => saveSettings({ quality: v }));
+  // (Load ahead's estimates follow Streaming quality.)
+  const aheadChoices = loadAheadChoices(s.quality);
+  const qualityList = radioRows('Streaming quality', QUALITIES, s.quality, (v) => {
+    saveSettings({ quality: v });
+    aheadChoices.splice(0, aheadChoices.length, ...loadAheadChoices(v));
+  });
   const length = choiceRow({
     title: 'Crossfade length',
     subtitle: 'How long one track takes to fade into the next.',
@@ -414,9 +440,9 @@ function playbackView({ el }) {
       quiet,
       choiceRow({
         title: 'Load ahead',
-        subtitle: 'On this device: how many tracks load in full ahead of time, so a dropped or slow connection doesn’t stop the music at the next one. They load while the track playing has what it needs, and this browser keeps them only while they’re wanted (300 MB at most; not saved, nor in its cache).',
-        options: LOAD_AHEAD,
-        value: Number(s.loadAhead) || 0,
+        subtitle: `On this device: how many tracks load in full ahead of time, so a dropped or slow connection doesn’t stop the music at the next one. While the track playing is still loading, they take half the connection at most (and wait whenever it needs more); once it’s all in, as much as the connection gives. This browser keeps them only while they’re wanted (${fmt.number(LOAD_AHEAD_BYTES / 1024 / 1024)} MB at most; not saved, nor in its cache).${loadedAhead()}`,
+        options: aheadChoices,
+        value: Math.min(LOAD_AHEAD_MAX, Math.max(0, Math.round(Number(s.loadAhead) || 0))),
         onChange: (v) => saveSettings({ loadAhead: v }),
       }),
       toggleRow({

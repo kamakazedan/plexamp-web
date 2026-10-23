@@ -1,6 +1,6 @@
 import { app, playlistScope, on } from '../state.js';
-import { normTrack } from '../plex.js';
-import { navigate, parseHash, refresh } from '../router.js';
+import { normTrack, store } from '../plex.js';
+import { navigate, parseHash, refresh, keepState } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, iconTile, emptyState, debounce, fmt, sectionHeader } from '../ui.js';
 import { mapLimit, norm } from '../ai.js';
 import { albumCard, artistRow, playlistCard, collectionCard, trackRow, numberedList } from '../components.js';
@@ -12,55 +12,114 @@ import { invitationRows } from './share.js';
 
 // ---------- Browsing the library (in Search) ----------
 
-// Tiles for the library's lists, each with its count. Lists the library
-// doesn't have (no soundtracks, no moods) leave once their count is in.
+// The counts last seen for each library, kept in the browser (and cleared on
+// signing out, as everything of yours is), so the tiles show at once, in
+// their places: brought up to date in place as the server answers, with a
+// list that's gone or new left for next time, so nothing moves while
+// you're looking. The first time, every tile has its place until its count
+// is in (one the library doesn't have says so, and goes next time).
+const COUNTS_KEY = 'libraryCounts';
+const COUNTS_KEPT = 12; // libraries
+const COUNTS_FRESH = 5 * 60000; // asked again after this long
+
+const libraryKey = () => `${app.source.serverId || app.source.uri}:${app.source.sectionKey}`;
+function keptCounts(lib) {
+  const all = store.get(COUNTS_KEY);
+  const counts = all && typeof all === 'object' ? all[lib]?.counts : null;
+  return counts && typeof counts === 'object' ? counts : null;
+}
+// `fresh`: the counts the server gave (id -> count). The others keep what's
+// kept for them as it is now (by another tab meanwhile, say): a count that
+// couldn't be had isn't taken for none, nor for an older one.
+function keepCounts(lib, fresh, ids) {
+  const was = keptCounts(lib) || {};
+  const counts = {};
+  for (const id of ids) {
+    if (fresh.has(id)) counts[id] = fresh.get(id);
+    else if (Number.isFinite(Number(was[id]))) counts[id] = Number(was[id]);
+  }
+  const all = { ...(store.get(COUNTS_KEY) || {}), [lib]: { counts, at: Date.now() } };
+  const recent = Object.keys(all)
+    .sort((a, b) => (all[b]?.at || 0) - (all[a]?.at || 0))
+    .slice(0, COUNTS_KEPT);
+  store.set(COUNTS_KEY, Object.fromEntries(recent.map((k) => [k, all[k]])));
+}
+
+// Tiles for the library's lists, each with its count.
 export function libraryTiles() {
   const s = app.server;
   const sec = app.source.sectionKey;
-  const collectionsP = s.collections(sec).catch(() => []);
-  const albumsP = s.count(sec, 9);
+  const lib = libraryKey();
+  const kept = keptCounts(lib);
+  // (Asked of the server at most every few minutes.)
+  const ask = (id, fn) => s.memo(`libraryCount:${sec}:${id}`, fn, COUNTS_FRESH);
+  const collectionsP = () => ask('collections', () => s.collections(sec));
+  const albumsP = () => ask('albums', () => s.count(sec, 9));
   const tags = (field, type) => async () => (await s.tags(sec, field, type)).length;
   // If the server ignores a filter it returns every album; that counts as
   // "not supported" rather than a misleading count.
   const filteredAlbums = (filters) => async () => {
-    const [n, all] = await Promise.all([s.count(sec, 9, filters), albumsP]);
+    const [n, all] = await Promise.all([s.count(sec, 9, filters), albumsP()]);
     return n === all ? 0 : n;
   };
 
   const entries = [
-    { title: 'Artists', icon: 'mic', href: '/browse/artists', count: () => s.count(sec, 8), unit: ['artist', 'artists'] },
-    { title: 'Albums', icon: 'disc', href: '/browse/albums', count: () => albumsP, unit: ['album', 'albums'] },
-    { title: 'Tracks', icon: 'note', href: '/browse/tracks', count: () => s.count(sec, 10), unit: ['track', 'tracks'] },
-    { title: 'Compilations', icon: 'stack', href: '/browse/albums?subformat=Compilation&title=Compilations', count: filteredAlbums({ subformat: 'Compilation' }), unit: ['compilation', 'compilations'], optional: true },
-    { title: 'Soundtracks', icon: 'film', href: '/browse/albums?subformat=Soundtrack&title=Soundtracks', count: filteredAlbums({ subformat: 'Soundtrack' }), unit: ['soundtrack', 'soundtracks'], optional: true },
-    { title: 'Collections', icon: 'collection', href: '/browse/collections?title=Collections', count: async () => (await collectionsP).length, unit: ['collection', 'collections'], optional: true },
-    { title: 'Genres', icon: 'tag', href: '/tags/genre/9?title=Genres', count: tags('genre', 9), unit: ['genre', 'genres'], optional: true },
-    { title: 'Artist genres', icon: 'tag', href: '/tags/genre/8?title=Artist%20genres', count: tags('genre', 8), unit: ['genre', 'genres'], optional: true },
-    { title: 'Styles', icon: 'palette', href: '/tags/style/9?title=Styles', count: tags('style', 9), unit: ['style', 'styles'], optional: true },
-    { title: 'Moods', icon: 'smile', href: '/tags/mood/9?title=Moods', count: tags('mood', 9), unit: ['mood', 'moods'], optional: true },
-    { title: 'Decades', icon: 'calendar', href: '/tags/decade/9?title=Decades', count: tags('decade', 9), unit: ['decade', 'decades'], optional: true },
+    { id: 'artists', title: 'Artists', icon: 'mic', href: '/browse/artists', count: () => s.count(sec, 8), unit: ['artist', 'artists'] },
+    { id: 'albums', title: 'Albums', icon: 'disc', href: '/browse/albums', count: () => albumsP(), unit: ['album', 'albums'] },
+    { id: 'tracks', title: 'Tracks', icon: 'note', href: '/browse/tracks', count: () => s.count(sec, 10), unit: ['track', 'tracks'] },
+    { id: 'compilations', title: 'Compilations', icon: 'stack', href: '/browse/albums?subformat=Compilation&title=Compilations', count: filteredAlbums({ subformat: 'Compilation' }), unit: ['compilation', 'compilations'], optional: true },
+    { id: 'soundtracks', title: 'Soundtracks', icon: 'film', href: '/browse/albums?subformat=Soundtrack&title=Soundtracks', count: filteredAlbums({ subformat: 'Soundtrack' }), unit: ['soundtrack', 'soundtracks'], optional: true },
+    { id: 'collections', title: 'Collections', icon: 'collection', href: '/browse/collections?title=Collections', count: async () => (await collectionsP()).length, unit: ['collection', 'collections'], optional: true },
+    { id: 'genres', title: 'Genres', icon: 'tag', href: '/tags/genre/9?title=Genres', count: tags('genre', 9), unit: ['genre', 'genres'], optional: true },
+    { id: 'artistGenres', title: 'Artist genres', icon: 'tag', href: '/tags/genre/8?title=Artist%20genres', count: tags('genre', 8), unit: ['genre', 'genres'], optional: true },
+    { id: 'styles', title: 'Styles', icon: 'palette', href: '/tags/style/9?title=Styles', count: tags('style', 9), unit: ['style', 'styles'], optional: true },
+    { id: 'moods', title: 'Moods', icon: 'smile', href: '/tags/mood/9?title=Moods', count: tags('mood', 9), unit: ['mood', 'moods'], optional: true },
+    { id: 'decades', title: 'Decades', icon: 'calendar', href: '/tags/decade/9?title=Decades', count: tags('decade', 9), unit: ['decade', 'decades'], optional: true },
   ];
 
   const tiles = h('div.browse-tiles');
-  for (const e of entries) {
-    const count = h('span.browse-count', null, '\u00a0');
-    const tile = h(
-      'a.browse-tile',
-      { href: `#${e.href}` },
-      h('span.browse-icon', null, icon(e.icon, 22)),
-      h('span.browse-text', null, h('span.browse-title', null, e.title), count),
-    );
-    if (e.optional) tile.hidden = true;
-    tiles.append(tile);
-    e.count().then(
+  const fresh = new Map(); // the counts the server gave
+  const asked = entries.map((e) => {
+    const before = kept?.[e.id];
+    // A list the library didn't have last time isn't shown (if it has one
+    // now, it's there next time).
+    const shown = !e.optional || !kept || Number(before) > 0;
+    let tile = null;
+    let count = null;
+    if (shown) {
+      count = h(`span.browse-count${Number.isFinite(Number(before)) ? '' : '.loading'}`, null, Number.isFinite(Number(before)) ? fmt.count(Number(before), ...e.unit) : ' ');
+      tile = h('a.browse-tile', { href: `#${e.href}` }, h('span.browse-icon', null, icon(e.icon, 22)), h('span.browse-text', null, h('span.browse-title', null, e.title), count));
+      tiles.append(tile);
+    }
+    // (A count that couldn't be had says so, and what was kept stays: see
+    // keepCounts.)
+    return ask(e.id, e.count).then(
       (n) => {
-        if (e.optional && !n) return tile.remove();
+        fresh.set(e.id, Number(n) || 0);
+        if (!tile) return;
+        count.classList.remove('loading');
+        if (e.optional && !n) {
+          // Kept in its place (this time): it says there's none, and can't be opened.
+          count.textContent = 'None';
+          tile.classList.add('browse-none');
+          tile.removeAttribute('href');
+          tile.setAttribute('aria-disabled', 'true');
+          return;
+        }
         count.textContent = fmt.count(n, ...e.unit);
-        tile.hidden = false;
       },
-      () => (e.optional ? tile.remove() : (count.textContent = 'Unavailable')),
+      () => {
+        if (!count) return;
+        count.classList.remove('loading');
+        count.textContent = 'Unavailable';
+      },
     );
-  }
+  });
+  // (Nothing to keep when none came: offline, say, or the page going, which
+  // stops what it asked for.)
+  Promise.allSettled(asked).then(() => {
+    if (fresh.size && app.source && libraryKey() === lib) keepCounts(lib, fresh, entries.map((e) => e.id));
+  });
   return tiles;
 }
 
@@ -147,7 +206,7 @@ async function filterLabels(kind, filters) {
   return out;
 }
 
-export async function browseView({ el, params, query, onDispose }) {
+export async function browseView({ el, params, query, saved, key, onDispose }) {
   const kind = params.kind;
   if (kind === 'collections') return collectionsView({ el, query });
   const type = TYPES[kind];
@@ -163,7 +222,7 @@ export async function browseView({ el, params, query, onDispose }) {
     actions: iconButton('sort', 'Sort', () => openSort(sorts, sort)),
   });
   const chips = h('div.chips.filter-chips', { hidden: true, role: 'list', 'aria-label': 'Filters' });
-  const within = searchWithin({ kind, filters, title, sort: query.sort });
+  const within = searchWithin({ kind, filters, title, sort: query.sort, typed: saved?.within || '', onWords: (q) => showWords(q) });
   el.append(head, chips, within, countEl);
 
   // Pages put aside are kept, and still brought up to date.
@@ -185,7 +244,8 @@ export async function browseView({ el, params, query, onDispose }) {
         const rest = Object.fromEntries(Object.entries(filters).filter(([k]) => k !== l.key));
         return h(
           'button.chip.filter-chip',
-          { type: 'button', role: 'listitem', 'aria-label': `Remove ${l.label}`, onclick: () => navigate(browseHref(kind, { ...rest, within: '1' }, query.sort), { replace: true }) },
+          // (What's typed in the search box stays.)
+          { type: 'button', role: 'listitem', 'aria-label': `Remove ${l.label}`, onclick: () => navigate(browseHref(kind, { ...rest, within: '1' }, query.sort), { replace: true, keep: true }) },
           h('span', null, l.label),
           icon('close', 16),
         );
@@ -197,25 +257,63 @@ export async function browseView({ el, params, query, onDispose }) {
   const s = app.server;
   const sec = app.source.sectionKey;
   const r = renderer(type, title);
+  const counted = (n) => {
+    countEl.textContent = fmt.count(n, r.unit[0], r.unit[1]);
+  };
+  // The list as it is, and (while something's typed in the box) what in it
+  // matches, shown in its place as you type; each with what loads more of
+  // it, which stops while it's out of sight.
+  const box = (list) => h('div.list-box', null, list);
+  const listed = (wrap, extra, empty) =>
+    pagedList(wrap, {
+      pageSize: r.pageSize,
+      fetchPage: (start, size) => s.list(sec, type, { sort, start, size, filters: plexFilters({ ...filters, ...extra }) }),
+      render: r.render,
+      onTotal: (n) => {
+        if (wrap.isConnected && !wrap.closest('[hidden]')) counted(n);
+        wrap.dataset.total = String(n);
+        wrap.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
+      },
+      empty,
+      onDispose,
+    });
   const container = r.wrap();
-  el.append(container);
-  pagedList(container, {
-    pageSize: r.pageSize,
-    fetchPage: (start, size) => s.list(sec, type, { sort, start, size, filters: plexFilters(filters) }),
-    render: r.render,
-    onTotal: (n) => {
-      countEl.textContent = fmt.count(n, r.unit[0], r.unit[1]);
-      container.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
-    },
-    empty: 'Nothing matches.',
-    onDispose,
-  });
+  const all = box(container);
+  el.append(all);
+  listed(container, {}, 'Nothing matches.');
+  const matches = box(null);
+  matches.hidden = true;
+  el.append(matches);
+  let typed = null; // { list, words }
+
+  function showWords(raw) {
+    const words = raw.trim();
+    if (typed?.words === words) return;
+    typed?.list.destroy();
+    typed = null;
+    matches.replaceChildren();
+    keepState(words ? { within: words } : null, key);
+    if (!words) {
+      matches.hidden = true;
+      all.hidden = false;
+      if (container.dataset.total) counted(Number(container.dataset.total));
+      return;
+    }
+    all.hidden = true;
+    matches.hidden = false;
+    countEl.textContent = ' ';
+    const list = r.wrap();
+    matches.append(list);
+    typed = { words, list: listed(list, { words }, `Nothing in ${title} matches “${words}”.`) };
+  }
+  if (saved?.within) showWords(saved.within);
 }
 
-// "Search in 1990s": narrows the list by another tag (a genre, a style, a
-// mood or a decade) or by words in the title. Only choices with something
-// to show are offered, with how many.
-function searchWithin({ kind, filters, title: name, sort }) {
+// "Search in 1990s": what's typed narrows the list as you type, to what has
+// it in its name or title (shown in the list's place: see browseView), and
+// another tag that matches (a genre, a style or a mood) is offered too, with
+// how many it has.
+function searchWithin({ kind, filters, title: name, sort, typed = '', onWords }) {
   let title = name;
   const s = app.server;
   const sec = app.source.sectionKey;
@@ -228,14 +326,20 @@ function searchWithin({ kind, filters, title: name, sort }) {
     'aria-label': `Search in ${title}`,
     autocomplete: 'off',
     enterkeyhint: 'search',
+    value: typed,
   });
   const results = h('div.rows.within-results', { hidden: true });
-  const clear = iconButton('close', 'Clear', () => {
-    input.value = '';
-    show('');
-    input.focus();
-  }, { size: 22, cls: 'search-clear' });
-  clear.hidden = true;
+  const clear = iconButton(
+    'close',
+    'Clear',
+    () => {
+      input.value = '';
+      show('');
+      input.focus();
+    },
+    { size: 22, cls: 'search-clear' },
+  );
+  clear.hidden = !typed;
   const wrap = h('div.within', null, h('label.search-box.has-clear.within-box', null, icon('search', 22), input, clear), results);
   wrap.rename = (n) => {
     title = n;
@@ -250,6 +354,7 @@ function searchWithin({ kind, filters, title: name, sort }) {
     const mine = ++seq;
     const q = norm(raw);
     clear.hidden = !raw;
+    onWords(q ? raw : '');
     if (!q) {
       results.hidden = true;
       results.replaceChildren();
@@ -257,51 +362,40 @@ function searchWithin({ kind, filters, title: name, sort }) {
     }
     // Tags from the fields not used yet, best matches first.
     const fields = FIELDS[kind].filter(([f]) => !(f in base));
+    if (!fields.length) {
+      results.hidden = true;
+      return;
+    }
     const lists = await Promise.all(fields.map(([f]) => s.tags(sec, f, type).catch(() => [])));
     if (mine !== seq) return;
     const found = [];
-    fields.forEach(([field, name, ic], i) => {
+    fields.forEach(([field, label, ic], i) => {
       for (const t of lists[i]) {
         const n = norm(t.title);
         const at = n.indexOf(q);
-        if (at >= 0) found.push({ field, name, ic, tag: t, rank: (at === 0 ? 0 : 1) * 1000 + n.length });
+        if (at >= 0) found.push({ field, label, ic, tag: t, rank: (at === 0 ? 0 : 1) * 1000 + n.length });
       }
     });
     found.sort((a, b) => a.rank - b.rank);
-    const options = found.slice(0, 10);
-    const [counts, titled] = await Promise.all([
-      mapLimit(options, 5, (o) => s.count(sec, type, plexFilters({ ...base, [o.field]: o.tag.key })).catch(() => 0)),
-      s.count(sec, type, plexFilters({ ...base, words: raw.trim() })).catch(() => 0),
-    ]);
+    const options = found.slice(0, 6);
+    const counts = await mapLimit(options, 5, (o) => s.count(sec, type, plexFilters({ ...base, [o.field]: o.tag.key })).catch(() => 0));
     if (mine !== seq) return;
     const rows = options
       .map((o, i) => ({ ...o, n: counts[i] }))
       .filter((o) => o.n > 0)
-      .slice(0, 8)
+      .slice(0, 3)
       .map((o) =>
         row({
           onClick: () => pick(o.field, o.tag.key),
           lead: iconTile(o.ic),
           title: o.tag.title,
-          subtitle: `${o.name} · ${fmt.count(o.n, ...unit)}`,
+          subtitle: `${o.label} · ${fmt.count(o.n, ...unit)}`,
           chevron: true,
           cls: 'within-option',
         }),
       );
-    if (titled > 0) {
-      rows.push(
-        row({
-          onClick: () => pick('words', raw.trim()),
-          lead: iconTile('search'),
-          title: `“${raw.trim()}”`,
-          subtitle: `In the ${kind === 'artists' ? 'name' : 'title'} · ${fmt.count(titled, ...unit)}`,
-          chevron: true,
-          cls: 'within-option',
-        }),
-      );
-    }
-    results.replaceChildren(...(rows.length ? rows : [h('p.within-none', null, `Nothing in ${title} matches “${raw.trim()}”.`)]));
-    results.hidden = false;
+    results.replaceChildren(...rows);
+    results.hidden = !rows.length;
   }
 
   const later = debounce(() => show(input.value), 250);
@@ -311,8 +405,10 @@ function searchWithin({ kind, filters, title: name, sort }) {
   });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
+      // (What matches is shown already: the keyboard goes.)
       e.preventDefault();
-      results.querySelector('.within-option')?.click();
+      show(input.value);
+      input.blur();
     }
     if (e.key === 'Escape' && input.value) {
       e.preventDefault();
@@ -321,6 +417,8 @@ function searchWithin({ kind, filters, title: name, sort }) {
       show('');
     }
   });
+  // (What was typed before, back: once the page has its lists.)
+  if (typed) queueMicrotask(() => show(typed));
   return wrap;
 }
 
@@ -333,7 +431,8 @@ function openSort(sorts, current) {
       onSelect: () => {
         const { path, query } = parseHash();
         const q = new URLSearchParams({ ...query, sort: value });
-        navigate(`${path}?${q}`, { replace: true });
+        // (What's typed in the search box stays.)
+        navigate(`${path}?${q}`, { replace: true, keep: true });
       },
     })),
   });

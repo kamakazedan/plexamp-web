@@ -52,6 +52,7 @@ MOCK = os.environ.get('MOCK_PLEX', 'http://127.0.0.1:32400').rstrip('/')
 LOGIN_URL = os.environ.get('PLEX_LOGIN_URL', '')
 OLLAMA = os.environ.get('OLLAMA_DIRECT', 'http://127.0.0.1:11434').rstrip('/')
 OLLAMA_NOTHINK = os.environ.get('OLLAMA_NOTHINK', 'http://127.0.0.1:11435').rstrip('/')
+APP_DEFAULTS = os.environ.get('APP_DEFAULTS') == '1'  # every test with the app's own settings to start with (see login)
 OUT = sys.argv[1] if len(sys.argv) > 1 else 'screenshots'
 ONLY = set(sys.argv[2:]) or None
 os.makedirs(OUT, exist_ok=True)
@@ -137,7 +138,7 @@ def shot(page, name):
     stray.extend(f'{name}: {f}' for f in found)
 
 
-def login(page, app, token='t'):
+def login(page, app, token='t', app_defaults=False):
     page.goto(app + '#/login')
     page.click('text=Use a server address and token instead')
     if LOGIN_URL:
@@ -145,6 +146,11 @@ def login(page, app, token='t'):
     page.fill('input[type=password]', token)
     page.click('button:has-text("Connect")')
     page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+    # (Most tests were written for loudness levelling and Load ahead off, as
+    # they were before 0.20.0: those that test them, or the app's defaults,
+    # keep the app's own, and APP_DEFAULTS=1 runs them all that way.)
+    if not (app_defaults or APP_DEFAULTS):
+        settings(page, {'loudness': False, 'loadAhead': 0})
 
 
 def js(page, expr):
@@ -1097,6 +1103,73 @@ with sync_playwright() as pw:
         where = lambda: js(page, '() => location.hash')
         heads = lambda: page.locator('.search-body .section-head h2').all_inner_texts()
 
+        # The library's lists, each with its count: in their places from the
+        # start (nothing moves as the counts come in), and the counts kept
+        # for next time, shown at once then.
+        tiles_now = lambda: page.evaluate("""() => [...document.querySelectorAll('.browse-tile')].map((t) => ({
+            title: t.querySelector('.browse-title').textContent, count: t.querySelector('.browse-count').textContent.trim(),
+            top: Math.round(t.getBoundingClientRect().top), none: t.classList.contains('browse-none') }))""")
+        js(page, "() => localStorage.removeItem('pw.libraryCounts')")
+        mock('/__mock/config?delay=400')
+        try:
+            page.goto(APP + '#/search')
+            page.wait_for_selector('.browse-tiles .browse-tile')
+            early = tiles_now()
+            settled = wait_for(lambda: (lambda ts: ts if all(t['count'] for t in ts) else None)(tiles_now()), 15, 0.3)
+        finally:
+            mock('/__mock/config?delay=0')
+        below = lambda: page.locator('.search-body .section-head', has_text='Most played').evaluate('e => Math.round(e.getBoundingClientRect().top)')
+        check('library: the library\'s lists are in their places from the start, and stay there as their counts come in',
+              early and settled and [t['title'] for t in early] == [t['title'] for t in settled] and [t['top'] for t in early] == [t['top'] for t in settled]
+              and any(not t['count'] for t in early) and all(t['count'] for t in settled), f'{early} {settled}')
+        kept = js(page, "() => JSON.parse(localStorage.getItem('pw.libraryCounts') || 'null')")
+        n_tracks = mock('/library/sections/1/all?type=10&X-Plex-Token=t&X-Plex-Container-Size=0')['MediaContainer']['totalSize']
+        place = below()
+        mock('/__mock/config?delay=1500')
+        try:
+            page.reload()
+            page.wait_for_selector('.browse-tiles .browse-tile')
+            at_once = tiles_now()
+            place_again = below()
+        finally:
+            mock('/__mock/config?delay=0')
+        check('library: ...their counts are kept for next time (just the numbers), and shown at once then',
+              kept and kept.get('mock-server-1:1', {}).get('counts', {}).get('tracks') == n_tracks
+              and all(t['count'] and t['count'] != '\u00a0' for t in at_once) and place_again == place, f'{kept} {at_once} {place} {place_again}')
+        # One the library doesn't have, when they were last counted, isn't
+        # shown (it is the next time, once it's been counted again).
+        js(page, """() => { const k = JSON.parse(localStorage.getItem('pw.libraryCounts'));
+            k['mock-server-1:1'].counts.soundtracks = 0; localStorage.setItem('pw.libraryCounts', JSON.stringify(k)); }""")
+        page.reload()
+        page.wait_for_selector('.browse-tiles .browse-tile')
+        gone = 'Soundtracks' not in [t['title'] for t in tiles_now()]
+        page.wait_for_timeout(1500)
+        stays_gone = 'Soundtracks' not in [t['title'] for t in tiles_now()]
+        page.reload()
+        page.wait_for_selector('.browse-tiles .browse-tile')
+        back = 'Soundtracks' in [t['title'] for t in tiles_now()]
+        check('library: a list the library didn\'t have last time isn\'t shown (not even once it\'s counted), and is the time after', gone and stays_gone and back,
+              f'{gone} {stays_gone} {back}')
+        # A count that can't be had says so, and isn't taken for none: the
+        # list stays, and so does its count for next time.
+        kept_moods = lambda: js(page, "() => JSON.parse(localStorage.getItem('pw.libraryCounts'))['mock-server-1:1'].counts.moods")
+        moods_before = kept_moods()
+        no_moods = re.compile(r'/library/sections/1/mood\?')
+        page.route(no_moods, lambda route: route.fulfill(status=500, body=''))
+        try:
+            page.reload()
+            page.wait_for_selector('.browse-tiles .browse-tile')
+            wait_for(lambda: page.locator('.browse-count.loading').count() == 0, 10, 0.3)
+            page.wait_for_timeout(500)
+            moods_tile = next((t for t in tiles_now() if t['title'] == 'Moods'), None)
+            moods_href = page.locator('.browse-tile', has_text='Moods').get_attribute('href')
+            moods_after = kept_moods()
+        finally:
+            page.unroute(no_moods)
+        check('library: a count that can\'t be had says so, and isn\'t taken for none (the list stays, with what was kept)',
+              moods_before and moods_tile and moods_tile['count'] == 'Unavailable' and not moods_tile['none'] and moods_href and moods_after == moods_before,
+              f'{moods_before} {moods_tile} {moods_href} {moods_after}')
+
         # Search: one tap clears it, back to browsing.
         page.goto(APP + '#/search')
         page.wait_for_selector('.search-box input')
@@ -1245,16 +1318,43 @@ with sync_playwright() as pw:
         check('library: a filter can be taken off', page.locator('.back-title').inner_text() == '2020s · Calm'
               and wait_for(lambda: page.locator('.list-count').inner_text() == f'{two} album{"" if two == 1 else "s"}', 5), page.locator('.list-count').inner_text())
         page.fill('.within input', 'zzzz')
-        page.wait_for_selector('.within-none', timeout=8000)
-        check('library: nothing offered when nothing would be left', page.locator('.within-option').count() == 0)
+        page.wait_for_selector('.list-box:not([hidden]) + .list-box, .list-box:not([hidden]) .empty-state, .view .empty-state', timeout=8000)
+        none = wait_for(lambda: page.locator('.view .empty-state', has_text='matches “zzzz”').count() == 1, 8)
+        check('library: nothing offered when nothing would be left (and the list says nothing matches)', none and page.locator('.within-option').count() == 0)
+        # What's typed stays when a filter is taken off.
+        page.locator('.filter-chip', has_text='Calm').click()
+        stays = wait_for(lambda: page.locator('.back-title').inner_text() == '2020s' and page.locator('.within input').input_value() == 'zzzz'
+                         and page.locator('.view .empty-state', has_text='matches “zzzz”').count() == 1, 8)
+        check('library: ...and what\'s typed stays when a filter is taken off', stays, f'{page.locator(".back-title").inner_text()} {page.locator(".within input").input_value()!r}')
+
+        # What's typed narrows the list as it's typed: no choosing it first.
         page.goto(APP + '#/browse/albums')
         page.wait_for_selector('.grid .card')
+        every = page.locator('.list-count').inner_text()
         page.fill('.within input', 'tidal')
-        page.wait_for_selector('.within-option:has-text("tidal")', timeout=8000)
-        page.locator('.within-option', has_text='tidal').click()
-        page.wait_for_timeout(800)
-        check('library: words in the title narrow a list too', page.locator('.grid .card .card-title').all_inner_texts() == ['Tidal Lines'],
-              str(page.locator('.grid .card .card-title').all_inner_texts()))
+        cards = lambda: page.locator('.list-box:not([hidden]) .grid .card .card-title').all_inner_texts()
+        narrowed = wait_for(lambda: cards() == ['Tidal Lines'], 8)
+        check('library: words in the title narrow a list as they\'re typed, with how many', narrowed and page.locator('.within-option', has_text='In the').count() == 0
+              and wait_for(lambda: page.locator('.list-count').inner_text() == '1 album', 5), f'{cards()} {page.locator(".list-count").inner_text()}')
+        shot(page, 'library-04-typed')
+        # ...and come back with Back, and go with ×.
+        page.locator('.list-box:not([hidden]) .grid .card').first.click()
+        page.wait_for_selector('.hero-album')
+        page.go_back()
+        page.wait_for_selector('.within input')
+        back_typed = wait_for(lambda: page.locator('.within input').input_value() == 'tidal' and cards() == ['Tidal Lines'], 8)
+        page.click('.within .search-clear')
+        cleared = wait_for(lambda: len(cards()) > 1 and page.locator('.list-count').inner_text() == every, 8)
+        check('library: ...what was typed is still there after Back, and × shows the whole list again', back_typed and cleared, f'{page.locator(".within input").input_value()} {cards()}')
+        page.goto(APP + '#/browse/artists')
+        page.wait_for_selector('.view .rows .row')
+        page.fill('.within input', 'glass')
+        artists = wait_for(lambda: page.locator('.list-box:not([hidden]) .row-title').all_inner_texts() == ['Glass Harbour'], 8)
+        check('library: an artist shows as their name is typed', artists, str(page.locator('.list-box:not([hidden]) .row-title').all_inner_texts()))
+        sheet_action(page, '.back-head button[aria-label="Sort"]', 'Recently added')
+        resorted = wait_for(lambda: 'sort=addedAt' in where() and page.locator('.within input').input_value() == 'glass'
+                            and page.locator('.list-box:not([hidden]) .row-title').all_inner_texts() == ['Glass Harbour'], 8)
+        check('library: ...and stays as it is when the list is sorted another way', resorted, f'{where()} {page.locator(".within input").input_value()!r}')
 
         # A playlist, a collection or a mix (an artist's page) into the queue.
         play_first_album_track(page, APP, album=0, track=0)
@@ -2793,6 +2893,10 @@ with sync_playwright() as pw:
         # device's stays, and another tab signed in follows.
         settings(page, {'playerName': 'Dan’s phone', 'gridSize': 'large', 'home': {'mock-server-1:1': {'order': ['recent']}},
                         'ai': {'mode': 'custom', 'url': OLLAMA, 'apiKey': 'key-123', 'model': 'llama3.1:8b', 'notes': 'Loves trip-hop'}})
+        # (Search's counts for the library kept, to see them go too.)
+        page.goto(APP + '#/search')
+        page.wait_for_selector('.browse-tile')
+        wait_for(lambda: js(page, "() => !!localStorage.getItem('pw.libraryCounts')"), 10, 0.3)
         other = ctx.new_page()
         attach(other, 'privacy-other')
         play_first_album_track(other, APP)
@@ -2816,7 +2920,7 @@ with sync_playwright() as pw:
         check('privacy: signing out says what goes and what stays', 'AI settings' in said and 'Home layout' in said and 'How the app looks and plays stays' in said, said)
         check('privacy: ...clears what\'s yours, and keeps the device\'s',
               kept.get('playerName') == '' and kept.get('home') == {} and kept.get('ai') == {'mode': 'auto', 'url': '', 'apiKey': '', 'model': '', 'notes': ''}
-              and kept.get('gridSize') == 'large' and not any(k in keys for k in ('pw.auth', 'pw.source', 'pw.aiMissing')) and 'pw.clientId' in keys, f'{kept} {keys}')
+              and kept.get('gridSize') == 'large' and not any(k in keys for k in ('pw.auth', 'pw.source', 'pw.aiMissing', 'pw.libraryCounts', 'pw.syncPending', 'pw.syncRev')) and 'pw.clientId' in keys, f'{kept} {keys}')
         art_after = page.evaluate(kept_art, art)
         check('privacy: ...and the browser forgets artwork it kept from this player (its address has the token)',
               forgot.value.url.endswith('/signed-out') and art_before == 200 and art_after == 'not kept', f'{art_before} {art_after}')
@@ -2825,6 +2929,64 @@ with sync_playwright() as pw:
         left = js(page, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.')).sort()")
         check('privacy: ...and another tab signed in signs out too, keeping nothing of what it was playing',
               other.url.endswith('#/login') and not any(k.startswith('pw.player') or k in ('pw.auth', 'pw.source') for k in left), f'{other.url} {left}')
+        ctx.close()
+
+        # What's typed in a search, or in a list's search box, is kept with
+        # the tab's own record of its pages, which signing out clears: not
+        # with the browser's history of the tab, so whoever signs in next
+        # there can't go Back to it.
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'privacy-back')
+        login(page, APP)
+        # (A tab from before 0.20.0 kept it in the browser's record of its
+        # pages too: it goes from those the tab comes back to.)
+        js(page, "() => history.replaceState({ ...history.state, saved: { within: 'from-before' } }, '', location.hash)")
+        page.click('#tabs .tab[data-tab=search]')
+        page.wait_for_selector('.search-box input')
+        page.go_back()
+        page.wait_for_function("() => location.hash === '#/'")
+        page.wait_for_timeout(300)
+        older = js(page, '() => JSON.stringify(history.state)')
+        check('privacy: (what a page from before 0.20.0 kept in the browser\'s record of it goes when the tab comes back to it)',
+              'from-before' not in older and '"k"' in older, older)
+        page.click('#tabs .tab[data-tab=search]')
+        page.wait_for_selector('.search-box input')
+        page.fill('.search-box input', 'harbour')
+        wait_for(lambda: any('ARTISTS' in t.upper() for t in page.locator('.search-body .section-head h2').all_inner_texts()), 8)
+        page.goto(APP + '#/browse/artists')
+        page.wait_for_selector('.within input')
+        page.fill('.within input', 'glass')
+        wait_for(lambda: page.locator('.list-box:not([hidden]) .row-title').all_inner_texts() == ['Glass Harbour'], 8)
+        recorded = js(page, '() => JSON.stringify(history.state)')
+        in_tab = js(page, "() => sessionStorage.getItem('pw.nav') || ''")
+        check('privacy: what\'s typed in a search is kept with the tab\'s own record of its pages, not with the browser\'s history of it',
+              'glass' not in recorded and 'glass' in in_tab and 'harbour' in in_tab, f'{recorded} {in_tab[:300]}')
+        page.goto(APP + '#/settings/account')
+        page.click('.account-card button:has-text("Sign out")')
+        page.wait_for_selector('.sheet.open')
+        with page.expect_event('load', timeout=15000):
+            page.locator('.sheet.open .sheet-action', has_text='Sign out').click()
+        page.wait_for_selector('text=Use a server address and token instead')
+        tab_after = js(page, '() => JSON.stringify(Object.entries(sessionStorage))')
+        # Someone else signs in on the tab, and goes Back through it.
+        login(page, APP, token='t2')
+        # (Back to the page the tab started on, before the app.)
+        trail = []
+        for _ in range(8):
+            try:
+                page.go_back(timeout=5000)
+            except Exception:  # noqa: BLE001 - nothing to go back to
+                break
+            page.wait_for_timeout(900)
+            if not page.url.startswith(APP):
+                break
+            trail.append((js(page, '() => location.hash'), js(page, "() => document.querySelector('.view .search-box input')?.value ?? null"),
+                          js(page, '() => JSON.stringify(history.state)')))
+        reached = {t[0].split('?')[0] for t in trail}
+        check('privacy: ...so after signing out, someone signing in next on the tab finds none of it going Back (nor does the page)',
+              'glass' not in tab_after and 'harbour' not in tab_after and {'#/browse/artists', '#/search'} <= reached
+              and not any(t[1] for t in trail) and not any('glass' in t[2] or 'harbour' in t[2] for t in trail), f'{tab_after} {trail}')
         ctx.close()
 
     # ---------- np: the player's sleep timer and converted tracks ----------
@@ -2945,6 +3107,11 @@ with sync_playwright() as pw:
         # again where it got to, as the same playback, and plays on.
         play_track(1, rules='&kill=2&sessions=1')
         tr = now()
+        # (Another album in its place: Plex hears that what was playing
+        # stopped, as its own playback.)
+        stops = [(x['ratingKey'], x['playback']) for x in hls()['timelines'] if x['state'] == 'stopped']
+        check('stream: another album played in its place, Plex hears that what was playing stopped (as its own playback)',
+              stops == [(first['id'], first['playback'])], f'{first} {stops}')
         wait_for(lambda: now()['t'] > 10 or now()['id'] != tr['id'], 30, 0.25)
         after = now()
         mine = sessions_of(tr['id'])
@@ -3037,7 +3204,9 @@ with sync_playwright() as pw:
         part1 = is_part(1)
         page.route(is_start, drop_start)
         page.route(part1, drop_part)
-        settings(page, {'gapless': False})  # nothing preloaded: only this track's requests are dropped
+        # (Nothing preloaded, nor loaded ahead: only this track's requests are dropped.)
+        ahead_was = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.loadAhead)")
+        settings(page, {'gapless': False, 'loadAhead': 0})
         play_track(2)
         tr = now()
         wait_for(lambda: now()['t'] > 6, 20, 0.25)
@@ -3066,7 +3235,7 @@ with sync_playwright() as pw:
         page.unroute(part3)
         player(page, 'p.play()')
         wait_for(lambda: now()['id'] != tr['id'], 30, 0.25)
-        settings(page, {'gapless': True})
+        settings(page, {'gapless': True, 'loadAhead': ahead_was})
         check('stream: ...and when that keeps happening, with plenty left to play, the same stream carries on from where it stopped loading',
               soft['id'] == tr['id'] and (soft['rescue'] or {}).get('soft') and soft['rescue']['tries'] == 0 and len(sessions_of(tr['id'])) == 1
               and dropped['part'] == 7 and now()['id'] != tr['id'] and not play_errors(), f'{soft} {dropped} {sessions_of(tr["id"])} {play_errors()}')
@@ -3220,7 +3389,8 @@ with sync_playwright() as pw:
                      " p.playTracks(list, 0, { context: { title: 'Smart', href: null } }); })")
             return wait_for(lambda: player(page, "p.state === 'playing' && p.spare.qid != null && p.spare.el.readyState >= 1"), 15, 0.2)
         smart_pair()
-        pre = player(page, "({ ahead: p.spare.hls?.config.maxBufferLength, at: p.spare.el.currentTime, plan: p.nextPlan()?.startAt })")
+        # (Loaded ahead, it's all in memory, and hls.js takes it all at once.)
+        pre = player(page, "({ ahead: p.spare.hls?.config.maxBufferLength, at: p.spare.el.currentTime, plan: p.nextPlan()?.startAt, memory: !!p.spare.prefetched })")
         h = hls()
         nxt = [s for s in h['sessions'] if s['track'] == y['ratingKey']]
         parts = [r['file'] for r in h['requests'] if nxt and r['session'] == nxt[0]['id'] and r['file'].endswith('.ts')]
@@ -3228,7 +3398,7 @@ with sync_playwright() as pw:
         wait_for(lambda: player(page, f"p.current?.id === '{y['ratingKey']}' && p.state === 'playing'"), 15, 0.2)
         took = player(page, 'p.time')
         check('stream: with smart crossfade, a converted next track is preloaded to past where its music starts, and fades in from there',
-              pre['ahead'] == 19 and pre['at'] < 0.5 and pre['plan'] == 9 and parts and parts[0] == '00000.ts' and 9 <= took <= 16 and not play_errors(),
+              pre['ahead'] == (30 if pre['memory'] else 19) and pre['at'] < 0.5 and pre['plan'] == 9 and parts and parts[0] == '00000.ts' and 9 <= took <= 16 and not play_errors(),
               f'{pre} {parts} {took} {play_errors()}')
 
         # ...whereas Next starts it from the top (even after a fade called
@@ -3279,7 +3449,7 @@ with sync_playwright() as pw:
         # time (going as it has), after a moment to get going.
         # (How fast it's gone not counting time waiting for the connection;
         # just started, on time if it can go on now.)
-        timing = player(page, """(() => { const t = performance.now(); const e = (o) => ({ waited: 0, waitingSince: 0, ...o }); const out = [
+        timing = player(page, """(() => { const t = performance.now(); const e = (o) => ({ waited: 0, waitingSince: 0, rested: 0, restingSince: 0, ...o }); const out = [
             p.ahead.onTime(e({ started: t - 10000, bytes: 1e6, expected: 2e6 }), 15),
             p.ahead.onTime(e({ started: t - 10000, bytes: 1e4, expected: 2e6 }), 15),
             p.ahead.onTime(e({ started: t - 20000, waited: 15000, bytes: 1e6, expected: 2.5e6 }), 15)];
@@ -3287,6 +3457,18 @@ with sync_playwright() as pw:
             p.roomToFetch = () => false; out.push(p.ahead.onTime(e({ started: t - 1000, bytes: 0, expected: 2e6 }), 15));
             delete p.roomToFetch; return out; })()""")
         check('stream: ...a track still loading ahead is waited for only if it\'ll be there in time', timing == [True, False, True, True, False], str(timing))
+        # Its rests count while it's held back (they go on: a slow connection's
+        # 30-second rests aren't "just started"), and not once it isn't.
+        rested = player(page, """(() => { const t = performance.now(); const e = (o) => ({ waited: 0, waitingSince: 0, rested: 0, restingSince: 0, ...o }); const out = [];
+            p.roomToFetch = () => true; p.aheadUnlimited = () => false;
+            out.push(p.ahead.onTime(e({ started: t - 150000, rested: 147500, bytes: 655360, expected: 22e6 }), 15));
+            out.push(p.ahead.onTime(e({ started: t - 60000, rested: 50000, bytes: 5e6, expected: 6e6 }), 10));
+            out.push(p.ahead.onTime(e({ started: t - 60000, rested: 40000, restingSince: t - 10000, bytes: 5e6, expected: 6e6 }), 10));
+            p.aheadUnlimited = () => true;
+            out.push(p.ahead.onTime(e({ started: t - 60000, rested: 50000, bytes: 5e6, expected: 6e6 }), 10));
+            out.push(p.ahead.onTime(e({ started: t - 60000, rested: 40000, restingSince: t - 10000, bytes: 5e6, expected: 6e6 }), 10));
+            delete p.roomToFetch; delete p.aheadUnlimited; return out; })()""")
+        check('stream: ...counting its rests while it\'s held back, and not once it isn\'t', rested == [False, False, False, True, True], str(rested))
         # The next track's own stream, as it was loaded: its playback, and the
         # session its parts are under. Only its requests count as played from
         # the network (once it's on, the one after it starts loading ahead,
@@ -3331,19 +3513,36 @@ with sync_playwright() as pw:
         # it does once a part is in), and carrying on once it doesn't.
         # (Gapless off: with the connection taken, the next track's own
         # preload, due at once on tracks this short, would stream it instead.)
+        # (Held back, as while the track playing is still loading: parts of
+        # 128 KB.)
         settings(page, {'quality': 'original', 'loadAhead': 1, 'gapless': False})
-        part = 512 * 1024
-        player(page, f"(p.roomToFetch = () => !p.ahead.busy || p.ahead.busy.bytes < {part}, true)")
+        part = 128 * 1024
+        player(page, f"(p.aheadUnlimited = () => false, p.roomToFetch = () => !p.ahead.busy || p.ahead.busy.bytes < {part}, true)")
         play_track(5, 2)
         tr = now()
         held_at = wait_for(lambda: [(e['state'], e['bytes']) for e in ahead()] == [('loading', part)], 20, 0.3)
         page.wait_for_timeout(2000)
         still = ahead()
         player(page, '(delete p.roomToFetch, true)')
-        loaded = wait_for(lambda: [e['state'] for e in ahead()] == ['done'], 20, 0.3)
+        # Held back, it rests after each part (here, as if the connection were
+        # too slow to share: the longest rest), until the track playing has
+        # all it needs, when it goes on at once, as fast as it can.
+        player(page, '(p.playingBitrate = () => 1e9, true)')
+        page.wait_for_timeout(2500)
+        resting = ahead()
+        player(page, '(delete p.aheadUnlimited, delete p.playingBitrate, true)')
+        loaded = wait_for(lambda: [e['state'] for e in ahead()] == ['done'], 8, 0.3)
         got = ahead()
         check('stream: loading a file ahead waits part-way while the track playing needs the connection, and carries on after',
               held_at and [(e['state'], e['bytes']) for e in still] == [('loading', part)] and loaded and got[0]['bytes'] > part, f'{still} {got}')
+        check('stream: ...held back while the track playing is loading, resting after each part, and at full speed once it has it all',
+              len(resting) == 1 and resting[0]['state'] == 'loading' and resting[0]['bytes'] <= 2 * part and loaded, f'{resting} {got}')
+        # How long a rest is: half the connection at most, leaving the track
+        # playing twice its bitrate at least (and a connection too slow for
+        # that tried again after half a minute).
+        rests = js(page, "() => import('./js/prefetch.js').then(({ restAfter }) => [restAfter(131072, 100, 320), restAfter(131072, 100, 4000), restAfter(131072, 1000, 1411)])")
+        check('stream: ...a rest halves what loading ahead takes, and leaves the track playing twice its bitrate', abs(rests[0] - 100) < 1 and 100 < rests[1] < 30000
+              and rests[2] == 30000, str(rests))
         settings(page, {'gapless': True})
         page.route('**/library/parts/**', no_server)
         player(page, 'p.next()')
@@ -3352,6 +3551,19 @@ with sync_playwright() as pw:
         page.unroute('**/library/parts/**')
         check('stream: ...a file played as it is too (it plays from memory, with the server out of reach)',
               loaded and not got[0]['hls'] and got[0]['bytes'] > 100000 and played and blob and not play_errors(), f'{got} {now()} {blob}')
+        # ...and with Next before the next track's own preload (here there's
+        # none: gapless off), it still plays from memory, as it is: never
+        # converted instead.
+        settings(page, {'gapless': False})
+        after_next = player(page, 'p.queue[p.index + 1]?.id')
+        ready_next = wait_for(lambda: any(e['id'] == after_next and e['state'] == 'done' for e in ahead()), 15, 0.3)
+        page.route('**/library/parts/**', no_server)
+        player(page, 'p.next()')
+        played_next = wait_for(lambda: now()['id'] == after_next and now()['state'] == 'playing' and now()['t'] > 1, 15, 0.25)
+        how = player(page, "({ src: (p.audio.getAttribute('src') || '').slice(0, 5), isHls: p.deck.isHls, transcoding: p.transcoding })")
+        page.unroute('**/library/parts/**')
+        check('stream: ...and with Next before the next track\'s own preload, still from memory, as it is (never converted instead)',
+              ready_next and played_next and how == {'src': 'blob:', 'isHls': False, 'transcoding': False} and not play_errors(), f'{ready_next} {now()} {how} {ahead()}')
         settings(page, {'quality': '320', 'loadAhead': 0})
         page.wait_for_timeout(500)
         check('stream: ...and none is kept once it\'s turned off', wait_for(lambda: ahead() == [] or all(e['id'] == now()['id'] for e in ahead()), 8, 0.3), str(ahead()))
@@ -3806,12 +4018,16 @@ with sync_playwright() as pw:
                      f" player.seek({at}); }})")
 
         def watch(seconds, until_id=None):
-            """The player every 0.2 s, for `seconds` or until `until_id` has been playing a moment."""
+            """The player every 0.2 s, for `seconds` or until `until_id` has
+            been playing a moment. (Each player's volume as the fade has it:
+            with loudness levelling on, what it plays at is that times the
+            track's level.)"""
             out = []
             end = time.time() + seconds
             while time.time() < end:
                 out.append(player(page, "({ cur: p.current?.id, t: p.time, kind: p.transition?.plan.kind || null, state: p.state,"
-                                        " vols: p.decks.map((d) => d.el.volume), times: p.decks.map((d) => d.el.currentTime),"
+                                        " vols: p.decks.map((d) => d.el.volume / Math.max(1e-9, p.volume * d.level)), levels: p.decks.map((d) => d.level),"
+                                        " times: p.decks.map((d) => d.el.currentTime),"
                                         " playing: p.decks.filter((d) => !d.el.paused).length, active: p.active })"))
                 if until_id and sum(1 for x in out if x['cur'] == until_id) > 3:
                     break
@@ -4008,14 +4224,23 @@ with sync_playwright() as pw:
             return wait_for(lambda: player(page, "p.state === 'playing'"), 10, 0.1)
 
         level = lambda: player(page, '({ level: p.deck.level, volume: p.audio.volume, spare: p.spare.qid != null ? p.spare.level : null })')
+        # On to start with (a new browser's settings).
+        fresh_ctx = browser.new_context(**MOBILE)
+        fresh = fresh_ctx.new_page()
+        attach(fresh, 'loudness-fresh')
+        login(fresh, APP, app_defaults=True)
+        starts = js(fresh, "() => import('./js/state.js').then(({ app }) => ({ loudness: app.settings.loudness, loadAhead: app.settings.loadAhead }))")
+        fresh_ctx.close()
+        # (0.19.0 had it off: settings from then are moved on to it.)
         settings(page, {'loudness': False, 'fades': 'off', 'gapless': True})
         play([loud['ratingKey']])
         off = level()
         settings(page, {'loudness': True})
         page.wait_for_timeout(400)
         on = level()
-        check('loudness: off to start with; on, a loud track is turned down to -14 LUFS (by 6 dB here), at once',
-              off['level'] == 1 and abs(on['level'] - 10 ** (-6 / 20)) < 0.01 and abs(on['volume'] - on['level']) < 0.01, f'{off} {on}')
+        check('loudness: on to start with (and loading the next track ahead); on, a loud track is turned down to -14 LUFS (by 6 dB here), at once',
+              starts == {'loudness': True, 'loadAhead': 1} and off['level'] == 1 and abs(on['level'] - 10 ** (-6 / 20)) < 0.01 and abs(on['volume'] - on['level']) < 0.01,
+              f'{starts} {off} {on}')
         play([quiet['ratingKey']])
         q = level()
         check('loudness: ...a quiet one isn\'t turned up', q['level'] == 1 and q['volume'] == 1, str(q))
@@ -4025,6 +4250,21 @@ with sync_playwright() as pw:
         album = level()
         check('loudness: an album played in order uses its album\'s gain (3 dB down here), for the next track too, before it plays',
               abs(first['level'] - 10 ** (-3 / 20)) < 0.01 and album['spare'] is not None and abs(album['spare'] - 10 ** (-3 / 20)) < 0.01, f'{first} {album}')
+        # Through a crossfade each track keeps its own level (the fade's
+        # volume times it), ending at the next one's.
+        settings(page, {'fades': 'always'})
+        play([quiet['ratingKey'], loud['ratingKey']])
+        wait_for(lambda: player(page, 'p.spare.qid != null && p.spare.level < 1'), 10, 0.2)
+        player(page, 'p.seek(p.duration - 6)')
+        fading = wait_for(lambda: player(page, "p.transition?.plan.kind === 'fade' && p.transition.p > 0.3"), 10, 0.1)
+        mix = player(page, "p.decks.map((d) => ({ volume: d.el.volume, gain: d.gain, level: d.level }))")
+        wait_for(lambda: player(page, f"p.current?.id === '{loud['ratingKey']}' && !p.transition"), 12, 0.2)
+        end = level()
+        settings(page, {'fades': 'off'})
+        check('loudness: through a crossfade each track keeps its own level (the fade\'s volume times it), ending at the next one\'s',
+              fading and all(abs(x['volume'] - x['gain'] * x['level']) < 0.01 for x in mix) and all(0.02 < x['gain'] < 0.98 for x in mix)
+              and sorted(round(x['level'], 2) for x in mix) == [round(10 ** (-6 / 20), 2), 1.0]
+              and abs(end['level'] - 10 ** (-6 / 20)) < 0.01 and abs(end['volume'] - end['level']) < 0.01, f'{mix} {end}')
         settings(page, {'loudness': False})
         page.wait_for_timeout(300)
         back = level()
@@ -4033,6 +4273,29 @@ with sync_playwright() as pw:
         page.wait_for_selector('label.toggle-row:has-text("Loudness levelling")')
         row_text = page.locator('label.toggle-row', has_text='Loudness levelling').inner_text()
         check('loudness: it\'s in Settings › Playback, saying it only ever turns tracks down', 'never up' in row_text, row_text)
+        # Load ahead is there too: off, or 1 to 10 tracks, each with about how
+        # much memory it takes, as Streaming quality has the tracks come in.
+        settings(page, {'quality': 'original'})
+        page.goto(APP + '#/settings')
+        page.goto(APP + '#/settings/playback')
+        page.wait_for_selector('.choice-row:has-text("Load ahead")')
+        page.click('.choice-row:has-text("Load ahead")')
+        page.wait_for_selector('.sheet.open')
+        labels = page.locator('.sheet.open .sheet-action .sheet-label, .sheet.open .sheet-action > span:first-child').all_inner_texts()
+        sheet_text = page.locator('.sheet.open').inner_text()
+        shot(page, 'loudness-02-load-ahead')
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(300)
+        page.locator('label.radio-row, .radio-row', has_text='320').first.click()
+        page.wait_for_timeout(300)
+        page.click('.choice-row:has-text("Load ahead")')
+        page.wait_for_selector('.sheet.open')
+        converted = page.locator('.sheet.open').inner_text()
+        page.keyboard.press('Escape')
+        check('loudness: Load ahead goes from off to 10 tracks, each saying about how much memory it takes (as MP3 and FLAC, or at the bitrate it\'s converted to)',
+              'Off' in sheet_text and '10 tracks' in sheet_text and 'The next 10 tracks: about 96 MB as MP3, 300 MB as FLAC.' in sheet_text
+              and 'The next 2 tracks: about 19 MB at 320 kbps.' in converted, f'{labels} {sheet_text[-200:]} {converted[-200:]}')
+        settings(page, {'quality': 'original'})
         js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
         ctx.close()
 
@@ -4599,7 +4862,7 @@ with sync_playwright() as pw:
                 pg.goto(APP_DEBUG)
                 pg.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
             else:
-                login(pg, APP_DEBUG, token)
+                login(pg, APP_DEBUG, token, app_defaults=True)
             return c, pg
 
         def mine(pg):
@@ -4766,7 +5029,7 @@ with sync_playwright() as pw:
         check('sync: signing out leaves the account\'s settings (its Home screen too) as they were', account('t')['settings'].get('home') == before and before, str(account('t')['settings'].get('home')))
         # ...and what that browser still has isn't the next account's to keep.
         account('t2', 'DELETE')
-        login(desk, APP_DEBUG, 't2')
+        login(desk, APP_DEBUG, 't2', app_defaults=True)
         desk.wait_for_timeout(2000)
         check('sync: signed in as someone else after that, nothing that browser had goes to their account', account('t2')['rev'] == 0, json.dumps(account('t2')))
         for c in (desk_ctx, phone_ctx, sam_ctx):
@@ -4820,6 +5083,27 @@ with sync_playwright() as pw:
         until("() => location.hash.startsWith('#/browse/tracks') && document.querySelectorAll('.tracks .track').length > 0")
         rows = count('.tracks .track')
         check('memory: a list you leave stops loading', 0 < rows <= 200, rows)
+
+        # ...and so does one hidden while what's typed in its search box
+        # shows what matches in its place.
+        page.click('#tabs .tab[data-tab=search]')
+        until("() => location.hash === '#/search'")
+        mock_big('/__mock/config?delay=600')
+        try:
+            page.click('a[href="#/browse/tracks"]')
+            until("() => !!document.querySelector('.within input')")
+            page.fill('.within input', 'zzzz')
+            page.wait_for_timeout(6000)
+            unseen = page.evaluate("() => [...document.querySelectorAll('.view .list-box')].filter((b) => b.hidden).map((b) => b.querySelectorAll('.track').length)")
+        finally:
+            mock_big('/__mock/config?delay=0')
+        check('memory: ...and so does one hidden while its search box shows what matches', len(unseen) == 1 and unseen[0] <= 100, unseen)
+        page.fill('.within input', '')
+        page.wait_for_timeout(600)
+        page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+        more = until("() => [...document.querySelectorAll('.view .list-box')].filter((b) => !b.hidden).some((b) => b.querySelectorAll('.track').length > 100)", 10)
+        check('memory: ...carrying on once it\'s shown again', more, page.evaluate("() => document.querySelectorAll('.view .list-box .track').length"))
+        page.evaluate('window.scrollTo(0, 0)')
 
         # Far from the screen, artwork lets go of its picture, and gets it back.
         page.click('#tabs .tab[data-tab=search]')

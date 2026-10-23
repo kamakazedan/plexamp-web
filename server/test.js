@@ -1056,6 +1056,41 @@ test('account settings: kept in a file only the service can read, and read back 
   }
 });
 
+test('account settings: loudness levelling kept off from 0.19.0 (how it started then) goes, once, so it starts on as in 0.20.0', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-settings-'));
+  const said = [];
+  const log = { info: (m) => said.push(m), warn: (m) => said.push(m), error: (m) => said.push(m) };
+  try {
+    const file = join(dir, 'settings.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        accounts: {
+          1: { settings: { loudness: false, gapless: false }, changed: { loudness: 2, gapless: 2 }, rev: 2 },
+          2: { settings: { loudness: true, gridSize: 'large' }, changed: { loudness: 1, gridSize: 1 }, rev: 1 },
+          3: { settings: {}, rev: 4, off: true },
+        },
+      }),
+    );
+    const store = new SettingsStore({ dir, log });
+    assert.deepEqual(store.get(1), { settings: { gapless: false }, changed: { gapless: 2 }, rev: 2, off: false });
+    assert.deepEqual(store.get(2), { settings: { loudness: true, gridSize: 'large' }, changed: { loudness: 1, gridSize: 1 }, rev: 1, off: false });
+    assert.deepEqual(store.get(3), { settings: {}, changed: {}, rev: 4, off: true });
+    assert.equal(said.length, 1);
+    assert.match(said[0], /1 account kept it off/);
+    store.flush();
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 2);
+    // Only once: turned off from then on, it stays off.
+    store.update(1, { set: { loudness: false } });
+    store.flush();
+    assert.deepEqual(new SettingsStore({ dir, log }).get(1).settings, { gapless: false, loudness: false });
+    assert.equal(said.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------- Spotify import ----------
 
 const SP_ID = '37i9dQZF1DXcBWIGoYBM5M';

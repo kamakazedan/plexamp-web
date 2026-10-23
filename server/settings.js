@@ -156,6 +156,21 @@ function checked(raw) {
   }
 }
 
+// The file's version: 2 from 0.20.0. Settings kept by 0.19.0 (version 1)
+// are brought up to date once, as they're read (see upgrade).
+const FILE_VERSION = 2;
+
+// 0.20.0 starts loudness levelling on (0.19.0 started it off). An account
+// that kept it off from then most likely kept 0.19.0's start (turning
+// keeping them on again sends them all), so it goes, and each device has
+// its own, as 0.20.0 starts it: on. Whether anything went.
+function upgrade(a) {
+  if (a.settings.loudness !== false) return false;
+  delete a.settings.loudness;
+  delete a.changed.loudness;
+  return true;
+}
+
 // What's said of an account's settings: them, how many times they've
 // changed (0: none kept yet), at which of those changes each last did
 // (so a browser can tell whether a change it couldn't send was overtaken),
@@ -176,10 +191,18 @@ export class SettingsStore {
     if (!this.file || !existsSync(this.file)) return;
     try {
       const data = JSON.parse(readFileSync(this.file, 'utf8'));
+      const before = !(Number(data?.version) >= FILE_VERSION);
+      let moved = 0;
       for (const [id, raw] of Object.entries(data?.accounts && typeof data.accounts === 'object' ? data.accounts : {})) {
         const uid = userId(id);
         const a = uid && checked(raw);
-        if (a && this.accounts.size < SETTINGS_LIMITS.accounts) this.accounts.set(uid, a);
+        if (!a || this.accounts.size >= SETTINGS_LIMITS.accounts) continue;
+        if (before && upgrade(a)) moved += 1;
+        this.accounts.set(uid, a);
+      }
+      if (moved) {
+        this.log?.info(`account settings: loudness levelling is on to start with from 0.20.0; ${moved} account${moved === 1 ? '' : 's'} kept it off from 0.19.0, where off was how it started, and now ${moved === 1 ? 'has' : 'have'} it on`);
+        this.changed();
       }
     } catch (err) {
       this.log?.warn(`account settings: couldn't read ${this.file} (${err.message}); starting without them`);
@@ -244,7 +267,7 @@ export class SettingsStore {
     if (!this.file) return;
     const tmp = `${this.file}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify({ version: 1, accounts: Object.fromEntries(this.accounts) }), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ version: FILE_VERSION, accounts: Object.fromEntries(this.accounts) }), { mode: 0o600 });
       renameSync(tmp, this.file);
     } catch (err) {
       this.log?.error(`account settings: couldn't save them to ${this.file}: ${err.message}`);
