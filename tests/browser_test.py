@@ -5321,12 +5321,16 @@ with sync_playwright() as pw:
             const after = m.missingList().map((x) => [x.title, x.via || '']);
             m.noteMissing([s], { songs: [], artists: [] }, 'an AI playlist');
             const taken = m.missingList()[0];
-            const out = { after, taken: [taken.via || '', taken.mb || '', m.askable(taken)] };
+            // Found as well as missing in one playlist (a lookup that failed
+            // once), it's found.
+            m.clearMissing();
+            const both = m.noteMissing([s], { songs: [s], artists: [] }, 'Twice in it', { via: 'spotify' });
+            const out = { after, taken: [taken.via || '', taken.mb || '', m.askable(taken)], both: [both.of, m.missingList().length] };
             m.clearMissing();
             return out;
         })""")
-        check('spotify: ...a song from Spotify isn\'t taken off by an AI\'s suggestion MusicBrainz doesn\'t know, and suggested by an AI, it stays a real song',
-              real == {'after': [['Basement Tape', 'spotify']], 'taken': ['', 'real', False]}, str(real))
+        check('spotify: ...a song from Spotify isn\'t taken off by an AI\'s suggestion MusicBrainz doesn\'t know, and suggested by an AI, it stays a real song (and one found as well as missing is found)',
+              real == {'after': [['Basement Tape', 'spotify']], 'taken': ['', 'real', False], 'both': [0, 0]}, str(real))
         # A song in a playlist from Spotify is counted once for each playlist
         # it's in, however often it's imported; suggested by an AI after, it's
         # counted afresh as a suggestion.
@@ -5346,6 +5350,7 @@ with sync_playwright() as pw:
                 for (const p of many) m.noteMissing(s, { songs: [], artists: [] }, p, { via: 'spotify' });
                 out.push(times());
             }
+            out.push(m.missingCsv().includes('"20+"'));
             return out;
         })""")
         page.goto(APP + '#/settings/missing')
@@ -5353,7 +5358,7 @@ with sync_playwright() as pw:
         twenty = page.locator('.missing-row').first.inner_text()
         js(page, "() => import('./js/missing.js').then((m) => m.clearMissing())")
         check('spotify: ...a song from Spotify counts once for each playlist it\'s in, however often imported, up to "20+" (suggested by an AI after, it\'s a suggestion)',
-              counts == [1, 1, 2, 2, 1, '', 20, 20] and 'in 20+ playlists from Spotify' in twenty, f'{counts} {twenty!r}')
+              counts == [1, 1, 2, 2, 1, '', 20, 20, True] and 'in 20+ playlists from Spotify' in twenty, f'{counts} {twenty!r}')
         js(page, "() => import('./js/missing.js').then((m) => m.clearMissing?.())")
         page.goto(APP + '#/search')
         page.wait_for_selector('.spotify-row')

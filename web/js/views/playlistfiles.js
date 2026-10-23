@@ -209,6 +209,8 @@ export function runImport(jobs, { remember = null } = {}) {
           const { keys, found, saved } = noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, {
             via: remember.via,
           });
+          // (Missing now, it's on the list again, whatever found it before.)
+          for (const key of keys) foundAt.delete(key);
           for (const key of found) foundAt.set(key, k);
           if (!saved) unsaved = true;
           r.keys = keys;

@@ -194,7 +194,8 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
     if (!entry.artist && !entry.title) continue;
     if (m.mb === 'real') entry.mb = 'real';
     const k = keyOf(entry);
-    if (noted.has(k)) continue;
+    // (Found as well, in the same call, it's found: a lookup that failed once.)
+    if (noted.has(k) || inLibrary.has(k)) continue;
     noted.add(k);
     const have = index.get(k);
     if (have) {
@@ -369,7 +370,8 @@ export const toCsv = (head, rows) => `\ufeff${[head, ...rows].map((r) => r.map(c
 // AI for (that's only shown here).
 export function missingCsv(list = missingList()) {
   const head = ['Artist', 'Title', 'Missing', 'Times suggested', 'Last suggested', 'Library', 'From'];
-  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', m.times || 1, day(m.last), m.library, m.via === 'spotify' ? 'A Spotify playlist' : 'An AI playlist']));
+  const times = (m) => (m.via === 'spotify' && m.lists?.length >= MISSING_LISTS ? `${MISSING_LISTS}+` : m.times || 1);
+  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', times(m), day(m.last), m.library, m.via === 'spotify' ? 'A Spotify playlist' : 'An AI playlist']));
 }
 
 export function missingText(list = missingList()) {
