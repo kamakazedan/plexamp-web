@@ -455,8 +455,10 @@ location = /_pms_auth {
     # everything else that reaches it), and who's asking.
     proxy_set_header X-PW-Route internal;
     proxy_set_header X-Real-IP \$remote_addr;
-    # \$args would be the subrequest's own (empty) query string.
-    proxy_set_header X-Original-URI \$request_uri;
+    # The token from the request's query string, and nothing else of it
+    # (what's searched for, a playlist's name: see nginx.conf). A token in
+    # the X-Plex-Token header comes as it is.
+    proxy_set_header X-PW-Plex-Token \$pms_auth_token;
     proxy_connect_timeout 5s;
     proxy_read_timeout 20s;
 }

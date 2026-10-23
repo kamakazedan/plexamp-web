@@ -18,7 +18,12 @@ import { app, emit } from './state.js';
 import { norm, songInLibrary, artistInLibrary, aiSettings } from './ai.js';
 
 const KEY = 'aiMissing';
-const LIMIT = 500;
+// Each server keeps the most recent of each: what AI playlists suggested, and
+// what playlists from Spotify had (a whole account's can be thousands: an
+// import's spreadsheet has all of its own). One doesn't push the other out,
+// nor one server another's.
+export const MISSING_LIMITS = { ai: 500, spotify: 1000 };
+const sourceOf = (m) => (m.via === 'spotify' ? 'spotify' : 'ai');
 
 const keyOf = (m) => `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
 const sameServer = (m, src = app.source) => !!src && m.server === (src.serverId || src.uri);
@@ -111,16 +116,34 @@ export async function checkSuggestions(list, { signal, onProgress } = {}) {
   return verdicts;
 }
 
+// The most recent of each server's, of each kind (see MISSING_LIMITS).
+function trim(list) {
+  const groups = new Map();
+  for (const m of list) {
+    const k = `${m.server}\n${sourceOf(m)}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(m);
+  }
+  const out = [];
+  for (const g of groups.values()) {
+    const cap = MISSING_LIMITS[sourceOf(g[0])];
+    out.push(...(g.length > cap ? g.sort((a, b) => (b.last || 0) - (a.last || 0)).slice(0, cap) : g));
+  }
+  return out;
+}
+
 // What an AI playlist found missing (and found there), for the request
-// `prompt`: new ones are added, ones seen before counted again, and ones
-// now in the library let go, as are those in `drop` (what MusicBrainz says
-// isn't real, kept from before it was asked). Those MusicBrainz knows come
-// with mb: 'real'. `via`: where they came from instead ('spotify', with the
-// playlist's name as `prompt`): real songs, never asked about on
-// MusicBrainz.
+// `prompt`: new ones are added, ones seen before counted again (once a
+// call: a song twice in a playlist is one), and ones now in the library let
+// go, as are those in `drop` (what MusicBrainz says isn't real, kept from
+// before it was asked). Those MusicBrainz knows come with mb: 'real'. `via`:
+// where they came from instead ('spotify', with the playlist's name as
+// `prompt`): real songs, never asked about on MusicBrainz. Returns how many
+// of them there are ({ of }), and how many are on the list now ({ kept }:
+// all, unless there wasn't room).
 export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [], via = '' } = {}) {
   const src = app.source;
-  if (!src) return;
+  if (!src) return { kept: 0, of: 0 };
   const now = Math.round(Date.now() / 1000);
   const here = (m) => sameLibrary(m, src);
   const foundKeys = new Set([
@@ -129,11 +152,14 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
     ...drop.map((m) => keyOf({ kind: m.kind, artist: m.artist || '', title: m.kind === 'track' ? m.title || '' : '' })),
   ]);
   let list = load().filter((m) => !(here(m) && foundKeys.has(keyOf(m))));
+  const noted = new Set();
   for (const m of missing) {
     const entry = { kind: m.kind, artist: String(m.artist || '').slice(0, 120), title: m.kind === 'track' ? String(m.title || '').slice(0, 160) : '' };
     if (!entry.artist && !entry.title) continue;
     if (m.mb === 'real') entry.mb = 'real';
     const k = keyOf(entry);
+    if (noted.has(k)) continue;
+    noted.add(k);
     const have = list.find((x) => here(x) && keyOf(x) === k);
     if (have) {
       have.times = (have.times || 1) + 1;
@@ -146,9 +172,10 @@ export function noteMissing(missing = [], seen = { songs: [], artists: [] }, pro
       list.push({ ...entry, ...(via ? { via } : {}), times: 1, first: now, last: now, prompt: String(prompt).slice(0, 200), server: src.serverId || src.uri, section: String(src.sectionKey), library: libraryName(src) });
     }
   }
-  // The most recently suggested are kept.
-  if (list.length > LIMIT) list = list.sort((a, b) => (b.last || 0) - (a.last || 0)).slice(0, LIMIT);
-  save(list);
+  save(trim(list));
+  // (What's kept, as read back: a browser out of room keeps nothing new.)
+  const kept = new Set(load().filter(here).map(keyOf));
+  return { kept: [...noted].filter((k) => kept.has(k)).length, of: noted.size };
 }
 
 export function forgetMissing(entry) {
@@ -237,7 +264,7 @@ export function restoreMissing(entries = []) {
     list.push(entry);
     have.add(idOf(m));
   }
-  save(list.length > LIMIT ? list.sort((a, b) => (b.last || 0) - (a.last || 0)).slice(0, LIMIT) : list);
+  save(trim(list));
 }
 
 // ---------- export ----------

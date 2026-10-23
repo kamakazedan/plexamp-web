@@ -4,7 +4,7 @@
 import { app } from '../state.js';
 import { navigate, describeError, popOverlay, refresh, parseHash } from '../router.js';
 import { h, sheet, toast, askText, fmt, download, fileDate } from '../ui.js';
-import { copyText, noteMissing } from '../missing.js';
+import { copyText, noteMissing, MISSING_LIMITS } from '../missing.js';
 import { refreshLists } from '../editing.js';
 import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine, entryWhere, entryText, entriesCsv } from '../playlistio.js';
 
@@ -198,8 +198,12 @@ export function runImport(jobs, { remember = null } = {}) {
         if (remember) {
           const gone = new Set(r.missing);
           const song = (e) => ({ kind: 'track', artist: e.artist || e.albumArtist || '', title: e.title });
-          noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, { via: remember.via });
-          r.remembered = r.missing.length;
+          const { kept, of } = noteMissing(r.missing.map(song), { songs: job.p.tracks.filter((e) => !gone.has(e)).map(song), artists: [] }, remember.from || job.from || job.title, {
+            via: remember.via,
+          });
+          r.remembered = kept;
+          r.unremembered = of - kept;
+          r.via = remember.via;
         }
         done.push({ job, ...r });
         if (r.playlist) made += 1;
@@ -224,16 +228,18 @@ export function runImport(jobs, { remember = null } = {}) {
 
 const SHOWN = 200;
 
-// "They're on Missing tracks", where what wasn't found went there.
-const rememberedNote = (r) =>
-  r.remembered
-    ? h(
-        'p.import-remembered',
-        null,
-        `${r.remembered === 1 ? 'It’s' : 'They’re'} on Missing tracks now, to go and find. `,
-        h('button.link-btn', { type: 'button', onclick: () => navigate('/settings/missing') }, 'See Missing tracks'),
-      )
-    : null;
+// "They're on Missing tracks", where what wasn't found went there (or as
+// many as there's room for: the spreadsheet has them all).
+function rememberedNote(r) {
+  if (!r.remembered && !r.unremembered) return null;
+  const room = `it keeps the latest ${fmt.number(MISSING_LIMITS[r.via === 'spotify' ? 'spotify' : 'ai'])}${r.via === 'spotify' ? ' from Spotify' : ''} for each server`;
+  const text = !r.unremembered
+    ? `${r.remembered === 1 ? 'It’s' : 'They’re'} on Missing tracks now, to go and find. `
+    : r.remembered
+      ? `${fmt.number(r.remembered)} of the ${fmt.number(r.remembered + r.unremembered)} are on Missing tracks now, to go and find (${room}): the spreadsheet has them all. `
+      : `There wasn’t room for them on Missing tracks (${room}): the spreadsheet has them all. `;
+  return h('p.import-remembered', null, text, r.remembered ? h('button.link-btn', { type: 'button', onclick: () => navigate('/settings/missing') }, 'See Missing tracks') : null);
+}
 
 function resultRow(r) {
   const title = r.job.title;

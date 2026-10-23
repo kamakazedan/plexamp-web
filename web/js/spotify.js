@@ -1,6 +1,6 @@
 // Search › From Spotify, two ways. Spotify's own download of your data
 // (see readSpotifyFiles): its playlist files, read here in the browser, with
-// every playlist you've made, however long. And, with SPOTIFY_IMPORT on the
+// all your playlists, however long. And, with SPOTIFY_IMPORT on the
 // container, a public playlist's link, which goes to this player's service,
 // which reads the playlist from the page Spotify shows anyone for it
 // (server/spotify.js), at most its first 100 tracks. Either way, the tracks
@@ -88,7 +88,7 @@ export function spotifyEntries(pl) {
 // settings › Download your data › Account data, which anyone can ask for. It
 // comes as a ZIP of files, one for each kind of data, and only two kinds are
 // wanted: Playlist1.json (with Playlist2.json and so on, for a lot of
-// playlists), every playlist you've made, and YourLibrary.json, with the
+// playlists), your playlists, and YourLibrary.json, with the
 // songs you've liked. The others hold your personal details (email, date of
 // birth, address, phone number, payment card, what you've searched for and
 // listened to), so a file is only opened if it has one of those two names:
@@ -143,51 +143,72 @@ function localEntry(lt) {
   return entryOf(part(m[3]), part(m[1]), part(m[2]));
 }
 
-// The playlists in Spotify's playlist files (see sortSpotifyFiles): [{
-// title, tracks: [{ title, artist, albumArtist, album }], liked }], your
-// Liked Songs (from YourLibrary.json) first, then the playlists in Spotify's
-// order. Files come from anyone, so what's read is bounded, and what isn't
-// a track (a podcast episode, an audiobook) is left out. Throws (with
-// `file`) for a file that isn't what its name says.
+// The playlists in Spotify's playlist files (see sortSpotifyFiles): {
+// playlists: [{ title, tracks: [{ title, artist, albumArtist, album }], of,
+// liked, file }], tooBig: [names], more, files: how many were read }. Your Liked Songs (from
+// YourLibrary.json) come first, then the playlists in Spotify's order. Files
+// come from anyone, so what's read is bounded (FILE_LIMITS): a file too big
+// is passed over (tooBig), playlists past the most that can be read at once
+// are only counted (more), and a playlist past the most tracks has its first
+// ones (`of` is how many it has). What isn't a track (a podcast episode, an
+// audiobook) is left out. Throws (with `file`) for a file that isn't what
+// its name says, or when none could be read.
 export async function readSpotifyFiles(files) {
   const order = (f) => (LIBRARY_FILE.test(f.name) ? -1 : Number(PLAYLIST_FILE.exec(f.name)?.[1] || 0));
-  const playlists = [];
+  const out = { playlists: [], tooBig: [], more: 0, files: 0 };
   let total = 0;
-  const take = (title, items, read, liked = false) => {
-    if (playlists.length >= FILE_LIMITS.playlists) return;
+  const take = (title, items, read, file, liked = false) => {
+    if (out.playlists.length >= FILE_LIMITS.playlists) {
+      out.more += 1;
+      return;
+    }
     const tracks = [];
-    for (const it of items.slice(0, FILE_LIMITS.tracks)) {
-      if (total >= FILE_LIMITS.total) break;
+    let of = 0;
+    for (const it of items) {
       const e = read(it);
-      if (e) {
+      if (!e) continue;
+      of += 1;
+      if (tracks.length < FILE_LIMITS.tracks && total < FILE_LIMITS.total) {
         tracks.push(e);
         total += 1;
       }
     }
-    playlists.push({ title, tracks, liked });
+    out.playlists.push({ title, tracks, of, liked, file });
   };
   for (const file of [...files].sort((a, b) => order(a) - order(b))) {
-    if (file.size > FILE_LIMITS.bytes) throw fileError(`${file.name} is too big to be one of Spotify’s playlist files.`);
+    if (file.size > FILE_LIMITS.bytes) {
+      out.tooBig.push(file.name);
+      continue;
+    }
     let data = null;
     try {
       data = JSON.parse(await file.text());
     } catch {
       data = null;
     }
+    out.files += 1;
     if (LIBRARY_FILE.test(file.name)) {
       if (!data || typeof data !== 'object' || !Array.isArray(data.tracks)) throw fileError(`${file.name} isn’t Spotify’s list of your library.`);
-      take(LIKED_SONGS, data.tracks, (t) => (t && typeof t === 'object' ? entryOf(t.track, t.artist, t.album) : null), true);
+      take(LIKED_SONGS, data.tracks, (t) => (t && typeof t === 'object' ? entryOf(t.track, t.artist, t.album) : null), file.name, true);
       continue;
     }
     if (!data || typeof data !== 'object' || !Array.isArray(data.playlists)) throw fileError(`${file.name} isn’t one of Spotify’s playlist files.`);
     for (const p of data.playlists) {
       if (!p || typeof p !== 'object' || !Array.isArray(p.items)) continue;
-      take(words(p.name, 200) || 'A playlist from Spotify', p.items, (it) => {
-        if (!it || typeof it !== 'object') return null;
-        if (it.track && typeof it.track === 'object') return entryOf(it.track.trackName, it.track.artistName, it.track.albumName);
-        return it.localTrack ? localEntry(it.localTrack) : null;
-      });
+      take(
+        words(p.name, 200) || 'A playlist from Spotify',
+        p.items,
+        (it) => {
+          if (!it || typeof it !== 'object') return null;
+          if (it.track && typeof it.track === 'object') return entryOf(it.track.trackName, it.track.artistName, it.track.albumName);
+          return it.localTrack ? localEntry(it.localTrack) : null;
+        },
+        file.name,
+      );
     }
   }
-  return playlists;
+  if (!out.playlists.length && out.tooBig.length) {
+    throw fileError(`${out.tooBig.join(', ')} ${out.tooBig.length === 1 ? 'is' : 'are'} too big to be Spotify’s playlist files (over ${FILE_LIMITS.bytes / 1024 / 1024} MB).`);
+  }
+  return out;
 }

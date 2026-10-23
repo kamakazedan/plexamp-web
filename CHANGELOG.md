@@ -8,7 +8,7 @@ you're running is shown in **Settings › About**.
 ### New
 
 - **Your Spotify playlists, from Spotify's download of your data**
-  (Search › From Spotify): every playlist you've made, however long, and
+  (Search › From Spotify): all your playlists, however long, and
   your Liked Songs, with a free Spotify account and nothing set on the
   container. Spotify only lets other apps read your playlists through its
   developer programme (Premium, and five people at most), so the app
@@ -23,6 +23,18 @@ you're running is shown in **Settings › About**.
 - The link import (`SPOTIFY_IMPORT`) is still there where it's on, as
   **Use a link instead**, for one public playlist straight away (its
   first 100 tracks).
+
+### Changed
+
+- **The `/pms/` proxy's sign-in check is given only each request's
+  token** (with `PLEX_SERVER_URL`): it was given the whole address, with
+  what's searched for in it, which the service never used or kept, but
+  needn't have had.
+- **Missing tracks keeps the latest 500 that AI playlists suggested, and
+  apart from those the latest 1,000 from Spotify, for each server**, so
+  a big Spotify import can't push the rest out. It was 500 in all. An
+  import says when there wasn't room for all it didn't find: its
+  spreadsheet has them all.
 
 ## 0.21.0 - 2026-10-23
 

@@ -11,6 +11,7 @@ import { popOverlay } from '../router.js';
 import { h, sheet, fmt, icon } from '../ui.js';
 import { readSpotifyPlaylist, spotifyLinkKind, spotifyEntries, spotifyOffered, sortSpotifyFiles, readSpotifyFiles, SPOTIFY_PRIVACY_URL, LIKED_SONGS } from '../spotify.js';
 import { runImport } from './playlistfiles.js';
+import { FILE_LIMITS } from '../playlistio.js';
 
 const where = () => app.source?.sectionTitle || 'this library';
 // Playlists by name ("Late night" and "late night " are one name).
@@ -20,78 +21,88 @@ const NOT_A_LINK = 'That isn’t a link to a Spotify playlist. In Spotify, choos
 
 // ---------- from Spotify's download of your data ----------
 
+// The files named, for what's said about them ("Userdata.json and
+// Payments.json").
+const names = (list) => (list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}` : list[0] || '');
+const notOpened = (refused) =>
+  refused.length ? `${names(refused)} ${refused.length === 1 ? 'wasn’t opened, as it isn’t a playlist file' : 'weren’t opened, as they aren’t playlist files'}.` : '';
+
 export function importFromSpotify() {
   let found = null; // the playlists read, once the guide has closed
   let byLink = false;
+  let closed = false;
+  let reading = false;
   const status = h('p.ask-message.spotify-status', { role: 'status' });
   const choose = h('button.btn.btn-primary.spotify-choose', { type: 'button', onclick: () => pickFiles(gotFiles) }, 'Choose the playlist files…');
+  const linkBtn = spotifyOffered()
+    ? h(
+        'button.btn.btn-secondary.spotify-by-link',
+        {
+          type: 'button',
+          onclick: () => {
+            byLink = true;
+            popOverlay();
+          },
+        },
+        'Use a link instead',
+      )
+    : null;
   const step = (title, ...text) => h('li', null, h('span.spotify-step-title', null, title), h('span.spotify-step-text', null, ...text));
+  const guide = h(
+    'div.ask-form.import-form.spotify-guide',
+    {
+      // Files dropped here are taken as chosen (and the browser doesn't
+      // open them in the page instead).
+      ondragover: (e) => e.preventDefault(),
+      ondrop: (e) => {
+        e.preventDefault();
+        const files = [...(e.dataTransfer?.files || [])];
+        if (files.length && !reading) gotFiles(files);
+      },
+    },
+    h(
+      'p.ask-message',
+      null,
+      'Spotify only lets other apps read your playlists through its developer programme, which needs a Premium account and allows five people. But anyone can download their own data from Spotify, with all their playlists, however long, and that’s what’s used here.',
+    ),
+    h(
+      'ol.spotify-steps',
+      null,
+      step(
+        'Ask Spotify for your data',
+        'On spotify.com, open your account’s Privacy settings, tick Account data under Download your data, and request it. Spotify emails you to confirm, then again when it’s ready, usually within a few days.',
+        h('a.btn.btn-secondary.spotify-privacy', { href: SPOTIFY_PRIVACY_URL, target: '_blank', rel: 'noopener noreferrer' }, icon('external', 20), h('span', null, 'Spotify’s privacy settings')),
+      ),
+      step(
+        'Open the ZIP it sends',
+        'Inside is a file for each kind of data. Only two kinds are needed: ',
+        h('code', null, 'Playlist1.json'),
+        ' (with ',
+        h('code', null, 'Playlist2.json'),
+        ' and so on, if you have a lot of playlists), and ',
+        h('code', null, 'YourLibrary.json'),
+        ', with your Liked Songs.',
+      ),
+      step('Choose just those', 'The other files hold your personal details: your email, date of birth, address and phone number, your payment card, and what you’ve searched for and listened to. Leave them out.'),
+    ),
+    h(
+      'p.spotify-private',
+      null,
+      `Only files with those names are opened, here on this device: any other is turned away unread. Of them, only each playlist’s name and each track’s title, artist and album are kept, and those go no further than ${app.source?.serverName || 'your Plex server'}, to find the tracks there and make the playlists you choose.`,
+    ),
+    status,
+    choose,
+    // (SPOTIFY_IMPORT on the container.)
+    linkBtn ? h('div.spotify-or', null, h('p.ask-message', null, 'Or bring over a public playlist from its link, straight away: only its first 100 tracks, though.'), linkBtn) : null,
+  );
   sheet({
     title: 'From Spotify',
-    content: h(
-      'div.ask-form.import-form.spotify-guide',
-      null,
-      h(
-        'p.ask-message',
-        null,
-        'Spotify only lets other apps read your playlists through its developer programme, which needs a Premium account and allows five people. But anyone can download their own data from Spotify, with every playlist they’ve made, however long, and that’s what’s used here.',
-      ),
-      h(
-        'ol.spotify-steps',
-        null,
-        step(
-          'Ask Spotify for your data',
-          'On spotify.com, open your account’s Privacy settings, tick Account data under Download your data, and request it. Spotify emails you to confirm, then again when it’s ready, usually within a few days.',
-          h(
-            'a.btn.btn-secondary.spotify-privacy',
-            { href: SPOTIFY_PRIVACY_URL, target: '_blank', rel: 'noopener noreferrer' },
-            icon('external', 20),
-            h('span', null, 'Spotify’s privacy settings'),
-          ),
-        ),
-        step(
-          'Open the ZIP it sends',
-          'Inside is a file for each kind of data. Only two kinds are needed: ',
-          h('code', null, 'Playlist1.json'),
-          ' (with ',
-          h('code', null, 'Playlist2.json'),
-          ' and so on, if you have a lot of playlists), and ',
-          h('code', null, 'YourLibrary.json'),
-          ', with your Liked Songs.',
-        ),
-        step('Choose just those', 'The other files hold your personal details: your email, date of birth, address and phone number, your payment card, and what you’ve searched for and listened to. Leave them out.'),
-      ),
-      h(
-        'p.spotify-private',
-        null,
-        `Only files with those names are opened, here on this device: any other is turned away unread. Of them, only each playlist’s name and each track’s title, artist and album are kept, and those go no further than ${app.source?.serverName || 'your Plex server'}, to find the tracks there and make the playlists you choose.`,
-      ),
-      status,
-      choose,
-      // (SPOTIFY_IMPORT on the container.)
-      spotifyOffered()
-        ? h(
-            'div.spotify-or',
-            null,
-            h('p.ask-message', null, 'Or bring over a public playlist from its link, straight away: only its first 100 tracks, though.'),
-            h(
-              'button.btn.btn-secondary.spotify-by-link',
-              {
-                type: 'button',
-                onclick: () => {
-                  byLink = true;
-                  popOverlay();
-                },
-              },
-              'Use a link instead',
-            ),
-          )
-        : null,
-    ),
+    content: guide,
     variant: 'dialog',
     closeLabel: 'Close',
     // (Once this dialog has gone: the next opens one of its own.)
     onClose: () => {
+      closed = true;
       if (found) Promise.resolve().then(() => choosePlaylists(found));
       else if (byLink) Promise.resolve().then(() => fromLink());
     },
@@ -102,28 +113,44 @@ export function importFromSpotify() {
     status.classList.toggle('warn', warn);
   }
 
+  function busy(on) {
+    reading = on;
+    choose.disabled = on;
+    if (linkBtn) linkBtn.disabled = on;
+  }
+
   async function gotFiles(files) {
     const { wanted, refused, zip } = sortSpotifyFiles(files);
     if (!wanted.length) {
       say(
-        zip
+        zip && files.length === 1
           ? 'That’s the ZIP itself, so it wasn’t opened. Open it first, and choose the files inside it named Playlist1.json and YourLibrary.json.'
-          : `${files.length === 1 ? 'That isn’t one of Spotify’s playlist files, so it wasn’t' : 'None of those are Spotify’s playlist files, so they weren’t'} opened. Choose the files named Playlist1.json (and Playlist2.json and so on) and YourLibrary.json.`,
+          : `${files.length === 1 ? 'That isn’t one of Spotify’s playlist files, so it wasn’t' : 'None of those are Spotify’s playlist files, so they weren’t'} opened. Choose the files named Playlist1.json (and Playlist2.json and so on) and YourLibrary.json${zip ? ', from inside the ZIP' : ''}.`,
         true,
       );
       return;
     }
     say('Reading your playlists…');
-    choose.disabled = true;
+    busy(true);
     try {
-      const list = await readSpotifyFiles(wanted);
-      if (!list.some((p) => p.tracks.length)) return say('There are no tracks in those files.', true);
-      found = { list, refused };
+      const read = await readSpotifyFiles(wanted);
+      if (closed) return;
+      if (!read.playlists.some((p) => p.of)) return say(`There are no tracks in ${wanted.length === 1 ? 'that file' : 'those files'}. ${notOpened(refused)}`.trim(), true);
+      // The names of the playlists you have, to choose by (null: they
+      // couldn't be had).
+      let have = null;
+      try {
+        have = new Set((await app.server.playlists()).map((p) => nameKey(p.title)));
+      } catch {
+        /* names aren't checked */
+      }
+      if (closed) return;
+      found = { ...read, refused, have };
       popOverlay();
     } catch (err) {
-      say(err.file ? err.message : 'Those files couldn’t be read.', true);
+      if (!closed) say(`${err.file ? err.message : `${wanted.length === 1 ? 'That file' : 'Those files'} couldn’t be read.`} ${notOpened(refused)}`.trim(), true);
     } finally {
-      choose.disabled = false;
+      busy(false);
     }
   }
 }
@@ -135,31 +162,52 @@ function pickFiles(then) {
   picker?.remove();
   picker = h('input.file-picker', { type: 'file', multiple: true, accept: '.json,application/json', hidden: true });
   const input = picker;
+  const done = () => {
+    input.remove();
+    if (picker === input) picker = null;
+  };
   input.addEventListener('change', () => {
     const files = [...(input.files || [])];
-    input.remove();
+    done();
     if (files.length) then(files);
   });
-  input.addEventListener('cancel', () => input.remove());
+  input.addEventListener('cancel', done);
   document.body.append(input);
   input.click();
 }
 
-// Which playlists to make: those with tracks, and not the name of one you
-// have already, to begin with (chosen, one of those comes over as "Name
-// (from Spotify)").
-async function choosePlaylists({ list, refused }) {
-  let have = new Set();
-  try {
-    have = new Set((await app.server.playlists()).map((p) => nameKey(p.title)));
-  } catch {
-    /* names aren't checked */
+// A name of its own here: the playlist's, unless you have one by it, then
+// "Name (from Spotify)", "Name (from Spotify 2)" and so on.
+function freeName(title, taken) {
+  if (!taken.has(nameKey(title))) return title;
+  for (let n = 1; ; n++) {
+    const t = `${title} (from Spotify${n > 1 ? ` ${n}` : ''})`;
+    if (!taken.has(nameKey(t))) return t;
   }
-  const named = (p) => (have.has(nameKey(p.title)) ? `${p.title} (from Spotify)` : p.title);
-  const boxes = list.map((p) => {
-    const taken = have.has(nameKey(p.title));
-    const input = h('input', { type: 'checkbox', checked: !taken && p.tracks.length > 0, disabled: !p.tracks.length });
-    const sub = [p.liked ? 'The songs you’ve liked' : '', p.tracks.length ? fmt.count(p.tracks.length, 'track', 'tracks') : 'No tracks', taken ? `you have one by this name: this would be “${named(p)}”` : '']
+}
+
+// Which playlists to make: those with tracks, and not the name of one you
+// have already, to begin with. Each made gets a name of its own (freeName).
+function choosePlaylists({ playlists, tooBig, more, files, refused, have }) {
+  const taken = have || new Set();
+  const counts = new Map();
+  for (const p of playlists) counts.set(nameKey(p.title), (counts.get(nameKey(p.title)) || 0) + 1);
+  const boxes = playlists.map((p) => {
+    const mine = taken.has(nameKey(p.title));
+    const input = h('input', { type: 'checkbox', checked: !mine && p.tracks.length > 0, disabled: !p.tracks.length });
+    const size = !p.of
+      ? 'No tracks'
+      : p.tracks.length === p.of
+        ? fmt.count(p.of, 'track', 'tracks')
+        : p.tracks.length
+          ? `The first ${fmt.number(p.tracks.length)} of its ${fmt.count(p.of, 'track', 'tracks')}, as many as can come over at once`
+          : `${fmt.count(p.of, 'track', 'tracks')}: more than can come over ${files > 1 ? `with the rest. Choose ${p.file} on its own for it` : 'at once'}`;
+    const sub = [
+      p.liked ? 'The songs you’ve liked' : '',
+      size,
+      mine ? `you have one by this name: this would be “${freeName(p.title, taken)}”` : '',
+      counts.get(nameKey(p.title)) > 1 ? 'another of these has the same name' : '',
+    ]
       .filter(Boolean)
       .join(' · ');
     const row = h('label.import-choice', null, input, h('span.import-choice-text', null, h('span.import-choice-title', null, p.title), h('span.import-choice-sub', null, sub)));
@@ -191,19 +239,26 @@ async function choosePlaylists({ list, refused }) {
   };
   boxes.forEach((b) => b.input.addEventListener('change', paint));
   paint();
-  const lists = list.filter((p) => !p.liked).length;
+  const lists = playlists.filter((p) => !p.liked).length;
+  // What wasn't read: files turned away, or too big, and playlists past
+  // the most that can be read at once.
+  const passed = [
+    notOpened(refused),
+    tooBig.length ? `${names(tooBig)} ${tooBig.length === 1 ? 'is' : 'are'} too big to read (over ${FILE_LIMITS.bytes / 1024 / 1024} MB).` : '',
+    more ? `${fmt.count(more, 'more playlist isn’t', 'more playlists aren’t')} listed: there are more than can be read at once. Choose their files on their own for them.` : '',
+  ].filter(Boolean);
   sheet({
     title: 'Your playlists from Spotify',
-    subtitle: [lists ? fmt.count(lists, 'playlist', 'playlists') : '', list.some((p) => p.liked) ? LIKED_SONGS : ''].filter(Boolean).join(' and '),
+    subtitle: [lists ? fmt.count(lists, 'playlist', 'playlists') : '', playlists.some((p) => p.liked) ? LIKED_SONGS : ''].filter(Boolean).join(' and '),
     content: h(
       'div.ask-form.import-form.spotify-choose-form',
       null,
       h(
         'p.ask-message',
         null,
-        `Their tracks are looked for in ${where()} by title, artist and album, and those found make a playlist here, in the same order. Ones with the name of a playlist you have already aren’t chosen to begin with.`,
+        `Their tracks are looked for in ${where()} by title, artist and album, and those found make a playlist here, in the same order.${have ? ' Ones with the name of a playlist you have already aren’t chosen to begin with.' : ''}`,
       ),
-      refused.length ? h('p.spotify-refused', null, `Not opened, as they aren’t playlist files: ${refused.join(', ')}.`) : null,
+      passed.length ? h('p.spotify-refused', null, passed.join(' ')) : null,
       usable.length > 1 ? all : null,
       h('div.import-choices', null, boxes.map((b) => b.row)),
       h(
@@ -218,7 +273,12 @@ async function choosePlaylists({ list, refused }) {
     closeLabel: 'Cancel',
     onClose: () => {
       if (!chosen?.length) return;
-      const jobs = chosen.map((p) => ({ p: { title: p.title, tracks: p.tracks }, title: named(p), from: p.title }));
+      const used = new Set(taken);
+      const jobs = chosen.map((p) => {
+        const title = freeName(p.title, used);
+        used.add(nameKey(title));
+        return { p: { title: p.title, tracks: p.tracks }, title, from: p.title };
+      });
       Promise.resolve().then(() => runImport(jobs, { remember: keep.checked ? { via: 'spotify' } : null }));
     },
   });

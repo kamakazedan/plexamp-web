@@ -566,14 +566,14 @@ async function aiVerdict(req, token, serverToken) {
 }
 
 // The token on a request nginx is about to pass to Plex at /pms/: from the
-// X-Plex-Token header, or from the original request's query string.
+// X-Plex-Token header, or from the original request's query string, which
+// nginx passes on alone (X-PW-Plex-Token: nothing else of the request comes
+// here, so what's searched for, or a playlist's name, doesn't either).
 function pmsToken(req) {
   const header = req.headers['x-plex-token'];
   if (validToken(header)) return header;
   try {
-    const original = String(req.headers['x-original-uri'] || '');
-    const q = new URLSearchParams(original.includes('?') ? original.slice(original.indexOf('?') + 1) : '');
-    const t = q.get('X-Plex-Token');
+    const t = decodeURIComponent(String(req.headers['x-pw-plex-token'] || '').replace(/\+/g, ' '));
     return validToken(t) ? t : null;
   } catch {
     return null;

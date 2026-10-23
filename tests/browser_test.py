@@ -5018,7 +5018,11 @@ with sync_playwright() as pw:
             window.__read = [];
             for (const name of ['text', 'arrayBuffer', 'stream', 'bytes', 'slice']) {
                 const f = Blob.prototype[name];
-                if (f) Blob.prototype[name] = function (...a) { if (this.name) window.__read.push(this.name); return f.apply(this, a); };
+                if (f) Blob.prototype[name] = function (...a) {
+                    if (this.name) window.__read.push(this.name);
+                    const r = f.apply(this, a);
+                    return window.__slowRead && r instanceof Promise ? new Promise((ok) => setTimeout(() => ok(r), window.__slowRead)) : r;
+                };
             }
             for (const name of ['readAsText', 'readAsArrayBuffer', 'readAsDataURL', 'readAsBinaryString']) {
                 const f = FileReader.prototype[name];
@@ -5058,7 +5062,7 @@ with sync_playwright() as pw:
         shot(page, 'spotify-00b-chooser')
         check('spotify: the playlists in them to choose from, Liked Songs first, the empty one not choosable, and the other file not opened (and said so)',
               titles == ['Liked Songs', 'Old favourites', 'Empty one', 'Road songs'] and ticked == [[True, False], [True, False], [False, True], [True, False]]
-              and '3 tracks' in chooser and '5 tracks' in chooser and 'Not opened, as they aren’t playlist files: Userdata.json' in chooser
+              and '3 tracks' in chooser and '5 tracks' in chooser and 'Userdata.json wasn’t opened, as it isn’t a playlist file' in chooser
               and sorted(set(read)) == ['Playlist1.json', 'Playlist2.json', 'YourLibrary.json'], f'{titles} {ticked} {read} {chooser[:500]!r}')
         page.click('.spotify-choose-form .btn-primary')
         page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
@@ -5107,10 +5111,94 @@ with sync_playwright() as pw:
         names = js(page, """() => import('./js/state.js').then(async ({ app }) => { app.server.forgetPlaylists(); return (await app.server.playlists()).map((p) => p.title).filter((t) => t.startsWith('Road songs')).sort(); })""")
         check('spotify: ...and a playlist you have already isn\'t chosen to begin with, and chosen, comes over as "Name (from Spotify)"',
               again_ticked == [False] and 'you have one by this name: this would be “Road songs (from Spotify)”' in again and names == ['Road songs', 'Road songs (from Spotify)'], f'{again_ticked} {names} {again[:300]!r}')
+        # A third time, and two of the same name in the files: each made
+        # gets a name of its own.
+        twice = json.dumps({'playlists': [
+            {'name': 'Road songs', 'items': [item('Echo Velvet', 'Kilo Meridian', 'Crate Digger')]},
+            {'name': 'Twice', 'items': [item('Cinder', 'Kilo Meridian', 'Crate Digger')]},
+            {'name': 'Twice', 'items': [item('Drift', 'Juniper & Ash', 'Hearthstone')]},
+        ]}).encode()
+        guide()
+        choose_files([('Playlist3.json', twice)])
+        page.wait_for_selector('.spotify-choose-form')
+        third = page.locator('.spotify-choose-form').inner_text()
+        page.check('.spotify-choose-form .import-choices input >> nth=0')
+        page.uncheck('.spotify-choose-form .spotify-keep input')
+        page.click('.spotify-choose-form .btn-primary')
+        page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        names = js(page, """() => import('./js/state.js').then(async ({ app }) => { app.server.forgetPlaylists(); return (await app.server.playlists()).map((p) => p.title).filter((t) => t.startsWith('Road songs') || t.startsWith('Twice')).sort(); })""")
+        check('spotify: ...a name taken twice over comes over as "Name (from Spotify 2)", and two of the same name in the files each get one of their own',
+              'this would be “Road songs (from Spotify 2)”' in third and third.count('another of these has the same name') == 2
+              and names == ['Road songs', 'Road songs (from Spotify)', 'Road songs (from Spotify 2)', 'Twice', 'Twice (from Spotify)'], f'{names} {third[:500]!r}')
         js(page, """() => import('./js/state.js').then(async ({ app }) => {
             app.server.forgetPlaylists();
-            for (const p of await app.server.playlists()) if (['Liked Songs', 'Old favourites', 'Road songs', 'Road songs (from Spotify)'].includes(p.title)) await app.server.deletePlaylist(p.ratingKey);
+            for (const p of await app.server.playlists()) if (['Liked Songs', 'Old favourites', 'Road songs', 'Twice'].includes(p.title.replace(/ \\(from Spotify( \\d+)?\\)$/, ''))) await app.server.deletePlaylist(p.ratingKey);
         })""")
+        # What's read at once is bounded, and the list says what was cut
+        # short (here, with the bounds lowered): a file too big is passed
+        # over, a playlist past the most tracks has its first ones, and one
+        # past the most in all, and playlists past the most, are said to be.
+        js(page, "() => import('./js/playlistio.js').then(({ FILE_LIMITS: l }) => { window.__limits = { ...l }; Object.assign(l, { bytes: 1500, tracks: 2, total: 3, playlists: 3 }); })")
+        first = json.dumps({'playlists': [
+            {'name': 'Long one', 'items': [item('Cinder', 'Kilo Meridian', 'Crate Digger'), item('Drift', 'Juniper & Ash', 'Hearthstone'), item('Echo Velvet', 'Kilo Meridian', 'Crate Digger')]},
+        ]}).encode()
+        second = json.dumps({'playlists': [
+            {'name': 'Second', 'items': [item('Copper Salt', 'The Wren Collective', 'Paper Boats')]},
+            {'name': 'Past the rest', 'items': [item('Drift Neon', 'Northbound Static', 'Long Way North')]},
+            {'name': 'Fourth', 'items': [item('Atlas', 'Marisol Vega', 'Noches de Cobre')]},
+        ]}).encode()
+        sizes = (len(first), len(second))
+        guide()
+        choose_files([('Playlist1.json', first), ('Playlist2.json', second), ('Playlist9.json', b'{"playlists": []}' + b' ' * 2000)])
+        page.wait_for_selector('.spotify-choose-form')
+        bounded = page.locator('.spotify-choose-form').inner_text()
+        bounded_ticked = page.locator('.spotify-choose-form .import-choices input').evaluate_all('els => els.map((e) => e.disabled)')
+        js(page, "() => import('./js/playlistio.js').then(({ FILE_LIMITS: l }) => Object.assign(l, window.__limits))")
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
+        check('spotify: ...what\'s cut short is said: a file too big, the first tracks of a long playlist, one past the most in all, and playlists past the most',
+              'Playlist9.json is too big to read' in bounded and 'The first 2 of its 3 tracks' in bounded and 'Choose Playlist2.json on its own for it' in bounded
+              and '1 more playlist isn’t listed' in bounded and bounded_ticked == [False, False, True] and max(sizes) < 1500, f'{sizes} {bounded_ticked} {bounded!r}')
+        # Closed while it's still reading, the guide opens nothing after, and
+        # the link can't be chosen meanwhile.
+        js(page, '() => (window.__slowRead = 1500)')
+        guide()
+        choose_files([('Playlist2.json', playlist2)])
+        page.wait_for_function("() => document.querySelector('.spotify-status')?.textContent.includes('Reading')")
+        link_off = page.locator('.spotify-by-link').is_disabled()
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(2500)
+        js(page, '() => (window.__slowRead = 0)')
+        check('spotify: ...closed while reading, nothing opens after (and the link can\'t be chosen meanwhile)',
+              link_off and page.locator('.spotify-choose-form').count() == 0 and page.locator('.sheet.open').count() == 0, f'{link_off} {page.locator(".sheet.open").count()}')
+        # Files dropped on the guide are taken as chosen, by their names too.
+        guide()
+        page.evaluate("""([a, b]) => {
+            const dt = new DataTransfer();
+            dt.items.add(new File([a], 'Playlist2.json', { type: 'application/json' }));
+            dt.items.add(new File([b], 'Userdata.json', { type: 'application/json' }));
+            document.querySelector('.spotify-guide').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+        }""", [playlist2.decode(), userdata.decode()])
+        page.wait_for_selector('.spotify-choose-form')
+        dropped = page.locator('.spotify-choose-form').inner_text()
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
+        check('spotify: ...files dropped on it are taken as chosen, and turned away by their names too',
+              'Road songs' in dropped and 'Userdata.json wasn’t opened' in dropped, dropped[:300])
+        # Missing tracks keeps the latest 1,000 from Spotify for each server,
+        # apart from what AI playlists suggested, and says how many it kept.
+        caps = js(page, """() => Promise.all([import('./js/missing.js'), import('./js/state.js')]).then(([m, { app }]) => {
+            m.clearMissing();
+            m.noteMissing([{ kind: 'track', artist: 'Some Artist', title: 'Suggested Song' }], { songs: [], artists: [] }, 'an AI playlist');
+            const many = Array.from({ length: 1200 }, (_, i) => ({ kind: 'track', artist: 'Band ' + i, title: 'Song ' + i }));
+            const r = m.noteMissing([...many, many[0]], { songs: [], artists: [] }, 'Big', { via: 'spotify' });
+            const list = m.missingList();
+            const out = { r, spotify: list.filter((x) => x.via === 'spotify').length, ai: list.filter((x) => !x.via).length };
+            m.clearMissing();
+            return out;
+        })""")
+        check('spotify: Missing tracks keeps the latest 1,000 from Spotify, apart from what AI playlists suggested, saying how many it kept',
+              caps == {'r': {'kept': 1000, 'of': 1200}, 'spotify': 1000, 'ai': 1}, str(caps))
         js(page, "() => import('./js/missing.js').then((m) => m.clearMissing?.())")
         page.goto(APP + '#/search')
         page.wait_for_selector('.spotify-row')
