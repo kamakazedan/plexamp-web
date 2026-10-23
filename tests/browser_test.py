@@ -5118,6 +5118,8 @@ with sync_playwright() as pw:
             {'name': 'Twice', 'items': [item('Cinder', 'Kilo Meridian', 'Crate Digger')]},
             {'name': 'Twice', 'items': [item('Drift', 'Juniper & Ash', 'Hearthstone')]},
         ]}).encode()
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
         guide()
         choose_files([('Playlist3.json', twice)])
         page.wait_for_selector('.spotify-choose-form')
@@ -5126,10 +5128,12 @@ with sync_playwright() as pw:
         page.uncheck('.spotify-choose-form .spotify-keep input')
         page.click('.spotify-choose-form .btn-primary')
         page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+        page.click('.dialog-close')
+        page.wait_for_timeout(400)
         names = js(page, """() => import('./js/state.js').then(async ({ app }) => { app.server.forgetPlaylists(); return (await app.server.playlists()).map((p) => p.title).filter((t) => t.startsWith('Road songs') || t.startsWith('Twice')).sort(); })""")
         check('spotify: ...a name taken twice over comes over as "Name (from Spotify 2)", and two of the same name in the files each get one of their own',
               'this would be “Road songs (from Spotify 2)”' in third and third.count('another of these has the same name') == 2
-              and names == ['Road songs', 'Road songs (from Spotify)', 'Road songs (from Spotify 2)', 'Twice', 'Twice (from Spotify)'], f'{names} {third[:500]!r}')
+              and sorted(names) == sorted(['Road songs', 'Road songs (from Spotify)', 'Road songs (from Spotify 2)', 'Twice', 'Twice (from Spotify)']), f'{names} {third[:500]!r}')
         js(page, """() => import('./js/state.js').then(async ({ app }) => {
             app.server.forgetPlaylists();
             for (const p of await app.server.playlists()) if (['Liked Songs', 'Old favourites', 'Road songs', 'Twice'].includes(p.title.replace(/ \\(from Spotify( \\d+)?\\)$/, ''))) await app.server.deletePlaylist(p.ratingKey);
