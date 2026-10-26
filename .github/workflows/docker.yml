@@ -8,13 +8,15 @@ on:
   workflow_dispatch:
 
 # Each job gets only what it needs (see image and stable below). Actions are
-# pinned to the commits of the versions named beside them.
+# pinned to the commits of the versions named beside them, and the runners to
+# Ubuntu 24.04 (ubuntu-latest moves to 26.04 from October 2026, where
+# Playwright 1.56 can't install its browser's dependencies).
 permissions:
   contents: read
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -97,7 +99,7 @@ jobs:
   image:
     needs: check
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write # to publish the image
@@ -142,7 +144,7 @@ jobs:
   stable:
     needs: image
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # to move the stable branch
     steps:
