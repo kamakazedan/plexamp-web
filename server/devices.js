@@ -251,18 +251,21 @@ export class Devices {
   }
 
   // Devices gone quiet are forgotten; one that was playing stops being the
-  // active one. Homes nobody has used for a day are dropped.
+  // active one. Homes nobody has used for a day are dropped. Returns the
+  // names of the playing devices let go.
   sweep() {
     const now = this.now();
+    const quiet = [];
     for (const [key, h] of this.homes) {
       for (const d of [...h.devices.values()]) {
         if (now - d.seen <= LIMITS.goneMs) continue;
-        if (h.active === d.id) this.release(h, d.id);
+        if (h.active === d.id && this.release(h, d.id)) quiet.push(d.name);
         h.devices.delete(d.id);
         this.bump(h);
       }
       if (now - h.touched > LIMITS.keepMs && !h.waiters.size) this.homes.delete(key);
     }
+    return quiet;
   }
 
   wait(h, since, ms) {

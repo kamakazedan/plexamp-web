@@ -3,6 +3,43 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.21.1 - 2026-10-26
+
+### Changed
+
+- **Debug mode logs every pause, and what caused it**: the play button,
+  the space bar, media keys, a headset or the system's media controls,
+  another of your devices (by name), Play Together, the sleep timer, the
+  end of the queue, tracks that won't play, or the browser itself (the
+  system pausing it, say, with Media keys and lock screen off). The
+  service logs which of your devices sends the one that plays a command
+  (only what kind: pause, next), and a playing device it stops hearing
+  from. A track still waiting for data after 8 seconds is logged as it
+  waits, and so is a device losing touch with the service, and getting it
+  back. What every open player asks every few seconds (your devices
+  waiting for news, the playing one's report, Play Together looking for
+  invitations) is left out of the log, unless it goes wrong.
+- A pause sent from another of your devices says so on the one that
+  plays: "Paused from Firefox on Windows".
+
+### Fixed
+
+- A file played as it is that stops coming part-way, its connection
+  held open with nothing more arriving (as through a proxy that's
+  stopped passing it on), is loaded again from where it got to after 30
+  seconds, once a track. It waited for ever. One that stops as it fades
+  out into the next track gives way to it after 3 seconds: the fade
+  waited with it.
+- Another of your devices takes over once it's playing, not as it starts
+  to: a play there that didn't start (the browser wanting a tap first,
+  say) stopped the music everywhere.
+- A play, pause, skip or seek from another device that took more than
+  30 seconds to reach the one playing (out of touch meanwhile) is let go,
+  rather than done out of nowhere.
+- On big screens, the bar at the top of Settings and the other pages
+  kept to a column in the middle goes right across, as on other pages,
+  rather than stopping at the column's edges.
+
 ## 0.21.0 - 2026-10-23
 
 ### New

@@ -4947,6 +4947,21 @@ body.in-together .pb-art::after {
     margin-inline: auto;
   }
 
+  /* Their bar at the top still goes right across, as on pages to browse,
+     with the back button and title over the column. (100vw counts the
+     window's scrollbar too: what goes past the main area is cut off, where
+     it can be.) */
+  @supports (overflow: clip) {
+    #main {
+      overflow-x: clip;
+    }
+
+    #main > .view-narrow > .back-head {
+      margin-inline: calc((100% - 100vw + var(--sidebar-w)) / 2);
+      padding-inline: calc((100vw - var(--sidebar-w) - 100%) / 2 + 18px);
+    }
+  }
+
   .search-box {
     max-width: 960px;
   }

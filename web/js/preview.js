@@ -52,6 +52,7 @@ export async function togglePreview(track, button) {
     for (const d of player.decks) d.el.volume = 0;
   } else if (player.isPlaying) {
     resumeAfter = true;
+    player.noteWhy('a track preview');
     player._pause();
   }
   try {

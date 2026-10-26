@@ -245,7 +245,7 @@ function keyboard() {
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.code === 'Space' && !t.closest?.('button, a')) {
       e.preventDefault();
-      player.toggle();
+      player.toggle('the space bar');
     } else if (e.key === 'ArrowRight' && e.shiftKey) {
       player.next();
     } else if (e.key === 'ArrowLeft' && e.shiftKey) {

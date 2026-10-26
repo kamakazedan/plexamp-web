@@ -24,7 +24,7 @@ Live notifications are sent over a WebSocket (/:/websockets/notifications)
 and an event stream (/:/eventsource/notifications), like a real server. For
 testing, these endpoints need no token:
 
-    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS&loved=smart|none&nearest=N&copy=0|1&quiet=ID,...
+    /__mock/config?ws=0|1&sse=0|1|silent&ping=SECONDS&open=0|1&delay=MS&loved=smart|none&nearest=N&copy=0|1&quiet=ID,...&stall=ID&bytes=N
         ws=0 refuses WebSockets (as a blocking proxy would), sse=0 refuses the
         event stream, sse=silent accepts it but never sends anything; open=1
         accepts any token; delay=MS slows library listings down; loved=smart
@@ -38,7 +38,10 @@ testing, these endpoints need no token:
         last 8 seconds about 23 dB down, a beat still ticking), quiet= none;
         hidden=ID,... keeps those tracks from the friends (as if they were in
         a library not shared with them): not added to their playlists, not
-        listed in them, not found by id. hidden= none
+        listed in them, not found by id. hidden= none; stall=ID&bytes=N: the
+        next time that track's file is asked for, its first N bytes come,
+        then nothing more for a minute (as through a proxy that's stopped
+        passing it on), stall= none
     /__mock/add-album?title=...   adds an album and announces it
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
@@ -812,7 +815,7 @@ def hls_playlist(seconds):
 
 # ---------------------------------------------------------------- notifications
 
-MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': []}
+MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None}
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
 listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
 listeners_lock = threading.Lock()
@@ -1238,7 +1241,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_bytes(self, data, ctype):
+    def send_bytes(self, data, ctype, stall_after=None):
         rng = self.headers.get('Range')
         start, end = 0, len(data) - 1
         status = 200
@@ -1257,7 +1260,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Range', f'bytes {start}-{end}/{len(data)}')
         self.send_header('Cache-Control', 'max-age=3600')
         self.end_headers()
-        self.wfile.write(chunk)
+        if stall_after is None:
+            self.wfile.write(chunk)
+            return
+        self.wfile.write(chunk[:stall_after])
+        self.wfile.flush()
+        time.sleep(60)  # (then the connection closes short)
 
     def not_found(self):
         self.send_json({'size': 0}, 404)
@@ -1643,6 +1651,11 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['quiet'] = [x for x in q['quiet'][0].split(',') if x]
             if 'hidden' in q:
                 MOCK['hidden'] = [x for x in q['hidden'][0].split(',') if x]
+            if 'stall' in q:
+                # stall=ID&bytes=N: the next time that track's file is asked
+                # for, N bytes of it come, then nothing more (the connection
+                # held open, as a proxy that's stopped passing it on does).
+                MOCK['stall'] = {'track': q['stall'][0], 'bytes': int(q.get('bytes', ['60000'])[0])} if q['stall'][0] else None
             return self.send_json(dict(MOCK, listeners=len(listeners)))
         if p == '/__mock/hls':
             # Converted streams: the rules (see hls_file), and what's been
@@ -1958,6 +1971,10 @@ class Handler(BaseHTTPRequestHandler):
                 timeline(t['ratingKey'], 10, 5)
             return self.send_json({})
         if p.startswith('/library/parts/'):
+            st = MOCK['stall']
+            if st and st['track'] == parts[2]:
+                MOCK['stall'] = None  # (once: asked for again, it all comes)
+                return self.send_bytes(tone_wav(parts[2]), 'audio/wav', stall_after=st['bytes'])
             return self.send_bytes(tone_wav(parts[2]), 'audio/wav')
         if p == '/:/timeline':
             t = items.get(q.get('ratingKey', [''])[0])

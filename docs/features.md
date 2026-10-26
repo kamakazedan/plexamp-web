@@ -82,7 +82,7 @@ Spotify's page isn't an API: when Spotify changes it, this stops working until p
 
 Signed in to the same Plex account and playing from the same server, your devices share what's playing. Start a playlist on your computer, open the player on your phone, and the phone shows the track, where it's got to and Up next, with its own sound off.
 
-- **One device plays.** The others show where the music is ("Playing on Firefox on Windows") and control it: play, pause, skip, seek, volume, shuffle, repeat and changes to Up next all happen there.
+- **One device plays.** The others show where the music is ("Playing on Firefox on Windows") and control it: play, pause, skip, seek, volume, shuffle, repeat and changes to Up next all happen there. Paused from another device, the one playing says so ("Paused from Chrome on Android"); a play, pause, skip or seek that took more than 30 seconds to get there (that device out of touch meanwhile) is let go. Another device takes over once it's playing, not as it starts to.
 - **Listen here.** Tap the muted speaker (or **Listen here** under the artwork) and the music moves to the device in your hand, from the same spot. Browsers only start sound after a tap on the device itself.
 - **Carry on later.** Close the player where it was playing, or leave it paused for 10 minutes, and the next device you open has the same queue ready at the same place.
 - **Name your devices** in **Settings › Experience › Player name**. Until you do, they're named by browser and system, like "Chrome on Android".

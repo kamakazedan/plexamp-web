@@ -62,7 +62,7 @@ Then, on the node (or inside the container, without `pct exec <ID> --`):
 
 - **Settings**: `pct exec <ID> -- plexamp-web-settings` opens them in an editor, with the same names as the Docker image's, and restarts the player with them. They're kept in `/etc/plexamp-web/plexamp-web.env`, readable by root only, and shared playlists in `/var/lib/plexamp-web`.
 - **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version, keeping your settings. With `--verbose` it shows every step as it goes: what it downloads (and the checksum hls.js matched), apt's own output, what it puts where, and the services restarting, with what they logged. An `update-plexamp-web` from 0.16.1 or earlier doesn't know `--verbose` yet, but passes this on: `pct exec <ID> -- env PW_VERBOSE=1 update-plexamp-web`.
-- **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`.
+- **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`. To keep a day's log in a file: `pct exec <ID> -- journalctl -u plexamp-web --since today -o short-iso --no-pager > plexamp-web.log` (on the Proxmox host); what browsers sent alone: add `| grep 'plexamp-web browser'`.
 
 ## Updating
 

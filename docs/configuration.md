@@ -71,9 +71,11 @@ If something doesn't work, set `DEBUG=true` on the container, restart it, and wa
 
 - the settings the container started with (secrets show only as "set") and the `config.js` it wrote;
 - whether the container can reach your Plex server, Ollama and plex.tv;
-- every request as a path and status code (`GET /pms/library/sections 502`), without query strings;
+- every request as a path and status code (`GET /pms/library/sections 502`), without query strings, except what every open player asks every few seconds (your devices waiting for news, the playing one's report, Play Together looking for invitations) unless it goes wrong;
 - nginx's own errors for the Plex proxy (timeouts, refused connections, TLS problems), with tokens removed;
-- what the service does (sign-in checks, Play Together sessions);
-- problems from browsers: failed requests, tracks that won't play, converted streams that fail part-way (which part, what the server answered, and what the player did about it), playback waiting for data part-way through a track (for how long, and how much was buffered), script errors, and which connection and live-update route each device uses (a limited number of lines a minute, as anyone who can open the player could send them).
+- what the service does: sign-in checks, Play Together sessions, which of your devices plays, the commands your other devices send it (only what kind: pause, next), and a playing device it stops hearing from (and, from the browsers, a device losing touch with the service and getting it back);
+- problems from browsers: failed requests, tracks that won't play, converted streams that fail part-way (which part, what the server answered, and what the player did about it), playback waiting for data part-way through a track (for how long, and how much was buffered, and as it waits past 8 seconds), script errors, which connection and live-update route each device uses, and every pause with what caused it: the play button, the space bar, media keys, a headset or the system's media controls, another of your devices (by name), Play Together, the sleep timer, the end of the queue, tracks that won't play, or the browser itself (a limited number of lines a minute, as anyone who can open the player could send them).
+
+Lines from browsers start `plexamp-web browser` and the start of the browser's own id, so one device's can be told apart (`plexamp-web browser 1a2b3c4d: info player: paused “Song” at 81.2 s: media keys, a headset or the system’s media controls`). The browser's console shows them too, as `[plexamp-web]`.
 
 Tokens and keys are replaced with `[redacted]` everywhere, but the log does show server addresses, people's names and the names of tracks: share it with care, and turn debug mode off when you're done. **Settings › Connection** in the app shows whether it's on.

@@ -440,7 +440,8 @@ test('your devices: one that goes quiet stops being the one that plays', async (
   now = 30000;
   d.seen(h, phone);
   now = DEVICE_LIMITS.goneMs + 1000;
-  d.sweep();
+  assert.deepEqual(d.sweep(), [mac.name]); // (named in the log)
+  assert.deepEqual(d.sweep(), []);
   const v = d.view(h, phone.id);
   assert.equal(v.active, null);
   assert.equal(v.state.playing, false); // kept, paused where it got to

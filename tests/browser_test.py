@@ -972,6 +972,15 @@ with sync_playwright() as pw:
         column = js(page, span)
         check('desktop: on a big screen pages to browse use the whole width, and settings keep to a column in the middle',
               browse[1:] == [0, 0] and column[0] == 1080 and abs(column[1] - column[2]) <= 1, f'{browse} {column}')
+        page.goto(APP + '#/settings/experience')
+        page.wait_for_selector('.view .back-head')
+        bar = js(page, """() => {
+            const r = (s) => document.querySelector(s).getBoundingClientRect();
+            const head = r('.back-head'), main = r('#main'), view = r('#main > .view'), back = r('.back-head .icon-btn');
+            return [Math.round(head.left - main.left), Math.round(main.right - head.right), Math.round(back.left - view.left), document.documentElement.scrollWidth - document.documentElement.clientWidth];
+        }""")
+        check('desktop: ...with the bar at the top of a settings page right across, its back button over the column (and nothing wider than the window)',
+              bar[0] <= 0 and bar[1] <= 0 and bar[2] == 18 and bar[3] == 0, str(bar))
         page.set_viewport_size({'width': 1440, 'height': 900})
         page.goto(APP + '#/')
         page.wait_for_selector('section[data-section=recentlyAdded] .card')
@@ -3819,6 +3828,38 @@ with sync_playwright() as pw:
         check('stream: a track whose stream never plays, even started again, is skipped, saying so',
               play_errors() == [tr['title']] and len(sessions_of(tr['id'])) == 2 and now()['id'] != tr['id'] and now()['state'] == 'playing'
               and any(f'Can\'t play “{tr["title"]}”. Skipping.' in x for x in told), f'{play_errors()} {sessions_of(tr["id"])} {now()} {told}')
+
+        # An original file that stops coming part-way (its connection held
+        # open, nothing more arriving, as through a proxy that's stopped
+        # passing it on): loaded again from where it got to once nothing has
+        # come in for a while (here 3 s), and it plays on.
+        # (A browser of its own: not one that has the file kept already.)
+        player(page, 'p.pause()')
+        sctx = browser.new_context(**MOBILE)
+        spg = sctx.new_page()
+        attach(spg, 'stream-stall')
+        login(spg, APP)
+        settings(spg, {'quality': 'original', 'loadAhead': 0, 'keepPlayed': 0, 'gapless': False})
+        spg.goto(APP + '#/browse/albums')
+        spg.wait_for_selector('.grid .card')
+        spg.locator('.grid .card').nth(5).click()
+        spg.wait_for_selector('.hero-album')
+        row = spg.locator('.track').nth(1)
+        tid = row.get_attribute('data-track-id')
+        # (500,000 bytes: about 11 of its 20 seconds. Chromium waits for ever
+        # on its own, part-way through a track.)
+        mock(f'/__mock/config?stall={tid}&bytes=500000')
+        player(spg, 'Object.assign(p.stallLimits, { say: 1000, reload: 3000 })')
+        row.locator('.track-main').click()
+        snow = lambda: player(spg, '({ id: String(p.current?.id), t: p.time, state: p.state, again: p.stallRetry != null && p.stallRetry === p.current?.qid })')
+        stuck = wait_for(lambda: player(spg, "p.state === 'loading' && p.time > 5"), 25, 0.2)
+        stuck_at = snow()['t']
+        resumed = wait_for(lambda: snow()['state'] == 'playing' and snow()['t'] > stuck_at + 2, 20, 0.25)
+        check('stream: an original file that stops coming part-way is loaded again from where it got to, and plays on',
+              stuck and resumed and snow()['id'] == str(tid) and snow()['again'] and 8 < stuck_at < 13, f'{stuck} {stuck_at} {snow()}')
+        mock('/__mock/config?stall=')
+        player(spg, 'p.pause()')
+        sctx.close()
         hls('?reset=1')
         player(page, 'p.pause()')
         ctx.close()
@@ -4152,9 +4193,13 @@ with sync_playwright() as pw:
         shot(phone, 'devices-01-phone-follows')
 
         phone.click('.pb-play')
-        check('devices: pause on one pauses the one playing', wait_for(lambda: D(desk, 'p.state') == 'paused', 5) and wait_for(lambda: D(phone, 'p.state') == 'paused', 5))
+        check('devices: pause on one pauses the one playing, which says where it was paused from', wait_for(lambda: D(desk, 'p.state') == 'paused', 5) and wait_for(lambda: D(phone, 'p.state') == 'paused', 5)
+              and wait_for(lambda: desk.locator('.toast', has_text='Paused from Phone').count() > 0, 3))
         phone.click('.pb-play')
         check('devices: ...and play plays it', wait_for(lambda: D(desk, 'p.state') == 'playing', 5))
+        D(desk, "(() => { const was = d.lastCmd; d.runCommands([{ id: was + 1, type: 'pause', from: 'nobody', at: d.serverNow() - 60000 }]); d.lastCmd = was; })()")
+        desk.wait_for_timeout(600)
+        check('devices: ...but a pause that took too long to get there (that device out of touch meanwhile) is let go', D(desk, 'p.state') == 'playing', D(desk, 'p.state'))
         before = D(desk, 'p.current.id')
         phone.click('.pb-next')
         check('devices: next, too', wait_for(lambda: D(desk, 'p.current.id') != before, 5) and wait_for(lambda: D(phone, 'p.current.id') == D(desk, 'p.current.id'), 5))
@@ -4410,6 +4455,22 @@ with sync_playwright() as pw:
         check('fades: "Always" fades between album tracks too, at the very end',
               fading and fading[0]['t'] >= 14.5 and last is not None and last > 19 and 3.5 <= first <= 6.5,
               f'{fading[0]["t"] if fading else None}, {last} -> {first}')
+        # A track that stops coming as it fades out (here made to wait for
+        # data, part-way through the fade): after a moment (here 1 s) the
+        # change is done with, and the next track plays on, rather than the
+        # fade, timed by the one fading out, waiting with it.
+        used = {t['ratingKey'] for t in (a, b, c, d, qe, qn)}
+        e, f = [t for t in tracks if t['ratingKey'] not in used and not t['silentEnd'] and not t['silentStart']][-2:]
+        js(page, "() => import('./js/player.js').then(({ player }) => Object.assign(player.stallLimits, { fade: 1000 }))")
+        queue([e['ratingKey'], f['ratingKey']], 12)
+        state = lambda: js(page, "() => import('./js/player.js').then(({ player: p }) => ({ id: String(p.current?.id), t: p.time, state: p.state, fading: !!p.transition && !p.transition.inn.el.paused }))")
+        fading = wait_for(lambda: state()['fading'], 10, 0.2)
+        js(page, "() => import('./js/player.js').then(({ player: p }) => { const o = p.transition.out.el; o.playbackRate = 0; o.dispatchEvent(new Event('waiting')); })")
+        stuck = state()
+        on = wait_for(lambda: (lambda s: s['id'] == str(f['ratingKey']) and s['state'] == 'playing' and not s['fading'])(state()), 6, 0.2)
+        check('fades: a track that stops coming as it fades out gives way to the next one, which plays on',
+              fading and stuck['state'] == 'loading' and stuck['id'] == str(e['ratingKey']) and on, f'{fading} {stuck} {state()}')
+        js(page, "() => import('./js/player.js').then(({ player }) => Object.assign(player.stallLimits, { fade: 3000 }))")
 
         # Off: one after another, silence and all.
         settings(page, {'fades': 'off'})
@@ -5069,6 +5130,15 @@ with sync_playwright() as pw:
     # ---------- debug: DEBUG=true ----------
     if run('debug') and APP_DEBUG:
         ctx = browser.new_context(**MOBILE)
+        # (The handlers the player gives the browser's media controls: media
+        # keys, headsets, the system's.)
+        ctx.add_init_script("""(() => {
+            const ms = navigator.mediaSession;
+            if (!ms) return;
+            window.__ms = {};
+            const set = ms.setActionHandler.bind(ms);
+            ms.setActionHandler = (action, fn) => { window.__ms[action] = fn; return set(action, fn); };
+        })();""")
         page = ctx.new_page()
         attach(page, 'debug', expected=('HTTP 404',))  # the missing album, on purpose
         sent = []
@@ -5087,6 +5157,56 @@ with sync_playwright() as pw:
         page.goto(APP_DEBUG + '#/settings/debug')
         page.wait_for_selector('.kv')
         check('debug: Connection page says debug mode is on', 'On' in page.locator('.kv', has_text='Debug mode').inner_text())
+        # Every pause is logged, with what caused it: the play button, media
+        # keys (or a headset, or the system's controls), the space bar, and
+        # the browser pausing it itself.
+        play_first_album_track(page, APP_DEBUG)
+        lines = lambda: [e for _, b in sent if b for e in json.loads(b).get('entries', [])]
+
+        def logged(text, level=None):
+            def seen():
+                page.wait_for_timeout(250)
+                return [e for e in lines() if text in e['message'] and (level is None or e['level'] == level)]
+            return wait_for(seen, 10)
+
+        def paused_by(how):
+            how()
+            wait_for(lambda: player(page, 'p.state') == 'paused', 5)
+
+        def again(how):
+            how()
+            wait_for(lambda: player(page, 'p.state') == 'playing', 5)
+
+        title = player(page, 'p.current.title')
+        paused_by(lambda: page.click('.pb-play'))
+        by_button = logged(f'paused “{title}” at ')
+        again(lambda: page.click('.pb-play'))
+        played = logged('play: the play/pause button')
+        paused_by(lambda: js(page, '() => window.__ms.pause()'))
+        by_keys = logged('media keys, a headset or the system’s media controls')
+        again(lambda: js(page, '() => window.__ms.play()'))
+        js(page, '() => document.activeElement?.blur()')
+        paused_by(lambda: page.keyboard.press('Space'))
+        by_space = logged(': the space bar')
+        again(lambda: page.keyboard.press('Space'))
+        paused_by(lambda: player(page, 'HTMLMediaElement.prototype.pause.call(p.audio)'))
+        by_browser = logged(': the browser or the system, not this app (', 'warn')
+        check('debug: each pause is logged with what caused it (the play button, media keys, the space bar, the browser itself), and each play asked for',
+              by_button and by_button[0]['message'].endswith(': the play/pause button') and played and by_keys and by_space and by_browser
+              and 'the page in view' in by_browser[0]['message'], str([e['message'] for e in lines() if e['area'] == 'player'][-8:]))
+        # ...still, a change of track or two later (the audio paused here for
+        # the change, and loaded again, forgets that it was).
+        again(lambda: page.click('.pb-play'))
+        for _ in range(2):
+            was = player(page, 'String(p.current.qid)')
+            player(page, 'p.next()')
+            wait_for(lambda: player(page, f"p.state === 'playing' && String(p.current.qid) !== {json.dumps(was)}"), 10, 0.2)
+        later = player(page, 'p.current.title')
+        paused_by(lambda: player(page, 'HTMLMediaElement.prototype.pause.call(p.audio)'))
+        after_skips = logged(f'paused “{later}” at ', 'warn')
+        check('debug: ...and the browser\'s own pause is still told apart after changes of track',
+              after_skips and ': the browser or the system, not this app (' in after_skips[-1]['message'], str([e['message'] for e in lines() if e['area'] == 'player'][-4:]))
+        player(page, 'p.pause()')
         # The shared model here won't take "think": the container passes on
         # what it said (as a line of the answer, which has started by then),
         # and the app asks again without it.

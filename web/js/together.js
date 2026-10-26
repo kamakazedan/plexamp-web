@@ -388,6 +388,7 @@ class Together extends EventTarget {
     const s = this.session;
     if (!s) return;
     this.detach();
+    player.noteWhy(why === 'sleep' ? 'the sleep timer: you left Play Together' : why === 'source' ? 'you left Play Together, switching to another library' : 'you left Play Together');
     player._pause();
     try {
       await this.api(`sessions/${s.id}/leave`, { method: 'POST' });
@@ -415,6 +416,7 @@ class Together extends EventTarget {
     if (!s) return;
     await this.api(`sessions/${s.id}`, { method: 'DELETE' });
     this.detach();
+    player.noteWhy('you ended Play Together');
     player._pause();
     toast('Session ended for everyone.');
   }
@@ -432,6 +434,7 @@ class Together extends EventTarget {
   ended(why) {
     const s = this.session;
     this.detach();
+    player.noteWhy(`Play Together ended${why ? ` (${why})` : ''}`);
     player._pause();
     toast(why || 'The session has ended.', { timeout: 6000 });
     debugLog('together', `session ${s?.id.slice(0, 6)} ended: ${why}`);
@@ -568,6 +571,7 @@ class Together extends EventTarget {
 
   pause() {
     if (!this.active) return;
+    // (player.pause noted who asked.)
     player._pause();
     this.command({ type: 'pause' });
   }

@@ -18,7 +18,7 @@ import { log, setDebug, isDebug } from './log.js';
 import { PlexAuth, AuthError, validToken } from './plex.js';
 import { Together, TogetherError } from './together.js';
 import { Cast, CastError } from './cast.js';
-import { Devices, DevicesError } from './devices.js';
+import { Devices, DevicesError, LIMITS as LIMITS_DEVICES } from './devices.js';
 import { SharedModel, AIRequestError, cleanChat, errorText, AI_LIMITS } from './ai.js';
 import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
 import { Shares, ShareError } from './shares.js';
@@ -82,7 +82,9 @@ const together = new Together({
 setInterval(() => together.sweep(), 60000).unref();
 const cast = new Cast({ auth, loopback: config.castLoopback });
 const devices = new Devices();
-setInterval(() => devices.sweep(), 15000).unref();
+setInterval(() => {
+  for (const name of devices.sweep()) log.debug(`devices: "${name}" hasn't been heard from for over ${LIMITS_DEVICES.goneMs / 1000} s, so it's no longer the one that plays`);
+}, 15000).unref();
 const sharedModel = config.ollamaUrl ? new SharedModel({ url: config.ollamaUrl, key: config.ollamaKey, model: config.ollamaModel, log }) : null;
 const musicbrainz = config.musicbrainzUrl ? new MusicBrainz({ base: config.musicbrainzUrl, version: config.version, log }) : null;
 const spotify = config.spotify ? new Spotify({ base: config.spotifyUrl || 'https://open.spotify.com', version: config.version, log }) : null;
@@ -871,7 +873,7 @@ async function devicesRoute(req, res, parts, url) {
     }
     if (parts[0] === 'release') {
       devices.seen(h, device);
-      devices.release(h, deviceId);
+      if (devices.release(h, deviceId)) log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" stopped being the one that plays`);
       return send(res, 200, { ok: true });
     }
     if (parts[0] === 'report') {
@@ -879,7 +881,12 @@ async function devicesRoute(req, res, parts, url) {
       return send(res, 200, { version: h.version, queueVersion: h.queueVersion });
     }
     if (parts[0] === 'command') {
-      return send(res, 200, { id: devices.command(h, device, body.command) });
+      const id = devices.command(h, device, body.command);
+      // (What kind of command only: not the tracks in it. Not each change of
+      // volume as a slider moves.)
+      const type = h.commands.at(-1)?.type;
+      if (type !== 'volume') log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" sent ${type} to "${h.devices.get(h.active)?.name}"`);
+      return send(res, 200, { id });
     }
   } catch (err) {
     if (err instanceof DevicesError) throw new HttpError(err.status, err.message);
@@ -1060,10 +1067,15 @@ async function handle(req, res) {
     if (!res.headersSent) send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.' });
   } finally {
     // Paths only (no query strings), so nothing secret can be logged. The
-    // checks nginx makes for each proxied request would only be noise.
-    if (isDebug() && parts[1] !== 'debug' && (parts[1] !== 'internal' || (status || res.statusCode) >= 400)) {
+    // checks nginx makes for each proxied request would only be noise, and
+    // so would what every open player asks every few seconds (your devices
+    // waiting for news, the playing one's report, Play Together's look for
+    // invitations), unless it went wrong.
+    const code = status || res.statusCode;
+    const routine = parts[1] === 'internal' || (parts[1] === 'devices' && (req.method === 'GET' ? !parts[2] : parts[2] === 'report')) || (parts[1] === 'together' && parts[2] === 'me' && req.method === 'GET');
+    if (isDebug() && parts[1] !== 'debug' && (!routine || code >= 400)) {
       const path = url.pathname.replace(/(\/sessions\/[A-Za-z0-9_-]{6})[A-Za-z0-9_-]*/, '$1…').replace(/(\/shares\/[a-f0-9]{6})[a-f0-9]+/, '$1…');
-      log.debug(`${req.method} ${path} ${status || res.statusCode} ${Date.now() - started} ms`);
+      log.debug(`${req.method} ${path} ${code} ${Date.now() - started} ms`);
     }
   }
 }

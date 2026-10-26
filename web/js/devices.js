@@ -26,6 +26,11 @@ const REPORT_DELAY = 250;
 // carry on from where it was without taking it over.
 const IDLE_RELEASE_MS = 10 * 60000;
 const WINDOW = 600; // tracks of the queue shared, around the current one
+// A play, pause, skip or seek that took longer than this to get here (this
+// device out of touch meanwhile) is let go: done now, it would come out of
+// nowhere. Changes to the queue are still made.
+const STALE_MS = 30000;
+const TIMELY = new Set(['play', 'pause', 'next', 'prev', 'seek', 'jump', 'play-tracks', 'volume']);
 const MAX_TRACKS = 1000; // sent in one command (see server/devices.js)
 const clientNow = () => performance.timeOrigin + performance.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -294,6 +299,7 @@ class Devices extends EventTarget {
   async loop(gen) {
     let backoff = 1000;
     let wait = 0; // the first answer straight away
+    let lost = 0; // when the service stopped answering (debug mode says so)
     while (gen === this.gen) {
       const asked = clientNow();
       const before = this.version;
@@ -309,6 +315,8 @@ class Devices extends EventTarget {
         });
         const view = await this.request(`?${q}`, { timeout: (WAIT_SECONDS + 15) * 1000, signal: this.ctrl.signal });
         if (gen !== this.gen) return;
+        if (lost) debugLog('devices', `back in touch with this player’s service after ${Math.round((clientNow() - lost) / 1000)} s`);
+        lost = 0;
         backoff = 1000;
         this.apply(view, { first: wait === 0 });
         // An answer at once with nothing new (this device has other
@@ -322,6 +330,10 @@ class Devices extends EventTarget {
           debugLog('devices', `not sharing playback between devices: ${err.message}`);
           this.stop({ release: false });
           return;
+        }
+        if (!lost) {
+          lost = clientNow();
+          debugLog('devices', `out of touch with this player’s service (${err.status || err.message}): trying again`, 'warn');
         }
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 15000);
@@ -360,6 +372,7 @@ class Devices extends EventTarget {
         this.leaveRemote({ adopt: true });
       } else if (this.role === 'active') {
         // This device went quiet for too long: still playing, it's the one again.
+        debugLog('devices', `the service hadn’t heard from this device for a while${player.isPlaying ? ': still playing, so it’s the one that plays again' : ''}`, 'warn');
         this.role = 'idle';
         if (player.isPlaying) this.activate();
       } else if (first) {
@@ -410,7 +423,9 @@ class Devices extends EventTarget {
   }
 
   onPlayer(kind) {
-    if (this.role === 'idle' && kind === 'state' && player.isPlaying && player.current && !player.remote && player.cast !== this.remote) {
+    // (Once it's playing, not as it starts loading: a play that doesn't
+    // start, say the browser wanting a tap first, mustn't stop the one that is.)
+    if (this.role === 'idle' && kind === 'state' && player.state === 'playing' && player.current && !player.remote && player.cast !== this.remote) {
       this.activate();
       return;
     }
@@ -434,6 +449,7 @@ class Devices extends EventTarget {
     if (this.role !== 'active' || player.isPlaying) return;
     this.idleTimer = setTimeout(() => {
       if (this.role !== 'active' || player.isPlaying) return;
+      debugLog('devices', `paused for ${IDLE_RELEASE_MS / 60000} minutes: no longer the device that plays`);
       this.role = 'idle';
       clearInterval(this.heartbeat);
       this.post('release').catch(() => {});
@@ -489,6 +505,11 @@ class Devices extends EventTarget {
       if (!(c.id > this.lastCmd)) continue;
       this.lastCmd = c.id;
       ran = true;
+      const age = Number.isFinite(c.at) ? this.serverNow() - c.at : 0;
+      if (age > STALE_MS && TIMELY.has(c.type)) {
+        debugLog('devices', `let go of a ${c.type} from “${this.nameOf(c.from)}” that took ${Math.round(age / 1000)} s to get here`, 'warn');
+        continue;
+      }
       try {
         this.execute(c);
       } catch (err) {
@@ -498,13 +519,25 @@ class Devices extends EventTarget {
     if (ran) this.reportSoon();
   }
 
+  // One of your devices, by its id: its name ("Firefox on Windows").
+  nameOf(id) {
+    return this.list.find((d) => d.id === id)?.name || 'another of your devices';
+  }
+
   execute(c) {
     const at = (qid) => player.queue.findIndex((t) => String(t.qid) === qid);
+    const from = this.nameOf(c.from);
+    if (c.type !== 'volume') debugLog('devices', `${c.type} from “${from}”`);
     switch (c.type) {
       case 'play':
-        return player.play();
-      case 'pause':
-        return player.pause();
+        return player.play(`a play from “${from}”`);
+      case 'pause': {
+        // (Said here too: you may not be looking at the one you paused it on.)
+        const was = player.isPlaying;
+        player.pause(`a pause from “${from}”`);
+        if (was) toast(`Paused from ${from}`);
+        return undefined;
+      }
       case 'next':
         return player.next();
       case 'prev':
@@ -562,6 +595,7 @@ class Devices extends EventTarget {
 
   // Another device took over: this one goes quiet and follows it.
   lostTo(dev) {
+    debugLog('devices', `“${dev.name}” plays now${player.isPlaying ? ', so it stopped here' : ''}: this device follows it`);
     this.becomeRemote();
     toast(`Now playing on ${dev.name}`, { action: 'Listen here', onAction: () => this.takeOver(), timeout: 6000 });
   }

@@ -56,6 +56,12 @@ const END_SLACK = 5;
 // without getting this many seconds further (once for a track that never
 // started), after these waits, and not while there's more than this left
 // of what's buffered to play.
+// An original file waiting for data part-way (no more of it coming, as a
+// proxy that holds the connection open without sending anything does):
+// said after `say` ms (in debug mode), and loaded again from where it got
+// to after `reload` ms with nothing more come in, once a track. One fading
+// out as the next track fades in: on to that one after `fade` ms.
+const STALL = { say: 8000, reload: 30000, fade: 3000 };
 const RESCUE_TRIES = 3;
 const RESCUE_PROGRESS = 20;
 const RESCUE_WAITS = [250, 3000, 6000];
@@ -313,6 +319,7 @@ class Player extends EventTarget {
     this.shuffle = false;
     this.repeat = 'off'; // off | all | one
     this.state = 'idle'; // idle | loading | playing | paused
+    this.why = null; // debug mode: why it's about to pause (see noteWhy)
     this.volume = store.get('volume', 1);
     this.muted = false;
     this.speed = 1;
@@ -326,6 +333,8 @@ class Player extends EventTarget {
     this.rescueOnline = null;
     this.rescueGo = null;
     this.directRetry = null; // the track whose original file was loaded again after its connection dropped
+    this.stallRetry = null; // the one loaded again after waiting for data too long (see watchStall)
+    this.stallLimits = { ...STALL };
     this.restoredAt = 0;
     this.pendingSeek = null; // seconds, or a function returning seconds (see setPendingSeek)
     this.startingAt = null; // where it was when set, in seconds
@@ -461,6 +470,18 @@ class Player extends EventTarget {
   bind(deck, i) {
     const el = deck.el;
     const mine = () => i === this.active;
+    // (Pauses asked for here are told apart from the browser's own: see
+    // 'pause' below.)
+    const pause = el.pause.bind(el);
+    el.pause = () => {
+      if (!el.paused) el.pausedHere = true;
+      return pause();
+    };
+    // (Loading something else drops the 'pause' still to come: so it's
+    // forgotten as the audio loads, or plays, again.)
+    const forget = () => (el.pausedHere = false);
+    el.addEventListener('play', forget);
+    el.addEventListener('emptied', forget);
     // A next track that fails while it's fading in: the change is called
     // off, and it's loaded again when it's due.
     const spareFailed = () => {
@@ -476,26 +497,32 @@ class Player extends EventTarget {
       this.switching = false;
       this.errorsInRow = 0;
       this.noteStall(deck, true);
+      this.unwatchStall(deck);
       this.setState('playing');
     });
     el.addEventListener('pause', () => {
+      const here = el.pausedHere;
+      el.pausedHere = false;
       if (el.ended || this.switching) return;
       const tr = this.transition;
       if (tr) {
         // During a change of track it's paused once both tracks are.
         if (tr.out.el.paused && tr.inn.el.paused) {
+          if (!here) this.noteWhy(this.notHere(el), { warn: true });
           this.setState('paused');
           this.saveProgress(true);
         }
         return;
       }
       if (!mine()) return;
+      if (!here) this.noteWhy(this.notHere(el), { warn: true });
       this.setState('paused');
       this.saveProgress(true);
     });
     el.addEventListener('waiting', () => {
       if (!mine() || this.endReached(deck, 1)) return;
       this.noteStall(deck);
+      this.watchStall(deck);
       this.setState('loading');
       // A stream waiting to be started again (see onStreamError) that's
       // run out of what's buffered, or been moved past it: now. One that
@@ -559,6 +586,16 @@ class Player extends EventTarget {
 
   setState(s) {
     if (s === this.state) return;
+    // (Not while another device or a Plex player plays: it paused there,
+    // and says why there.)
+    // A load that wasn't to play ends paused too: from loading, only when
+    // something was noted.
+    const noted = this.why && performance.now() - this.why.at < 5000 ? this.why : null;
+    if (s === 'paused' && (this.state === 'playing' || (this.state === 'loading' && noted)) && debugOn() && !this.cast) {
+      const t = this.current;
+      debugLog('player', `paused${t ? ` “${t.title}” at ${this.time.toFixed(1)} s` : ''}${this.state === 'loading' ? ' (while loading)' : ''}: ${noted?.text || 'no reason noted'}`, noted?.warn ? 'warn' : 'info');
+    }
+    if (s === 'paused' || s === 'playing') this.why = null;
     this.state = s;
     const ms = navigator.mediaSession;
     if (ms && s !== 'loading' && app.settings.mediaSession !== false) ms.playbackState = s === 'playing' ? 'playing' : s === 'paused' ? 'paused' : 'none';
@@ -597,10 +634,12 @@ class Player extends EventTarget {
   async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true, resume = false } = {}) {
     this.cancelTransition();
     this.cancelRescue();
+    for (const d of this.decks) this.unwatchStall(d);
     this.qualityLater = false; // (it loads as Streaming quality now says)
     if (!resume) {
       this.rescue = null;
       this.directRetry = null;
+      this.stallRetry = null;
     }
     const prev = this.current;
     // (A track held while paused, as Streaming quality changed, is played
@@ -817,6 +856,61 @@ class Player extends EventTarget {
       'player',
       `waited ${waited.toFixed(1)} s for “${this.current?.title}” at ${s.t.toFixed(1)} s of ${this.duration.toFixed(1)} (${deck.isHls ? 'converted' : 'original file'}, ${s.ahead.toFixed(1)} s buffered, ${next})`,
     );
+  }
+
+  // An original file waiting for data: said once it's waited a while (debug
+  // mode), and if nothing more has come in after a longer while, it's loaded
+  // again from where it got to (once a track: past that, the browser's own
+  // retries). Converted streams have their own (see onStreamError).
+  watchStall(deck) {
+    this.unwatchStall(deck);
+    const el = deck.el;
+    const qid = deck.qid;
+    const gen = deck.gen;
+    const t0 = el.currentTime;
+    const got = bufferedEnd(el, t0);
+    // (Still this load of this track, waiting: not one loaded since, the
+    // same track again, say. During a change of track: see stallFade.)
+    const stillHere = () => deck.gen === gen && deck.qid === qid && this.deck === deck && this.state === 'loading' && !el.paused;
+    const waiting = () => stillHere() && !this.transition;
+    deck.stallSay = setTimeout(() => {
+      if (!stillHere()) return;
+      debugLog(
+        'player',
+        `still waiting for data for “${this.current?.title}” at ${el.currentTime.toFixed(1)} s, after ${this.stallLimits.say / 1000} s (${deck.isHls ? 'converted' : 'original file'}, buffered to ${bufferedEnd(el, el.currentTime).toFixed(1)} s, network ${el.networkState}, ready ${el.readyState})`,
+        'warn',
+      );
+    }, this.stallLimits.say);
+    // Fading out as the next track fades in: the fade (timed by this one)
+    // would wait with it, so it's done with, and the next one plays on.
+    deck.stallFade = setTimeout(() => {
+      if (!stillHere() || this.transition?.out !== deck) return;
+      debugLog('player', `“${this.current?.title}” stopped coming as it faded out: on to the next track`, 'warn');
+      this.finishTransition();
+      const now = this.deck.el;
+      if (!now.paused && now.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) this.setState('playing');
+    }, this.stallLimits.fade);
+    if (deck.isHls) return;
+    deck.stallReload = setTimeout(() => {
+      const track = this.current;
+      if (!waiting() || !track || track.qid !== qid || this.stallRetry === qid) return;
+      // Offline: watched again once it's back.
+      if (navigator.onLine === false) return addEventListener('online', () => waiting() && this.watchStall(deck), { once: true });
+      if (bufferedEnd(el, el.currentTime) > got + 0.5) return this.watchStall(deck); // something came in: wait again
+      this.stallRetry = qid;
+      const at = el.currentTime;
+      debugLog('player', `nothing more of “${track.title}” came in for ${this.stallLimits.reload / 1000} s: loading the file again from ${at.toFixed(1)} s`, 'warn');
+      // (In a Play Together session, from where the session has got to.)
+      const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? at : at;
+      this.load(this.index, { startAt, reportPrev: false, resume: true });
+    }, this.stallLimits.reload);
+  }
+
+  unwatchStall(deck) {
+    clearTimeout(deck.stallSay);
+    clearTimeout(deck.stallReload);
+    clearTimeout(deck.stallFade);
+    deck.stallSay = deck.stallReload = deck.stallFade = 0;
   }
 
   // Whether the next track can start loading without taking what this one
@@ -1147,9 +1241,10 @@ class Player extends EventTarget {
   // Play Together session they go to the session; the _underscored ones
   // act on this device only.
 
-  play() {
+  play(why = 'the app') {
     if (this.remote) return this.remote.play();
     if (this.cast) return this.cast.play();
+    this.noteWhy(why, { play: true });
     this._play();
   }
 
@@ -1165,7 +1260,10 @@ class Player extends EventTarget {
     this.audio.play()?.catch((err) => this.onPlayError(err));
   }
 
-  pause() {
+  // `why`: who asked, for the log in debug mode ("the space bar", "a pause
+  // from Dan's phone"). In a Play Together session this device pauses too.
+  pause(why = 'the app') {
+    this.noteWhy(why);
     if (this.remote) return this.remote.pause();
     if (this.cast) return this.cast.pause();
     this._pause();
@@ -1187,11 +1285,39 @@ class Player extends EventTarget {
     if (this.state === 'loading') this.setState('paused');
   }
 
-  toggle() {
+  toggle(why = 'the play/pause button') {
+    this.noteWhy(why, { play: !this.isPlaying });
     if (this.remote) return this.remote.toggle();
     if (this.cast) return this.isPlaying ? this.cast.pause() : this.cast.play();
     if (this.isPlaying) this._pause();
     else this._play();
+  }
+
+  // Debug mode: why it's about to pause (logged as it does: see setState),
+  // or start playing (logged now). `warn`: not something asked for.
+  noteWhy(text, { play = false, warn = false } = {}) {
+    if (!debugOn()) return;
+    if (play) debugLog('player', `play: ${text}`);
+    else this.why = { text, warn, at: performance.now() };
+  }
+
+  // A pause of the audio this app didn't ask for: the browser's own, or the
+  // system's (its media controls, with Media keys and lock screen off here).
+  notHere(el) {
+    let buffered = 0;
+    try {
+      buffered = el.buffered.length ? el.buffered.end(el.buffered.length - 1) : 0;
+    } catch {
+      /* none */
+    }
+    const about = [
+      document.hidden ? 'the page in the background' : 'the page in view',
+      navigator.onLine === false ? 'offline' : '',
+      `buffered to ${buffered.toFixed(1)} s`,
+      el.error ? `media error ${el.error.code}` : '',
+      app.settings.mediaSession === false ? 'Media keys and lock screen off' : '',
+    ].filter(Boolean);
+    return `the browser or the system, not this app (${about.join(', ')})`;
   }
 
   seek(sec) {
@@ -1272,12 +1398,14 @@ class Player extends EventTarget {
         this.aheadOf = { sid: track.sid, until: performance.now() + 5000 };
         this.load(this.index + 1, { reportPrev: false });
       } else {
+        this.noteWhy('the end of the Play Together queue');
         this.setState('paused');
       }
       return;
     }
     if (this.sleepEndOfTrack) {
       // Sleep timer set to "end of this track": stop here, ready at the next one.
+      this.noteWhy('the sleep timer, at the end of the track');
       this.report('stopped', track, this.duration, true);
       this.sleepEndOfTrack = false;
       const ni = this.nextIndex();
@@ -1296,6 +1424,7 @@ class Player extends EventTarget {
     this.report('stopped', track, this.duration, true);
     const ni = this.nextIndex();
     if (ni === -1) {
+      this.noteWhy('the end of the queue');
       this.setState('paused');
       this.deck.reset();
       this.restoredAt = 0;
@@ -1311,6 +1440,10 @@ class Player extends EventTarget {
   onPlayError(err) {
     this.switching = false;
     if (err?.name === 'NotAllowedError') {
+      // (Said with the pause line as it pauses, or alone when it was paused.)
+      const refused = `the browser wouldn’t start the sound${this.current ? ` of “${this.current.title}”` : ''} without a tap (NotAllowedError)`;
+      if (this.state === 'playing' || this.state === 'loading') this.noteWhy(refused, { warn: true });
+      else debugLog('player', refused, 'warn');
       this.setState('paused');
       // The browser wants a tap before it plays sound (e.g. after a reload).
       this.remote?.blocked();
@@ -1347,12 +1480,14 @@ class Player extends EventTarget {
       // Only this device can't play it; the session carries on, and this
       // device picks up again at the next track.
       this.failedQid = track.qid;
+      this.noteWhy('this device couldn’t play the track', { warn: true });
       this.setState('paused');
       this.emit('playerror', { track, err, remote: true });
       return;
     }
     this.emit('playerror', { track, err });
     if (this.errorsInRow >= 3 || this.nextIndex() === -1) {
+      this.noteWhy(this.errorsInRow >= 3 ? 'three tracks in a row couldn’t be played' : 'the last track couldn’t be played', { warn: true });
       this.setState('paused');
       return;
     }
@@ -1613,7 +1748,10 @@ class Player extends EventTarget {
         this.followClock(true);
       }
     } else {
-      if (this.isPlaying) this._pause();
+      if (this.isPlaying) {
+        this.noteWhy('Play Together: the session paused');
+        this._pause();
+      }
       if (Math.abs(this.time - sec()) > 0.5) this._seek(sec(), false);
     }
   }
@@ -1678,6 +1816,7 @@ class Player extends EventTarget {
     this.sleepEndOfTrack = false;
     // In a session, stop listening on this device rather than pausing
     // everyone else.
+    this.noteWhy('the sleep timer');
     if (this.remote) this.remote.sleep();
     else if (this.cast) this.cast.pause();
     else this._pause();
@@ -2082,9 +2221,10 @@ class Player extends EventTarget {
         /* unsupported action */
       }
     };
-    set('play', () => this.play());
-    set('pause', () => this.pause());
-    set('stop', () => this.pause());
+    const keys = 'media keys, a headset or the system’s media controls';
+    set('play', () => this.play(keys));
+    set('pause', () => this.pause(keys));
+    set('stop', () => this.pause(`${keys} (stop)`));
     set('previoustrack', () => this.prev());
     set('nexttrack', () => this.next());
     set('seekto', (d) => this.seek(d.seekTime));
