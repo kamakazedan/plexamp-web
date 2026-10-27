@@ -52,8 +52,9 @@ function loadConfig() {
     // in dataDir too.
     settingsSync: env.PW_SERVICE_SETTINGS_SYNC ? env.PW_SERVICE_SETTINGS_SYNC === 'true' : cfg.settingsSync !== false,
     dataDir: env.PW_SERVICE_DATA_DIR ?? cfg.dataDir ?? '',
-    // Search › From Spotify (SPOTIFY_IMPORT): off unless it's turned on. Its
-    // address is for tests (the mock's).
+    // Search › From Spotify by link (SPOTIFY_LINK_IMPORT, or SPOTIFY_IMPORT):
+    // off unless it's turned on. Its address is for tests (the mock's).
+    // (From Spotify's download of your data is the browser's alone.)
     spotify: env.PW_SERVICE_SPOTIFY ? env.PW_SERVICE_SPOTIFY === 'true' : cfg.spotify === true,
     spotifyUrl: env.PW_SERVICE_SPOTIFY_URL ?? cfg.spotifyUrl ?? '',
     // Development only: players at 127.0.0.1 (the mock player).
@@ -475,7 +476,7 @@ async function musicbrainzRoute(req, res, parts) {
   }
 }
 
-// Search › From Spotify (SPOTIFY_IMPORT): a public playlist's name and
+// Search › From Spotify by link (SPOTIFY_LINK_IMPORT): a public playlist's name and
 // tracks, read from Spotify's own page for it (see spotify.js), for the
 // people the shared AI model is for (who can use this player's Plex server,
 // or anyone signed in to Plex without PLEX_SERVER_URL). A few a minute for
@@ -568,14 +569,14 @@ async function aiVerdict(req, token, serverToken) {
 }
 
 // The token on a request nginx is about to pass to Plex at /pms/: from the
-// X-Plex-Token header, or from the original request's query string.
+// X-Plex-Token header, or from the original request's query string, which
+// nginx passes on alone (X-PW-Plex-Token: nothing else of the request comes
+// here, so what's searched for, or a playlist's name, doesn't either).
 function pmsToken(req) {
   const header = req.headers['x-plex-token'];
   if (validToken(header)) return header;
   try {
-    const original = String(req.headers['x-original-uri'] || '');
-    const q = new URLSearchParams(original.includes('?') ? original.slice(original.indexOf('?') + 1) : '');
-    const t = q.get('X-Plex-Token');
+    const t = decodeURIComponent(String(req.headers['x-pw-plex-token'] || '').replace(/\+/g, ' '));
     return validToken(t) ? t : null;
   } catch {
     return null;
@@ -1134,7 +1135,7 @@ function started() {
     !shares && 'shared playlists',
     !accountSettings && 'settings that follow each account',
   ].filter(Boolean);
-  log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${spotify ? ', importing from Spotify on' : ''}${config.debug ? ', debug mode on' : ''}`);
+  log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${spotify ? ', importing from Spotify by link on' : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
 }
 

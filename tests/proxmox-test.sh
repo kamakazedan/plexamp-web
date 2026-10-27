@@ -89,8 +89,10 @@ expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'
     'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'PLAYLIST_SHARING=true' \
     '# Each Plex account'"'"'s settings kept by the player, so they follow it to every' '# browser it signs in on (false: each browser keeps its own).' 'SYNC_SETTINGS=true' \
     '# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org' '# (the public service) or your own mirror. Empty: no checks.' \
-    'MUSICBRAINZ_URL=' '# true: Search › From Spotify makes a playlist from a Spotify playlist'"'"'s link,' \
-    '# read from Spotify'"'"'s public page for it (see docs/configuration.md).' 'SPOTIFY_IMPORT=' 'DEBUG=')"
+    'MUSICBRAINZ_URL=' '# true: Search › From Spotify makes playlists from Spotify'"'"'s download of your' \
+    '# data, read in the browser (see docs/configuration.md).' 'SPOTIFY_FILE_IMPORT=' \
+    '# true: Search › From Spotify makes a playlist from a Spotify playlist'"'"'s link,' \
+    '# read from Spotify'"'"'s public page for it (see docs/configuration.md).' 'SPOTIFY_LINK_IMPORT=' 'DEBUG=')"
 [ "$(cat "$T/pushed/plexamp-web.env" 2>/dev/null)" = "$expected" ] && pass "writes the settings" || fail "settings: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
 calls | grep -q -- '^pct push 123 .*/plexamp-web.env /etc/plexamp-web/plexamp-web.env --perms 600$' && pass "settings readable by root only" || fail "settings permissions: $(calls | grep push)"
 cmp -s "$T/pushed/install-plexamp-web.sh" "$ROOT/proxmox/install.sh" && pass "copies in the installer" || fail "the installer wasn't copied in"

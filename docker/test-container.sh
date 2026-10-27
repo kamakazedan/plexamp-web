@@ -92,7 +92,8 @@ OLLAMA_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}
 docker run -d --name pw-web --network "$NET" --add-host "ollama.box:$OLLAMA_IP" -e "$TV" \
     -e PLEX_SERVER_URL=http://pw-plex:32400 -e DISABLE_WEBSOCKETS=true \
     -e OLLAMA_URL=http://ollama.box:11434 -e OLLAMA_MODEL=llama3.1:8b \
-    -e MUSICBRAINZ_URL=http://pw-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pw-plex:32400 "$IMAGE" >/dev/null
+    -e MUSICBRAINZ_URL=http://pw-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pw-plex:32400 \
+    -e SPOTIFY_FILE_IMPORT=true "$IMAGE" >/dev/null
 wait_http pw-web http://pw-web/
 wait_service pw-web
 W=http://pw-web
@@ -186,11 +187,15 @@ MB_SEEN="$(cb 'http://pw-plex:32400/__mock/musicbrainz?X-Plex-Token=t')"
 contains "MusicBrainz: asks as this app, with its version" '"plexamp-web/' "$MB_SEEN"
 contains "MusicBrainz: ...and where to find it" ' ( https://github.com/kamakazedan/plexamp-web )' "$MB_SEEN"
 
-# Spotify import (SPOTIFY_IMPORT): a public playlist, read from Spotify's
-# page for it (the mock's here), for people who can use the server.
+# Spotify import by link (SPOTIFY_IMPORT here, the name before 0.22.0): a
+# public playlist, read from Spotify's page for it (the mock's here), for
+# people who can use the server. And from Spotify's download of your data
+# (SPOTIFY_FILE_IMPORT), which is the browser's: only in config.js.
 SPQ='{"link":"https://open.spotify.com/playlist/mockRoadTrip0000000001?si=x"}'
 contains "Spotify: in config.js when it's on" "spotify: true" "$(cb $W/config.js)"
-contains "Spotify: the log says it's on, and how it works" "importing from Spotify is on: playlists are read from Spotify's public pages" "$(docker logs pw-web 2>&1)"
+contains "Spotify: from the download of your data too, with SPOTIFY_FILE_IMPORT" "spotifyFiles: true" "$(cb $W/config.js)"
+contains "Spotify: ...and the log says which are on" "importing from Spotify's download of your data is on" "$(docker logs pw-web 2>&1)"
+contains "Spotify: the log says it's on, and how it works" "importing from Spotify by link is on: playlists are read from Spotify's public pages" "$(docker logs pw-web 2>&1)"
 expect "Spotify: needs a sign-in" 401 "$(c -H "$JSON" -X POST -d "$SPQ" $W/api/spotify/playlist)"
 expect "Spotify: Plex account without access to the server refused" 403 "$(c -H 'X-Plex-Token: t3' -H "$JSON" -X POST -d "$SPQ" $W/api/spotify/playlist)"
 expect "Spotify: only POST" 405 "$(c -H 'X-Plex-Token: t2' $W/api/spotify/playlist)"
@@ -317,7 +322,7 @@ expect "defaults: Play Together, your devices, shared playlists and account sett
 contains "defaults: Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner)" "Play on with Plex players needs PLEX_SERVER_URL" "$(docker logs pw-web2 2>&1)"
 expect "defaults: ...so the service has no players for anyone" 404 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/cast/players)"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
-expect "defaults: no Spotify import (SPOTIFY_IMPORT isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"link":"spotify:playlist:mockRoadTrip0000000001"}' http://pw-web2/api/spotify/playlist)"
+expect "defaults: no Spotify import by link (SPOTIFY_LINK_IMPORT isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"link":"spotify:playlist:mockRoadTrip0000000001"}' http://pw-web2/api/spotify/playlist)"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
 expect "defaults: Play Together needs a sign-in" 401 "$(c http://pw-web2/api/together/me)"
@@ -354,6 +359,15 @@ expect "open server: the owner still gets in" 200 "$(c "http://pw-web5/pms/libra
 expect "open server: friends are refused (they'd act as the owner)" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
 expect "open server: ...and can't change things" 403 "$(c -X PUT "http://pw-web5/pms/playlists/999999?title=x&X-Plex-Token=t2")"
 expect "open server: the owner can change things" 404 "$(c -X PUT "http://pw-web5/pms/playlists/999999?title=x&X-Plex-Token=t")"
+# The check is given only the token (see nginx.conf), the query string's
+# first, from wherever it is in it, or from the header.
+expect "open server: the token after what's searched for" 200 "$(c "http://pw-web5/pms/hubs/search?query=Atlas&X-Plex-Token=t")"
+expect "open server: ...a friend's refused there too" 403 "$(c "http://pw-web5/pms/hubs/search?query=Atlas&X-Plex-Token=t2")"
+expect "open server: an encoded token" 200 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=%74")"
+expect "open server: the owner's token in the header" 200 "$(c -H 'X-Plex-Token: t' "http://pw-web5/pms/library/sections")"
+expect "open server: ...a friend's refused" 403 "$(c -H 'X-Plex-Token: t2' "http://pw-web5/pms/library/sections")"
+expect "open server: an empty token first isn't passed over for the next" 401 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=&X-Plex-Token=t")"
+expect "open server: a token in the path isn't the query string's" 403 "$(c --path-as-is "http://pw-web5/pms/library/sections&X-Plex-Token=t?X-Plex-Token=t2")"
 expect "open server: shared AI not opened up by it" 401 "$(c -H 'X-Plex-Token: made-up-token' http://pw-web5/ollama/api/tags)"
 docker logs pw-web5 2>&1 | grep -q "lets this container in without signing in" && pass "open server: the log explains" || fail "open server: the log explains"
 c "http://pw-plex:32400/__mock/config?open=0" >/dev/null
@@ -382,18 +396,19 @@ lacks "debug: no API key in the log" "sk-test-secret-123" "$LOG"
 expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content-Type: application/json' -X POST -d '{"entries":[]}' http://pw-web/api/debug/log)"
 
 # ---------- 7. Play Together off ----------
-docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true "$IMAGE" >/dev/null
+docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true -e SPOTIFY_IMPORT=true -e SPOTIFY_LINK_IMPORT=false "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7b. Playing on other Plex players off ----------
-docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false "$IMAGE" >/dev/null
+docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
+    -e SPOTIFY_LINK_IMPORT=true "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false and SYNC_SETTINGS=false: not in config.js" "window.PW_CONFIG = { together: true, devices: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false and SYNC_SETTINGS=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone)" "window.PW_CONFIG = { together: true, devices: true, spotify: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
 expect "PLAYLIST_SHARING=false: no shared playlists" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/shares?server=mock-server-1')"
@@ -497,6 +512,8 @@ bad "rejects an NGINX_LOG_PORT that isn't a port" "NGINX_LOG_PORT must be a port
 bad "rejects a MusicBrainz address without http://" "MUSICBRAINZ_URL must start with http://" -e MUSICBRAINZ_URL=musicbrainz.org
 bad "rejects a MusicBrainz address with a password in it" "MUSICBRAINZ_URL has an invalid host or port" -e 'MUSICBRAINZ_URL=http://me:secret@mb.box:5000'
 bad "rejects a SPOTIFY_IMPORT that isn't true or false" "SPOTIFY_IMPORT: expected true or false" -e SPOTIFY_IMPORT=sometimes
+bad "rejects a SPOTIFY_LINK_IMPORT that isn't true or false" "SPOTIFY_LINK_IMPORT: expected true or false" -e SPOTIFY_LINK_IMPORT=sometimes
+bad "rejects a SPOTIFY_FILE_IMPORT that isn't true or false" "SPOTIFY_FILE_IMPORT: expected true or false" -e SPOTIFY_FILE_IMPORT=sometimes
 bad "rejects a SPOTIFY_URL with a path in it" "SPOTIFY_URL isn't a plain address" -e SPOTIFY_IMPORT=true -e 'SPOTIFY_URL=http://spotify.box/x'
 docker rm -f pw-bad >/dev/null 2>&1 || true
 docker run -d --name pw-bad -e 'PLEX_SERVER_URL=http://user:hunter2@plex.box:32400' "$IMAGE" >/dev/null

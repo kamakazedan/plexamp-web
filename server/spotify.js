@@ -1,5 +1,6 @@
-// Spotify playlists, read for Search › From Spotify (SPOTIFY_IMPORT, off
-// unless whoever runs the player turns it on). Spotify's API only gives a
+// Spotify playlists, read for Search › From Spotify by link
+// (SPOTIFY_LINK_IMPORT, or SPOTIFY_IMPORT as before 0.22.0: off unless
+// whoever runs the player turns it on). Spotify's API only gives a
 // playlist's tracks to the account that owns it, so its name and tracks are
 // read from the page Spotify shows anyone for it instead: its embed player,
 // which lists the first 100 tracks at most. That page isn't an API: Spotify

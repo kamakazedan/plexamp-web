@@ -3,6 +3,59 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.22.0 - 2026-10-27
+
+### New
+
+- **Your Spotify playlists, from Spotify's download of your data**
+  (Search › From Spotify): all your playlists, however long, and
+  your Liked Songs, with a free Spotify account. Off unless it's turned
+  on with `SPOTIFY_FILE_IMPORT=true` on the container, for now, while
+  it's tried with real downloads from Spotify. Spotify only lets other
+  apps read your playlists through its developer programme (Premium, and
+  five people at most), so the app walks you through asking Spotify for
+  your data instead, and choosing just its playlist files:
+  `Playlist1.json` (and `Playlist2.json` and so on) and
+  `YourLibrary.json`. Only files with those names are opened, in the
+  browser; any other, the ZIP included, is turned away unread, as the
+  rest of the download is your personal details. Of them, only playlist
+  names and each track's title, artist and album are kept. You choose
+  which playlists to make (the files can be dropped on the guide, too);
+  those found in your library make them, and what isn't goes on Missing
+  tracks, as before.
+- **Each way of importing from Spotify has its own setting, and each is
+  off unless it's turned on**: `SPOTIFY_FILE_IMPORT` for the download of
+  your data, and `SPOTIFY_LINK_IMPORT` for one public playlist straight
+  away from its link (its first 100 tracks), as `SPOTIFY_IMPORT` did,
+  which still works (`SPOTIFY_LINK_IMPORT`, when set, wins). With both
+  on, the link is **Use a link instead**; with the link alone, From
+  Spotify goes straight to it, as before.
+
+### Changed
+
+- **The `/pms/` proxy's sign-in check is given only each request's
+  token** (with `PLEX_SERVER_URL`): it was given the whole address, with
+  what's searched for in it, which the service never used or kept, but
+  needn't have had.
+- **Missing tracks keeps the latest 500 that AI playlists suggested, and
+  apart from those the latest 1,000 from Spotify, for each server**, so
+  a big Spotify import can't push the rest out. It was 500 in all. Each
+  playlist imported says how many of its are on the list once the rest
+  have come in, when there wasn't room for them all: its spreadsheet has
+  them all.
+- A song from Spotify on Missing tracks counts once for each playlist
+  it's in (up to "20+"), however often a playlist is imported: it counted
+  each import. One that comes from somewhere else next (from a playlist,
+  then an AI's suggestion) is counted afresh from there.
+- Fixed: a song on Missing tracks from a Spotify playlist was taken off
+  when an AI playlist suggested it too and MusicBrainz didn't know it,
+  and one an AI suggested after could then be taken off by Check on
+  MusicBrainz. Songs from Spotify are real, and stay so.
+- An import's playlist with none of its tracks found (so not made) lists
+  them too, to copy or save as a spreadsheet.
+- A file dropped on the page by mistake isn't opened in its place, which
+  left the player.
+
 ## 0.21.1 - 2026-10-26
 
 ### Changed

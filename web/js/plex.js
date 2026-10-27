@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.21.1' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.22.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -25,13 +25,16 @@ export const store = {
       return fallback;
     }
   },
+  // Whether it was kept.
   set(key, value) {
-    if (frozen) return;
+    if (frozen) return false;
     try {
       if (value === null || value === undefined) localStorage.removeItem(`pw.${key}`);
       else localStorage.setItem(`pw.${key}`, JSON.stringify(value));
+      return true;
     } catch {
       /* storage unavailable (private mode, quota): carry on without it */
+      return false;
     }
   },
   clear(keepKeys = []) {

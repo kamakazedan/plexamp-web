@@ -25,10 +25,13 @@
 #                       (on by default)
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
 #                       here, for all of its devices (on by default)
-#   SPOTIFY_IMPORT      "true" turns on Search › From Spotify: a playlist made
-#                       from a Spotify playlist's link, read from Spotify's
-#                       public page for it (off by default: see
-#                       server/spotify.js)
+#   SPOTIFY_FILE_IMPORT "true" turns on Search › From Spotify with Spotify's
+#                       download of your data: its playlist files, read in
+#                       the browser (off by default)
+#   SPOTIFY_LINK_IMPORT "true" turns on Search › From Spotify with a public
+#                       playlist's link, read from Spotify's public page for
+#                       it (off by default: see server/spotify.js).
+#                       (SPOTIFY_IMPORT, its name before 0.22.0, still works.)
 #   DATA_DIR            where shared playlists and each account's settings
 #                       are kept (default /data: give the container a volume
 #                       there). A folder of its own: it's made the service's
@@ -338,13 +341,22 @@ case "$PLEX_TV" in
 esac
 whole "$PLEX_TV" '^https?://[]A-Za-z0-9._:[-]+(/[A-Za-z0-9._~/-]*)?$' || fail "PLEX_TV_URL isn't a plain address (got: $(safe_url "$PLEX_TV"))"
 
-# ---------- Spotify import ----------
+# ---------- Spotify imports ----------
 
-# Off unless it's turned on: it reads playlists from Spotify's public pages,
+# Each way is off unless it's turned on. From Spotify's download of your data
+# (SPOTIFY_FILE_IMPORT): its playlist files, read in the browser; nothing goes
+# to this container or to Spotify, so it doesn't need the service. From a
+# public playlist's link (SPOTIFY_LINK_IMPORT; SPOTIFY_IMPORT before 0.22.0,
+# which it overrides when both are set): read from Spotify's public pages,
 # which Spotify's terms don't allow (see server/spotify.js). SPOTIFY_URL is
 # for tests (the mock's address).
+SPOTIFY_FILES=false
+if truthy SPOTIFY_FILE_IMPORT "${SPOTIFY_FILE_IMPORT:-}"; then SPOTIFY_FILES=true; fi
 SPOTIFY=false
 if truthy SPOTIFY_IMPORT "${SPOTIFY_IMPORT:-}"; then SPOTIFY=true; fi
+if [ -n "${SPOTIFY_LINK_IMPORT:-}" ]; then
+    if truthy SPOTIFY_LINK_IMPORT "$SPOTIFY_LINK_IMPORT"; then SPOTIFY=true; else SPOTIFY=false; fi
+fi
 SPOTIFY_URL="${SPOTIFY_URL:-https://open.spotify.com}"
 whole "$SPOTIFY_URL" '^https?://[]A-Za-z0-9._:[-]+$' || fail "SPOTIFY_URL isn't a plain address (got: $(safe_url "$SPOTIFY_URL"))"
 
@@ -455,8 +467,10 @@ location = /_pms_auth {
     # everything else that reaches it), and who's asking.
     proxy_set_header X-PW-Route internal;
     proxy_set_header X-Real-IP \$remote_addr;
-    # \$args would be the subrequest's own (empty) query string.
-    proxy_set_header X-Original-URI \$request_uri;
+    # The token from the request's query string, and nothing else of it
+    # (what's searched for, a playlist's name: see nginx.conf). A token in
+    # the X-Plex-Token header comes as it is.
+    proxy_set_header X-PW-Plex-Token \$pms_auth_token;
     proxy_connect_timeout 5s;
     proxy_read_timeout 20s;
 }
@@ -616,7 +630,12 @@ if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each Plex account
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi
-if [ "$SPOTIFY" = true ]; then say "importing from Spotify is on: playlists are read from Spotify's public pages"; fi
+if [ "$SPOTIFY" = true ]; then say "importing from Spotify by link is on: playlists are read from Spotify's public pages"; fi
+# (In the browser: no service needed.)
+if [ "$SPOTIFY_FILES" = true ]; then
+    add_config 'spotifyFiles: true'
+    say "importing from Spotify's download of your data is on: its playlist files are read in the browser"
+fi
 
 printf 'window.PW_CONFIG = { %s };\n' "$CONFIG" >"$HTML_DIR/config.js"
 
@@ -730,7 +749,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  SYNC_SETTINGS=$SETTINGS_SYNC  SPOTIFY_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  SYNC_SETTINGS=$SETTINGS_SYNC  SPOTIFY_FILE_IMPORT=$SPOTIFY_FILES  SPOTIFY_LINK_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.
