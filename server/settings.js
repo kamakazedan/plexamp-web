@@ -35,6 +35,7 @@ export const SYNCED_SETTINGS = Object.freeze({
   listRatings: 'boolean',
   lovedPlaylist: 'boolean',
   codecBadges: 'boolean',
+  coverBadges: 'boolean',
   searchCodecs: 'boolean',
   popularTracks: 'boolean',
   topListSize: 'number',

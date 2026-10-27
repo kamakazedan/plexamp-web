@@ -111,6 +111,8 @@ const ICONS = {
   info: S('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.2"/>'),
   signOut: S('<path d="M14.5 4.5h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-3M10 16.5 5.5 12 10 7.5M5.5 12H15"/>'),
   check: S('<path d="M5 12.5 9.5 17 19 7.5"/>'),
+  // Choosing several (selection.js): a ticked circle.
+  select: S('<circle cx="12" cy="12" r="8.5"/><path d="m8.3 12.3 2.6 2.6 4.9-5.2"/>'),
   playNext: S('<path d="M4 6.5h11M4 11.5h11M4 16.5h6"/><path d="M14.5 14.2v6l4.8-3z" fill="currentColor"/>'),
   addQueue: S('<path d="M4 6.5h12M4 11.5h12M4 16.5h7M17.5 14v6M14.5 17h6"/>'),
   sort: S('<path d="M4 7h16M7 12h10M10 17h4"/>'),
@@ -387,20 +389,107 @@ function watchShelf(head, shelf, back, on) {
 // artwork asked for them.
 const cardArt = () => (window.innerWidth >= 1900 ? Math.min(280, Math.round(window.innerWidth * 0.096)) : 200);
 
-export function card({ href, image, title, subtitle, round = false, fallback = 'disc', onPlay, onShuffle, size = cardArt() }) {
+// `onMenu`: its menu, from a button in the corner of its artwork (with the
+// play buttons) or, on a touch screen, a long press.
+export function card({ href, image, title, subtitle, round = false, fallback = 'disc', onPlay, onShuffle, onMenu, size = cardArt() }) {
   const a = h(
-    `a.card${round ? '.card-round' : ''}`,
+    `a.card${round ? '.card-round' : ''}${onMenu ? '.has-menu' : ''}`,
     { href: `#${href}` },
-    h('div.card-art', null, art(image, { size, round, fallback, alt: '' }), onPlay ? cardActions(title, onPlay, onShuffle) : null),
+    h('div.card-art', null, art(image, { size, round, fallback, alt: '' }), onPlay ? cardActions(title, onPlay, onShuffle, onMenu) : null),
     h('div.card-title', null, title),
     subtitle ? h('div.card-sub', null, subtitle) : null,
   );
+  if (onMenu) longPress(a, onMenu);
   return a;
 }
 
-// Play (and shuffle) buttons in the middle of a card's artwork, shown on
-// hover or keyboard focus.
-function cardActions(title, onPlay, onShuffle) {
+// A long press with a finger: `fn`, instead of what a tap would do (and
+// instead of the browser's own menu for a link). Not while choosing several
+// (selection.js), where a tap chooses. One set of listeners for the page,
+// however many covers it has.
+const LONG_PRESS = 500; // ms
+const pressable = new WeakMap(); // element → what a long press on it does
+let press = null; // { el, id, x, y, timer }: a finger down, until it's a long press
+let held = null; // the element pressed long, until the finger's lifted
+
+export function longPress(el, fn) {
+  pressable.set(el, fn);
+  if (longPress.listening) return;
+  longPress.listening = true;
+  document.addEventListener('pointerdown', pressStart);
+  document.addEventListener('pointermove', (e) => press?.id === e.pointerId && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10 && pressEnd(), { passive: true });
+  document.addEventListener('pointerup', (e) => press?.id === e.pointerId && pressEnd());
+  document.addEventListener('pointercancel', (e) => press?.id === e.pointerId && pressEnd());
+  document.addEventListener('contextmenu', (e) => {
+    const on = press?.el || held;
+    if (on && on.contains(e.target)) e.preventDefault();
+  });
+}
+
+function pressStart(e) {
+  pressEnd();
+  if (e.pointerType !== 'touch' || document.body.classList.contains('selecting')) return;
+  let el = e.target;
+  while (el && !pressable.has(el)) el = el.parentElement;
+  if (!el) return;
+  const p = { el, id: e.pointerId, x: e.clientX, y: e.clientY };
+  p.timer = setTimeout(() => {
+    if (press !== p) return;
+    press = null;
+    if (!el.isConnected) return;
+    held = el;
+    ignoreRelease(p.id, () => held === el && (held = null));
+    navigator.vibrate?.(8);
+    pressable.get(el)?.();
+  }, LONG_PRESS);
+  press = p;
+}
+
+function pressEnd() {
+  if (!press) return;
+  clearTimeout(press.timer);
+  press = null;
+}
+
+// The tap that lifting the finger after a long press can make isn't one,
+// wherever it lands (on the menu that opened under it, say): a click where
+// the finger came up, straight after. (Browsers that make none leave the
+// next real tap alone: it's somewhere else, or later.)
+function ignoreRelease(pointerId, then) {
+  let until = Infinity;
+  let at = null;
+  let quit = 0;
+  const done = () => {
+    window.removeEventListener('click', swallow, true);
+    window.removeEventListener('pointerup', up, true);
+    window.removeEventListener('pointercancel', up, true);
+    clearTimeout(quit);
+    then();
+  };
+  const swallow = (e) => {
+    const here = !at || Math.hypot(e.clientX - at.x, e.clientY - at.y) < 24;
+    if (performance.now() <= until && here) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    done();
+  };
+  const up = (e) => {
+    if (e.pointerId !== pointerId) return;
+    until = performance.now() + 400;
+    at = { x: e.clientX, y: e.clientY };
+    clearTimeout(quit);
+    quit = setTimeout(done, 450);
+  };
+  window.addEventListener('click', swallow, true);
+  window.addEventListener('pointerup', up, true);
+  window.addEventListener('pointercancel', up, true);
+  quit = setTimeout(done, 20000); // (a finger that's never lifted, as far as we hear)
+}
+
+// Play (and shuffle) buttons in the middle of a card's artwork, and its
+// menu in the corner, shown on hover or keyboard focus.
+function cardActions(title, onPlay, onShuffle, onMenu) {
   const button = (cls, label, name, size, fn) =>
     h(
       `button.${cls}`,
@@ -421,6 +510,7 @@ function cardActions(title, onPlay, onShuffle) {
     null,
     button('card-play', `Play ${title}`, 'play', 24, onPlay),
     onShuffle ? button('card-shuffle', `Shuffle ${title}`, 'shuffle', 20, onShuffle) : null,
+    onMenu ? button('card-more', `More options for ${title}`, 'more', 20, onMenu) : null,
   );
 }
 

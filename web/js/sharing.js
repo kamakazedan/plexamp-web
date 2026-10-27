@@ -299,12 +299,13 @@ async function copyGone(share, token, key) {
 }
 
 // The pages showing it load it again: the one open now, unless it's being
-// changed there.
+// changed there, or tracks or albums are being chosen on it (selection.js:
+// it's loaded again next time).
 function shownChanged(copyId) {
   app.server?.forgetPlaylists();
   const page = (p) => p === '/' || p === '/playlists' || p === `/playlist/${copyId}`;
   dropCached(page);
-  if (page(parseHash().path) && !document.querySelector('.view.is-editing, .view.is-sorting, .sheet.open')) refresh();
+  if (page(parseHash().path) && !document.querySelector('.view.is-editing, .view.is-sorting, .sheet.open') && !document.body.classList.contains('selecting')) refresh();
 }
 
 function tell(share, r) {

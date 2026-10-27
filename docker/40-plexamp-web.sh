@@ -622,6 +622,7 @@ else
     MB=false
     SHARING=false
     SETTINGS_SYNC=false
+    if [ "$SPOTIFY" = true ]; then say "importing from Spotify by link needs Node.js, which isn't installed here, so it's off"; fi
     SPOTIFY=false
 fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"

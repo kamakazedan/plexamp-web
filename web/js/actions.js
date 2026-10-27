@@ -11,6 +11,7 @@ import { exportPlaylistFile } from './views/playlistfiles.js';
 import { lovedPlaylist, LOVED_TITLE } from './ratings.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
+const REMOTE_LIMIT = 500; // tracks sent to a Play Together session at once (player.js)
 
 export async function guard(fn) {
   try {
@@ -24,20 +25,27 @@ export async function guard(fn) {
 
 const ctx = (title, href) => ({ title, href });
 
-// A whole list into the queue: next, or at the end (at most 1,000 tracks).
-const queueAll = (load, where) =>
+// How many tracks go into the queue at once: 1,000, or 500 to a Play
+// Together session (as many as the player sends it).
+export const queueLimit = () => (player.remote ? REMOTE_LIMIT : PLAYLIST_PLAY_LIMIT);
+
+// A whole list into the queue: next, or at the end (at most queueLimit()
+// tracks). `after`: more for the message, once it's done; `done(true)`:
+// once they're in.
+export const queueTracks = (load, where, { after, done } = {}) =>
   guard(async () => {
-    const tracks = (await load()).slice(0, PLAYLIST_PLAY_LIMIT);
+    const tracks = (await load()).slice(0, queueLimit());
     if (!tracks.length) return toast('There’s nothing to add.');
     const playing = !!player.current;
     if (where === 'next') player.playNext(tracks);
     else player.addToQueue(tracks);
     const n = fmt.count(tracks.length, 'track', 'tracks');
-    toast(!playing ? 'Playing' : where === 'next' ? `${n} playing next` : `Added ${n} to the queue`);
+    toast(`${!playing ? 'Playing' : where === 'next' ? `${n} playing next` : `Added ${n} to the queue`}${after?.() || ''}`);
+    done?.(true);
   });
 const queueActions = (load) => [
-  { icon: 'playNext', label: 'Play next', onSelect: () => queueAll(load, 'next') },
-  { icon: 'addQueue', label: 'Add to queue', onSelect: () => queueAll(load, 'end') },
+  { icon: 'playNext', label: 'Play next', onSelect: () => queueTracks(load, 'next') },
+  { icon: 'addQueue', label: 'Add to queue', onSelect: () => queueTracks(load, 'end') },
 ];
 
 export function playList(tracks, start, context, opts = {}) {
@@ -252,8 +260,11 @@ export const sonicPath = (from, to) =>
 // ---------- menus ----------
 
 // `extra`: actions for where the menu was opened (an unlocked playlist's
-// "Remove from playlist", say), shown first.
-export function trackMenu(track, { queueIndex, extra = [] } = {}) {
+// "Remove from playlist", say), shown first. `select`: to start choosing
+// more with it (selection.js), where it can be.
+const selectAction = (select, what) => select && { icon: 'select', label: 'Select', description: `Choose more ${what} to go with it`, onSelect: select };
+
+export function trackMenu(track, { queueIndex, extra = [], select = null } = {}) {
   const inQueue = queueIndex !== undefined;
   sheet({
     title: track.title,
@@ -279,6 +290,7 @@ export function trackMenu(track, { queueIndex, extra = [] } = {}) {
         label: 'Add to collection…',
         onSelect: () => addToCollection({ kind: 'track', what: track.title, load: async () => [track] }),
       },
+      selectAction(select, 'tracks'),
       /^\d+$/.test(String(track.id)) && { icon: 'appears', label: 'Appears in…', onSelect: () => navigate(`/appears/${track.id}`) },
       track.albumId && { icon: 'disc', label: 'Go to album', onSelect: () => navigate(`/album/${track.albumId}`) },
       track.artistId && { icon: 'mic', label: 'Go to artist', onSelect: () => navigate(`/artist/${track.artistId}`) },
@@ -286,7 +298,9 @@ export function trackMenu(track, { queueIndex, extra = [] } = {}) {
   });
 }
 
-export function albumMenu(album) {
+// From its page, or its cover anywhere (`select`, as for trackMenu; there
+// "Go to album" too).
+export function albumMenu(album, { select = null, open = false } = {}) {
   sheet({
     title: album.title,
     subtitle: album.parentTitle,
@@ -294,14 +308,15 @@ export function albumMenu(album) {
     actions: [
       { icon: 'play', label: 'Play', onSelect: () => playAlbum(album) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playAlbum(album, { shuffle: true }) },
-      { icon: 'playNext', label: 'Play next', onSelect: () => queueAlbum(album, 'next') },
-      { icon: 'addQueue', label: 'Add to queue', onSelect: () => queueAlbum(album, 'end') },
+      ...queueActions(() => tracksOf([album])),
       { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: album.title, load: () => tracksOf([album]), suggest: album.title }) },
       isAdminNow() && {
         icon: 'collection',
         label: 'Add to collection…',
         onSelect: () => addToCollection({ kind: 'album', what: album.title, load: async () => [album] }),
       },
+      selectAction(select, 'albums'),
+      open && { icon: 'disc', label: 'Go to album', onSelect: () => navigate(`/album/${album.ratingKey}`) },
       album.parentRatingKey && { icon: 'mic', label: 'Go to artist', onSelect: () => navigate(`/artist/${album.parentRatingKey}`) },
     ],
   });
@@ -399,11 +414,3 @@ export function queueMenu() {
     ],
   });
 }
-
-const queueAlbum = (album, where) =>
-  guard(async () => {
-    const tracks = (await app.server.children(album.ratingKey)).map(normTrack);
-    if (where === 'next') player.playNext(tracks);
-    else player.addToQueue(tracks);
-    toast(where === 'next' ? 'Playing next' : 'Added to queue');
-  });

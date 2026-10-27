@@ -38,6 +38,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'listRatings',
   'lovedPlaylist',
   'codecBadges',
+  'coverBadges',
   'searchCodecs',
   'popularTracks',
   'topListSize',
@@ -183,9 +184,10 @@ function take(patch) {
     sync.applying = false;
   }
   // Pages kept to go back to read their settings when they were built; Home
-  // on screen is built again with its new layout.
+  // on screen is built again with its new layout (not while tracks or
+  // albums are being chosen on it: then next time).
   dropCached(() => true);
-  if ('home' in patch && parseHash().path === '/') refresh();
+  if ('home' in patch && parseHash().path === '/' && !document.body.classList.contains('selecting')) refresh();
 }
 
 // What's kept for the account, here: except settings changed here and not

@@ -534,22 +534,50 @@ def public(it):
     return {k: v for k, v in it.items() if not k.startswith('_')}
 
 
+LOSSY = ('mp3', 'aac', 'opus', 'vorbis')
+
+
 def track_detail(t):
     d = public(t)
     d['Media'] = [dict(t['Media'][0])]
+    codec = t['Media'][0].get('audioCodec', 'flac')
     hires = t.get('_hires', int(t['ratingKey']) % 2 == 1)
     # Loudness analysis, as Plex gives it: gains in dB to ReplayGain's -18
     # LUFS. Tracks with an even id are loud masters (-8 LUFS), the others
     # quiet (-16 LUFS); every album's gain is -7 dB.
     loud = int(t['ratingKey']) % 2 == 0
     loudness = -8.0 if loud else -16.0
+    # (A lossy file has no bit depth, and is 44.1 kHz here.)
+    sound = {'samplingRate': 44100, 'bitrate': t['Media'][0].get('bitrate')} if codec in LOSSY else {
+        'bitDepth': 24 if hires else 16, 'samplingRate': 96000 if hires else 44100}
     d['Media'][0]['Part'] = [dict(t['Media'][0]['Part'][0], Stream=[
-        {'id': int(t['ratingKey']) * 10 + 1, 'streamType': 2, 'codec': 'flac',
-         'bitDepth': 24 if hires else 16,
-         'samplingRate': 96000 if hires else 44100, 'channels': 2,
-         'loudness': loudness, 'gain': -18.0 - loudness, 'albumGain': -7.0,
-         'peak': 0.98 if loud else 0.6, 'albumPeak': 0.99}])]
+        dict({'id': int(t['ratingKey']) * 10 + 1, 'streamType': 2, 'codec': codec, 'channels': 2,
+              'loudness': loudness, 'gain': -18.0 - loudness, 'albumGain': -7.0,
+              'peak': 0.98 if loud else 0.6, 'albumPeak': 0.99}, **sound)])]
     return d
+
+
+# Tracks' formats as /__mock/config?codec= changed them: what they were.
+CODEC_WAS = {}
+
+
+def set_codecs(spec):
+    """/__mock/config?codec=ID:mp3,ID2:flac gives tracks another format
+    (a lossy one at 320 kbps); codec=reset puts them back."""
+    if spec == 'reset':
+        for rk, media in CODEC_WAS.items():
+            if rk in items:
+                items[rk]['Media'] = media
+        CODEC_WAS.clear()
+        return
+    for pair in filter(None, spec.split(',')):
+        rk, _, codec = pair.partition(':')
+        t = items.get(rk)
+        if not t or t.get('type') != 'track' or not codec:
+            continue
+        CODEC_WAS.setdefault(rk, t['Media'])
+        part = dict(t['Media'][0]['Part'][0], container=codec)
+        t['Media'] = [{'audioCodec': codec, 'container': codec, 'bitrate': 320 if codec in LOSSY else 1411, 'Part': [part]}]
 
 
 # Tracks that end, or start, in silence (and are analysed: see the levels
@@ -1651,6 +1679,8 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['quiet'] = [x for x in q['quiet'][0].split(',') if x]
             if 'hidden' in q:
                 MOCK['hidden'] = [x for x in q['hidden'][0].split(',') if x]
+            if 'codec' in q:
+                set_codecs(q['codec'][0])
             if 'stall' in q:
                 # stall=ID&bytes=N: the next time that track's file is asked
                 # for, N bytes of it come, then nothing more (the connection

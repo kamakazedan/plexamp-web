@@ -633,9 +633,56 @@ a.section-head:hover .chev {
     transform: scale(1.07);
   }
 
-  .card:hover .card-actions .card-shuffle:hover {
+  .card:hover .card-actions .card-shuffle:hover,
+  .card:hover .card-actions .card-more:hover {
     background: rgba(40, 40, 40, 0.9);
   }
+}
+
+/* A card's menu, in the corner of its artwork with the play buttons. (On a
+   touch screen, a long press opens it: ui.js.) */
+.card-actions .card-more {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 32px;
+  background: rgba(18, 18, 18, 0.74);
+  color: #fff;
+}
+
+/* ...a long press, not the browser's own menu for the link, nor a text
+   selection. (Album rows, in search, too.) */
+.card.has-menu,
+.row.has-menu {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* An album's format over its cover (formats.js). */
+.cover-badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  max-width: calc(100% - 12px);
+  overflow: hidden;
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 4px;
+  background: rgba(10, 10, 12, 0.74);
+  color: #fff;
+  font-size: calc(10.5px * var(--fs, 1));
+  font-weight: 700;
+  line-height: 16px;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.cover-badge.hires {
+  border-color: rgba(232, 194, 91, 0.9);
+  color: #ffd977;
 }
 
 .wide-card {
@@ -784,6 +831,36 @@ label.row:hover {
 .row-main {
   flex: 1;
   min-width: 0;
+}
+
+/* An album in a list of rows: its link, and its menu after it. */
+.album-row {
+  padding-right: 4px;
+}
+
+.album-row:hover {
+  background: var(--hover);
+}
+
+.row-link {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.row-link > .art {
+  flex: none;
+  width: 52px;
+  border-radius: 3px;
+}
+
+.row-more {
+  flex: none;
+  color: var(--muted);
 }
 
 .row-title {
@@ -2182,21 +2259,42 @@ a.np-album[href]:hover {
   text-decoration: underline;
 }
 
+/* The format (a badge, as on album pages), what it's converted to if it
+   is, and the rating after them, centred together. */
 .np-info {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  justify-content: center;
+  gap: 6px 14px;
   font-size: calc(15px * var(--fs, 1));
   color: var(--muted);
 }
 
 .np-codec {
-  justify-self: end;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: calc(13px * var(--fs, 1));
+  font-weight: 700;
+  line-height: 18px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.np-codec.hires {
+  border-color: #e8c25b;
+  color: #ffd977;
+}
+
+/* Converted as it plays: the file's format steps back. */
+.np-codec.converted {
+  opacity: 0.55;
 }
 
 .np-quality {
-  justify-self: start;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2229,19 +2327,10 @@ a.np-album[href]:hover {
 }
 
 /* Settings › Experience › Player: the codec, the rating, or both. */
-.np-info.no-rating {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-}
-
 .np-info.no-rating .np-stars,
 .np-info.no-codec .np-codec,
 .np-info.no-codec .np-quality {
   display: none;
-}
-
-.np-info.no-codec {
-  grid-template-columns: auto;
-  justify-content: center;
 }
 
 .star {
@@ -3390,6 +3479,246 @@ body.scanning .scan-status {
 
 .np-tool.is-busy .ic {
   animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* ---------- choosing several (selection.js) ---------- */
+
+/* While choosing, a circle on everything that can be chosen, ticked once
+   it is; a tap chooses, so the buttons for playing and menus step aside. */
+body.selecting [data-sel] {
+  cursor: pointer;
+}
+
+body.selecting .track[data-sel] .track-lead::after,
+body.selecting .card[data-sel] .card-art::after,
+body.selecting .row[data-sel] .row-link > .art::after {
+  content: '';
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+body.selecting .track[data-sel] .track-lead::after,
+body.selecting .row[data-sel] .row-link > .art::after {
+  inset: 0;
+  margin: auto;
+}
+
+body.selecting .card[data-sel] .card-art::after {
+  top: 8px;
+  left: 8px;
+}
+
+body.selecting .track.chosen .track-lead::after,
+body.selecting .card.chosen .card-art::after,
+body.selecting .row.chosen .row-link > .art::after {
+  border-color: #fff;
+  background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23111' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5.5 12.6 4.2 4.2 8.8-9.1'/%3E%3C/svg%3E") center / 15px 15px no-repeat;
+}
+
+/* (A track's number, or the bars of the one playing, under the circle.) */
+body.selecting .track[data-sel] .track-lead > :not(.art) {
+  visibility: hidden;
+}
+
+body.selecting .track[data-sel] .track-more,
+body.selecting .track[data-sel] .track-preview,
+body.selecting .row[data-sel] .row-more {
+  visibility: hidden;
+}
+
+body.selecting .card[data-sel] .card-actions {
+  display: none;
+}
+
+body.selecting .track.chosen,
+body.selecting .row.chosen {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+body.selecting .card[data-sel] .card-art::after {
+  z-index: 2;
+}
+
+body.selecting .card.chosen .card-art::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 3px solid #fff;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+/* What's chosen, and what to do with it: over the bottom of the page, where
+   toasts would be (they go above it meanwhile). */
+.select-bar {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: calc(var(--tab-h) + var(--pb-h) + var(--safe-b) + 10px);
+  z-index: 55; /* under sheets (60) */
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 5px 6px 5px 4px;
+  border-radius: 14px;
+  background: #f2f2f2;
+  color: #111;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  animation: toast-in 0.2s var(--ease);
+}
+
+body.no-player .select-bar {
+  bottom: calc(var(--tab-h) + var(--safe-b) + 10px);
+}
+
+body.np-open .select-bar,
+body.bare .select-bar {
+  display: none;
+}
+
+.select-close,
+.select-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: calc(15px * var(--fs, 1));
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.select-close:hover,
+.select-btn:hover {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+/* Doing something (getting albums' tracks, say): nothing else meanwhile. */
+.select-bar.busy .select-btn {
+  opacity: 0.45;
+  cursor: progress;
+}
+
+.select-bar.busy .select-btn:hover {
+  background: none;
+}
+
+.select-close:focus-visible,
+.select-btn:focus-visible {
+  outline-color: #111;
+}
+
+.select-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+}
+
+/* (Two lines where it's narrow: "2 albums and 5 tracks".) */
+.select-count {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: calc(15px * var(--fs, 1));
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.select-hint {
+  overflow: hidden;
+  color: rgba(0, 0, 0, 0.6);
+  font-size: calc(13px * var(--fs, 1));
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* On a phone, short names under the icons (some look alike); beside them
+   where there's room. */
+.select-label {
+  font-size: calc(11px * var(--fs, 1));
+  font-weight: 600;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+.select-label.wide {
+  display: none;
+}
+
+@media (max-width: 719px) {
+  .select-btn {
+    flex-direction: column;
+    gap: 2px;
+    min-width: 52px;
+    height: 50px;
+    padding: 0 4px;
+  }
+}
+
+@media (max-width: 360px) {
+  .select-btn {
+    min-width: 46px;
+    padding: 0 2px;
+  }
+
+  .select-close {
+    min-width: 36px;
+    padding: 0 4px;
+  }
+}
+
+@media (min-width: 720px) {
+  .select-label {
+    font-size: calc(15px * var(--fs, 1));
+    line-height: inherit;
+  }
+
+  .select-label.short {
+    display: none;
+  }
+
+  .select-label.wide {
+    display: inline;
+  }
+
+  .select-more .select-label {
+    display: none;
+  }
+}
+
+/* Room to scroll the end of the page up past the bar. */
+body.selecting #main {
+  padding-bottom: calc(var(--tab-h) + var(--pb-h) + var(--safe-b) + 96px);
+}
+
+body.selecting.no-player #main {
+  padding-bottom: calc(var(--tab-h) + var(--safe-b) + 96px);
+}
+
+body.selecting:not(.np-open) #toasts {
+  bottom: calc(var(--tab-h) + var(--pb-h) + var(--safe-b) + 76px);
+}
+
+body.selecting.no-player:not(.np-open) #toasts {
+  bottom: calc(var(--tab-h) + var(--safe-b) + 76px);
 }
 
 /* ---------- toasts ---------- */
@@ -4799,6 +5128,32 @@ body.in-together .pb-art::after {
   body.no-player #toasts {
     left: var(--sidebar-w);
     bottom: calc(var(--pb-h) + 18px);
+  }
+
+  body.selecting:not(.np-open) #toasts {
+    bottom: calc(var(--pb-h) + 84px);
+  }
+
+  body.selecting.no-player:not(.np-open) #toasts {
+    bottom: 84px;
+  }
+
+  .select-bar {
+    left: calc(var(--sidebar-w) + 16px);
+    right: 16px;
+    bottom: calc(var(--pb-h) + 14px);
+  }
+
+  body.no-player .select-bar {
+    bottom: 18px;
+  }
+
+  body.selecting #main {
+    padding-bottom: calc(var(--pb-h) + 110px);
+  }
+
+  body.selecting.no-player #main {
+    padding-bottom: 110px;
   }
 
   .page-head {

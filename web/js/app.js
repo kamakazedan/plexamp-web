@@ -8,6 +8,8 @@ import { player } from './player.js';
 import { initBackdrop } from './backdrop.js';
 import { initPlayerBar } from './nowplaying.js';
 import { syncCurrent } from './components.js';
+import { pageShown, isSelecting } from './selection.js';
+import { forgetFormats } from './formats.js';
 import { homeView, recentView } from './views/home.js';
 import { browseView, playlistsView, tagsView, itemsView } from './views/library.js';
 import { albumView, artistView, playlistView, collectionView } from './views/detail.js';
@@ -118,7 +120,10 @@ function playlistsBadge() {
   dot.parentElement.setAttribute('aria-label', n ? `Playlists, ${n} shared with you` : 'Playlists');
 }
 
-function onRouteChange({ route: r, tab }) {
+function onRouteChange({ route: r, tab, key, same }) {
+  // Another page stops choosing several (selection.js); the same one
+  // brought up to date, or sorted or filtered another way, doesn't.
+  pageShown(key, same);
   document.body.classList.toggle('bare', !!r.bare);
   document.querySelectorAll('#tabs .tab').forEach((a) => {
     const active = a.dataset.tab === tab;
@@ -211,7 +216,7 @@ function hideBanner() {
 // user: they're near the top and nothing is open over it.
 function refreshIfIdle(test) {
   const { path } = parseHash();
-  if (!test(path) || window.scrollY > 150 || overlayDepth() || document.querySelector('.ai-progress, .view.is-editing, .view.is-sorting')) return;
+  if (!test(path) || window.scrollY > 150 || overlayDepth() || isSelecting() || document.querySelector('.ai-progress, .view.is-editing, .view.is-sorting')) return;
   refresh();
 }
 
@@ -232,6 +237,10 @@ function wireLiveUpdates() {
     refreshIfIdle(affected);
   });
   live.addEventListener('scan', (e) => {
+    // Albums' formats (on their covers) are looked up again once a scan's
+    // done: files may have been replaced. (Not on every change it brings:
+    // an album's format doesn't change as others are added.)
+    if (!e.detail && document.body.classList.contains('scanning')) forgetFormats();
     document.body.classList.toggle('scanning', !!e.detail);
     document.querySelectorAll('.scan-text').forEach((n) => (n.textContent = e.detail?.title || ''));
   });

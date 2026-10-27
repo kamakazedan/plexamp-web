@@ -26,7 +26,8 @@ and t3 (Alex, a friend without access).
 
 Sections: core ws ai dj djs nows blocked poll custom desktop nav library edit
 lists pictures missing files sharing routes privacy np stream cast ratings
-devices fades together settings home spotify debug memory (default: all).
+devices fades together settings home formats select spotify debug memory
+(default: all).
 """
 
 import json
@@ -1277,7 +1278,7 @@ with sync_playwright() as pw:
             page.fill('.search-box input', 'crate digger')
             wait_for(lambda: 'ALBUMS' in heads(), 8)
             page.wait_for_timeout(500)
-            albums = page.locator('.block .rows a.row').evaluate_all('rs => rs.map((r) => [r.getAttribute("href"), r.querySelector(".row-title").textContent])')
+            albums = page.locator('.block .rows .album-row').evaluate_all('rs => rs.map((r) => [r.querySelector("a").getAttribute("href"), r.querySelector(".row-title").textContent])')
             crates = [a for a in albums if a[1] == 'Crate Digger']
             check('library: ...and one of each album, the best-sounding edition', len(crates) == 1 and crates[0][0].endswith(f'/album/{hires_album}'), str(albums))
             settings(page, {'searchCodecs': False})
@@ -5028,6 +5029,411 @@ with sync_playwright() as pw:
         check('home: reset brings the defaults back', order[:3] == ['mixes', 'recentPlays', 'recentPlaylists'] and 'decade2020' not in order, str(order))
         ctx.close()
 
+    # ---------- formats: albums' formats over their covers, and the player's ----------
+    # The mock's tracks are FLAC: 24/96 those with an odd id, 16/44.1 the
+    # rest (an album's badge is its first track's); /__mock/config?codec=
+    # makes some MP3 here, for an album that's all MP3 and one of each.
+    if run('formats'):
+        ctx = browser.new_context(viewport={'width': 1280, 'height': 900})
+        page = ctx.new_page()
+        attach(page, 'formats')
+        asked = []
+        page.on('request', lambda r: asked.append(r.url))
+        login(page, APP)
+        all_albums = {a['title']: a for a in mock('/library/sections/1/all?type=9&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata']}
+
+        def khz(hz):
+            return f'{hz / 1000:.1f}'.rstrip('0').rstrip('.')
+
+        def kids(album_id):
+            return [m for m in mock(f'/library/metadata/{album_id}/children?X-Plex-Token=t')['MediaContainer']['Metadata'] if m['type'] == 'track']
+
+        def stream(track_id):
+            d = mock(f'/library/metadata/{track_id}?X-Plex-Token=t')['MediaContainer']['Metadata'][0]
+            return next(x for x in d['Media'][0]['Part'][0]['Stream'] if x['streamType'] == 2)
+
+        def expected(album_id):
+            ts = kids(album_id)
+            codecs = {m['Media'][0]['audioCodec'] for m in ts}
+            if len(codecs) > 1:
+                return ['Mixed', False]
+            if codecs == {'mp3'}:
+                return ['MP3', False]
+            a = stream(ts[0]['ratingKey'])
+            return [f"FLAC {a['bitDepth']}/{khz(a['samplingRate'])}", a['bitDepth'] > 16 or a['samplingRate'] > 48000]
+
+        def covers():
+            return page.locator('.grid .card').evaluate_all('cs => cs.map((c) => [c.getAttribute("href").split("/").pop(), c.querySelector(".cover-badge")?.textContent ?? null, !!c.querySelector(".cover-badge.hires")])')
+
+        looked_up = lambda ids: [u for u in asked if re.search(r'/library/metadata/(\d+)/children', u) and re.search(r'/library/metadata/(\d+)/children', u).group(1) in ids]
+        details = lambda: [u for u in asked if re.search(r'/library/metadata/[\d,]+(\?|$)', u)]
+        try:
+            mock('/__mock/config?codec=' + ','.join(f"{t['ratingKey']}:mp3" for t in kids(all_albums['Interference']['ratingKey']))
+                 + f",{kids(all_albums['Paper Boats']['ratingKey'])[-1]['ratingKey']}:mp3")
+            # Only what's in view (and a little beyond) is looked up, each
+            # album once.
+            page.set_viewport_size({'width': 1280, 'height': 300})
+            page.goto(APP + '#/browse/albums')
+            page.wait_for_selector('.grid .card')
+            del asked[:]
+            ids = page.locator('.grid .card').evaluate_all('cs => cs.map((c) => c.getAttribute("href").split("/").pop())')
+            check('formats: (the mock\'s albums are one page of the list)', 6 < len(ids) < 60, len(ids))
+            wait_for(lambda: page.locator('.cover-badge').count() >= 6, 10)
+            page.wait_for_timeout(1500)
+            first = covers()
+            seen = looked_up(ids)
+            check('formats: covers get their format as they come into view, not all at once',
+                  6 <= len([c for c in first if c[1]]) < len(ids) and first[-1][1] is None and len(seen) == len(set(seen)) < len(ids),
+                  f'{len([c for c in first if c[1]])} of {len(ids)} badges, {len(seen)} looked up')
+            page.set_viewport_size({'width': 1280, 'height': 900})
+            page.mouse.move(700, 450)
+            for _ in range(20):  # down a screenful at a time, giving each a moment in view
+                if page.locator('.cover-badge').count() >= len(ids):
+                    break
+                page.mouse.wheel(0, 600)
+                page.wait_for_timeout(700)
+            wait_for(lambda: page.locator('.cover-badge').count() == len(ids), 10)
+            got = covers()
+            want = [[i, *expected(i)] for i in ids]
+            check('formats: every album cover says its format, as its tracks are (high resolution in gold)', got == want, f'{got} != {want}')
+            seen = looked_up(ids)
+            check('formats: ...asking about each album once, and its first track\'s details at most once',
+                  len(seen) == len(set(seen)) == len(ids) and len(details()) <= len(ids), f'{len(seen)} lookups, {len(details())} detail requests for {len(ids)} albums')
+            mixed = page.locator(f'.grid .card[href="#/album/{all_albums["Paper Boats"]["ratingKey"]}"] .cover-badge').get_attribute('title')
+            check('formats: a cover with several formats says so', mixed == 'Mixed formats', mixed)
+            shot(page, 'formats-01-covers')
+            # Shown again, the page has them at once (they're kept).
+            del asked[:]
+            page.goto(APP + '#/')
+            page.wait_for_selector('section.block[data-section]')
+            page.goto(APP + '#/browse/albums')
+            page.wait_for_selector('.grid .card')
+            page.wait_for_timeout(300)
+            check('formats: ...and kept: shown again, there\'s no asking again',
+                  page.locator('.cover-badge').count() == len(ids) and not looked_up(ids), len(looked_up(ids)))
+            # An album page: its badge as before, and the covers of the rest.
+            page.locator(f'.grid .card[href="#/album/{all_albums["Interference"]["ratingKey"]}"]').click()
+            page.wait_for_selector('.hero-album .codec-badge')
+            check('formats: an album page says the same as its cover', page.locator('.hero-album .codec-badge').inner_text() == 'MP3',
+                  page.locator('.hero-album .codec-badge').inner_text())
+            page.goto(APP + f'#/album/{all_albums["Paper Boats"]["ratingKey"]}')
+            page.wait_for_selector('.hero-album .codec-badge')
+            check('formats: ...“Mixed formats” there', page.locator('.hero-album .codec-badge').inner_text() == 'Mixed formats')
+            # Search: albums' formats before their artist, as tracks' are.
+            page.goto(APP + '#/search')
+            page.fill('.search-box input', 'Lantern')
+            page.wait_for_selector('.search-body .album-row')
+            wait_for(lambda: page.locator('.search-body .album-row .track-codec').count() > 0, 8)
+            rows = page.locator('.search-body .album-row').evaluate_all('rs => rs.map((r) => [r.querySelector("a").getAttribute("href").split("/").pop(), r.querySelector(".track-codec")?.textContent ?? null, !!r.querySelector(".track-codec.hires")])')
+            check('formats: albums in search say their format too', rows and all(r == [r[0], *expected(r[0])] for r in rows), str(rows))
+            # The player: the file's badge ("FLAC 24/96", "MP3 320"), and the
+            # rating to its right.
+            page.goto(APP + f'#/album/{all_albums["Low Light Signals"]["ratingKey"]}')
+            page.wait_for_selector('.hero-album')
+            for i in range(2):
+                if i:
+                    page.keyboard.press('Escape')
+                    page.wait_for_selector('.np.open', state='detached')
+                page.locator('.album-tracks .track-main').nth(i).click()
+                wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+                a = stream(player(page, 'p.current.id'))
+                page.click('.pb-main')
+                page.wait_for_selector('.np.open')
+                want = f"FLAC {a['bitDepth']}/{khz(a['samplingRate'])}"
+                wait_for(lambda: page.locator('.np-codec').inner_text() == want, 8)
+                hires = 'hires' in (page.locator('.np-codec').get_attribute('class') or '')
+                check(f"formats: the player shows the file's badge ({want})", page.locator('.np-codec').inner_text() == want and hires == (a['bitDepth'] > 16),
+                      f"{page.locator('.np-codec').inner_text()!r} hires={hires}")
+            # (Measured together: the player may still be sliding into place.)
+            badge, stars = page.evaluate("() => ['.np-codec', '.np-stars'].map((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })")
+            check('formats: ...with the rating to its right, on one line',
+                  badge['x'] + badge['width'] <= stars['x'] and abs((badge['y'] + badge['height'] / 2) - (stars['y'] + stars['height'] / 2)) < 4, f'{badge} {stars}')
+            shot(page, 'formats-02-player')
+            settings(page, {'quality': '320'})
+            page.wait_for_selector('.np.open .np-codec.converted', timeout=10000)
+            chip, stars = page.evaluate("() => ['.np-quality', '.np-stars'].map((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })")
+            check('formats: converted as it plays, the badge steps back for what it plays at (before the rating)',
+                  page.locator('.np-quality').inner_text().strip() == '320 kbps' and chip['x'] + chip['width'] <= stars['x'],
+                  page.locator('.np-quality').inner_text())
+            settings(page, {'quality': 'original'})
+            page.keyboard.press('Escape')
+            page.wait_for_selector('.np.open', state='detached')
+            page.goto(APP + f'#/album/{all_albums["Interference"]["ratingKey"]}')
+            page.wait_for_selector('.hero-album')
+            page.locator('.album-tracks .track-main').first.click()
+            wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+            page.click('.pb-main')
+            page.wait_for_selector('.np.open')
+            check('formats: a lossy file\'s badge has its bitrate', wait_for(lambda: page.locator('.np-codec').inner_text() == 'MP3 320', 8), page.locator('.np-codec').inner_text())
+            page.keyboard.press('Escape')
+            page.wait_for_selector('.np.open', state='detached')
+            player(page, 'p.pause()')
+            # Turned off (Settings › Experience): none, and nothing's asked.
+            settings(page, {'coverBadges': False})
+            page.goto(APP + '#/browse/albums')
+            page.reload()
+            page.wait_for_selector('.grid .card')
+            del asked[:]
+            page.wait_for_timeout(1500)
+            check('formats: covers\' badges can be turned off', page.locator('.cover-badge').count() == 0 and not looked_up(ids), len(looked_up(ids)))
+        finally:
+            mock('/__mock/config?codec=reset')
+            settings(page, {'coverBadges': True})
+        ctx.close()
+
+    # ---------- select: albums' menus, and choosing several ----------
+    if run('select'):
+        ctx = browser.new_context(viewport={'width': 1280, 'height': 900})
+        page = ctx.new_page()
+        attach(page, 'select')
+        login(page, APP)
+        album_tracks = lambda aid: [m['ratingKey'] for m in mock(f'/library/metadata/{aid}/children?X-Plex-Token=t')['MediaContainer']['Metadata'] if m['type'] == 'track']
+        card_ids = lambda sel: page.locator(sel).evaluate_all('cs => cs.map((c) => c.getAttribute("href").split("/").pop())')
+        chosen = lambda: page.locator('.chosen').count()
+        count_text = lambda: page.locator('.select-count').inner_text() if page.locator('.select-bar').count() else None
+
+        def sheet_labels():
+            page.wait_for_selector('.sheet.open')
+            return page.locator('.sheet.open .sheet-action-label').all_text_contents()
+
+        def pick(label):
+            page.locator('.sheet.open .sheet-action', has_text=label).first.click()
+            page.wait_for_selector('.sheet', state='detached')
+
+        play_first_album_track(page, APP)
+        player(page, 'p.pause()')
+        # An album cover's menu, from the corner of its artwork.
+        page.goto(APP + '#/browse/albums')
+        page.wait_for_selector('.grid .card')
+        card = page.locator('.grid .card').nth(1)
+        card.hover()
+        page.wait_for_timeout(300)
+        art = card.locator('.card-art').bounding_box()
+        more = card.locator('.card-more').bounding_box()
+        check('select: an album cover has a menu button in its corner (on hover)',
+              card.locator('.card-more').is_visible() and more['x'] > art['x'] + art['width'] / 2 and more['y'] < art['y'] + art['height'] / 3, f'{more} in {art}')
+        card.locator('.card-more').click()
+        labels = sheet_labels()
+        check('select: ...with Play next, Add to queue, Add to playlist and Select',
+              all(x in labels for x in ('Play next', 'Add to queue', 'Add to playlist…', 'Select', 'Go to album')), str(labels))
+        before = player(page, 'p.queue.length')
+        aid = card_ids('.grid .card')[1]
+        pick('Add to queue')
+        check('select: ...and Add to queue adds the album', wait_for(lambda: player(page, 'p.queue.length') == before + len(album_tracks(aid)), 5)
+              and player(page, 'p.queue.slice(-1)[0].id') == album_tracks(aid)[-1] and page.evaluate('location.hash') == '#/browse/albums',
+              f"{before} -> {player(page, 'p.queue.length')}")
+        page.mouse.move(5, 5)
+
+        # Ctrl-click starts choosing, without opening the album; Shift-click
+        # chooses everything from the last one.
+        ids = card_ids('.grid .card')
+        page.locator('.grid .card').nth(0).click(modifiers=['ControlOrMeta'])
+        page.wait_for_selector('.select-bar')
+        check('select: Ctrl-click chooses an album, and doesn\'t open it',
+              count_text() == '1 album' and page.locator('.select-hint').is_visible() and page.evaluate('location.hash') == '#/browse/albums', count_text())
+        page.locator('.grid .card').nth(3).click(modifiers=['Shift'])
+        check('select: Shift-click chooses the ones in between', count_text() == '4 albums' and chosen() == 4 and not page.locator('.select-hint').is_visible(), count_text())
+        page.locator('.grid .card').nth(2).click()
+        page.locator('.grid .card').nth(5).click()
+        check('select: while choosing, a click chooses or lets go', count_text() == '4 albums' and page.evaluate('location.hash') == '#/browse/albums'
+              and page.locator('.grid .card.chosen').evaluate_all('cs => cs.map((c) => c.getAttribute("href").split("/").pop())') == [ids[0], ids[1], ids[3], ids[5]], count_text())
+        shot(page, 'select-01-albums')
+        # Sorted another way, it's the same list: what's chosen stays chosen.
+        page.click('button[aria-label="Sort"]')
+        pick('Artist')
+        page.wait_for_selector('.grid .card')
+        wait_for(lambda: page.locator('.grid .card.chosen').count() == 4, 5)
+        check('select: sorting the list another way keeps what\'s chosen', count_text() == '4 albums' and page.locator('.grid .card.chosen').count() == 4, count_text())
+        page.click('button[aria-label="Sort"]')
+        pick('Name')
+        page.wait_for_selector('.grid .card')
+        wait_for(lambda: page.locator('.grid .card.chosen').count() == 4, 5)
+        before = player(page, 'p.queue.length')
+        # (Tapped twice: the second, while it gets the tracks, does nothing.)
+        page.evaluate("() => { const b = document.querySelector('.select-btn[aria-label=\"Add to queue\"]'); b.click(); b.click(); }")
+        want = [t for i in (0, 1, 3, 5) for t in album_tracks(ids[i])]
+        check('select: Add to queue adds them all, in the order they\'re on the page (once, tapped twice)',
+              wait_for(lambda: player(page, 'p.queue.length') == before + len(want), 8) and player(page, f'p.queue.slice(-{len(want)}).map((t) => t.id)') == want
+              and page.locator('.toast', has_text=f'Added {len(want)} tracks to the queue').count() > 0
+              and (page.wait_for_timeout(800) or player(page, 'p.queue.length') == before + len(want)), player(page, 'p.queue.length'))
+        check('select: ...and then stops choosing', page.locator('.select-bar').count() == 0 and chosen() == 0 and not js(page, "() => document.body.classList.contains('selecting')"))
+
+        # Tracks: chosen the same way; Select all; into a new playlist.
+        page.goto(APP + f'#/album/{ids[2]}')
+        page.wait_for_selector('.album-tracks .track')
+        rows = album_tracks(ids[2])
+        page.locator('.album-tracks .track').nth(1).click(modifiers=['ControlOrMeta'])
+        page.locator('.album-tracks .track').nth(3).click(modifiers=['Shift'])
+        check('select: tracks are chosen the same way', count_text() == '3 tracks' and player(page, "p.state") != 'playing', count_text())
+        shot(page, 'select-02-tracks')
+        page.click('.select-btn[aria-label="More"]')
+        labels = sheet_labels()
+        check('select: More has Play, Select all and (for the server\'s admin) Add to collection',
+              all(x in labels for x in ('Play', 'Shuffle', 'Add to playlist…', 'Add to collection…', 'Select all', 'Stop choosing')), str(labels))
+        pick('Select all')
+        check('select: Select all chooses the whole list', count_text() == f'{len(rows)} tracks' and chosen() == len(rows), count_text())
+        labels = page.locator('.album-tracks .track .track-main').evaluate_all('bs => bs.map((b) => [b.getAttribute("aria-label"), b.getAttribute("aria-pressed")])')
+        check('select: ...and a screen reader hears "Choose …", pressed', all(l.startswith('Choose ') and p == 'true' for l, p in labels), str(labels[:2]))
+        page.click('.select-btn[aria-label="Add to playlist"]')
+        page.wait_for_selector('.sheet.open .sheet-action:has-text("New playlist")')
+        page.locator('.sheet.open .sheet-action', has_text='New playlist').click()
+        page.wait_for_selector('.sheet.open .ask-form input')
+        page.wait_for_timeout(250)
+        page.fill('.sheet.open .ask-form input', 'Select test')
+        page.click('.sheet.open .ask-form button[type=submit]')
+        made = wait_for(lambda: next((p for p in mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', []) if p['title'] == 'Select test'), None), 8)
+        items = [m['ratingKey'] for m in mock(f"/playlists/{made['ratingKey']}/items?X-Plex-Token=t")['MediaContainer'].get('Metadata', [])] if made else []
+        check('select: ...and into a new playlist, in order', items == rows, f'{items} != {rows}')
+        check('select: ...and stops choosing once it\'s made', page.locator('.select-bar').count() == 0)
+
+        # Select, in a track's menu; Esc stops; so does another page.
+        page.locator('.album-tracks .track-more').nth(0).click()
+        pick('Select')
+        check('select: a track\'s menu has Select', count_text() == '1 track' and page.locator('.album-tracks .track').nth(0).evaluate('r => r.classList.contains("chosen")'))
+        page.keyboard.press('Escape')
+        check('select: Esc stops choosing', page.locator('.select-bar').count() == 0 and chosen() == 0)
+        page.locator('.album-tracks .track').nth(0).click(modifiers=['ControlOrMeta'])
+        page.wait_for_selector('.select-bar')
+        page.locator('.hero-link').click()
+        page.wait_for_selector('.hero-artist')
+        check('select: another page stops choosing', page.locator('.select-bar').count() == 0 and not js(page, "() => document.body.classList.contains('selecting')"))
+        # Search: an album's menu (⋯); tracks and albums together (but a
+        # collection holds one kind); and what's chosen stays chosen as the
+        # search changes, so songs from several searches go in together.
+        page.goto(APP + '#/search')
+        page.fill('.search-box input', 'Lantern')
+        page.wait_for_selector('.search-body .album-row')
+        page.locator('.search-body .album-row .row-more').first.click()
+        labels = sheet_labels()
+        check('select: albums in search have a menu', all(x in labels for x in ('Play next', 'Add to queue', 'Add to playlist…', 'Select')), str(labels))
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        first_track = page.locator('.search-body .track').first.get_attribute('data-track-id')
+        page.locator('.search-body .track').first.click(modifiers=['ControlOrMeta'])
+        page.locator('.search-body .album-row').first.click(modifiers=['ControlOrMeta'])
+        check('select: tracks and albums can be chosen together', count_text() == '1 album and 1 track', count_text())
+        page.click('.select-btn[aria-label="More"]')
+        labels = sheet_labels()
+        check('select: ...though not into a collection then', 'Add to collection…' not in labels and 'Add to playlist…' in labels, str(labels))
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        page.fill('.search-box input', 'Signal')
+        wait_for(lambda: page.locator('.search-body .track').count() > 0 and page.locator(f'.search-body .track[data-track-id="{first_track}"]').count() == 0, 8)
+        page.locator('.search-body .track').first.click()
+        check('select: a new search keeps what\'s chosen, and adds to it', count_text() == '1 album and 2 tracks', count_text())
+        page.fill('.search-box input', 'Lantern')
+        wait_for(lambda: page.locator(f'.search-body .track[data-track-id="{first_track}"]').count() > 0, 8)
+        check('select: ...showing it chosen again where it turns up',
+              page.locator(f'.search-body .track[data-track-id="{first_track}"]').first.evaluate('r => r.classList.contains("chosen")'))
+        page.locator('.search-box input').focus()
+        page.keyboard.press('Escape')  # (empties the search box, first)
+        page.keyboard.press('Escape')
+        check('select: Esc stops choosing from the search box too', page.locator('.select-bar').count() == 0, count_text())
+
+        # Not the queue's own rows, nor an unlocked playlist's (unlocking it
+        # stops choosing).
+        page.goto(APP + f"#/playlist/{made['ratingKey']}")
+        page.wait_for_selector('.tracks .track')
+        page.locator('.tracks .track').nth(0).click(modifiers=['ControlOrMeta'])
+        page.wait_for_selector('.select-bar')
+        page.click('.lock-btn')
+        page.wait_for_selector('.view.is-editing')
+        check('select: unlocking a playlist stops choosing in it', page.locator('.select-bar').count() == 0 and chosen() == 0)
+        page.locator('.tracks .track').nth(1).click(modifiers=['ControlOrMeta'])
+        page.wait_for_timeout(300)
+        no_menu = 'Select' not in (page.locator('.tracks .track-more').nth(1).click() or sheet_labels())
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        check('select: an unlocked playlist\'s tracks aren\'t chosen (they\'re being moved or removed)', page.locator('.select-bar').count() == 0 and no_menu)
+        page.click('.lock-btn')
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open .np-queue-list .track', state='attached')
+        check('select: nor are Up next\'s', page.locator('.np-queue-list .track').count() > 0 and page.locator('.np-queue-list .track[data-sel]').count() == 0
+              and page.locator('#main .track[data-sel]').count() > 0)
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.np.open', state='detached')
+
+        # Play, from the bar's ⋯, with a dozen albums: it says it's getting
+        # their tracks, then that it's playing.
+        page.goto(APP + '#/browse/albums')
+        page.wait_for_selector('.grid .card')
+        page.locator('.grid .card').nth(0).click(modifiers=['ControlOrMeta'])
+        page.locator('.grid .card').nth(11).click(modifiers=['Shift'])
+        check('select: (a dozen albums chosen)', count_text() == '12 albums', count_text())
+        page.click('.select-btn[aria-label="More"]')
+        pick('Play')
+        check('select: Play plays them, and says so (after getting their tracks)',
+              wait_for(lambda: page.locator('.toast').count() and page.locator('.toast').last.inner_text() == 'Playing', 8)
+              and wait_for(lambda: player(page, "p.context?.title === '12 albums'"), 5) and page.locator('.select-bar').count() == 0,
+              page.locator('.toast').all_inner_texts())
+        ctx.close()
+
+        # A friend (not the server's admin): no collections.
+        ctx = browser.new_context(viewport={'width': 1280, 'height': 900})
+        page = ctx.new_page()
+        attach(page, 'select-friend')
+        login(page, APP, token='t2')
+        friend_is_admin = js(page, "() => import('./js/editing.js').then((m) => m.isAdmin())")
+        page.goto(APP + '#/browse/albums')
+        page.wait_for_selector('.grid .card')
+        page.locator('.grid .card').first.click(modifiers=['ControlOrMeta'])
+        page.click('.select-btn[aria-label="More"]')
+        labels = sheet_labels()
+        check('select: collections are only for the server\'s admin', friend_is_admin is False and 'Add to collection…' not in labels and 'Add to playlist…' in labels, str(labels))
+        ctx.close()
+
+        # A phone: a long press on a cover opens its menu (not the album);
+        # the bar names its buttons.
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'select-touch')
+        login(page, APP)
+        play_first_album_track(page, APP)
+        player(page, 'p.pause()')
+        cdp = ctx.new_cdp_session(page)
+        page.goto(APP + '#/browse/albums')
+        page.wait_for_selector('.grid .card')
+        page.wait_for_timeout(500)
+        box = page.locator('.grid .card').nth(1).bounding_box()
+        x, y = box['x'] + box['width'] / 2, box['y'] + box['width'] / 2
+        # A finger that moves (scrolling) isn't a long press.
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y}]})
+        for step in range(1, 6):
+            page.wait_for_timeout(60)
+            cdp.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [{'x': x, 'y': y - step * 12}]})
+        page.wait_for_timeout(700)
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+        page.wait_for_timeout(400)
+        check('select: a finger that moves over a cover (scrolling) doesn\'t open its menu', page.locator('.sheet').count() == 0 and page.evaluate('location.hash') == '#/browse/albums')
+        page.evaluate('window.scrollTo(0, 0)')
+        page.wait_for_timeout(300)
+        box = page.locator('.grid .card').nth(1).bounding_box()
+        x, y = box['x'] + box['width'] / 2, box['y'] + box['width'] / 2
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y}]})
+        page.wait_for_timeout(800)
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+        page.wait_for_timeout(600)
+        check('select: a long press on a cover opens its menu, and lifting the finger doesn\'t close it',
+              page.locator('.sheet.open').count() == 1 and page.evaluate('location.hash') == '#/browse/albums', page.evaluate('location.hash'))
+        shot(page, 'select-03-long-press')
+        page.locator('.sheet.open .sheet-action', has_text='Select').tap()
+        page.wait_for_selector('.select-bar')
+        page.locator('.grid .card').nth(2).tap()
+        page.wait_for_timeout(300)
+        bar = page.locator('.select-bar').bounding_box()
+        mini = page.locator('#player-bar').bounding_box()
+        names = page.locator('.select-bar .select-label.short').evaluate_all('ls => ls.filter((l) => l.offsetParent).map((l) => l.textContent)')
+        check('select: on a phone, taps choose, and the bar (over the player) names its buttons',
+              count_text() == '2 albums' and names == ['Next', 'Queue', 'Playlist', 'More'] and bar['y'] + bar['height'] <= mini['y'] + 1, f'{count_text()} {names} {bar} {mini}')
+        shot(page, 'select-04-phone')
+        page.locator('.select-close').tap()
+        check('select: ✕ stops choosing', page.locator('.select-bar').count() == 0)
+        page.locator('.grid .card').nth(0).tap()
+        page.wait_for_selector('.hero-album')
+        check('select: ...and a tap opens an album again', page.evaluate('location.hash').startswith('#/album/'))
+        js(page, f"() => import('./js/state.js').then(({{ app }}) => app.server.deletePlaylist('{made['ratingKey']}'))")
+        ctx.close()
+
     # ---------- spotify: a playlist from a Spotify playlist's link ----------
     if run('spotify'):
         ctx = browser.new_context(**MOBILE)
@@ -5511,8 +5917,7 @@ with sync_playwright() as pw:
         # Spotify; with the link alone (by its new name), it's the link.
         login(page, APP_NOWS)
         page.goto(APP_NOWS + '#/search')
-        page.wait_for_selector('.search-body, .rows')
-        page.wait_for_timeout(500)
+        page.wait_for_selector('a.row[href="#/sonic-path"]')  # (in the same block as From Spotify)
         check('spotify: on a player with neither way turned on, there\'s no From Spotify', page.locator('.spotify-row').count() == 0
               and js(page, "() => !window.PW_CONFIG.spotify && !window.PW_CONFIG.spotifyFiles"))
         if APP_DEBUG:

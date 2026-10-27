@@ -15,6 +15,7 @@ import { levelSamples } from './transitions.js';
 import { cast, openCastSheet, castLabel } from './cast.js';
 import { devices } from './devices.js';
 import { rateTrack, ratingEvents, ratingMode, LOVED, LOVED_TITLE } from './ratings.js';
+import { formatOf, audioStream } from './formats.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
@@ -323,8 +324,6 @@ export function openNowPlaying({ queue = false } = {}) {
     setTimeout(() => !np.isOpen && (np.root.hidden = true), 320);
   });
 }
-
-const kHz = (hz) => (hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 
 const QUALITY_NAMES = { 320: 'High (320 kbps)', 192: 'Normal (192 kbps)', 128: 'Data saver (128 kbps)' };
 
@@ -686,8 +685,11 @@ function buildNowPlaying() {
   const title = h('div.np-title');
   const album = h('a.np-album');
   const djNote = h('div.np-dj', { hidden: true });
-  const codec = h('span.np-codec');
-  const quality = h('span.np-quality');
+  // The format, as a badge (as on album pages), and when your server
+  // converts it as it plays, that and the bitrate it plays at: before the
+  // rating.
+  const codec = h('span.np-codec', { hidden: true });
+  const quality = h('span.np-quality', { hidden: true });
   const stars = ratingControl();
   const prev = iconButton('prev', 'Previous track', () => player.prev(), { size: 40, cls: 'np-skip' });
   const play = iconButton('play', 'Play', () => player.toggle(), { size: 38, cls: 'np-play' });
@@ -741,7 +743,7 @@ function buildNowPlaying() {
       null,
       wave.el,
       h('div.np-meta', null, artist, title, album, djNote, whereBox),
-      h('div.np-info', null, codec, stars.el, quality),
+      h('div.np-info', null, codec, quality, stars.el),
       h('div.np-transport', null, back, prev, play, next, fwd),
     ),
     toolbar,
@@ -779,25 +781,32 @@ function buildNowPlaying() {
   }
 
   let detailToken = 0;
+  // "FLAC 24/96" (gold for high resolution), "MP3 320": the file's. When it's
+  // converted as it plays, the badge steps back (what's heard is what the
+  // mark after it says).
+  function showFormat(t, a, converted) {
+    const f = formatOf(a?.codec || t.codec, a, t.bitrate);
+    codec.hidden = !f;
+    codec.textContent = f?.text || '';
+    codec.classList.toggle('hires', !!f?.hires);
+    codec.classList.toggle('converted', converted);
+    codec.title = !f ? '' : converted ? `The file is ${f.text}: your server converts it as it plays` : f.hires ? `${f.text}: high resolution` : f.text;
+  }
   async function loadDetail(t) {
     const mine = ++detailToken;
     wave.setLevels(null);
     stars.set(t.userRating);
-    codec.textContent = fmt.codec(t.codec);
     const q = app.settings.quality;
     const converted = player.transcoding;
     const kbps = q === 'original' ? 320 : Number(q) || 320;
-    if (converted) quality.replaceChildren(convertedMark(t, q, kbps), `${kbps} kbps`);
-    else quality.textContent = t.bitrate && !['flac', 'alac', 'wav', 'pcm'].includes(t.codec) ? `${fmt.number(t.bitrate)} kbps` : '';
+    showFormat(t, null, converted);
+    quality.hidden = !converted;
+    quality.replaceChildren(...(converted ? [convertedMark(t, q, kbps), `${kbps} kbps`] : []));
     try {
       const d = await app.server.trackDetail(t.id);
       if (mine !== detailToken || !d) return;
-      const a = (d.Media?.[0]?.Part?.[0]?.Stream || []).find((s) => s.streamType === 2) || {};
-      codec.textContent = fmt.codec(a.codec || t.codec);
-      if (!converted) {
-        if (a.samplingRate && a.bitDepth) quality.textContent = `${kHz(a.samplingRate)} / ${a.bitDepth}`;
-        else if (a.samplingRate && !t.bitrate) quality.textContent = `${kHz(a.samplingRate)} kHz`;
-      }
+      const a = audioStream(d) || {};
+      showFormat(t, a, converted);
       if (d.userRating !== undefined) stars.set(d.userRating);
       if (!t.year && d.parentYear && app.settings.showAlbumYear !== false) album.textContent = `${t.album} (${d.parentYear})`;
       if (a.id) {

@@ -2,14 +2,19 @@
 // and highlight whatever is currently playing.
 import { app } from './state.js';
 import { player } from './player.js';
-import { playAlbum, playPlaylist, playCollection, trackMenu } from './actions.js';
-import { h, art, card, row, icon, fmt, nowBars, sheet, toast } from './ui.js';
+import { playAlbum, playPlaylist, playCollection, trackMenu, albumMenu, playlistMenu, collectionMenu } from './actions.js';
+import { h, art, card, row, icon, fmt, nowBars, sheet, toast, longPress } from './ui.js';
 import { togglePreview, isPreviewing } from './preview.js';
 import { rowRating } from './ratings.js';
 import { sharedMark } from './sharing.js';
+import { selectable, startSelect } from './selection.js';
+import { watchFormat } from './formats.js';
 
+// An album's cover, with its format over it (Settings › Experience) once
+// it's been looked up, and its menu; it can be chosen with others
+// (selection.js).
 export function albumCard(m, { subtitle } = {}) {
-  return card({
+  const c = card({
     href: `/album/${m.ratingKey}`,
     image: m.thumb,
     title: m.title,
@@ -17,6 +22,26 @@ export function albumCard(m, { subtitle } = {}) {
     fallback: 'disc',
     onPlay: () => playAlbum(m),
     onShuffle: () => playAlbum(m, { shuffle: true }),
+    onMenu: () => albumMenu(m, { select: () => startSelect(c), open: true }),
+  });
+  selectable(c, 'album', m);
+  if (app.settings.coverBadges !== false) {
+    watchFormat(c, m.ratingKey, (f) => c.querySelector('.card-art')?.append(coverBadge(f)));
+  }
+  return c;
+}
+
+function coverBadge(f) {
+  return h(`span.cover-badge${f.hires ? '.hires' : ''}`, { title: f.hires ? `${f.text}: high resolution` : f.text }, f.short || f.text);
+}
+
+// The same, in a list of rows (search, where formats in search are on
+// too): before the artist, as tracks' are.
+function rowBadge(r, m) {
+  if (app.settings.coverBadges === false || app.settings.searchCodecs === false) return;
+  watchFormat(r, m.ratingKey, (f) => {
+    const sub = r.querySelector('.row-sub') || r.querySelector('.row-main')?.appendChild(h('div.row-sub'));
+    sub?.prepend(h(`span.track-codec${f.hires ? '.hires' : ''}`, { title: f.hires ? `${f.text}: high resolution` : f.text }, f.short || f.text));
   });
 }
 
@@ -37,6 +62,7 @@ export function playlistCard(m) {
     fallback: 'list',
     onPlay: () => playPlaylist(m),
     onShuffle: () => playPlaylist(m, { shuffle: true }),
+    onMenu: () => playlistMenu(m),
   });
   // Shared with friends, or by one (top left of its picture).
   c.querySelector('.card-art')?.append(sharedMark(m.ratingKey));
@@ -55,6 +81,7 @@ export function collectionCard(m) {
     fallback: 'list',
     onPlay: () => playCollection(m),
     onShuffle: () => playCollection(m, { shuffle: true }),
+    onMenu: () => collectionMenu(m),
   });
 }
 
@@ -62,15 +89,26 @@ export function artistRow(m) {
   return row({ href: `/artist/${m.ratingKey}`, image: m.thumb, round: true, title: m.title, fallback: 'mic', chevron: false });
 }
 
+// An album in a list of rows (search): its link, and its menu (⋯, or a
+// long press on a touch screen); it can be chosen with others.
 export function albumRow(m) {
-  return row({
-    href: `/album/${m.ratingKey}`,
-    image: m.thumb,
-    title: m.title,
-    subtitle: [m.parentTitle, m.year].filter(Boolean).join(', '),
-    fallback: 'disc',
-    chevron: false,
-  });
+  const sub = [m.parentTitle, m.year].filter(Boolean).join(', ');
+  const menu = () => albumMenu(m, { select: () => startSelect(r), open: true });
+  const r = h(
+    'div.row.album-row.has-menu',
+    null,
+    h(
+      'a.row-link',
+      { href: `#/album/${m.ratingKey}` },
+      art(m.thumb, { size: 56, fallback: 'disc' }),
+      h('div.row-main', null, h('div.row-title', null, m.title), sub ? h('div.row-sub', null, sub) : null),
+    ),
+    h('button.icon-btn.row-more', { type: 'button', 'aria-label': `More options for ${m.title}`, title: 'More options', onclick: menu }, icon('more', 22)),
+  );
+  selectable(r, 'album', m);
+  rowBadge(r, m);
+  longPress(r, menu);
+  return r;
 }
 
 export function playlistRow(m) {
@@ -102,7 +140,9 @@ function tapTrack(track, onPlay, inQueue) {
 
 // A playable track row. `onPlay` decides what plays (usually the whole list
 // starting from this row). `popular` marks one of the album's best-known
-// tracks. `onMenu` replaces the usual menu (pages add their own actions).
+// tracks. `onMenu` replaces the usual menu (pages add their own actions):
+// it's given { select }, for trackMenu (the row can be chosen with others,
+// see selection.js, except in a queue).
 // `rating`: the track's rating control (as Settings › Experience says), on
 // by default except in the queue. In a numbered list (numberedList), `position`
 // puts its place in the list before it, and `album` its album in a column
@@ -154,10 +194,12 @@ export function trackRow(
     preview,
     h(
       'button.icon-btn.track-more',
-      { type: 'button', 'aria-label': `More options for ${track.title}`, onclick: () => (onMenu ? onMenu() : trackMenu(track, { queueIndex })) },
+      { type: 'button', 'aria-label': `More options for ${track.title}`, onclick: () => (onMenu ? onMenu({ select }) : trackMenu(track, { queueIndex, select })) },
       icon('more', 22),
     ),
   );
+  const select = inQueue ? null : () => startSelect(el);
+  if (!inQueue) selectable(el, 'track', track);
   markRow(el);
   return el;
 }

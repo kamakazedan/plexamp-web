@@ -42,6 +42,8 @@ import {
   trackMenu,
 } from '../actions.js';
 import { isAdmin } from '../editing.js';
+import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
+import { clearSelection } from '../selection.js';
 import { sortChoices, sortedOrder, restoreOrder, saveOrder } from '../sorting.js';
 
 function actionButtons(buttons) {
@@ -60,7 +62,6 @@ function actionButtons(buttons) {
 }
 
 const year = (m) => m.year || (m.originallyAvailableAt || '').slice(0, 4) || null;
-const kHz = (hz) => (hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 
 // The album's best-known tracks (Plex's play counts from Last.fm), for the
 // "popular" badge: up to three, and only clear favourites.
@@ -72,21 +73,22 @@ function popularIds(tracks) {
   return new Set(counted.slice(0, 3).filter((t) => t.ratingCount >= top * 0.3).map((t) => t.id));
 }
 
-// "FLAC 24/96" style badge; bit depth and sample rate come from a track's
-// stream details.
+// "FLAC 24/96" style badge (formats.js); bit depth and sample rate come
+// from the first track's stream details.
 function codecBadge(tracks) {
   if (app.settings.codecBadges === false) return null;
-  const codecs = [...new Set(tracks.map((t) => t.codec).filter(Boolean))];
-  if (!codecs.length) return null;
-  const badge = h('span.codec-badge', null, codecs.length === 1 ? fmt.codec(codecs[0]) : 'Mixed formats');
-  if (codecs.length === 1) {
+  const codecs = codecsOf(tracks);
+  const f = albumFormatOf(codecs);
+  if (!f) return null;
+  const badge = h('span.codec-badge', null, f.text);
+  if (wantsDetail(codecs)) {
     app.server
       .trackDetail(tracks[0].id)
       .then((d) => {
-        const a = (d?.Media?.[0]?.Part?.[0]?.Stream || []).find((x) => x.streamType === 2);
-        if (!a?.bitDepth || !a.samplingRate) return;
-        badge.textContent = `${fmt.codec(codecs[0])} ${a.bitDepth}/${kHz(a.samplingRate)}`;
-        if (a.bitDepth > 16 || a.samplingRate > 48000) {
+        const more = albumFormatOf(codecs, audioStream(d));
+        if (!more) return;
+        badge.textContent = more.text;
+        if (more.hires) {
           badge.classList.add('hires');
           badge.title = 'High resolution';
         }
@@ -647,7 +649,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       position: true,
       album: true,
       onPlay: () => playPlaylist(pl, { start: Math.max(0, rows().indexOf(r)) }),
-      onMenu: () => trackMenu(t, { extra: editActions(r) }),
+      onMenu: ({ select }) => trackMenu(t, { extra: editActions(r), select: editing ? null : select }),
     });
     r.dataset.pid = m.playlistItemID ?? '';
     r.dataset.title = t.title;
@@ -656,6 +658,8 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   }
 
   function setEditing(on) {
+    // (Unlocked, its tracks are moved or removed, not chosen.)
+    if (on) clearSelection();
     editing = on;
     el.classList.toggle('is-editing', on);
     list.classList.toggle('editing', on);
@@ -943,7 +947,7 @@ export async function collectionView({ el, params, onHide }) {
             position: true,
             album: true,
             onPlay: () => playList(tracks, i, { title: meta.title, href: `/collection/${params.id}` }),
-            onMenu: editable ? () => trackMenu(t, { extra: unlock }) : undefined,
+            onMenu: editable ? ({ select }) => trackMenu(t, { extra: unlock, select }) : undefined,
           }),
         ),
       );
@@ -975,6 +979,7 @@ export async function collectionView({ el, params, onHide }) {
   }
 
   function setEditing(on) {
+    if (on) clearSelection();
     editing = on;
     el.classList.toggle('is-editing', on);
     bar.el.hidden = !on;

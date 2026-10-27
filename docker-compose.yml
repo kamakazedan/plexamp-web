@@ -30,9 +30,9 @@
 #   SPOTIFY_FILE_IMPORT "true": Search › From Spotify makes playlists from
 #                       Spotify's download of your data, read in the browser.
 #                       Off unless set, for now.
-#   SPOTIFY_LINK_IMPORT "true": Search › From Spotify can also make a playlist
-#                       from a public Spotify playlist's link, with the tracks
-#                       you have. Off unless set: it reads Spotify's public
+#   SPOTIFY_LINK_IMPORT "true": Search › From Spotify makes a playlist from a
+#                       public Spotify playlist's link, with the tracks you
+#                       have. Off unless set: it reads Spotify's public
 #                       page for the playlist (the first 100 tracks), which
 #                       Spotify's terms don't allow, and which can stop
 #                       working. (SPOTIFY_IMPORT, its old name, still works.)

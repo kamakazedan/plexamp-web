@@ -3,6 +3,52 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.23.0 - 2026-10-27
+
+### New
+
+- **Each album's format over its cover**, as you browse (an artist's
+  albums, the album lists, Home, collections), as on its page: FLAC 24/96
+  in gold for high resolution, FLAC 16/44.1, MP3, or Mixed for an album
+  of several formats, so an album and its hi-res edition can be told
+  apart. Albums in search have theirs before the artist, as tracks do.
+  Your server is asked about each album once it's been in view for a
+  moment (not what's scrolled past), a few at a time, and what it says
+  is kept while the app's open (for an hour, or until a scan of the
+  library ends). **Settings › Experience › Show codec badges on covers**
+  turns them off.
+- **A menu on every album, playlist and collection cover**: the ⋯ in the
+  corner of its artwork (with the play buttons, when the pointer's over
+  it), or a long press on a touch screen. Albums in search have a ⋯ too.
+  An album's has Play next, Add to queue, Add to playlist…, Select, and
+  Go to album or artist.
+- **Choose several tracks or albums at once**, and play them, queue them
+  (next, or at the end) or add them to a playlist together: **Select**
+  in a track's or album's menu, or on a computer Ctrl-click (⌘-click on
+  a Mac) or Shift-click (on a cover, instead of opening it in a new tab
+  or window). While choosing, a tap chooses or lets go, Shift-click
+  chooses everything from the one chosen last, and Ctrl+A or Select all
+  everything loaded in that list. What's chosen stays chosen as you
+  search again, sort the list another way or take a filter off, so songs
+  from several searches can go into one playlist. Albums go in by their
+  tracks: those on the page in the order they're shown, the rest in the
+  order they were chosen. The server's admin can add them to a
+  collection too (of one kind). Doing one of those lets go of what it
+  was done with, once it's in; ✕, Esc or another page stops. Not Up
+  next's own tracks, nor an unlocked playlist's.
+
+### Changed
+
+- **Now Playing shows the file's format as a badge**, as album pages do
+  (FLAC 16/44.1, gold for high resolution; MP3 320), with the rating to
+  its right. Converted as it plays, the badge is dimmed, with the
+  bitrate it plays at after it.
+- An album's Play next and Add to queue say how many tracks went in, as
+  a playlist's do.
+- Fixed: Play next or Add to queue in a Play Together session (a whole
+  playlist, artist or collection) said up to 1,000 tracks went in. 500
+  do, the most a session takes at once, and it says so.
+
 ## 0.22.0 - 2026-10-27
 
 ### New

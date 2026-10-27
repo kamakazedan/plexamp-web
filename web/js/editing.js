@@ -103,7 +103,9 @@ export function refreshLists(kind) {
 // description for the sheet ("3 tracks", an album's name); `load` gives the
 // tracks (it can be slow, so it runs after a playlist is picked). `extra`:
 // more choices, shown after New playlist (Add to a collection, say).
-export async function addToPlaylist({ what, load, suggest = '', title = 'Add to playlist', extra = [] }) {
+// `done(ok)`: once it's been tried (`load` has run), whether they're in it
+// now; `after()`: more for the message that says they are.
+export async function addToPlaylist({ what, load, suggest = '', title = 'Add to playlist', extra = [], done, after }) {
   const s = app.server;
   let lists = [];
   try {
@@ -119,13 +121,13 @@ export async function addToPlaylist({ what, load, suggest = '', title = 'Add to 
     title,
     subtitle: what,
     actions: [
-      { icon: 'plus', label: 'New playlist…', onSelect: () => newPlaylist({ load, suggest }) },
+      { icon: 'plus', label: 'New playlist…', onSelect: () => newPlaylist({ load, suggest, done, after }) },
       ...extra,
       ...lists.map((p) => ({
         icon: 'list',
         label: p.title,
         description: countOf(p.leafCount || 0),
-        onSelect: () => addTo(p, load),
+        onSelect: () => addTo(p, load, { done, after }),
       })),
     ],
   });
@@ -144,38 +146,49 @@ async function inPlaylist(pl) {
 }
 
 // Tracks already in the playlist aren't added again.
-async function addTo(pl, load) {
+async function addTo(pl, load, { done, after } = {}) {
+  let ok = false;
   try {
     const tracks = await load();
     if (!tracks.length) return toast('There’s nothing to add.');
     const have = await inPlaylist(pl);
     const fresh = have ? tracks.filter((t) => !have.has(String(t.id))) : tracks;
-    if (!fresh.length) return toast(tracks.length === 1 ? `“${tracks[0].title}” is already in “${pl.title}”` : `They’re all in “${pl.title}” already`);
+    if (!fresh.length) {
+      ok = true;
+      return toast(tracks.length === 1 ? `“${tracks[0].title}” is already in “${pl.title}”` : `They’re all in “${pl.title}” already`);
+    }
     await app.server.addToPlaylist(pl.ratingKey, ids(fresh));
+    ok = true;
     refreshLists('playlist');
     sharedPlaylistChanged(pl.ratingKey);
     const skipped = tracks.length - fresh.length;
     const added = fresh.length === 1 ? `“${fresh[0].title}”` : countOf(fresh.length);
-    toast(`Added ${added} to “${pl.title}”${skipped ? ` (${fmt.count(skipped, 'was', 'were')} there already)` : ''}`, {
+    toast(`Added ${added} to “${pl.title}”${skipped ? ` (${fmt.count(skipped, 'was', 'were')} there already)` : ''}${after?.() || ''}`, {
       action: 'Open',
       onAction: () => navigate(`/playlist/${pl.ratingKey}`),
     });
   } catch (err) {
     toast(err?.status === 401 || err?.status === 403 ? 'You can’t change that playlist.' : describeError(err));
+  } finally {
+    done?.(ok);
   }
 }
 
-async function newPlaylist({ load, suggest }) {
+async function newPlaylist({ load, suggest, done, after }) {
   const title = await askText({ title: 'New playlist', label: 'Name', value: suggest, confirm: 'Create' });
   if (!title) return;
+  let ok = false;
   try {
     const tracks = await load();
     if (!tracks.length) return toast('There’s nothing to add.');
     const pl = await app.server.createPlaylist(title, ids(tracks));
+    ok = true;
     refreshLists('playlist');
-    toast(`Made “${title}”`, pl ? { action: 'Open', onAction: () => navigate(`/playlist/${pl.ratingKey}`) } : {});
+    toast(`Made “${title}”${after?.() || ''}`, pl ? { action: 'Open', onAction: () => navigate(`/playlist/${pl.ratingKey}`) } : {});
   } catch (err) {
     toast(describeError(err));
+  } finally {
+    done?.(ok);
   }
 }
 
@@ -185,8 +198,8 @@ export const COLLECTION_TYPE = { artist: 8, album: 9, track: 10 };
 const UNITS = { artist: ['artist', 'artists'], album: ['album', 'albums'], track: ['track', 'tracks'] };
 
 // Add items of one kind (artists, albums or tracks) to a collection of that
-// kind, or a new one. `load` gives the items.
-export async function addToCollection({ kind, what, load, suggest = '' }) {
+// kind, or a new one. `load` gives the items; `done(ok)`, as for playlists.
+export async function addToCollection({ kind, what, load, suggest = '', done }) {
   if (!(await isAdmin())) return toast('Only the server’s admin can change collections.');
   const s = app.server;
   const sec = app.source.sectionKey;
@@ -202,22 +215,24 @@ export async function addToCollection({ kind, what, load, suggest = '' }) {
     title: `Add to ${kind} collection`,
     subtitle: what,
     actions: [
-      { icon: 'plus', label: 'New collection…', onSelect: () => newCollection({ kind, load, suggest }) },
+      { icon: 'plus', label: 'New collection…', onSelect: () => newCollection({ kind, load, suggest, done }) },
       ...list.map((c) => ({
         icon: 'collection',
         label: c.title,
         description: fmt.count(c.childCount || 0, ...UNITS[kind]),
-        onSelect: () => collect(c, kind, load),
+        onSelect: () => collect(c, kind, load, done),
       })),
     ],
   });
 }
 
-async function collect(c, kind, load) {
+async function collect(c, kind, load, done) {
+  let ok = false;
   try {
     const items = await load();
     if (!items.length) return toast('There’s nothing to add.');
     await app.server.addToCollection(c.ratingKey, ids(items));
+    ok = true;
     refreshLists('collection');
     toast(`Added ${items.length === 1 ? `“${items[0].title}”` : fmt.count(items.length, ...UNITS[kind])} to “${c.title}”`, {
       action: 'Open',
@@ -225,19 +240,25 @@ async function collect(c, kind, load) {
     });
   } catch (err) {
     toast(err?.status === 401 || err?.status === 403 ? 'Only the server’s admin can change collections.' : describeError(err));
+  } finally {
+    done?.(ok);
   }
 }
 
-async function newCollection({ kind, load, suggest }) {
+async function newCollection({ kind, load, suggest, done }) {
   const title = await askText({ title: `New ${kind} collection`, label: 'Name', value: suggest, confirm: 'Create' });
   if (!title) return;
+  let ok = false;
   try {
     const items = await load();
     if (!items.length) return toast('There’s nothing to add.');
     const c = await app.server.createCollection(app.source.sectionKey, COLLECTION_TYPE[kind], title, ids(items));
+    ok = true;
     refreshLists('collection');
     toast(`Made “${title}”`, c ? { action: 'Open', onAction: () => navigate(`/collection/${c.ratingKey}`) } : {});
   } catch (err) {
     toast(err?.status === 401 || err?.status === 403 ? 'Only the server’s admin can change collections.' : describeError(err));
+  } finally {
+    done?.(ok);
   }
 }

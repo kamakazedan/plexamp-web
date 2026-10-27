@@ -254,7 +254,7 @@ export function navigate(path, { replace = false, keep = false } = {}) {
     switchTab(tab, { push: hash });
     return;
   }
-  render(replace ? replaceEntry(tab, hash, keep) : pushEntry(tab, hash), false);
+  render(replace ? replaceEntry(tab, hash, keep) : pushEntry(tab, hash), false, { same: replace && keep });
 }
 
 // What a page wants back when it's shown again (what's being searched for,
@@ -550,12 +550,15 @@ export function overlayDepth() {
 
 // ---------- rendering ----------
 
-async function render(k, useCache) {
+// `same`: it's the page on screen another way (see navigate's `keep`).
+async function render(k, useCache, { same = false } = {}) {
   const { path, query } = parseHash();
   const m = match(path) || match('/404');
   currentKey = k;
   currentHash = location.hash;
-  onChange({ path, route: m, tab: activeTab });
+  // (`key`: the page's entry: the same when it's shown again brought up to
+  // date, by refresh().)
+  onChange({ path, route: m, tab: activeTab, key: k, same });
 
   const cached = useCache ? cache.get(k) : null;
   if (cached && cached.hash === location.hash) {
