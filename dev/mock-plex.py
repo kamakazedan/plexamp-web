@@ -17,7 +17,7 @@ Made-up accounts:
     t    Dan, who owns this server
     t2   Sam, a friend of Dan's with access to the server
     t3   Alex, a friend of Dan's without access
-    t4   Kid, in Dan's Plex Home: a managed user, with a PIN (2468), who
+    t4   Kid, in Dan's Plex Home: a managed user, with a PIN (0427), who
          can use the server
     t5   Gran, in Dan's Plex Home too, with no PIN, who can't use it
 
@@ -1212,7 +1212,7 @@ SERVER_TOKENS = {'t': 'owned', 't2': 'shared', 't4': 'shared'}
 FRIENDS = {'t': ['t2', 't3'], 't2': ['t', 't3'], 't3': ['t']}
 # Dan's Plex Home: Dan (its admin), Kid (managed, with a PIN) and Gran; and
 # the switches made in it (/__mock/home).
-HOME = {'admin': 't', 'members': ['t', 't4', 't5'], 'managed': {'t4'}, 'pins': {'t4': '2468'}}
+HOME = {'admin': 't', 'members': ['t', 't4', 't5'], 'managed': {'t4'}, 'pins': {'t4': '0427'}}
 HOME_SWITCHES = []
 
 

@@ -2056,6 +2056,13 @@ with sync_playwright() as pw:
         # (With a smart collection too, which says nothing on its items: on
         # before signing in, as Home lists the collections, kept a minute.)
         mock('/__mock/config?smartcollection=1')
+        # (A playlist with a track twice: Favourite tracks' first.)
+        fav0 = next(p for p in mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer']['Metadata'] if p['title'] == 'Favourite tracks')
+        first0 = mock(f"/playlists/{fav0['ratingKey']}/items?X-Plex-Token=t&X-Plex-Container-Size=500")['MediaContainer']['Metadata'][0]['ratingKey']
+        on_repeat = json.loads(urllib.request.urlopen(urllib.request.Request(
+            f"{MOCK}/playlists?type=audio&title=On%20repeat&X-Plex-Token=t&uri="
+            + urllib.parse.quote(f"server://mock-server-1/com.plexapp.plugins.library/library/metadata/{first0},{first0}", safe=''),
+            method='POST'), timeout=10).read())['MediaContainer']['Metadata'][0]
         ctx = browser.new_context(**MOBILE)
         page = ctx.new_page()
         attach(page, 'lists', expected=('Error: Not found',))  # an album's id, below
@@ -2112,7 +2119,7 @@ with sync_playwright() as pw:
         check('lists: ...but not a smart playlist of the whole library (as Plex\'s All Music is): every track is in it',
               everything == {'Everything'} and not everything & set(got_pl), f'{everything} {got_pl}')
         twice = [k for k, v in want_pl.items() if v > 1]
-        check('lists: ...saying when it\'s in one more than once', twice and all(f'in it {want_pl[k]} times' in subs[k] for k in twice), str(subs))
+        check('lists: ...saying when it\'s in one more than once', 'On repeat' in twice and all(f'in it {want_pl[k]} times' in subs[k] for k in twice), str(subs))
         check('lists: ...and the collections it\'s in (its own, its album\'s or its artist\'s)', set(got_col) == want_col, f'{got_col} vs {want_col}')
         # Collections as Plex says (what each of them is in), none of them
         # read but smart ones (whose rules decide what's in them); playlists
@@ -2507,6 +2514,7 @@ with sync_playwright() as pw:
         check('lists: a song is looked for by its name, without what marks a version of it',
               terms == ['Stop Me Now', 'Born Slippy', 'Signal Fires', 'Your Woman', 'Song', 'Will Survive'], str(terms))
         mock('/__mock/config?smartcollection=0')
+        urllib.request.urlopen(urllib.request.Request(f"{MOCK}/playlists/{on_repeat['ratingKey']}?X-Plex-Token=t", method='DELETE'), timeout=10).read()
         ctx.close()
 
         # Very long smart playlists aren't read: one of the whole library (by
@@ -4726,6 +4734,12 @@ with sync_playwright() as pw:
         rate(now_id, -1)
         rate(left_id, 4)
         touched.update(down + [now_id, left_id])
+        # (Some were rated here before: Plex says they've changed, and the
+        # app goes by what Plex has now, as for a rating made in another
+        # Plex app.)
+        caught_up = wait_for(lambda: js(page, f"""() => import('./js/ratings.js').then((r) => {json.dumps(down)}.every((id) => r.isDisliked({{ id, userRating: 2 }}))
+            && !r.isDisliked({{ id: '{now_id}', userRating: null }}) && !r.isDisliked({{ id: '{left_id}', userRating: 4 }}))"""), 15, 0.5)
+        check('ratings: (a track rated here, then rated again in another Plex app, goes by its rating now)', caught_up)
 
         def queued(expr):
             js(page, f"""() => Promise.all([import('./js/actions.js'), import('./js/state.js'), import('./js/player.js')]).then(async ([a, s, pl]) => {{
@@ -4744,6 +4758,10 @@ with sync_playwright() as pw:
         check('ratings: tracks rated down (thumbs down, a star or less) are left out of what\'s picked for you, to begin with: an artist\'s shuffle and radio',
               toggle_on is True and row_on and sorted(shuffled) == sorted([now_id, left_id]) and radio and not set(radio) & set(down),
               f'{toggle_on} {row_on} {shuffled} {[x for x in radio if x in down]}')
+        # (Nothing played yet, as far as DJs go: they don't play a track,
+        # or a song, again.)
+        player(page, 'p.history.splice(0).length')
+        js(page, "() => import('./js/dj.js').then((d) => { d.guestDJ.songs.length = 0; d.guestDJ.recent.length = 0; })")
         js(page, f"""() => Promise.all([import('./js/actions.js'), import('./js/state.js'), import('./js/plex.js'), import('./js/dj.js')]).then(async ([a, s, x, d]) => {{
             a.playList([x.normTrack(await s.app.server.metadata('{now_id}'))], 0, null); d.guestDJ.set('double'); }})""")
         dj_pick = wait_for(lambda: player(page, "p.queue[p.index + 1] && p.queue[p.index + 1].dj === 'double' ? p.queue[p.index + 1].id : null"), 15)
@@ -6941,6 +6959,12 @@ with sync_playwright() as pw:
             home_rows(pg)
             pg.locator('.sheet.open button.home-user', has_text=name).click()
 
+        def clear_missing():
+            body = json.dumps({'ops': [{'type': 'clear', 'id': f'{random.getrandbits(48):012x}', 'everyone': True}]}).encode()
+            req = urllib.request.Request(A + 'api/missing?server=mock-server-1', method='POST', data=body,
+                                         headers={'X-Plex-Token': 't', 'Content-Type': 'application/json', 'Accept': 'application/json'})
+            urllib.request.urlopen(req, timeout=20).read()
+
         # (What the switch shows over the page, kept where the page going
         # can't take it: not the app's own storage.)
         COVER_WATCH = """() => new MutationObserver(() => { const c = document.querySelector('.switching-cover');
@@ -6963,7 +6987,10 @@ with sync_playwright() as pw:
         page.reload()
         page.wait_for_selector('.account-card')
         shown = switch_button(page)
+        sync_row = page.locator('label.toggle-row', has_text='On all your devices').inner_text()
         shot(page, 'plexhome-01-account')
+        check('plexhome: (Settings › Account, the page the app opens on, says whether settings follow the account: it doesn\'t wait for nothing)',
+              'Couldn’t check' not in sync_row and page.locator('label.toggle-row:has-text("On all your devices") input:checked').count() == 1, sync_row)
         check('plexhome: Settings › Account has Switch user, beside Sign out, where you\'re in a Plex Home with others (not signed in with a server token)',
               not with_token and shown and page.locator('.account-card button:has-text("Sign out")').count() == 1, f'{with_token} {shown}')
         page.click('.account-card button:has-text("Switch user")')
@@ -6976,7 +7003,8 @@ with sync_playwright() as pw:
               rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'none of it goes with them' in said, f'{rows} {said!r}')
 
         # Dan's: settings (some kept for his account), a search, what's
-        # playing, a page in another tab.
+        # playing, a missing track an AI playlist of his suggested (with what
+        # he asked for), a page in another tab.
         settings(page, {'gridSize': 'large', 'skipDisliked': False, 'playerName': 'Dan’s phone', 'quality': '320',
                         'ai': {'mode': 'custom', 'url': OLLAMA, 'apiKey': 'key-123', 'model': 'llama3.1:8b', 'notes': 'Loves trip-hop'}})
         dan_kept = wait_for(lambda: kept_for('t')['settings'].get('gridSize') == 'large' and kept_for('t')['settings'].get('skipDisliked') is False, 10, 0.3)
@@ -6986,6 +7014,7 @@ with sync_playwright() as pw:
         page.fill('.search-box input', 'harbour')
         wait_for(lambda: any('ARTISTS' in t.upper() for t in page.locator('.search-body .section-head h2').all_inner_texts()), 8)
         play_first_album_track(page, A)
+        js(page, "() => import('./js/missing.js').then((m) => m.noteMissing([{ kind: 'track', artist: 'Dans Artist', title: 'Dans Secret Song' }], { songs: [], artists: [] }, 'Dan’s own prompt'))")
         dan_lists = {p['title'] for p in mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])}
         fav = next(p for p in mock('/playlists?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer']['Metadata'] if p['title'] == 'Favourite tracks')
         other = ctx.new_page()
@@ -7028,10 +7057,13 @@ with sync_playwright() as pw:
         keys = js(page, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.')).sort()")
         tab = js(page, '() => JSON.stringify(Object.entries(sessionStorage))')
         playing = player(page, '[p.current && p.current.id, p.queue.length]')
-        check('plexhome: ...with nothing of Dan\'s on the device: every setting as it is to begin with (his for his account too), no queue, no searches',
+        kid_missing = js(page, "() => import('./js/missing.js').then((m) => m.missingList().map((x) => x.title))")
+        kid_stored = js(page, '() => JSON.stringify(localStorage)')
+        check('plexhome: ...with nothing of Dan\'s on the device: every setting as it is to begin with (his for his account too), no queue, no searches, none of his missing tracks',
               theirs == {'grid': 'normal', 'skip': True, 'name': '', 'quality': 'original', 'ai': {'mode': 'auto', 'url': '', 'apiKey': '', 'model': '', 'notes': ''}}
-              and not any(k.startswith('pw.player') or k in ('pw.libraryCounts', 'pw.syncPending', 'pw.syncRev', 'pw.aiMissing') for k in keys)
-              and 'harbour' not in tab and playing == [None, 0], f'{theirs} {keys} {tab[:200]} {playing}')
+              and not any(k.startswith('pw.player') or k in ('pw.libraryCounts', 'pw.syncPending', 'pw.syncRev') for k in keys)
+              and 'harbour' not in tab and playing == [None, 0] and 'Dans Secret Song' not in kid_missing and 'Dans Secret Song' not in kid_stored
+              and 'own prompt' not in kid_stored, f'{theirs} {keys} {tab[:200]} {playing} {kid_missing}')
         followed = eventually(lambda: other.url.endswith('#/') and who(other)['token'] == 't4' and other.locator('.wide-card:not(.skeleton)').count() > 0, 20)
         check('plexhome: ...and another tab follows, at Home (not on Dan\'s playlist)', followed, f'{other.url}')
         other.close()
@@ -7061,10 +7093,11 @@ with sync_playwright() as pw:
         page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
         back = who(page)
         dan_again = wait_for(lambda: js(page, "() => import('./js/state.js').then(({ app }) => [app.settings.gridSize, app.settings.skipDisliked])") == ['large', False], 10, 0.3)
+        his_missing = wait_for(lambda: 'Dans Secret Song' in js(page, "() => import('./js/missing.js').then((m) => m.missingList().map((x) => x.title))"), 10, 0.5)
         page.goto(A + '#/playlists')
         page.wait_for_selector('.view .grid-playlists .card', timeout=15000)
-        check('plexhome: switching back to Dan (no PIN to ask for): his token, server and library, and his settings and playlists again',
-              back['token'] == 't' and back['server'] == 'mock-server-1' and back['section'] == section_before and dan_again
+        check('plexhome: switching back to Dan (no PIN to ask for): his token, server and library, and his settings, missing tracks and playlists again',
+              back['token'] == 't' and back['server'] == 'mock-server-1' and back['section'] == section_before and dan_again and his_missing
               and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts(), str(back))
 
         # Gran can't use Dan's server: she chooses one, and can switch (or
@@ -7110,6 +7143,7 @@ with sync_playwright() as pw:
         ctx.close()
         for t in ('t', 't2', 't4'):
             kept_for(t, 'DELETE')
+        clear_missing()
 
     # ---------- missingsync: Missing tracks that follow each account, and everyone's for the server's owner ----------
     if run('missingsync') and APP_DEBUG:

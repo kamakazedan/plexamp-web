@@ -145,7 +145,7 @@ Choose a DJ with the DJ button in Now Playing. It plays along with your queue un
 | Queue Echo | Adds nothing. As each track starts, whichever of your next 40 sounds most like it moves up to play next. |
 | Queue Bridge | Adds nothing. When your next track sounds far from the one playing, one from later in your queue that sits between them plays first. |
 
-No DJ adds a song you've played since opening the player (the last 300), or one that's queued, and another version of a song (on a compilation, a live album or a remaster) counts as the same song. Up next and Now Playing say which tracks a DJ added or moved, and why. The sound-based DJs need Plex's sonic analysis (see [Good to know](#good-to-know)); without it, the ones that add tracks match on genre. With **Skip live tracks and demos** (see [Now Playing and playback](#now-playing-and-playback)), they leave live tracks and demos out.
+No DJ adds a song you've played since opening the player (the last 300), or one that's queued, and another version of a song (on a compilation, a live album or a remaster) counts as the same song. Up next and Now Playing say which tracks a DJ added or moved, and why. The sound-based DJs need Plex's sonic analysis (see [Good to know](#good-to-know)); without it, the ones that add tracks match on genre. They never add a track you've rated down (unless **Skip tracks you've rated down** is off), and with **Skip live tracks and demos** they leave live tracks and demos out (see [Now Playing and playback](#now-playing-and-playback)).
 
 ## MusicBrainz features
 

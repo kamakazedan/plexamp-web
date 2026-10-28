@@ -9,6 +9,7 @@ import { app, on } from './state.js';
 import { describeError } from './router.js';
 import { h, toast } from './ui.js';
 import { refreshLists } from './editing.js';
+import { live } from './live.js';
 
 export const LOVED = 10;
 export const LOVED_TITLE = '❤️ Tracks';
@@ -25,6 +26,25 @@ const known = new Map();
 const pending = new Map();
 // (Another server's tracks have other ids.)
 on('source', ({ serverChanged } = {}) => serverChanged && known.clear());
+// A track rated here that Plex says has changed since (rated again in
+// another Plex app, say): what Plex has for it now, so what's picked for
+// you (picks.js) and what's shown go by that.
+live.addEventListener('items', (e) => {
+  const ids = (e.detail?.ids || []).map(String).filter((id) => known.has(id) && !pending.has(id));
+  for (const id of ids.slice(0, 50)) {
+    app.server
+      ?.metadata(id)
+      .then((m) => {
+        if (!m || !known.has(id) || pending.has(id)) return;
+        const value = m.userRating ?? null;
+        if (known.get(id) === value) return;
+        known.set(id, value);
+        ratingEvents.dispatchEvent(new CustomEvent('rated', { detail: { id, rating: value } }));
+        paintRows(id, value);
+      })
+      .catch(() => {});
+  }
+});
 const knownRating = (track) => (known.has(String(track.id)) ? known.get(String(track.id)) : (track.userRating ?? null));
 const shownRating = (track) => (pending.has(String(track.id)) ? pending.get(String(track.id)) : knownRating(track));
 

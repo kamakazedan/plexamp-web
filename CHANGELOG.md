@@ -26,6 +26,12 @@ you're running is shown in **Settings › About**.
   yourself plays as it is. Ratings are each Plex account's own, so what
   one person rates down is left out for them alone.
 
+### Fixed
+
+- **Settings › Account said it couldn't check whether your settings
+  follow your account** when it was the page the app opened on (after a
+  reload, say): it asked before the app had started keeping them.
+
 ### Changed
 
 - **Appears in leaves out playlists of the whole library**, such as
