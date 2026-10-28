@@ -28,8 +28,9 @@
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
 #                       here, so they follow it to every browser it signs in on.
 #   SYNC_MISSING_TRACKS "false" turns off keeping each Plex account's Missing
-#                       tracks here, so they follow it to every browser, and
-#                       a Plex server's owner sees everyone's for it.
+#                       tracks here (the server's owner's, and friends' who
+#                       choose to), so they follow it to every browser, and
+#                       the owner sees friends'.
 #   SPOTIFY_FILE_IMPORT "true": Search › From Spotify makes playlists from
 #                       Spotify's download of your data, read in the browser.
 #                       Off unless set, for now.

@@ -88,6 +88,9 @@ expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'
     'PLEX_SERVER_URL=http://192.168.1.10:32400' 'DISABLE_WEBSOCKETS=' 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b' \
     'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'PLAYLIST_SHARING=true' \
     '# Each Plex account'"'"'s settings kept by the player, so they follow it to every' '# browser it signs in on (false: each browser keeps its own).' 'SYNC_SETTINGS=true' \
+    '# Missing tracks kept by the player for each Plex account (your Plex server'"'"'s' \
+    '# owner'"'"'s, and friends'"'"' who choose to), so they follow it to every browser,' \
+    '# and the owner sees friends'"'"' (false: each browser keeps its own).' 'SYNC_MISSING_TRACKS=true' \
     '# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org' '# (the public service) or your own mirror. Empty: no checks.' \
     'MUSICBRAINZ_URL=' '# true: Search › From Spotify makes playlists from Spotify'"'"'s download of your' \
     '# data, read in the browser (see docs/configuration.md).' 'SPOTIFY_FILE_IMPORT=' \

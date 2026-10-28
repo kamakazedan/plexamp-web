@@ -26,8 +26,9 @@
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
 #                       here, for all of its devices (on by default)
 #   SYNC_MISSING_TRACKS "false" turns off keeping each Plex account's Missing
-#                       tracks here, for all of its devices and for the Plex
-#                       server's owner to see (on by default)
+#                       tracks here, for all of its devices (the Plex server's
+#                       owner's, and friends' who choose to, for the owner to
+#                       see too; on by default)
 #   SPOTIFY_FILE_IMPORT "true" turns on Search › From Spotify with Spotify's
 #                       download of your data: its playlist files, read in
 #                       the browser (off by default)
@@ -637,7 +638,7 @@ fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
 if [ "$SHARING" = true ]; then say "shared playlists are kept in $DATA_DIR"; fi
 if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each Plex account are kept in $DATA_DIR"; fi
-if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each Plex account are kept in $DATA_DIR (a Plex server's owner sees everyone's for it)"; fi
+if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each Plex account are kept in $DATA_DIR (a Plex server's owner's, and friends' who choose to)"; fi
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi

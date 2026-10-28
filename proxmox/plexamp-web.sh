@@ -319,9 +319,9 @@ PLAYLIST_SHARING=true
 # Each Plex account's settings kept by the player, so they follow it to every
 # browser it signs in on (false: each browser keeps its own).
 SYNC_SETTINGS=true
-# Each Plex account's Missing tracks kept by the player, so they follow it to
-# every browser, and your Plex server's owner sees everyone's for it to go and
-# find (false: each browser keeps its own).
+# Missing tracks kept by the player for each Plex account (your Plex server's
+# owner's, and friends' who choose to), so they follow it to every browser,
+# and the owner sees friends' (false: each browser keeps its own).
 SYNC_MISSING_TRACKS=true
 # MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org
 # (the public service) or your own mirror. Empty: no checks.
