@@ -8,7 +8,8 @@
 // "&" and "and", what's in brackets, a leading "The" and punctuation don't
 // count; and a name with letters of another script in it (宇多田ヒカル,
 // Кино) keeps all its letters and numbers, as they're written (NFKC), but
-// for Arabic's and Hebrew's vowel points and the tatweel.
+// for what's written one way or the other: Arabic's and Hebrew's vowel
+// points and the tatweel, Greek's accents, Russian's ё, Persian's ی and ک.
 const plain = (v) =>
   String(v || '')
     .toLowerCase()
@@ -28,6 +29,10 @@ const written = (v) =>
     .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
     .replace(/^the\s+/, '')
     .toLowerCase()
+    .replace(/\p{Script=Greek}+/gu, (g) => g.normalize('NFD').replace(/\p{M}+/gu, '').normalize('NFC'))
+    .replace(/ё/g, 'е')
+    .replace(/[يى]/g, 'ی')
+    .replace(/ك/g, 'ک')
     .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim();
 const OTHER_SCRIPT = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}\p{N}\p{M}\s]/u;
@@ -50,11 +55,12 @@ function editDistance(a, b) {
 // more after it, or a letter or two different (not in Chinese, Japanese or
 // Korean, where one character can be another word, nor a number).
 const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
 export function sameTitle(a, b) {
   if (!a || !b) return false;
   if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
   if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
-  if (a.replace(/\D+/g, ' ').trim() !== b.replace(/\D+/g, ' ').trim()) return false;
+  if (numbersOf(a) !== numbersOf(b)) return false;
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
 }
 
