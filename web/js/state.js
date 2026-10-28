@@ -25,6 +25,7 @@ export const DEFAULT_SETTINGS = {
   quietEndings: 'quiet', // smart fades start over a quiet ending: off | soft | quiet | hushed (transitions.js)
   shareDevices: true, // your devices share what's playing; one plays (devices.js)
   reportPlays: true, // "Sync recent plays": tell Plex what's played
+  skipLive: false, // live tracks and demos left out of what the app picks (mb.js skipLiveOn; on with mbSkipLive where the player has the MusicBrainz features)
   // mode: 'auto' (the app's shared model when there is one) | 'shared' | 'custom' | 'off'
   ai: { mode: 'auto', url: '', apiKey: '', model: '', notes: '' },
 
@@ -66,7 +67,7 @@ export const DEFAULT_SETTINGS = {
   skipForward: 30,
 
   // MusicBrainz features, where the player has them (MUSICBRAINZ_ADVANCED: mb.js)
-  mbSkipLive: true, // live tracks and demos left out of what the app picks
+  mbSkipLive: true, // ...Skip live tracks and demos on, to begin with, where it has them (see skipLive)
   mbMissingAlbums: true, // an artist's albums the library hasn't, on their page
   mbMissingKinds: ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'], // ...those of these kinds (mb.js RELEASE_KINDS)
   mbOriginalYears: true, // albums by the year they first came out

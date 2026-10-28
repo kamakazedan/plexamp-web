@@ -7,7 +7,7 @@ import { albumCard, artistRow, playlistCard, collectionCard, trackRow, numberedL
 import { playList } from '../actions.js';
 import { isLovedTitle } from '../ratings.js';
 import { importPicker, backUpPlaylists } from './playlistfiles.js';
-import { sharingOn, freshShares, invitations } from '../sharing.js';
+import { sharingOn, sharesSoon, invitations } from '../sharing.js';
 import { invitationRows } from './share.js';
 
 // ---------- Browsing the library (in Search) ----------
@@ -491,7 +491,7 @@ function playlistsMenu() {
 }
 
 export async function playlistsView({ el, onDispose }) {
-  const [pls] = await Promise.all([app.server.playlists(playlistScope()), sharingOn() ? freshShares().catch(() => []) : null]);
+  const [pls] = await Promise.all([app.server.playlists(playlistScope()), sharingOn() ? sharesSoon() : null]);
   const menu = iconButton('more', 'Import and back up', playlistsMenu, { cls: 'playlists-menu' });
   el.append(pageHeader('Playlists', { subtitle: pls.length ? fmt.count(pls.length, 'playlist', 'playlists') : null, actions: [menu] }));
   // Shared with you by Plex friends, to add (or not).

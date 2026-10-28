@@ -3,6 +3,56 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.28.0 - 2026-10-28
+
+### New
+
+- **Appears in, on artist pages**: your playlists and the library's
+  collections with the artist's music in them (their tracks, or tracks
+  credited to them, as on a compilation; their albums; them), each saying
+  how many of theirs it has, playlists first, each by name. Plex can't be
+  asked which playlists hold an artist's music, so the app looks through
+  them once the page comes near the section, as no more than their
+  tracks' ids and whose they are, and shows each as it's found. What it
+  found is kept until a playlist changes, and a track's Appears in uses
+  it too, so the next artist's page is quick.
+- **Skip live tracks and demos is for everyone**, in **Settings ›
+  Playback**: it goes by Plex's kind for the album (a live album, a demo)
+  and the track's title. It's off to begin with, and on to begin with
+  where `MUSICBRAINZ_ADVANCED` is on, as before, when it was one of the
+  MusicBrainz features (which now add their kind for an album Plex hasn't
+  typed).
+
+### Fixed
+
+- **Singles & EPs, Live albums, Compilations and the rest were missing
+  from artist pages.** Plex lists an artist's albums proper apart from
+  their other releases, and the page only had the first list. It now has
+  all of them, from Plex alone: the library's albums by the artist, which
+  of those are albums proper, the rows Plex has for the artist's page
+  (the ones Plexamp shows), and the albums' own release types. They're no
+  longer listed under Not in your library either, as if you didn't have
+  them.
+- **MusicBrainz no longer changes which kind an album in your library
+  is.** With the MusicBrainz features on, an album Plex has as an album
+  could move to Singles & EPs (Christmas Tree Farm, say), where Plexamp
+  keeps it. They're used for Not in your library and original release
+  years, as before, and never for how Plex groups what you have.
+- **A slow service no longer holds back your playlists.** The Playlists
+  tab and a playlist waited for the player's service to say what's shared
+  (it asks plex.tv), however long it took. They wait three seconds at
+  most now, and what's shared shows once it's in. Till then a playlist
+  can't be unlocked for editing, in case it's one shared with you to view
+  only.
+
+### Changed
+
+- **The shared AI model's name isn't in the app's public config** any
+  more, which anyone could read without signing in. Settings › AI still
+  shows it, to the people the model is for.
+- **The docs say what each setting turns off**, and that the MusicBrainz
+  features add to what Plex says and are needed for nothing else.
+
 ## 0.27.0 - 2026-10-28
 
 ### New

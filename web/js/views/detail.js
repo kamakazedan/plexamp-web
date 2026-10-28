@@ -26,8 +26,8 @@ import {
   download,
   fileDate,
 } from '../ui.js';
-import { albumCard, artistCard, trackRow, numberedList, collectionCard, playlistArt } from '../components.js';
-import { sharingOn, freshShares, shareOf, syncShare, sharedPlaylistChanged, sharedMark, stopSharing, leaveShared } from '../sharing.js';
+import { albumCard, artistCard, trackRow, numberedList, collectionCard, playlistCard, playlistArt } from '../components.js';
+import { sharingOn, freshShares, sharesSoon, shareOf, syncShare, sharedPlaylistChanged, sharedMark, stopSharing, leaveShared } from '../sharing.js';
 import { openShareDialog, leaveDialog, shareLine } from './share.js';
 import {
   playAlbum,
@@ -49,6 +49,7 @@ import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
 import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, RELEASE_KINDS, KIND_NAMES } from '../mb.js';
 import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
+import { artistAppearsIn } from '../membership.js';
 import { chooseMissingKinds, missingKinds } from './mbsettings.js';
 import { copyText, toCsv } from '../missing.js';
 import { clearSelection } from '../selection.js';
@@ -191,10 +192,14 @@ export async function albumView({ el, params }) {
       .catch(() => {});
   }
 
+  // More by the artist: their albums proper (Plex's /children of the
+  // artist), or, where those are none but this, their other releases.
   if (album.parentRatingKey) {
+    const others = (list) => list.filter((m) => m?.type === 'album' && String(m.ratingKey) !== String(album.ratingKey) && (!isId(m.parentRatingKey) || String(m.parentRatingKey) === String(album.parentRatingKey)));
     s.children(album.parentRatingKey)
-      .then((others) => {
-        const more = others.filter((m) => String(m.ratingKey) !== String(album.ratingKey));
+      .then(async (proper) => {
+        let more = others(proper);
+        if (!more.length) more = others(await s.artistAlbums(album.librarySectionID ?? app.source.sectionKey, album.parentRatingKey));
         if (!more.length) return;
         const row = shelf(more.map((m) => albumCard(m, { subtitle: year(m) || '' })));
         el.append(h('section.block', null, sectionHeader(`More by ${album.parentTitle}`, `/artist/${album.parentRatingKey}`, null, row), row));
@@ -205,29 +210,65 @@ export async function albumView({ el, params }) {
 
 // ---------- Artist ----------
 
-// The kinds of release on an artist's page, in this order (releases.js
-// RELEASE_KINDS: Albums, Singles & EPs, Live albums, Compilations...): Plex's
-// release types (from MusicBrainz, as Plexamp shows them), its Format the
-// main one (album, EP, single) and its Subformat what else it is (live, a
-// compilation...), or else the row of Plex's for the artist's page that
-// it's in (hubs.js), as Plexamp has them; with the player's MusicBrainz
-// features, MusicBrainz's own for an album Plex hasn't typed. Albums are a
-// grid, the rest shelves. Then what they appear on: others' albums with
-// their tracks on (compilations, soundtracks, someone else's with them
-// featured).
+// An artist's releases, by kind, in this order (releases.js RELEASE_KINDS:
+// Albums, Singles & EPs, Live albums, Compilations...), all of them as Plex
+// has them, as Plexamp shows them: the library's albums by them (plex.js
+// artistAlbums), their albums proper among them (Plex's /children of the
+// artist, its "true albums": nothing else is), and the rest by Plex's rows
+// for their page (hubs.js) or their own release types (Format, the main
+// one: album, EP, single; Subformat, what else: live, a compilation...).
+// MusicBrainz never changes which kind one is. Albums are a grid, the rest
+// shelves. Then what they appear on: others' albums with their tracks on
+// (compilations, soundtracks, someone else's with them featured); and what
+// of yours they're in: your playlists and collections with their music.
 
-// Whether Plex said what kind of release it is.
-const typed = (m) => plexKind(m) !== null;
-export const albumGroup = (m) => KIND_NAMES[plexKind(m) || 'albums'];
-
-// Albums with their release types: Plex's listing of an artist's albums
-// leaves them out, so they're looked up (plex.js albumTypes: 40 albums to a
-// request, kept while the app's open), as are Plex's rows for the page.
-const TYPES_WAIT = 700; // ms the albums wait for them, before they're shown without
+const TYPES_WAIT = 700; // ms the albums wait for their kinds, before they're shown as they are
+// Albums whose release types one page asks for, at most (40 to a request):
+// the rest of a discography that big (Various Artists' can be thousands)
+// goes by Plex's rows for the page, as far as those go.
+const TYPES_ASKED = 1000;
 const keptFor = (id) => `${app.source?.serverId || app.source?.uri || ''}|${id}`;
-async function releaseTypes(s, albums) {
-  const types = await s.albumTypes(albums.map((m) => m.ratingKey));
-  return albums.map((m, i) => ({ ...m, ...(types[i] || {}) }));
+const idOf = (m) => String(m?.ratingKey ?? '');
+const isId = (v) => /^\d+$/.test(String(v ?? ''));
+
+// An album's kind, as Plex says (`st`: `proper`, their albums proper, by
+// id, or null where Plex couldn't be asked; `separated`, whether Plex keeps
+// those apart from the rest here: the library has albums of theirs that
+// aren't (an older server's /children has them all); `rows`, what its rows
+// say (hubs.js releasesFromHubs); `types`, albums' release types from their
+// details, by id; `settled`, once all of that is in; `various`, whether
+// they're Various Artists): the row it's in, where that says more than
+// albums, else Albums for one of their albums proper where Plex keeps those
+// apart, else its own types, else Albums for one of their albums proper.
+// Null while that's still being asked; then, for one Plex says nothing
+// more of, Compilations for Various Artists (an album of theirs is one),
+// else Albums, or Other for one that Plex keeps apart from their albums
+// proper.
+export function releaseKind(m, st) {
+  const id = idOf(m);
+  const row = st.rows?.kinds?.get(id) || null;
+  if (row && row !== 'albums') return row;
+  const proper = !!st.proper?.has(id);
+  if (proper && st.separated) return 'albums';
+  const said = plexKind(m) || plexKind(st.types?.get(id));
+  if (said) return said;
+  if (proper) return 'albums';
+  if (!st.settled) return null;
+  if (st.various && !row) return 'compilations';
+  return row || !st.separated ? 'albums' : 'other';
+}
+
+// Their albums, each once: the library's, those proper (as /children has
+// them, where the library's listing hasn't), and those Plex's rows have;
+// those of others' (that the listing may have, for who's on them) left out.
+function ownAlbums(me, ...lists) {
+  const out = new Map();
+  for (const m of lists.flat()) {
+    if (!m || m.type !== 'album' || !isId(m.ratingKey) || out.has(idOf(m))) continue;
+    if (isId(m.parentRatingKey) && String(m.parentRatingKey) !== me) continue;
+    out.set(idOf(m), m);
+  }
+  return [...out.values()];
 }
 
 // The library's artist of that name (as the app compares names), or null:
@@ -326,7 +367,7 @@ const mbidOf = (artist) =>
     .find((g) => /^mbid:\/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(g))
     ?.slice(7) || null;
 
-export async function artistView({ el, params }) {
+export async function artistView({ el, params, onDispose }) {
   const s = app.server;
   const sec = app.source.sectionKey;
   const artist = await s.metadata(params.id, mbFeatures() ? { includeGuids: 1 } : undefined);
@@ -360,10 +401,11 @@ export async function artistView({ el, params }) {
   const popularSlot = h('div');
   const albumsBox = h('div.artist-albums');
   const appearsBox = h('div.artist-appears');
+  const inBox = h('div.artist-appears-in');
   const missingBox = h('div.artist-missing');
   const similarSlot = h('div');
   const sonicSlot = h('div');
-  el.append(popularSlot, albumsBox, appearsBox, missingBox, similarSlot, sonicSlot);
+  el.append(popularSlot, albumsBox, appearsBox, inBox, missingBox, similarSlot, sonicSlot);
   // Its styles, each opening the library's artists of that style.
   const styles = (artist.Style || []).filter((t) => t?.tag && tagKey(t));
   if (styles.length) {
@@ -427,42 +469,45 @@ export async function artistView({ el, params }) {
     .memo(`rows:${artist.ratingKey}`, () => s.artistHubs(artist.ratingKey).then((hubs) => releasesFromHubs(hubs, artist.ratingKey)), ROWS_KEPT_MS)
     .catch(() => null);
 
-  // Their albums by kind, each with its year (when it first came out, with
-  // Original release years, where MusicBrainz says that was earlier than
-  // the year Plex has), newest first. Plex's listing doesn't say which kind
-  // each is, so the kinds are looked up (see releaseTypes), and Plex's rows
-  // for the page are asked for. For most artists that's a request or two,
-  // waited for, as MusicBrainz is (the player keeps what it says); a big
-  // discography, or a first look on MusicBrainz, is shown as it is, and
-  // again once they're in. An album's kind: Plex's type for it, else the
-  // row of Plex's it's in, unless that says no more than albums (as it may
-  // of one Plex hasn't typed, which MusicBrainz may know better), else
-  // MusicBrainz's.
-  const rowOf = (m, rows) => rows?.kinds.get(String(m.ratingKey)) || null;
-  const saidOf = (m, rows) => plexKind(m) || (rowOf(m, rows) !== 'albums' ? rowOf(m, rows) : null);
-  const placed = (albums, mb, rows) => {
+  // Their releases by kind (see releaseKind), each with its year (when it
+  // first came out, with Original release years, where MusicBrainz says
+  // that was earlier than the year Plex has), newest first. The library's
+  // albums by them and their albums proper are asked for together, then
+  // Plex's rows for the page and the release types of those that aren't
+  // albums proper (40 to a request, kept while the app's open): for most
+  // artists a request or two, waited for, as MusicBrainz is; or else the
+  // albums proper are shown, and the rest as they come. `st` is what's in
+  // so far (see releaseKind).
+  const me = String(artist.ratingKey);
+  const st = { proper: null, separated: false, rows: null, types: null, settled: false, listed: [], properList: [], various };
+  let mb = null;
+  const albumsNow = () => ownAlbums(me, st.listed, st.properList, [...(st.rows?.own?.values() || [])]);
+  const placed = (albums) => {
     const groups = mb?.groups || [];
     const origin = mbOn('mbOriginalYears');
     return albums.map((m) => {
-      const row = rowOf(m, rows);
-      const said = saidOf(m, rows);
+      const kind = releaseKind(m, st);
       const own = Number(year(m)) || null;
-      const g = groups.length ? matchGroup(groups, m.title, said, own) : null;
+      const g = groups.length ? matchGroup(groups, m.title, kind, own) : null;
       const was = origin ? firstYear(g) : null;
-      return { m, g, kind: said || (g ? kindOf(g.primary, g.secondary) : null) || row || 'albums', year: was && (!own || was < own) ? was : own };
+      return { m, kind, year: was && (!own || was < own) ? was : own };
     });
   };
   let painted = '';
-  const paintAlbums = (albums, mb, rows) => {
-    paintMissing(albums, mb, rows);
-    const list = placed(albums, mb, rows).sort((a, b) => (b.year || 0) - (a.year || 0));
+  const paintAlbums = () => {
+    const albums = albumsNow();
+    paintMissing(albums);
+    // (Those whose kind isn't known yet wait for it.)
+    const list = placed(albums)
+      .filter((x) => x.kind)
+      .sort((a, b) => (b.year || 0) - (a.year || 0));
     const kinds = new Map();
     for (const x of list) {
       if (!kinds.has(x.kind)) kinds.set(x.kind, []);
       kinds.get(x.kind).push(x);
     }
     // (Grouped as they were: left as they are, so what has focus keeps it.)
-    const shape = JSON.stringify([...kinds].map(([k, xs]) => [k, xs.map((x) => [x.m.ratingKey, x.year])]));
+    const shape = JSON.stringify([!kinds.size && st.settled, [...kinds].map(([k, xs]) => [k, xs.map((x) => [x.m.ratingKey, x.year])])]);
     if (shape === painted) return;
     painted = shape;
     const blocks = RELEASE_KINDS.filter(([k]) => kinds.has(k)).map(([k, name]) => {
@@ -471,24 +516,26 @@ export async function artistView({ el, params }) {
       const strip = shelf(cards);
       return h('section.block', { dataset: { group: name } }, sectionHeader(name, null, null, strip), strip);
     });
-    albumsBox.replaceChildren(...(blocks.length ? blocks : [emptyState('No albums for this artist.')]));
+    albumsBox.replaceChildren(...(blocks.length ? blocks : st.settled ? [emptyState('No albums for this artist.')] : []));
   };
 
   // Not in your library (Missing albums on artist pages): their release
   // groups on MusicBrainz that none of the library's albums is, of the
   // kinds chosen (Kinds…), newest first, by kind, each linked to
   // MusicBrainz; to copy or download, all of them.
+  // (What the library has is known once all of their albums are in: until
+  // then, nothing's said to be missing.)
   let missingPainted = '';
-  const paintMissing = (albums, mb, rows) => {
+  const paintMissing = (albums) => {
     const groups = mb?.groups || [];
-    if (!mbOn('mbMissingAlbums') || !groups.length) {
+    if (!mbOn('mbMissingAlbums') || !groups.length || !st.settled) {
       missingPainted = '';
       return missingBox.replaceChildren();
     }
     const have = new Set();
     const titles = new Set();
     for (const m of albums) {
-      const g = matchGroup(groups, m.title, saidOf(m, rows), Number(year(m)) || null);
+      const g = matchGroup(groups, m.title, releaseKind(m, st), Number(year(m)) || null);
       if (g) have.add(g.id);
       titles.add(albumKey(m.title));
     }
@@ -500,7 +547,7 @@ export async function artistView({ el, params }) {
     const shape = JSON.stringify([chosen, missing.map((g) => g.id)]);
     if (shape === missingPainted) return;
     missingPainted = shape;
-    const kindsButton = h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albums, mb, rows)) }, 'Kinds…');
+    const kindsButton = h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albumsNow())) }, 'Kinds…');
     const head = sectionHeader('Not in your library', null, kindsButton);
     if (!missing.length) {
       missingBox.replaceChildren(h('section.block.mb-missing', null, head, h('p.hint.pad', null, `Your library has all of ${artist.title}’s that MusicBrainz has, of the kinds chosen.`)));
@@ -570,32 +617,53 @@ export async function artistView({ el, params }) {
     );
   };
 
-  const albumsP = s.children(artist.ratingKey).then(async (albums) => {
-    const typing = !albums.length || albums.some(typed) ? null : releaseTypes(s, albums);
-    // (Where Plex's listing has every album's type, its rows can't change
-    // one: not waited for.)
-    const rowsP = albums.length && albums.every(typed) ? Promise.resolve(null) : hubsP;
-    const soon = await Promise.race([Promise.all([typing || albums, mbP, rowsP]), new Promise((r) => setTimeout(r, TYPES_WAIT))]);
-    if (soon) return paintAlbums(...soon);
+  // (Asked of the library the artist's in; let go of if the page is.)
+  const ctrl = new AbortController();
+  onDispose?.(() => ctrl.abort());
+  const listedP = s.artistAlbums(artist.librarySectionID ?? sec, artist.ratingKey, { signal: ctrl.signal }).catch(() => null);
+  const properP = s.children(artist.ratingKey).catch(() => null);
+  // (Once they're first shown: what comes after them waits for no more.)
+  let shown;
+  const shownP = new Promise((r) => (shown = r));
+  const albumsP = Promise.all([listedP, properP]).then(async ([listed, proper]) => {
+    if (!listed && !proper) throw new Error('Plex didn’t say what albums they have.');
+    st.listed = listed || [];
+    st.properList = (proper || []).filter((m) => m?.type === 'album');
+    st.proper = proper ? new Set(st.properList.map(idOf)) : null;
+    st.separated = !!st.proper && ownAlbums(me, st.listed).some((m) => !st.proper.has(idOf(m)));
+    // The release types of those that don't say (but albums proper, where
+    // Plex keeps those apart).
+    const ask = ownAlbums(me, st.listed, st.properList)
+      .filter((m) => !(st.separated && st.proper.has(idOf(m))) && !plexKind(m))
+      .slice(0, TYPES_ASKED);
+    const typesP = (ask.length ? s.albumTypes(ask.map(idOf)) : Promise.resolve([])).then(
+      (got) => (st.types = new Map(ask.map((m, i) => [idOf(m), got[i]]).filter(([, t]) => t))),
+      () => null,
+    );
+    const rowsP = hubsP.then((rows) => (st.rows = rows));
+    const mbIn = mbP.then((got) => (mb = got));
+    const all = Promise.all([typesP, rowsP]).then(() => (st.settled = true));
+    const soon = await Promise.race([Promise.all([all, mbIn]).then(() => true), new Promise((r) => setTimeout(r, TYPES_WAIT))]);
+    if (soon) return paintAlbums();
     // (Shown as it is, then again with each, as it comes.)
-    let now = albums;
-    let mb = null;
-    let rows = null;
-    paintAlbums(now, mb, rows);
-    await Promise.all([
-      typing?.then((got) => paintAlbums((now = got), mb, rows)),
-      mbP.then((got) => got && paintAlbums(now, (mb = got), rows)),
-      rowsP.then((got) => got && paintAlbums(now, mb, (rows = got))),
-    ]);
+    paintAlbums();
+    shown();
+    await Promise.all([typesP.then(paintAlbums), rowsP.then(paintAlbums), mbIn.then(paintAlbums), all.then(paintAlbums)]);
   });
+  albumsP.finally(() => shown()).catch(() => {});
 
   // Appears on: others' albums they're on, newest first, as Plex's rows
-  // for the page have them, or else as its search finds them. (Not for
+  // for the page have them (and the library's albums by them, where those
+  // take in what they're on), or else as its search finds them. (Not for
   // Various Artists, who are on everything of theirs.)
   const appearsP = various
     ? null
-    : hubsP.then(async (rows) => {
-        const albums = rows?.appears.length ? rows.appears : await appearsBySearch(s, sec, artist);
+    : Promise.all([hubsP, listedP]).then(async ([rows, listed]) => {
+        const seen = new Set();
+        const theirs = [...(rows?.appears || []), ...(listed || []).filter((m) => m?.type === 'album' && isId(m.parentRatingKey) && String(m.parentRatingKey) !== me)].filter(
+          (m) => !seen.has(idOf(m)) && seen.add(idOf(m)),
+        );
+        const albums = theirs.length ? theirs : await appearsBySearch(s, sec, artist);
         if (!albums.length) return;
         const cards = albums
           .slice()
@@ -604,6 +672,17 @@ export async function artistView({ el, params }) {
         const strip = shelf(cards);
         appearsBox.replaceChildren(h('section.block', { dataset: { group: 'Appears on' } }, sectionHeader('Appears on', null, null, strip), strip));
       });
+
+  // Appears in: your playlists and collections with their music in them
+  // (see appearsInShelf), looked for once their albums are shown (not
+  // waiting for MusicBrainz) and the page has come near it. (Not for
+  // Various Artists, who are in everything.)
+  if (!various) {
+    shownP
+      .then(() => whenNear(inBox, ctrl.signal))
+      .then(() => appearsInShelf(inBox, artist, ctrl.signal))
+      .catch(() => {});
+  }
 
   // Similar artists (Plex's, those in this library) and sonically similar
   // ones, each a shelf, with a page of more.
@@ -615,7 +694,78 @@ export async function artistView({ el, params }) {
   const similarP = similarInLibrary(s, sec, artist, SHELF_ARTISTS).then((artists) => artistShelf(similarSlot, 'Similar artists', `/artist/${artist.ratingKey}/similar`, artists));
   const sonicP = sonicallySimilar(s, artist, { limit: SHELF_ARTISTS }).then((artists) => artistShelf(sonicSlot, 'Sonically similar artists', `/artist/${artist.ratingKey}/sonic`, artists));
 
+  // (Appears in isn't waited for: it's looked for as the page is read.)
   await Promise.allSettled([popularP, albumsP, appearsP, similarP, sonicP]);
+}
+
+// Once `el` is near being seen (or at once, where the browser can't tell),
+// unless `signal` says the page has gone.
+function whenNear(el, signal) {
+  return new Promise((resolve, reject) => {
+    const gone = () => reject(Object.assign(new Error('aborted'), { aborted: true }));
+    if (signal.aborted) return gone();
+    if (!('IntersectionObserver' in window)) return resolve();
+    const io = new IntersectionObserver(
+      (es) => {
+        if (!es.some((e) => e.isIntersecting)) return;
+        io.disconnect();
+        resolve();
+      },
+      { rootMargin: '600px 0px' },
+    );
+    io.observe(el);
+    signal.addEventListener('abort', () => {
+      io.disconnect();
+      gone();
+    });
+  });
+}
+
+// An artist's Appears in (membership.js artistAppearsIn), in `box`: a shelf
+// of your playlists, then the collections, each by name, as they're found,
+// each saying how many of theirs it has. While they're looked for, it says
+// so; with none, it goes.
+const LOOKING_IN = 'Looking through your playlists and collections…';
+const byName = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+async function appearsInShelf(box, artist, signal) {
+  const status = h('p.hint.pad.appears-in-status', { role: 'status' }, LOOKING_IN);
+  const strip = shelf([]);
+  const track = strip.firstElementChild;
+  box.replaceChildren(h('section.block', { dataset: { group: 'Appears in' } }, sectionHeader('Appears in', null, null, strip), status, strip));
+  const of = (n, one, many) => (n === 1 ? one : `${fmt.number(n)} ${many}`);
+  const say = (kind, e) => {
+    if (kind === 'playlist') return e.every ? 'Every track in your library' : of(e.count, 'A track of theirs', 'of their tracks');
+    if (e.via === 'artist') return 'Artist collection';
+    return e.via === 'album' ? of(e.count, 'An album of theirs', 'of their albums') : of(e.count, 'A track of theirs', 'of their tracks');
+  };
+  const add = (kind, e) => {
+    const c = (kind === 'playlist' ? playlistCard : collectionCard)(e.list, { subtitle: say(kind, e) });
+    c.dataset.inKind = kind === 'playlist' ? '0' : '1';
+    c.dataset.inTitle = e.list.title || '';
+    // (Playlists first, then collections, each by name. A shelf at its
+    // start stays there: the browser would keep the card it was on in view.)
+    const after = [...track.children].find((x) => x.dataset.inKind > c.dataset.inKind || (x.dataset.inKind === c.dataset.inKind && byName.compare(x.dataset.inTitle, c.dataset.inTitle) > 0));
+    const atStart = strip.scrollLeft <= 1;
+    track.insertBefore(c, after || null);
+    if (atStart) strip.scrollLeft = 0;
+  };
+  try {
+    const res = await artistAppearsIn(artist, {
+      signal,
+      onFound: add,
+      onProgress: (done, total) => {
+        status.textContent = total ? `${LOOKING_IN} ${fmt.number(done)} of ${fmt.number(total)}` : LOOKING_IN;
+      },
+    });
+    if (signal.aborted) return;
+    if (!res.playlists.length && !res.collections.length) return box.replaceChildren();
+    if (res.skipped.length) status.textContent = `Too long to look through, so not included: ${res.skipped.map((l) => l.title).join(', ')}.`;
+    else status.remove();
+  } catch (err) {
+    if (signal.aborted || err?.aborted) return;
+    if (track.children.length) status.textContent = describeError(err);
+    else box.replaceChildren();
+  }
 }
 
 // All of an artist's similar artists in the library (`kind`: 'similar',
@@ -874,19 +1024,50 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
 
 export async function playlistView({ el, params, onDispose, onHide }) {
   const s = app.server;
-  const [pl] = await Promise.all([s.playlist(params.id), sharingOn() ? freshShares().catch(() => []) : null]);
+  const hash = location.hash;
+  // (The shares are waited for a few seconds at most, so a slow service
+  // doesn't hold the playlist back. Till they're in, it can't be unlocked
+  // (one shared with you to view only mustn't change); once they are, it
+  // can, or, where it turns out to be shared, the page is shown again (or,
+  // put aside, the next time it's opened), as that changes what can be
+  // done with it. Where they can't be had, it's taken as not shared, as
+  // before.)
+  const [pl, shares] = await Promise.all([s.playlist(params.id), sharingOn() ? sharesSoon() : []]);
   if (!pl) throw Object.assign(new Error('Not found'), { status: 404 });
+  let sharesKnown = shares !== null;
   // Shared with friends (yours), or shared with you (see sharing.js).
   const share = shareOf(pl.ratingKey);
   // Smart playlists follow their rules in Plex; they can't be edited here.
   // Nor can one shared with you to view only (changes would be undone).
   const editable = !pl.smart && (pl.playlistType || 'audio') === 'audio' && share?.role !== 'view';
+  const canEdit = () => editable && sharesKnown;
   let editing = false;
   let total = pl.leafCount || 0;
   let pager = null;
 
-  const lock = editable ? lockButton('playlist', () => setEditing(!editing)) : null;
+  const lock = editable ? lockButton('playlist', () => canEdit() && setEditing(!editing)) : null;
   lock?.set(false);
+  if (lock && !sharesKnown) {
+    lock.el.disabled = true;
+    lock.el.title = 'Checking whether it’s shared…';
+  }
+  if (!sharesKnown) {
+    freshShares()
+      .catch(() => null)
+      .then(() => {
+        if (shareOf(pl.ratingKey)) {
+          // (Any other kept page of it too: built again when it's opened.)
+          dropCached((p) => p === `/playlist/${pl.ratingKey}`);
+          if (location.hash === hash) refresh();
+          return;
+        }
+        sharesKnown = true;
+        if (lock) {
+          lock.el.disabled = false;
+          lock.set(editing);
+        }
+      });
+  }
   // Until the lock has been used, a reminder of what it's for.
   const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder, sort or remove tracks, or change the picture.', { key: 'lock' }) : () => {};
   const picture = pictureBox(playlistArt(pl), {
@@ -902,8 +1083,9 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   });
   // A smart playlist can't be unlocked (its rules decide what's in it), but
   // its picture can still change, from its menu.
+  // (Not till what's shared is known: it decides which they are.)
   const shareActions = () => {
-    if (!sharingOn()) return [];
+    if (!sharingOn() || !sharesKnown) return [];
     if (share && share.role !== 'owner') {
       return [{ icon: 'together', label: 'Stop sharing it with me…', description: `Keep it as a playlist of your own, without ${share.owner.title}’s changes`, onSelect: () => leaveDialog(share, { onChange: refresh }) }];
     }
@@ -984,7 +1166,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   function editActions(r) {
     if (!editing) {
       // Locked: the way in, for anyone looking here to remove a track.
-      return editable ? [{ icon: 'unlock', label: 'Edit playlist', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }] : [];
+      return canEdit() ? [{ icon: 'unlock', label: 'Edit playlist', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }] : [];
     }
     return [
       r !== rows()[0] && { icon: 'moveTop', label: 'Move to top', onSelect: () => moveTo(r, 'top') },

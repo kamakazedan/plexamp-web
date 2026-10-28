@@ -1,9 +1,11 @@
 // Plex's hubs for an artist's page (/hubs/metadata/{id}): the rows Plex's
 // own apps show there, as Plexamp does (Albums, Singles & EPs, Live albums,
-// Compilations, Appears On...). Plex's listing of an artist's albums doesn't
-// say which kind of release each is, and its hubs do: here, which kind each
-// of the artist's albums is, by the hub it's in, and the albums of others'
-// that the artist appears on.
+// Compilations, Appears On...). Plex keeps an artist's albums proper (its
+// "true albums", their /children) apart from their other releases, which
+// are in these rows (and in the library's albums by them), and its
+// listings don't say which kind of release each is: here, which kind each
+// of the artist's albums is, by the hub it's in, the albums of theirs the
+// hubs have, and the albums of others' that the artist appears on.
 
 import { plexKind, norm } from './releases.js';
 
@@ -62,12 +64,15 @@ export function albumOfTrack(t) {
 // What an artist's hubs say (`hubs` as Plex gives them, `artistId` the
 // artist's): `kinds`, the kind of each of their albums that's in one (album
 // id -> kind; an album's own Format and Subformat first, where the hub has
-// them), and `appears`, the albums of others' in a hub of what they appear
-// on, each once, in Plex's order (tracks there stand for their albums).
-// Hubs of anything else are left out, as are others' albums elsewhere.
+// them), `own`, those albums that the hub says are theirs (album id -> the
+// album as the hub has it), and
+// `appears`, the albums of others' in a hub of what they appear on, each
+// once, in Plex's order (tracks there stand for their albums). Hubs of
+// anything else are left out, as are others' albums elsewhere.
 export function releasesFromHubs(hubs, artistId) {
   const me = String(artistId);
   const kinds = new Map();
+  const own = new Map();
   const appears = [];
   const seen = new Set();
   const theirs = (m) => {
@@ -94,19 +99,22 @@ export function releasesFromHubs(hubs, artistId) {
       // say, the row's. Others' are what they appear on only in a row that
       // says so (not in one of a label's albums, say).
       const by = m.parentRatingKey;
-      const own = isId(by) ? String(by) === me : said !== 'appears';
+      const mine = isId(by) ? String(by) === me : said !== 'appears';
       if (said === 'appears') {
-        if (!own) theirs(m);
+        if (!mine) theirs(m);
         continue;
       }
-      if (!own) continue;
+      if (!mine) continue;
       const id = String(m.ratingKey);
+      // (Shown as theirs only where the row says so: one it doesn't say
+      // the artist of is only given its kind.)
+      if (isId(by) && !own.has(id)) own.set(id, m);
       const kind = plexKind(m) || said;
       // (In two hubs: the one that says more than albums.)
       if (kind && (!kinds.has(id) || kinds.get(id) === 'albums')) kinds.set(id, kind);
     }
   }
-  return { kinds, appears };
+  return { kinds, own, appears };
 }
 
 // Whether a track's credited to the artist whose name is `want` (as norm

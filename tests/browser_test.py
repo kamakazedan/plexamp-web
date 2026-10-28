@@ -427,8 +427,12 @@ with sync_playwright() as pw:
         # Settings: the model in use, and nothing else about the AI server.
         page.goto(APP + '#/settings/ai')
         page.wait_for_selector('.ai-model-row')
-        check('ai: settings show the model in use and that it\'s ready', 'llama3.1:8b' in page.locator('.ai-model-row').inner_text()
-              and page.wait_for_selector('.ai-shared p.hint:has-text("Ready")', timeout=15000) is not None)
+        page.wait_for_selector('.ai-shared p.hint:has-text("Ready")', timeout=15000)
+        check('ai: settings show the model in use and that it\'s ready', 'llama3.1:8b' in page.locator('.ai-model-row').inner_text(), page.locator('.ai-model-row').inner_text())
+        # (Its name only for those it's for: not in the app's config, which
+        # anyone can read before signing in.)
+        public = urllib.request.urlopen(APP + 'config.js', timeout=10).read().decode()
+        check('ai: ...whose name isn\'t in the app\'s config, which anyone can read', 'ollama/' in public and 'llama3.1' not in public, public[:300])
         # (Nothing of the AI server's: not its other models, nor where it is.)
         shown = page.locator('.view').inner_text()
         check('ai: nothing else about the AI server: no choosing its models, nor where it is',
@@ -1481,13 +1485,15 @@ with sync_playwright() as pw:
         player(page, 'p.pause()')
 
         # An artist's page: their releases by kind, as Plexamp has them,
-        # Singles & EPs below Albums (Plex's listing of an artist's albums
-        # doesn't say which kind each is: the app asks for their details),
-        # then the artists Plex says are like them that the library has, and
-        # those that sound like them, each with a page of more, and their
-        # styles.
+        # Singles & EPs below Albums (Plex's /children of an artist has only
+        # their albums proper, and its listings don't say which kind each
+        # is: the app asks for the library's albums by them, Plex's rows for
+        # the page and their details), then the artists Plex says are like
+        # them that the library has, and those that sound like them, each
+        # with a page of more, and their styles.
         named = {a['title']: a for a in mock('/library/sections/1/all?type=8&X-Plex-Container-Size=100&X-Plex-Token=t')['MediaContainer']['Metadata']}
-        untyped = not any('Format' in a or 'Subformat' in a for a in mock(f"/library/metadata/{named['Glass Harbour']['ratingKey']}/children?X-Plex-Token=t")['MediaContainer']['Metadata'])
+        proper = mock(f"/library/metadata/{named['Glass Harbour']['ratingKey']}/children?X-Plex-Token=t")['MediaContainer']['Metadata']
+        untyped = not any('Format' in a or 'Subformat' in a for a in proper) and 'Buoy' not in [a['title'] for a in proper]
         group = lambda g: page.locator(f'.view section[data-group="{g}"] .card-title').all_inner_texts()
         # What Glass Harbour appear on, as Plex's row for it has it: the
         # compilation and the soundtrack with tracks of theirs.
@@ -1501,7 +1507,7 @@ with sync_playwright() as pw:
         order = [x for x in heads if x in ('ALBUMS', 'SINGLES & EPS', 'APPEARS ON', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT')]
         shot(page, 'library-02-artist')
         # (Other sections add albums to this artist: those are albums too.)
-        check('library: an artist\'s page: Albums, then Singles & EPs, though Plex\'s listing of their albums doesn\'t say which is which',
+        check('library: an artist\'s page: Albums, then Singles & EPs, though Plex\'s /children of the artist has only their albums proper, and its listings don\'t say which is which',
               untyped and order[:2] == ['ALBUMS', 'SINGLES & EPS'] and {'Low Light Signals', 'Tidal Lines'} <= set(group('Albums')) and 'Buoy' not in group('Albums')
               and group('Singles & EPs') == ['Buoy'], f'{untyped} {heads} {group("Albums")} {group("Singles & EPs")}')
         on_subs = page.locator('.view section[data-group="Appears on"] .card-sub').all_inner_texts()
@@ -1632,13 +1638,150 @@ with sync_playwright() as pw:
                     got[name] = {g: v for g, v in got[name].items() if v}
                 ok = all(got[n] == {g: sorted(v) for g, v in want_kinds[n].items()} for n in want_kinds)
                 check(f'library: an artist\'s releases by kind {says}', ok, str(got))
-            got = kinds_with('types=off&hubs=off')
+            got = kinds_with('types=off&hubs=off&children=all')
             gh = got['Glass Harbour']
-            check('library: ...and with neither, all of them albums, and still what they appear on',
+            check('library: ...and with neither, on a server whose /children of an artist has all their albums (an older one), all of them albums, and still what they appear on',
                   {'Tidal Lines', 'Low Light Signals', 'Buoy'} <= set(gh.get('Albums', [])) and 'Singles & EPs' not in gh and sorted(gh.get('Appears on', [])) == sorted(want_on),
                   str(got))
+            mock('/__mock/config?children=albums')
+            page.goto('about:blank')
+            page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
+            page.wait_for_selector('.view section[data-group="Other"]', timeout=15000)
+            check('library: ...and where Plex keeps one apart from their albums proper but says nothing more of it, under Other',
+                  group('Other') == ['Buoy'] and {'Tidal Lines', 'Low Light Signals'} <= set(group('Albums')) and 'Buoy' not in group('Albums'), f'{group("Albums")} {group("Other")}')
+            page.goto('about:blank')
+            page.goto(APP + f"#/artist/{named['Various Artists']['ratingKey']}")
+            page.wait_for_selector('.view section[data-group="Compilations"]', timeout=15000)
+            check('library: ...but Various Artists\', which are compilations (as an album of theirs is), with none of theirs albums proper',
+                  sorted(group('Compilations')) == ['Night Drive Vol. 1', 'The Lighthouse (Original Score)'] and not group('Albums') and not group('Other'),
+                  f'{group("Albums")} {group("Compilations")} {group("Other")}')
         finally:
-            mock('/__mock/config?types=on&hubs=on')
+            mock('/__mock/config?types=on&hubs=on&children=albums')
+
+        # Which kind an album is, as Plex says: the row it's in where that
+        # says more than albums; one of the artist's albums proper where
+        # Plex keeps those apart, whatever its details say; its own types;
+        # else Albums, or Other where Plex keeps it apart (once all's in).
+        release_kinds = js(page, """() => import('./js/views/detail.js').then(({ releaseKind }) => {
+            const ep = { Format: [{ tag: 'EP' }] }, live = { Format: [{ tag: 'Album' }], Subformat: [{ tag: 'Live' }] };
+            const st = (o) => ({ proper: new Set(['1']), separated: true, rows: { kinds: new Map() }, types: new Map(), settled: false, ...o });
+            const m = (id, more = {}) => ({ ratingKey: id, type: 'album', ...more });
+            return [
+                releaseKind(m('1'), st({ rows: { kinds: new Map([['1', 'singles']]) } })),
+                releaseKind(m('1'), st({ types: new Map([['1', ep]]) })),
+                releaseKind(m('1'), st({ separated: false, types: new Map([['1', ep]]) })),
+                releaseKind(m('1'), st({ separated: false })),
+                releaseKind(m('2'), st({ types: new Map([['2', live]]) })),
+                releaseKind(m('2', ep), st()),
+                releaseKind(m('2'), st()),
+                releaseKind(m('2'), st({ settled: true })),
+                releaseKind(m('2'), st({ settled: true, rows: { kinds: new Map([['2', 'albums']]) } })),
+                releaseKind(m('2'), st({ settled: true, proper: null, separated: false })),
+                releaseKind(m('2'), st({ settled: true, various: true })),
+                releaseKind(m('2'), st({ settled: true, various: true, types: new Map([['2', { Format: [{ tag: 'Album' }], Subformat: [{ tag: 'Soundtrack' }] }]]) })),
+            ];
+        })""")
+        check('library: an album\'s kind: its row where that says more than albums, then one of their albums proper, its own types, else Albums or Other (Compilations, for Various Artists)',
+              release_kinds == ['singles', 'albums', 'singles', 'albums', 'live', 'singles', None, 'other', 'albums', 'albums', 'compilations', 'soundtracks'], str(release_kinds))
+
+        # Albums' release types are asked for without the rest of their
+        # details (where Plex can leave those out).
+        try:
+            mock('/__mock/config?hubs=off')
+            typed_asks = []
+            page.on('request', lambda r: typed_asks.append(r.url) if re.search(r'/library/metadata/\d+(,\d+)*\?', r.url) and 'excludeElements' in r.url else None)
+            page.goto('about:blank')
+            page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
+            page.wait_for_selector('.view section[data-group="Singles & EPs"]', timeout=15000)
+            asked_light = [urllib.parse.unquote(u) for u in typed_asks]
+            check('library: albums\' release types are asked for as no more than those (not their summaries and tags)',
+                  asked_light and all('excludeFields=summary' in u and 'Genre' in u for u in asked_light) and group('Singles & EPs') == ['Buoy'], str(asked_light[:2]))
+        finally:
+            mock('/__mock/config?hubs=on')
+
+        # Where the library's list of their albums can't be had, their albums
+        # proper are shown, and the rest that Plex's rows have.
+        gh_id = named['Glass Harbour']['ratingKey']
+        listing = re.compile(rf'/library/sections/1/all\?.*artist\.id={gh_id}(&|$)')
+        no_list = lambda route: route.abort() if listing.search(route.request.url) and 'type=9' in route.request.url else route.continue_()
+        page.route('**/library/sections/1/all**', no_list)
+        try:
+            page.goto('about:blank')
+            page.goto(APP + f"#/artist/{gh_id}")
+            page.wait_for_selector('.view section[data-group="Singles & EPs"]', timeout=15000)
+            # (Albums other sections added to the artist are albums too.)
+            check('library: ...without the library\'s list of their albums, their albums proper and the rows\' others still show',
+                  {'Low Light Signals', 'Tidal Lines'} <= set(group('Albums')) and 'Buoy' not in group('Albums') and group('Singles & EPs') == ['Buoy'],
+                  f'{group("Albums")} {group("Singles & EPs")}')
+        finally:
+            page.unroute('**/library/sections/1/all**', no_list)
+
+        # Where the library's list of their albums takes in others' they're
+        # on, those are on Appears on too (with the row's).
+        theirs_album = next(a for a in mock('/library/sections/1/all?type=9&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata'] if a['title'] == 'Crate Digger')
+
+        def with_theirs(route):
+            if not (listing.search(route.request.url) and 'type=9' in route.request.url):
+                return route.continue_()
+            got = route.fetch().json()
+            got['MediaContainer']['Metadata'] = got['MediaContainer'].get('Metadata', []) + [theirs_album]
+            got['MediaContainer']['size'] = len(got['MediaContainer']['Metadata'])
+            got['MediaContainer']['totalSize'] = got['MediaContainer']['size']
+            route.fulfill(json=got)
+        page.route('**/library/sections/1/all**', with_theirs)
+        try:
+            page.goto('about:blank')
+            page.goto(APP + f"#/artist/{gh_id}")
+            page.wait_for_selector('.view section[data-group="Appears on"]', timeout=15000)
+            page.wait_for_timeout(800)
+            on_now = group('Appears on')
+            check('library: ...and others\' albums the library\'s list of theirs takes in are on Appears on, with the row\'s, not among their own',
+                  'Crate Digger' in on_now and set(want_on) <= set(on_now) and 'Crate Digger' not in group('Albums'), f'{on_now} {group("Albums")}')
+        finally:
+            page.unroute('**/library/sections/1/all**', with_theirs)
+
+        # An album's More by: their albums proper, or, with none but it, the
+        # rest of their releases (an artist of EPs and singles).
+        only_eps = mock('/__mock/add-artist?name=Only%20EPs&eps=2&noalbum=1')['MediaContainer']['Metadata'][0]
+        try:
+            eps = [a for a in mock('/library/sections/1/all?type=9&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata'] if a.get('parentRatingKey') == only_eps['ratingKey']]
+            first_ep = next(a for a in eps if a['title'] == 'Only EPs EP 1')
+            page.goto('about:blank')
+            page.goto(APP + f"#/album/{first_ep['ratingKey']}")
+            page.wait_for_selector('.view section.block:has-text("More by Only EPs") .card', timeout=15000)
+            more_by = page.locator('.view section.block:has-text("More by Only EPs") .card-title').all_inner_texts()
+            page.goto(APP + f"#/artist/{only_eps['ratingKey']}")
+            page.wait_for_selector('.view section[data-group="Singles & EPs"]', timeout=15000)
+            check('library: an album\'s More by is the rest of their releases where they have no albums proper, and their page has them all',
+                  more_by == ['Only EPs EP 2'] and sorted(group('Singles & EPs')) == ['Only EPs EP 1', 'Only EPs EP 2'] and not group('Albums'),
+                  f'{more_by} {group("Singles & EPs")} {group("Albums")}')
+        finally:
+            mock(f"/__mock/add-artist?remove={only_eps['ratingKey']}")
+
+        # Skip live tracks and demos (Settings › Playback), without the
+        # MusicBrainz features: off to begin with; on, a shuffle of an
+        # artist leaves their live album out, by Plex's kind for it.
+        def shuffled_albums(name):
+            page.goto(APP + f"#/artist/{named[name]['ratingKey']}")
+            page.wait_for_selector('.view section[data-group="Live albums"]', timeout=15000)
+            page.locator('.view .hero-actions button[aria-label="Shuffle"]').click()
+            wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+            got = player(page, 'p.queue.map((t) => t.album)')
+            player(page, 'p.pause()')
+            return set(got or [])
+        page.goto(APP + '#/settings/playback')
+        page.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
+        skip_row = page.locator('label.toggle-row', has_text='Skip live tracks and demos')
+        off_first = not skip_row.locator('input').is_checked() and 'MusicBrainz' not in skip_row.inner_text()
+        kept = shuffled_albums('Marisol Vega')
+        page.goto(APP + '#/settings/playback')
+        page.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
+        page.locator('label.toggle-row', has_text='Skip live tracks and demos').locator('input').click()
+        turned = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.skipLive)")
+        skipped = shuffled_albums('Marisol Vega')
+        settings(page, {'skipLive': False})
+        check('library: Skip live tracks and demos (Settings › Playback), without the MusicBrainz features: off to begin with; on, a shuffle of an artist leaves out their live album, as Plex has it',
+              off_first and turned is True and kept == {'Noches de Cobre', 'Live at the Lantern'} and skipped == {'Noches de Cobre'}, f'{off_first} {turned} {kept} {skipped}')
         ctx.close()
 
     # ---------- edit: the queue, playlists and collections ----------
@@ -2018,6 +2161,106 @@ with sync_playwright() as pw:
         got_buoy = set(page.locator('.appears-collections .row-title').all_inner_texts())
         check('lists: ...a track\'s own collection, its album\'s and a smart one, each found', {'Best of 2022', 'Rainy day albums', 'Electronic picks'} <= want_buoy
               and got_buoy == want_buoy, f'{got_buoy} vs {want_buoy}')
+
+        # An artist's page: Appears in, your playlists and the collections
+        # with their music in them (tracks by them, or credited to them, as
+        # on a compilation; their albums; them), worked out the long way.
+        artists_now = {a['title']: a for a in mc('/library/sections/1/all?type=8&X-Plex-Container-Size=100')['Metadata']}
+        gh = artists_now['Glass Harbour']
+
+        def credited(m, name):
+            credit = (m.get('originalTitle') or '').strip().lower()
+            return bool(credit) and (credit == name or name in (p.strip() for p in re.split(
+                r'\s+(?:feat\.?|ft\.?|featuring|with|vs\.?|x)\s+|\s*;\s*|\s+/\s+', credit, flags=re.I)))
+
+        def in_lists(artist):
+            me, name = artist['ratingKey'], artist['title'].lower()
+            mine = lambda m: m.get('grandparentRatingKey') == me or credited(m, name)
+            pl_now = mc('/playlists?X-Plex-Container-Size=500').get('Metadata', [])
+            on_pl = {p['title']: sum(1 for m in mc(f"/playlists/{p['ratingKey']}/items?X-Plex-Container-Size=5000").get('Metadata', []) if mine(m)) for p in pl_now}
+            on_col = {}
+            for c in mc('/library/sections/1/collections?X-Plex-Container-Size=200').get('Metadata', []):
+                kids = mc(f"/library/collections/{c['ratingKey']}/children").get('Metadata', [])
+                of = {'artist': lambda m: m['ratingKey'] == me, 'album': lambda m: m.get('parentRatingKey') == me}.get(c['subtype'], mine)
+                on_col[c['title']] = sum(1 for m in kids if of(m))
+            return {k: v for k, v in on_pl.items() if v}, {k: v for k, v in on_col.items() if v}
+
+        def appears_in(artist, wait=True):
+            page.goto(APP + '#/')
+            page.wait_for_selector('.wide-card')
+            page.goto(APP + f"#/artist/{artist['ratingKey']}")
+            page.wait_for_selector('.view section[data-similar=sonic], .view section[data-group]', timeout=15000)
+            page.wait_for_timeout(500)
+            page.evaluate("() => document.querySelector('.view .artist-appears-in')?.scrollIntoView()")
+            if wait:
+                page.wait_for_selector('.view section[data-group="Appears in"] .card', timeout=15000)
+                page.wait_for_function("() => { const s = document.querySelector('.view .appears-in-status'); return !s || !s.textContent.startsWith('Looking'); }", timeout=30000)
+            else:
+                page.wait_for_timeout(2500)
+            cards = page.locator('.view section[data-group="Appears in"] a.card')
+            return [(c.get_attribute('href').split('/')[1], c.locator('.card-title').inner_text(), c.locator('.card-sub').inner_text()) for c in cards.all()]
+
+        want_in_pl, want_in_col = in_lists(gh)
+        in_reads = []
+        page.on('request', lambda r: in_reads.append(r.url) if re.search(r'/(items|children)\?', r.url) else None)
+        shown = appears_in(gh)
+        shot(page, 'lists-01c-artist-appears-in')
+        got_in_pl = {t: s for k, t, s in shown if k == 'playlist'}
+        got_in_col = {t: s for k, t, s in shown if k == 'collection'}
+        of_theirs = lambda n, one, many: one if n == 1 else f'{n} of their {many}'
+        check('lists: an artist\'s page: Appears in, the playlists with their tracks in (by them, or credited to them), each saying how many',
+              want_in_pl and set(got_in_pl) == set(want_in_pl) and all(got_in_pl[k] == of_theirs(n, 'A track of theirs', 'tracks') for k, n in want_in_pl.items()),
+              f'{got_in_pl} vs {want_in_pl}')
+        col_sub = {c['title']: c['subtype'] for c in cols}
+        want_col_subs = {k: 'Artist collection' if col_sub.get(k) == 'artist' else of_theirs(n, 'An album of theirs', 'albums') if col_sub.get(k) == 'album' else of_theirs(n, 'A track of theirs', 'tracks')
+                         for k, n in want_in_col.items()}
+        check('lists: ...and the collections with them, their albums or their tracks in (a smart one too)',
+              {'Rainy day albums', 'Best of 2022', 'Electronic picks'} <= set(want_in_col) and got_in_col == want_col_subs, f'{got_in_col} vs {want_col_subs}')
+        order = [(k, t) for k, t, _ in shown]
+        check('lists: ...playlists first, then collections, each by name',
+              order == sorted(order, key=lambda x: (x[0] != 'playlist', x[1].casefold())), str(order))
+        light_in = [urllib.parse.unquote(u) for u in in_reads if '/playlists/' in u or '/library/collections/' in u]
+        check('lists: ...lists read as their entries\' ids and whose they are, a page Plex takes at a time',
+              all('includeFields=ratingKey,parentRatingKey,grandparentRatingKey,originalTitle' in u for u in light_in)
+              and all(int(re.search(r'X-Plex-Container-Size=(\d+)', u).group(1)) <= 120 for u in light_in if '/library/collections/' in u), str(light_in[:3]))
+        in_reads.clear()
+        again = appears_in(gh)
+        read_again = [u for u in in_reads if '/playlists/' in u or '/library/collections/' in u]
+        check('lists: ...and looking again is quick (what was read is kept, for the track menu\'s Appears in too)', not read_again and again == shown, f'{read_again} {again == shown}')
+        page.evaluate("() => document.querySelector('.view section[data-group=\"Appears in\"] a.card[href^=\"#/playlist/\"]').click()")
+        page.wait_for_timeout(500)
+        check('lists: ...each opening its playlist or collection', js(page, '() => location.hash').startswith('#/playlist/'))
+        nobody = mock('/__mock/add-artist?name=Nobody%20Listed')['MediaContainer']['Metadata'][0]
+        try:
+            none_shown = appears_in(nobody, wait=False)
+            check('lists: ...and for an artist in none of them, no Appears in', not none_shown and page.locator('.view section[data-group="Appears in"]').count() == 0, str(none_shown))
+        finally:
+            mock(f"/__mock/add-artist?remove={nobody['ratingKey']}")
+        appears_in(artists_now['Various Artists'], wait=False)
+        check('lists: ...nor for Various Artists', page.locator('.view section[data-group="Appears in"]').count() == 0)
+
+        # Two artists' pages looking at once (an artist's, then a similar
+        # one's) read each list once, between them.
+        twin_ctx = browser.new_context(**MOBILE)
+        twin = twin_ctx.new_page()
+        attach(twin, 'lists-twin')
+        login(twin, APP)
+        list_reads = []
+
+        def list_read(r):
+            m = re.search(r'/(playlists|library/collections)/(\d+)/(items|children)\?.*X-Plex-Container-Start=(\d+)', r.url)
+            if m and 'includeFields' in r.url:
+                list_reads.append((m.group(2), m.group(4)))
+        twin.on('request', list_read)
+        both = js(twin, f"""() => Promise.all([import('./js/membership.js'), import('./js/state.js')]).then(async ([m, s]) => {{
+            const [a, b] = await Promise.all(['{gh['ratingKey']}', '{artists_now['Marisol Vega']['ratingKey']}'].map((id) => s.app.server.metadata(id)));
+            const [x, y] = await Promise.all([m.artistAppearsIn(a), m.artistAppearsIn(b)]);
+            return [x.playlists.length + x.collections.length, y.playlists.length + y.collections.length];
+        }})""")
+        read_twice = sorted({k for k in list_reads if list_reads.count(k) > 1})
+        check('lists: two artists\' pages looking at once read each list once, between them', both[0] > 0 and both[1] > 0 and list_reads and not read_twice,
+              f'{both} {read_twice} {len(list_reads)}')
+        twin_ctx.close()
 
         # The fewest moves: checked against every order of a few lists, made
         # move by move as Plex makes them.
@@ -3033,6 +3276,46 @@ with sync_playwright() as pw:
         check('sharing: (the playlist is as it was)', pl_items(wid, 't') == original)
         dan_ctx.close()
         sam_ctx.close()
+
+        # A service that doesn't answer about shares (one stuck asking
+        # plex.tv, say) doesn't hold your playlists back: they're shown
+        # after a few seconds at most, the Playlists tab and a playlist.
+        stuck_ctx = browser.new_context(**MOBILE)
+        stuck = stuck_ctx.new_page()
+        attach(stuck, 'sharing-stuck')
+        held = []
+        stuck.route('**/api/shares**', lambda route: held.append(route))  # (not answered, till the end)
+        login(stuck, APP)
+        stuck.goto(APP + '#/')
+        stuck.wait_for_selector('.wide-card')
+        started = time.time()
+        stuck.goto(APP + '#/playlists')
+        stuck.wait_for_selector('.view .grid-playlists .card', timeout=8000)
+        tab_took = time.time() - started
+        started = time.time()
+        stuck.goto(APP + f'#/playlist/{wid}')
+        stuck.wait_for_selector('.view .tracks .track', timeout=8000)
+        page_took = time.time() - started
+        check('sharing: a service that doesn\'t answer about shares holds back neither the Playlists tab nor a playlist (a few seconds at most)',
+              tab_took < 6 and page_took < 6, f'{tab_took:.1f}s {page_took:.1f}s')
+        # (...though till it says, the playlist can't be unlocked: one shared
+        # with you to view only mustn't change.)
+        lock_off = stuck.locator('.view .lock-btn').first.is_disabled()
+        stuck.locator('.view .tracks .track .track-more').first.click()
+        stuck.wait_for_selector('.sheet.open')
+        no_edit = stuck.locator('.sheet.open .sheet-action', has_text='Edit playlist').count() == 0
+        stuck.keyboard.press('Escape')
+        stuck.locator('.back-head button[aria-label="More options"]').first.click()
+        stuck.wait_for_selector('.sheet.open')
+        no_share = stuck.locator('.sheet.open .sheet-action', has_text='Share with friends').count() == 0
+        stuck.keyboard.press('Escape')
+        check('sharing: ...and till it says what\'s shared, the playlist can\'t be unlocked, nor shared', lock_off and no_edit and no_share, f'{lock_off} {no_edit} {no_share}')
+        for r in held:
+            try:
+                r.abort()
+            except Exception:
+                pass
+        stuck_ctx.close()
 
     # ---------- routes: how the app reaches the server, and why ----------
     if run('routes'):
@@ -6735,6 +7018,10 @@ with sync_playwright() as pw:
         desk.click('.account-card button:has-text("Sign out")')
         desk.click('.sheet.open .sheet-action:has-text("Sign out")')
         desk.wait_for_url('**#/login')
+        # (The page loads afresh after signing out, a moment later: signed in
+        # again before that, the two would get in each other's way.)
+        desk.wait_for_timeout(1700)
+        desk.wait_for_load_state('load')
         sam_before = titles('t2')
         login(desk, APP_DEBUG, 't2', app_defaults=True)
         desk.wait_for_timeout(2000)
@@ -6810,16 +7097,24 @@ with sync_playwright() as pw:
             page.wait_for_selector(until, timeout=20000)
 
         # Settings › MusicBrainz, where the player has them: each on to begin
-        # with, and for the server's owner, the years and genres to fix.
+        # with, and for the server's owner, the years and genres to fix; and
+        # Skip live tracks and demos, which they add to, in Settings ›
+        # Playback, on to begin with here.
         page.goto(APP_MB + '#/settings')
         page.locator('a.row[href="#/settings/musicbrainz"]').click()
-        page.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
+        page.wait_for_selector('label.toggle-row:has-text("Missing albums on artist pages")')
         shot(page, 'mb-01-settings')
-        on = [page.locator('label.toggle-row', has_text=t).locator('input').is_checked() for t in ('Skip live tracks and demos', 'Missing albums on artist pages', 'Original release years')]
+        on = [page.locator('label.toggle-row', has_text=t).locator('input').is_checked() for t in ('Missing albums on artist pages', 'Original release years')]
         kinds_now = page.locator('.mb-kinds-row .row-sub').inner_text()
+        skip_here = page.locator('label.toggle-row:has-text("Skip live tracks and demos")').count()
         check('mb: Settings › MusicBrainz, each on to begin with, the missing albums\' kinds, and for the owner, the years and genres to fix',
-              on == [True, True, True] and kinds_now == 'Albums, Singles & EPs, Compilations, Soundtracks, Remixes'
-              and page.locator('a.row[href="#/settings/mbreview"]').count() == 1, f'{on} {kinds_now}')
+              on == [True, True] and kinds_now == 'Albums, Singles & EPs, Compilations, Soundtracks, Remixes' and not skip_here
+              and page.locator('a.row[href="#/settings/mbreview"]').count() == 1, f'{on} {kinds_now} {skip_here}')
+        page.goto(APP_MB + '#/settings/playback')
+        page.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
+        skip_row = page.locator('label.toggle-row', has_text='Skip live tracks and demos')
+        check('mb: ...and Skip live tracks and demos in Settings › Playback, on to begin with, going by MusicBrainz too',
+              skip_row.locator('input').is_checked() and 'MusicBrainz' in skip_row.inner_text(), skip_row.inner_text())
 
         # An artist's page: their albums the library hasn't (of the kinds
         # chosen), each linked to MusicBrainz.
@@ -6849,17 +7144,19 @@ with sync_playwright() as pw:
               and all(t in csv_text for t in ('Sea Glass', 'Undertow', 'Early Tapes', 'musicbrainz.org/release-group/')) and 'Tidal Lines' not in csv_text, csv_text[:300])
         settings(page, {'mbMissingKinds': ['albums', 'singles', 'compilations', 'soundtracks', 'remixes']})
 
-        # An album Plex hasn't typed: grouped by MusicBrainz's kind for it,
-        # and, live, left out of a shuffle of the artist.
+        # An album Plex hasn't typed: shown as Plex has it (MusicBrainz never
+        # changes which kind an album in the library is), and, as
+        # MusicBrainz says it's live, left out of a shuffle of the artist.
         mock('/__mock/add-album?title=Harbour%20Lights%20Live&untyped=1')
-        artist_page('Glass Harbour', '.view section[data-group="Live albums"]')
+        artist_page('Glass Harbour', '.view section[data-group="Albums"] .card:has-text("Harbour Lights Live")')
+        page.wait_for_selector('.view .mb-missing', timeout=20000)
         live_group = group('Live albums')
         page.locator('.view .hero-actions button[aria-label="Shuffle"]').click()
         wait_for(lambda: player(page, "p.state === 'playing'"), 10)
         shuffled = player(page, 'p.queue.map((t) => t.album)')
         player(page, 'p.pause()')
-        check('mb: an album Plex hasn\'t typed is grouped by MusicBrainz\'s kind, and as a live album, left out of a shuffle of the artist',
-              live_group == ['Harbour Lights Live'] and 'Harbour Lights Live' not in group('Albums') and shuffled and 'Harbour Lights Live' not in shuffled and 'Tidal Lines' in shuffled,
+        check('mb: an album Plex hasn\'t typed stays where Plex has it (MusicBrainz never changes which kind one is), and as MusicBrainz says it\'s live, is left out of a shuffle of the artist',
+              not live_group and 'Harbour Lights Live' in group('Albums') and shuffled and 'Harbour Lights Live' not in shuffled and 'Tidal Lines' in shuffled,
               f'{live_group} {group("Albums")} {sorted(set(shuffled or []))}')
 
         # Live tracks and demos left out of what the app picks for you, by
@@ -6991,7 +7288,7 @@ with sync_playwright() as pw:
         attach(fpage, 'mb-friend')
         login(fpage, APP_MB, 't2')
         fpage.goto(APP_MB + '#/settings/musicbrainz')
-        fpage.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
+        fpage.wait_for_selector('label.toggle-row:has-text("Missing albums on artist pages")')
         no_row = fpage.locator('a.row[href="#/settings/mbreview"]').count() == 0
         fpage.goto(APP_MB + '#/settings/mbreview')
         fpage.wait_for_selector('.view .empty-state', timeout=10000)

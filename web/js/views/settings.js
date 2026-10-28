@@ -3,12 +3,12 @@ import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, ro
 import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
-import { aiSettings, sharedAI, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
+import { aiSettings, sharedAI, sharedModelName, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { missingTracksView } from './missingtracks.js';
 import { musicbrainzSettingsView } from './mbsettings.js';
 import { mbReviewView } from './mbreview.js';
-import { mbFeatures } from '../mb.js';
+import { mbFeatures, skipLiveOn } from '../mb.js';
 import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
@@ -45,7 +45,7 @@ export async function settingsView({ el }) {
         subtitle: app.config.devices ? 'Streaming quality, crossfade and your devices' : 'Streaming quality, gapless playback and crossfade',
       }),
       row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
-      mbFeatures() ? row({ href: '/settings/musicbrainz', lead: lead('disc'), title: 'MusicBrainz', subtitle: 'Live tracks and demos, missing albums, original years' }) : null,
+      mbFeatures() ? row({ href: '/settings/musicbrainz', lead: lead('disc'), title: 'MusicBrainz', subtitle: 'Missing albums, original years' }) : null,
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'Server address and diagnostics' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
     ),
@@ -492,6 +492,14 @@ function playbackView({ el }) {
         disabled: !canFade,
         onChange: (v) => saveSettings({ loudness: v }),
       }),
+      // (With the MusicBrainz features, on to begin with, as it was with
+      // those: turned off or on, it's that with them or without.)
+      toggleRow({
+        title: 'Skip live tracks and demos',
+        subtitle: `Leaves them out of what the app picks for you: radio and stations, shuffling an artist or your library, and Guest DJs. Albums and playlists you play yourself play as they are. By their album’s kind in Plex (a live album, a demo)${mbFeatures() ? ', or MusicBrainz’s where Plex hasn’t one,' : ''} and their title, like “(Live)” or “- Demo”.`,
+        checked: skipLiveOn(),
+        onChange: (v) => saveSettings({ skipLive: v, mbSkipLive: v }),
+      }),
     ),
   );
   if (app.config.devices) {
@@ -883,7 +891,7 @@ function aiView({ el, onDispose }) {
   // this Plex account, and what to do instead), and a test. Which model it
   // is, and where it runs, is up to whoever runs this player.
   function sharedParts() {
-    const name = h('span', null, shared.model || '…');
+    const name = h('span', null, sharedModelName() || '…');
     const status = h('p.hint.pad', { role: 'status' }, 'Checking…');
     const test = h('p.hint.pad', { role: 'status' });
     const tester = testButton(test);

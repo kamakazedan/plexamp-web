@@ -93,6 +93,14 @@ export function freshShares() {
   return loadShares();
 }
 
+// The same, waited for SHARES_WAIT at most, so a page of playlists isn't
+// held back by a service that's slow to answer (it asks plex.tv who's who):
+// null if they aren't in by then (they're shown when they are).
+const SHARES_WAIT = 3000;
+export function sharesSoon() {
+  return Promise.race([freshShares().catch(() => []), new Promise((r) => setTimeout(() => r(null), SHARES_WAIT))]);
+}
+
 // The shares for this account on this server, from the service. An answer
 // that comes once another server (or account) is in use is let go.
 export function loadShares() {

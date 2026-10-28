@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.27.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.28.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -360,11 +360,21 @@ const MEMO_LIMIT = 300;
 const TYPES_LIMIT = 5000; // albums' release types kept (see albumTypes)
 const WRITE_BATCH = 200; // items per request when adding to a playlist or collection
 const HUB_COUNT = 100; // items in each of an artist's hubs (see artistHubs)
-// What's in a list as no more than each entry's id (and the list's size):
-// Plex leaves the rest out, where it can (a server that can't sends it all).
+const ARTIST_PAGE = 1000; // albums asked for at a time (see artistAlbums)
+// What's in a list as no more than each entry's id and whose it is (its
+// album's and artist's ids, and who a track's credited to), and the list's
+// size: Plex leaves the rest out, where it can (a server that can't sends
+// it all).
 const LIGHT = {
-  includeFields: 'ratingKey,size,totalSize,offset,leafCount',
+  includeFields: 'ratingKey,parentRatingKey,grandparentRatingKey,originalTitle,size,totalSize,offset,leafCount',
   excludeElements: 'Media,Genre,Mood,Style,Collection,Label,Guid,Field,Image,UltraBlurColors,Country',
+};
+// Albums' details as albumTypes asks for them: their release types, without
+// what else their details have (their summaries, tags and the rest), where
+// Plex can leave that out.
+const TYPES_ONLY = {
+  excludeElements: `${LIGHT.excludeElements},Review,Location,Similar`,
+  excludeFields: 'summary',
 };
 
 const chunks = (list, size) => {
@@ -465,8 +475,37 @@ export class PlexServer {
     return asArray(mc.Metadata)[0] || null;
   }
 
+  // (An artist's children are their albums proper, Plex's "true albums":
+  // their singles, EPs, live albums, compilations and the rest are only in
+  // artistAlbums, and Plex's rows for their page.)
   async children(id) {
     return asArray((await this.get(`/library/metadata/${id}/children`)).Metadata);
+  }
+
+  // Every album of an artist's, of every kind: the library's albums by
+  // them, ARTIST_PAGE at a time, on until Plex's count of them (or a short
+  // page where it gives none; one bigger than was asked for is a server
+  // that gave them all at once, and the same page again one that doesn't
+  // page). As the library lists them: without what kind each is.
+  async artistAlbums(section, artistId, { signal } = {}) {
+    if (!/^\d+$/.test(String(artistId)) || !/^\d+$/.test(String(section))) return [];
+    const out = [];
+    let last = null;
+    for (let start = 0; start < ARTIST_PAGE * 50; ) {
+      const mc = await this.get(
+        `/library/sections/${section}/all`,
+        { type: 9, 'artist.id': artistId, 'X-Plex-Container-Start': start, 'X-Plex-Container-Size': ARTIST_PAGE },
+        { signal },
+      );
+      const items = asArray(mc.Metadata);
+      const sig = items.map((m) => m?.ratingKey).join(',');
+      if (start && sig === last) break;
+      last = sig;
+      out.push(...items);
+      start += items.length;
+      if (!items.length || items.length > ARTIST_PAGE || (mc.totalSize != null ? start >= mc.totalSize : items.length < ARTIST_PAGE)) break;
+    }
+    return out;
   }
 
   async allLeaves(id) {
@@ -499,12 +538,16 @@ export class PlexServer {
 
   // A page of what's in a collection, in its order (`ids`: only each one's
   // id, as LIGHT asks).
-  async collectionItems(id, { start = 0, size = 500, ids = false } = {}) {
-    const mc = await this.get(`/library/collections/${id}/children`, {
-      ...(ids ? LIGHT : {}),
-      'X-Plex-Container-Start': start,
-      'X-Plex-Container-Size': size,
-    });
+  async collectionItems(id, { start = 0, size = 500, ids = false, signal } = {}) {
+    const mc = await this.get(
+      `/library/collections/${id}/children`,
+      {
+        ...(ids ? LIGHT : {}),
+        'X-Plex-Container-Start': start,
+        'X-Plex-Container-Size': size,
+      },
+      { signal },
+    );
     // (`counted`: how many Plex says there are, null if it doesn't say.)
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0, counted: mc.totalSize ?? null };
   }
@@ -525,12 +568,16 @@ export class PlexServer {
   }
 
   // (`ids`: only each entry's id, as LIGHT asks.)
-  async playlistItems(id, { start = 0, size = 100, ids = false } = {}) {
-    const mc = await this.get(`/playlists/${id}/items`, {
-      ...(ids ? LIGHT : {}),
-      'X-Plex-Container-Start': start,
-      'X-Plex-Container-Size': size,
-    });
+  async playlistItems(id, { start = 0, size = 100, ids = false, signal } = {}) {
+    const mc = await this.get(
+      `/playlists/${id}/items`,
+      {
+        ...(ids ? LIGHT : {}),
+        'X-Plex-Container-Start': start,
+        'X-Plex-Container-Size': size,
+      },
+      { signal },
+    );
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.leafCount ?? mc.size ?? 0, counted: mc.totalSize ?? mc.leafCount ?? null };
   }
 
@@ -582,10 +629,10 @@ export class PlexServer {
 
   // Several items' full details in one request (Plex takes a list of ids):
   // ids must be numbers, as everywhere they go into an address.
-  async metadataMany(ids) {
+  async metadataMany(ids, params) {
     const out = [];
     const clean = [...new Set(ids.map(String))].filter((id) => /^\d+$/.test(id));
-    for (const part of chunks(clean, 40)) out.push(...asArray((await this.get(`/library/metadata/${part.join(',')}`)).Metadata));
+    for (const part of chunks(clean, 40)) out.push(...asArray((await this.get(`/library/metadata/${part.join(',')}`, params)).Metadata));
     return out;
   }
 
@@ -635,7 +682,7 @@ export class PlexServer {
     const lane = async () => {
       for (let p = parts.shift(); p; p = parts.shift()) {
         try {
-          const got = await this.metadataMany(p.part);
+          const got = await this.metadataMany(p.part, TYPES_ONLY);
           const byId = new Map(got.map((m) => [String(m.ratingKey), m]));
           // (One Plex didn't give has nothing to say.)
           for (const id of p.part) this.types.set(id, { Format: asArray(byId.get(id)?.Format), Subformat: asArray(byId.get(id)?.Subformat) });

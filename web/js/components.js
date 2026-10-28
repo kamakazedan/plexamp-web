@@ -52,12 +52,12 @@ export function artistCard(m) {
 // the mosaic Plex makes from its tracks (its composite).
 export const playlistArt = (m) => m?.thumb || m?.composite || null;
 
-export function playlistCard(m) {
+export function playlistCard(m, { subtitle } = {}) {
   const c = card({
     href: `/playlist/${m.ratingKey}`,
     image: playlistArt(m),
     title: m.title,
-    subtitle: fmt.long(m.duration) || fmt.count(m.leafCount || 0, 'track', 'tracks'),
+    subtitle: subtitle !== undefined ? subtitle : fmt.long(m.duration) || fmt.count(m.leafCount || 0, 'track', 'tracks'),
     fallback: 'list',
     onPlay: () => playPlaylist(m),
     onShuffle: () => playPlaylist(m, { shuffle: true }),
@@ -70,13 +70,13 @@ export function playlistCard(m) {
 
 const COLLECTION_UNITS = { album: ['album', 'albums'], artist: ['artist', 'artists'], track: ['track', 'tracks'] };
 
-export function collectionCard(m) {
+export function collectionCard(m, { subtitle } = {}) {
   const unit = COLLECTION_UNITS[m.subtype] || ['item', 'items'];
   return card({
     href: `/collection/${m.ratingKey}`,
     image: m.thumb || m.composite,
     title: m.title,
-    subtitle: m.childCount ? fmt.count(m.childCount, ...unit) : '',
+    subtitle: subtitle !== undefined ? subtitle : m.childCount ? fmt.count(m.childCount, ...unit) : '',
     fallback: 'list',
     onPlay: () => playCollection(m),
     onShuffle: () => playCollection(m, { shuffle: true }),

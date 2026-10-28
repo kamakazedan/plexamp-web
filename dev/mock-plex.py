@@ -47,10 +47,18 @@ testing, these endpoints need no token:
         identifiers that say what's in them, only titles that do, or none
         (as an older server); types=off: albums' details without their
         release types (Format, Subformat), as some servers give them;
+        children=albums|all: an artist's /children, their albums proper
+        only (Plex's "true albums", as Plex has them now: their singles,
+        EPs, live albums, compilations and the rest are in the library's
+        albums by them and their page's rows), or all of them (as an older
+        server);
         smartcollection=1|0: a smart collection (Electronic picks) listed,
         whose items carry no tag for it, or not
-    /__mock/add-artist?name=...   adds an artist with an album and a track of
-                                  their own; ?remove=ID takes them away again
+    /__mock/add-artist?name=...[&eps=N][&noalbum=1]
+                                  adds an artist with an album and a track of
+                                  their own (and N EPs, a track on each;
+                                  noalbum: no album, only those);
+                                  ?remove=ID takes them away again
     /__mock/add-album?title=...[&untyped=1]
                                   adds an album and announces it (untyped:
                                   without a Format or Subformat, as an album
@@ -621,7 +629,8 @@ def project(mc, q):
     with only the fields asked for, and without those elements."""
     fields = {x for x in q.get('includeFields', [''])[0].split(',') if x}
     gone = {x for x in q.get('excludeElements', [''])[0].split(',') if x}
-    if not fields and not gone:
+    left = {x for x in q.get('excludeFields', [''])[0].split(',') if x}
+    if not fields and not gone and not left:
         return mc
 
     def trim(d, top=False):
@@ -632,7 +641,7 @@ def project(mc, q):
                     out[k] = [trim(x) for x in v]
                 elif k not in gone:
                     out[k] = v
-            elif not fields or k in fields:
+            elif (not fields or k in fields) and k not in left:
                 out[k] = v
         return out
     return trim(mc, top=True)
@@ -1054,7 +1063,7 @@ def hls_playlist(seconds):
 # ---------------------------------------------------------------- notifications
 
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None,
-        'hubs': 'on', 'types': 'on'}
+        'hubs': 'on', 'types': 'on', 'children': 'albums'}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 NO_GENRE = {}  # album id -> its genres, taken away (/__mock/config?nogenre=)
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
@@ -1940,6 +1949,8 @@ class Handler(BaseHTTPRequestHandler):
                     collections.remove(SMART_COLLECTION)
             if 'types' in q:  # off: albums' details without their release types, as some servers give them
                 MOCK['types'] = 'off' if q['types'][0] in ('0', 'off', 'false') else 'on'
+            if 'children' in q:  # all: an artist's /children has all their albums, as an older server's
+                MOCK['children'] = 'all' if q['children'][0] == 'all' else 'albums'
             if 'stall' in q:
                 # stall=ID&bytes=N: the next time that track's file is asked
                 # for, N bytes of it come, then nothing more (the connection
@@ -1988,18 +1999,23 @@ class Handler(BaseHTTPRequestHandler):
                 a.pop(f, None)
             items[k] = a
             artists.append(a)
-            ak = key()
-            al = dict(albums[0], ratingKey=ak, key=f'/library/metadata/{ak}/children', title=f'{name} Alone', titleSort=f'{name} alone'.lower(),
-                      parentRatingKey=k, parentTitle=name, parentThumb=a['thumb'], thumb=f'/library/metadata/{ak}/thumb/1', leafCount=1)
-            items[ak] = al
-            albums.append(al)
-            tk = key()
-            tr = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', guid=track_guid(tk), title=f'{name} Song', index=1, parentIndex=1,
-                      parentRatingKey=ak, parentTitle=al['title'], parentThumb=al['thumb'], grandparentRatingKey=k, grandparentTitle=name,
-                      grandparentThumb=a['thumb'])
-            tr.pop('originalTitle', None)
-            items[tk] = tr
-            tracks.append(tr)
+            eps = max(0, min(10, int(q.get('eps', ['0'])[0] or 0)))
+            made = [] if q.get('noalbum', [''])[0] in ('1', 'true') else [(f'{name} Alone', 'Album')]
+            made += [(f'{name} EP {n}', 'EP') for n in range(1, eps + 1)]
+            for n, (title, fmt) in enumerate(made):
+                ak = key()
+                al = dict(albums[0], ratingKey=ak, key=f'/library/metadata/{ak}/children', title=title, titleSort=title.lower(),
+                          parentRatingKey=k, parentTitle=name, parentThumb=a['thumb'], thumb=f'/library/metadata/{ak}/thumb/1', leafCount=1,
+                          year=2020 + n, Format=[{'tag': fmt}], Subformat=[])
+                items[ak] = al
+                albums.append(al)
+                tk = key()
+                tr = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', guid=track_guid(tk), title=f'{name} Song' if fmt == 'Album' else f'{title} Song',
+                          index=1, parentIndex=1, parentRatingKey=ak, parentTitle=al['title'], parentThumb=al['thumb'], grandparentRatingKey=k,
+                          grandparentTitle=name, grandparentThumb=a['thumb'])
+                tr.pop('originalTitle', None)
+                items[tk] = tr
+                tracks.append(tr)
             return self.send_json({'size': 1, 'Metadata': [public(a)]})
         if p == '/__mock/player':
             with PLAYER['lock']:
@@ -2149,7 +2165,8 @@ class Handler(BaseHTTPRequestHandler):
                             res = [x for x in res if x.get(fld) and x[fld] < limit]
                         continue
                     res = [x for x in res if matches(x, f, vals[0])]
-                return self.page(sort_items(res, q.get('sort', [None])[0]), q)
+                # (Albums as Plex lists them: without what kind each is.)
+                return self.page([listed(x) for x in sort_items(res, q.get('sort', [None])[0])], q)
             if sub in ('genre', 'style', 'mood', 'decade'):
                 return self.send_json({'size': 0, 'Directory': tag_dir(sub, typ)})
             if sub == 'collections':
@@ -2190,7 +2207,7 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith('/library/metadata/') and ',' in parts[2] and len(parts) == 3:
             # Several at once, as Plex gives them: those it has.
             many = [items[i] for i in parts[2].split(',') if i in items and (items[i]['type'] != 'track' or can_have(i, token))]
-            return self.send_json({'size': len(many), 'Metadata': [item_detail(x) for x in many]})
+            return self.send_json(project({'size': len(many), 'Metadata': [item_detail(x) for x in many]}, q))
         if p.startswith('/library/metadata/'):
             it = items.get(parts[2])
             if not it or (it['type'] == 'track' and not can_have(parts[2], token)):
@@ -2199,9 +2216,10 @@ class Handler(BaseHTTPRequestHandler):
             if sub in ('posters', 'poster') or (sub == 'thumb' and self.command == 'DELETE'):
                 return self.pictures(it, sub, q, token)
             if sub == 'children':
-                # (An artist's albums, as Plex lists them: without what kind
+                # (An artist's albums proper, Plex's "true albums" (all of
+                # them, children=all), as Plex lists them: without what kind
                 # each is, which an album's own details have.)
-                kids = [{k: v for k, v in a.items() if k not in ('Format', 'Subformat')} for a in albums if a['parentRatingKey'] == it['ratingKey']] \
+                kids = [listed(a) for a in albums if a['parentRatingKey'] == it['ratingKey'] and (MOCK['children'] == 'all' or album_kind(a) == 'albums')] \
                     if it['type'] == 'artist' else [t for t in tracks if t['parentRatingKey'] == it['ratingKey']]
                 return self.page(kids, {'X-Plex-Container-Size': ['500']})
             if sub == 'allLeaves':

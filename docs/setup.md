@@ -16,7 +16,7 @@ docker run -d --name plexamp-web -p 8080:80 -v plexamp-web-data:/data \
 
 Open `http://<your-docker-host>:8080`, choose **Sign in with Plex**, then pick your server and music library. The settings are in [configuration.md](configuration.md).
 
-The volume at `/data` keeps [shared playlists](features.md#shared-playlists) when the container is replaced (by an update, say). Without it everything else works, and the log says shared playlists would be lost.
+The volume at `/data` keeps [shared playlists](features.md#shared-playlists), each account's settings and Missing tracks, and what the MusicBrainz features looked up, when the container is replaced (by an update, say). Without it everything else works, and the log says what would be lost.
 
 The image is built, tested and published by GitHub Actions for amd64 and arm64 (a Raspberry Pi 4 or CM4 works well). `latest` is the newest version that passed every test; each version is also tagged with its number (such as `0.15.0`), to stay on one. If pulling fails because the package is private, make it public in the package settings on GitHub, or run `docker login ghcr.io` first.
 
@@ -60,7 +60,7 @@ CTID=120 PLEX_SERVER_URL=http://192.168.1.10:32400 YES=1 bash -c "$(curl -fsSL h
 
 Then, on the node (or inside the container, without `pct exec <ID> --`):
 
-- **Settings**: `pct exec <ID> -- plexamp-web-settings` opens them in an editor, with the same names as the Docker image's, and restarts the player with them. They're kept in `/etc/plexamp-web/plexamp-web.env`, readable by root only, and shared playlists in `/var/lib/plexamp-web`.
+- **Settings**: `pct exec <ID> -- plexamp-web-settings` opens them in an editor, with the same names as the Docker image's, and restarts the player with them. They're kept in `/etc/plexamp-web/plexamp-web.env`, readable by root only, and shared playlists (with each account's settings and Missing tracks, and what the MusicBrainz features looked up) in `/var/lib/plexamp-web`.
 - **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version, keeping your settings. With `--verbose` it shows every step as it goes: what it downloads (and the checksum hls.js matched), apt's own output, what it puts where, and the services restarting, with what they logged. An `update-plexamp-web` from 0.16.1 or earlier doesn't know `--verbose` yet, but passes this on: `pct exec <ID> -- env PW_VERBOSE=1 update-plexamp-web`.
 - **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`. To keep a day's log in a file: `pct exec <ID> -- journalctl -u plexamp-web --since today -o short-iso --no-pager > plexamp-web.log` (on the Proxmox host); what browsers sent alone: add `| grep 'plexamp-web browser'`.
 
@@ -75,4 +75,4 @@ What's new is in [CHANGELOG.md](../CHANGELOG.md), and in the app under **Setting
 
 The container serves plain HTTP, which on a home network is the same as Plex's own `http://` addresses. To use the player from outside, put it behind a reverse proxy with HTTPS (Nginx Proxy Manager, Caddy, Traefik, a Cloudflare tunnel and the like), so tokens never cross the internet unencrypted. Turn on the proxy's WebSockets support, if it has a switch for it: live updates use them when they can (see [configuration.md](configuration.md#live-updates)).
 
-Behind HTTPS, the browser can't use a Plex server's plain `http://` addresses, so set `PLEX_SERVER_URL`: the player then reaches Plex through the container. Set it too if the player can be reached from the internet: it keeps the container's service (the shared AI model, MusicBrainz checks, Play Together, your devices and shared playlists) to people who can use your Plex server, and Play on to its owner (see [SECURITY.md](../SECURITY.md#remaining-risks)). Signing out also makes the browser forget the artwork it kept, which browsers only do over HTTPS.
+Behind HTTPS, the browser can't use a Plex server's plain `http://` addresses, so set `PLEX_SERVER_URL`: the player then reaches Plex through the container. Set it too if the player can be reached from the internet: it keeps the container's service (the shared AI model, MusicBrainz checks and features, Play Together, your devices, shared playlists, settings and Missing tracks that follow each account, and Spotify link import) to people who can use your Plex server, and Play on to its owner (see [SECURITY.md](../SECURITY.md#remaining-risks)). Signing out also makes the browser forget the artwork it kept, which browsers only do over HTTPS.

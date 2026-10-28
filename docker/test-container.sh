@@ -98,7 +98,10 @@ wait_http pw-web http://pw-web/
 wait_service pw-web
 W=http://pw-web
 
-contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true, cast: true, musicbrainz: "own", musicbrainzAdvanced: true' "$(cb $W/config.js)"
+contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/" }, together: true, cast: true, musicbrainz: "own", musicbrainzAdvanced: true' "$(cb $W/config.js)"
+# (The shared model's name only for those it's for: not in config.js,
+# which anyone can read before signing in.)
+lacks "config.js doesn't say which AI model is shared" 'llama3.1' "$(cb $W/config.js)"
 expect "app is served" 200 "$(c $W/)"
 expect "hls.js is bundled" 200 "$(c $W/vendor/hls.min.js)"
 # The service starts as root to make its socket, then gives up root and

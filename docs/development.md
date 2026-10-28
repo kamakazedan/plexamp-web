@@ -52,7 +52,7 @@ web/
   js/playlistio.js       playlists to a file and back, finding their tracks, changing a playlist's tracks
   js/sharing.js          shared playlists: keeping your copies the same as everyone's
   js/sorting.js          sorting playlists and collections with the fewest moves
-  js/membership.js       Appears in: the albums a song is on, and the playlists and collections it's in
+  js/membership.js       Appears in: the albums a song is on, and the playlists and collections it's in (or an artist's music is)
   js/hubs.js             Plex's rows for an artist's page: their releases by kind, and what they appear on
   js/releases.js         what kind of release an album is: the same file as server/releases.js
   js/mb.js               the MusicBrainz features (MUSICBRAINZ_ADVANCED)

@@ -4,13 +4,16 @@
 // player's service (server/musicbrainz.js), which asks MusicBrainz by
 // artist, once a second at most where that's musicbrainz.org, and keeps
 // what it says for a month. Only names go there: an artist's, and an
-// album's title is matched on the player.
+// album's title is matched on the player. None of them changes what Plex
+// says of the library (which kind an album is, on an artist's page, is
+// Plex's alone): they only add to it.
 //
-//   Skip live tracks and demos (mbSkipLive): left out of what the app
-//     picks for you (radio and stations, shuffling an artist or the
-//     library, Guest DJs), by their album's kind (Plex's, or MusicBrainz's
-//     where Plex hasn't one) or their title. Never an album or playlist you
-//     play yourself.
+//   Skip live tracks and demos (skipLive, Settings › Playback, for
+//     everyone; on to begin with where the player has these, mbSkipLive):
+//     left out of what the app picks for you (radio and stations,
+//     shuffling an artist or the library, Guest DJs), by their album's
+//     kind (Plex's, or, with these, MusicBrainz's where Plex hasn't one)
+//     or their title. Never an album or playlist you play yourself.
 //   Missing albums (mbMissingAlbums, mbMissingKinds): on an artist's page,
 //     their release groups the library doesn't have, of the kinds chosen.
 //   Original release years (mbOriginalYears): an artist's albums in the
@@ -28,6 +31,10 @@ import { RELEASE_KINDS, kindOf, plexKind } from './releases.js';
 export const mbFeatures = () => !!app.config.musicbrainzAdvanced;
 // ...and this one's on (each is on to begin with).
 export const mbOn = (setting) => mbFeatures() && app.settings[setting] !== false;
+// Skip live tracks and demos (Settings › Playback): on where it's been
+// turned on, or, where the player has the MusicBrainz features, unless
+// it's been turned off (as it was on to begin with, with those).
+export const skipLiveOn = () => app.settings.skipLive === true || mbOn('mbSkipLive');
 
 export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup } from './releases.js';
 export const KIND_NAMES = Object.fromEntries(RELEASE_KINDS);
@@ -132,13 +139,14 @@ const MB_WAIT = 1500; // how long picking waits on the player for albums it does
 
 // Of tracks picked for you, those that aren't live or demos (with Skip live
 // tracks and demos on): by their title, and their album's kind, Plex's
-// (plex.js albumTypes) or else MusicBrainz's (those it doesn't know yet go
-// by their title this time, and are looked up for next time). If that
-// would leave fewer than `keep` (an artist with nothing but live albums),
-// they're all kept. (Tracks as the app has them, or as Plex lists them.)
+// (plex.js albumTypes) or else, with the MusicBrainz features,
+// MusicBrainz's (those it doesn't know yet go by their title this time,
+// and are looked up for next time). If that would leave fewer than `keep`
+// (an artist with nothing but live albums), they're all kept. (Tracks as
+// the app has them, or as Plex lists them.)
 const albumOf = (t) => String(t?.albumId ?? t?.parentRatingKey ?? '');
 export async function withoutLiveOrDemos(tracks, { server = app.server, keep = 1 } = {}) {
-  if (!mbOn('mbSkipLive') || !tracks.length || !server) return tracks;
+  if (!skipLiveOn() || !tracks.length || !server) return tracks;
   const albums = new Map(); // album id -> { artist, title, year }, of a track of it
   for (const t of tracks) {
     const id = albumOf(t);
@@ -154,7 +162,7 @@ export async function withoutLiveOrDemos(tracks, { server = app.server, keep = 1
     // (Not Various Artists': theirs is everyone's, and MusicBrainz has too
     // many to look through.)
     if (k) kinds.set(id, k);
-    else if (types[i] && artist && title && norm(artist) !== 'various artists') ask.push({ id, artist, title, year });
+    else if (mbFeatures() && types[i] && artist && title && norm(artist) !== 'various artists') ask.push({ id, artist, title, year });
   });
   if (ask.length) {
     const groups = await albumsOnMB(ask, { wait: MB_WAIT }).catch(() => []);

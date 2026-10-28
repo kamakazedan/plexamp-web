@@ -2,7 +2,8 @@
 // (mb.js): each on or off (for you, on all your devices where settings
 // follow your account), which kinds of an artist's missing albums are
 // shown, and for the server's owner, a look through the library for the
-// years and genres to fix in Plex (mbreview.js).
+// years and genres to fix in Plex (mbreview.js). (Skip live tracks and
+// demos, which these add to, is in Settings › Playback, for everyone.)
 import { app, saveSettings } from '../state.js';
 import { dropCached } from '../router.js';
 import { h, backHeader, row, toggleRow, sheet } from '../ui.js';
@@ -67,13 +68,6 @@ export async function musicbrainzSettingsView({ el }) {
       'div.rows',
       null,
       toggleRow({
-        title: 'Skip live tracks and demos',
-        subtitle:
-          'Leaves them out of what the app picks for you: radio and stations, shuffling an artist or your library, and Guest DJs. Albums and playlists you play yourself play as they are. By their album’s kind (Plex’s, or MusicBrainz’s where Plex hasn’t one) and their title, like “(Live)” or “- Demo”.',
-        checked: s.mbSkipLive !== false,
-        onChange: set('mbSkipLive'),
-      }),
-      toggleRow({
         title: 'Missing albums on artist pages',
         subtitle: 'An artist’s albums, EPs and singles that MusicBrainz has and your library hasn’t, under Not in your library on their page, to download or copy.',
         checked: s.mbMissingAlbums !== false,
@@ -88,6 +82,7 @@ export async function musicbrainzSettingsView({ el }) {
       }),
     ),
     h('p.hint.pad', null, 'An artist who isn’t found by their name (importing a playlist, checking Missing tracks again) is looked for by the other names MusicBrainz has for them too: other spellings and scripts, what they were called before.'),
+    h('p.hint.pad', null, 'Skip live tracks and demos (in Settings › Playback) goes by MusicBrainz too, for an album Plex hasn’t said the kind of. What’s in your library is shown as Plex has it: MusicBrainz never changes which kind an album is.'),
     admin
       ? h(
           'div',

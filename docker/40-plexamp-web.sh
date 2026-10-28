@@ -26,11 +26,12 @@
 #                       checks. (MUSICBRAINZ, from 0.12.0: "false" still
 #                       turns them off; "true" alone means musicbrainz.org.)
 #   MUSICBRAINZ_ADVANCED "true" turns on the app's MusicBrainz features, with
-#                       MUSICBRAINZ_URL: live tracks and demos left out of
-#                       what the app picks, albums missing from artists'
-#                       pages, original release years, other names for
-#                       artists, genres where Plex has none (off by default:
-#                       they ask MusicBrainz a lot more, best with your own)
+#                       MUSICBRAINZ_URL: albums missing from artists' pages,
+#                       original release years, other names for artists,
+#                       genres where Plex has none, MusicBrainz's kind for
+#                       albums Plex hasn't typed (Skip live tracks and demos)
+#                       (off by default: they ask MusicBrainz a lot more,
+#                       best with your own; nothing else needs them)
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends
 #                       (on by default)
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
@@ -550,7 +551,9 @@ AI_ON=false
 if [ -n "${OLLAMA_URL:-}" ]; then
     prepare_upstream OLLAMA_URL "$OLLAMA_URL"
     MODEL="${OLLAMA_MODEL:-}"
-    # (The model's name goes into the app's config.js as it is.)
+    # (The model's name goes into the service's config, and is told only to
+    # those the model is for: never in the app's config.js, which anyone
+    # can read before signing in.)
     whole "$MODEL" '^[A-Za-z0-9._:/@+-]{0,200}$' || fail "OLLAMA_MODEL has unexpected characters (got: $(printf '%s' "$MODEL" | tr -c 'A-Za-z0-9._:/@+-' '?'))"
     KEY="${OLLAMA_API_KEY:-}"
     whole "$KEY" '^[A-Za-z0-9._~+/=-]*$' || fail "OLLAMA_API_KEY has unexpected characters"
@@ -596,7 +599,7 @@ CONF
             ai_location tags GET
             echo 'location ^~ /ollama/ { return 404; }'
         } >"$AI_CONF"
-        add_config "ai: { proxy: \"ollama/\", model: \"$MODEL\" }"
+        add_config 'ai: { proxy: "ollama/" }'
         say "sharing the AI model ${MODEL:-"(the first one installed)"} from $(safe_url "$OLLAMA_URL") with $AUTH_DESC"
         [ -n "$MODEL" ] || say "OLLAMA_MODEL isn't set, so the first model installed on the AI server is used. Set it to choose the model."
     else

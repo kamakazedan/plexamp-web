@@ -52,9 +52,11 @@ export const aiWaitMinutes = () => {
 };
 export const sharedAI = () => (app.config.ai?.proxy ? app.config.ai : null);
 
-// The shared model's name, once the container has said it (when it's the
-// first one installed rather than one set with OLLAMA_MODEL).
+// The shared model's name, once the container has said it (its status, or
+// an answer: it's told only to those the model is for, so it isn't in the
+// app's config).
 let sharedName = '';
+export const sharedModelName = () => sharedName;
 
 // Which Ollama to use, or null when there's none (or AI is off here): this
 // device's own, when that's chosen (Settings › AI), or else the shared
@@ -74,7 +76,7 @@ export function aiTarget(settings = aiSettings()) {
   if (app.auth?.token) headers['X-Plex-Token'] = app.auth.token;
   if (app.source?.token && app.source.token !== app.auth?.token && !skipServerToken) headers['X-Plex-Server-Token'] = app.source.token;
   const base = new URL(shared.proxy, location.href).toString().replace(/\/+$/, '');
-  return { kind: 'shared', base, model: shared.model || sharedName, headers };
+  return { kind: 'shared', base, model: sharedName, headers };
 }
 
 // Whether the shared model is known not to be for this Plex account (the
@@ -119,7 +121,11 @@ on('source', () => {
   allowed = null;
   changed();
 });
-on('signout', () => (allowed = null));
+// (The shared model's name too: it's for whoever's signed in, if anyone.)
+on('signout', () => {
+  allowed = null;
+  sharedName = '';
+});
 on('settings', changed);
 
 // The shared model: { model, ready, problem } (nothing else about the AI
