@@ -5667,3 +5667,26 @@ body.in-together .pb-art::after {
 .link-btn.danger:hover {
   color: #ffb4a8;
 }
+
+/* ---------- MusicBrainz features (mb.js) ---------- */
+
+/* An album's page: when it first came out, under its year. */
+.hero-first {
+  margin-top: 2px;
+}
+
+/* An artist's page: Not in your library, by kind. */
+.mb-missing-head {
+  margin: 16px 0 6px;
+  color: var(--muted);
+  font-size: calc(14px * var(--fs, 1));
+  font-weight: 700;
+}
+
+.mb-missing-row .row-sub {
+  color: var(--faint);
+}
+
+.mb-missing-actions {
+  margin-top: 12px;
+}

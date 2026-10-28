@@ -13,6 +13,10 @@ config.js. Settings come from the environment:
                      wsonly sections are skipped without it)
     APP_URL_BIG      app on a mock Plex server started with --big 3000, and
     MOCK_PLEX_BIG    that server (the memory section is skipped without them)
+    APP_URL_MB       app with MUSICBRAINZ_ADVANCED=true, on the mock's
+                     MusicBrainz, SYNC_SETTINGS=false and
+                     SYNC_MISSING_TRACKS=false (the mb section is skipped
+                     without it)
     MOCK_PLEX        mock Plex server, e.g. http://127.0.0.1:32400
     PLEX_LOGIN_URL   server address to sign in with; empty to use the
                      container's /pms proxy
@@ -28,7 +32,7 @@ and t3 (Alex, a friend without access).
 Sections: core ws ai dj djs nows blocked poll wsonly custom desktop nav library edit
 lists pictures missing files sharing routes privacy np stream cast ratings
 devices fades together settings home formats select spotify debug sync
-missingsync memory (default: all).
+missingsync mb memory (default: all).
 """
 
 import json
@@ -49,6 +53,7 @@ APP = os.environ.get('APP_URL', 'http://127.0.0.1:8081/')
 APP_NOWS = os.environ.get('APP_URL_NOWS', 'http://127.0.0.1:8082/')
 APP_DEBUG = os.environ.get('APP_URL_DEBUG', '')
 APP_BIG = os.environ.get('APP_URL_BIG', '')
+APP_MB = os.environ.get('APP_URL_MB', '')
 MOCK_BIG = os.environ.get('MOCK_PLEX_BIG', '').rstrip('/')
 MOCK = os.environ.get('MOCK_PLEX', 'http://127.0.0.1:32400').rstrip('/')
 LOGIN_URL = os.environ.get('PLEX_LOGIN_URL', '')
@@ -6636,6 +6641,222 @@ with sync_playwright() as pw:
         check('missingsync: with SYNC_MISSING_TRACKS=false, nothing goes to the player, and the list says it\'s this device\'s',
               not asked and 'kept on this device' in local_lede and local.locator('.missing-lede ~ .rows label').count() == 0, f'{asked} {local_lede}')
         local_ctx.close()
+
+    # ---------- mb: the MusicBrainz features (MUSICBRAINZ_ADVANCED) ----------
+    if run('mb') and APP_MB:
+        mock('/__mock/musicbrainz?reset=1')
+        mock('/__mock/edits?reset=1')
+        edits = lambda: mock('/__mock/edits')['MediaContainer']['edits']
+        named = {a['title']: a for a in mock('/library/sections/1/all?type=8&X-Plex-Container-Size=100&X-Plex-Token=t')['MediaContainer']['Metadata']}
+        albums_of = lambda: {a['title']: a for a in mock('/library/sections/1/all?type=9&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata']}
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'mb')
+        login(page, APP_MB)
+        group = lambda g: page.locator(f'.view section[data-group="{g}"] .card-title').all_inner_texts()
+        missing = lambda kind: page.locator(f'.view .mb-missing-kind[data-kind="{kind}"] .row-title').all_inner_texts()
+
+        def artist_page(name, until='.view .mb-missing'):
+            page.goto(APP_MB + '#/')
+            page.goto(APP_MB + f"#/artist/{named[name]['ratingKey']}")
+            page.wait_for_selector(until, timeout=20000)
+
+        # Settings › MusicBrainz, where the player has them: each on to begin
+        # with, and for the server's owner, the years and genres to fix.
+        page.goto(APP_MB + '#/settings')
+        page.locator('a.row[href="#/settings/musicbrainz"]').click()
+        page.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
+        shot(page, 'mb-01-settings')
+        on = [page.locator('label.toggle-row', has_text=t).locator('input').is_checked() for t in ('Skip live tracks and demos', 'Missing albums on artist pages', 'Original release years')]
+        kinds_now = page.locator('.mb-kinds-row .row-sub').inner_text()
+        check('mb: Settings › MusicBrainz, each on to begin with, the missing albums\' kinds, and for the owner, the years and genres to fix',
+              on == [True, True, True] and kinds_now == 'Albums, Singles & EPs, Compilations, Soundtracks, Remixes'
+              and page.locator('a.row[href="#/settings/mbreview"]').count() == 1, f'{on} {kinds_now}')
+
+        # An artist's page: their albums the library hasn't (of the kinds
+        # chosen), each linked to MusicBrainz.
+        artist_page('Glass Harbour')
+        shot(page, 'mb-02-artist')
+        links = page.locator('.view .mb-missing-row').evaluate_all('rs => rs.map((r) => [r.getAttribute("href"), r.getAttribute("rel"), r.getAttribute("target")])')
+        heads = [t.upper() for t in page.locator('.view .block h2').all_inner_texts()]
+        check('mb: an artist\'s page lists their albums MusicBrainz has and the library hasn\'t, by kind, after their own (none of theirs, nor live albums or demos)',
+              missing('Albums') == ['Sea Glass'] and missing('Singles & EPs') == ['Undertow'] and page.locator('.view .mb-missing-kind').count() == 2
+              and 'NOT IN YOUR LIBRARY' in heads and heads.index('NOT IN YOUR LIBRARY') > heads.index('SINGLES & EPS') and heads.index('NOT IN YOUR LIBRARY') < heads.index('SIMILAR ARTISTS'),
+              f'{missing("Albums")} {missing("Singles & EPs")} {heads}')
+        check('mb: ...each opening MusicBrainz in a tab of its own, without saying where from',
+              links and all(h.startswith('https://musicbrainz.org/release-group/') and 'noreferrer' in (r or '') and t == '_blank' for h, r, t in links), str(links))
+        page.click('.view .mb-kinds-btn')
+        page.wait_for_selector('.sheet.open label.toggle-row:has-text("Demos")')
+        page.locator('.sheet.open label.toggle-row', has_text='Demos').locator('input').click()
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        page.wait_for_selector('.view .mb-missing-kind[data-kind="Demos"]', timeout=5000)
+        demos = missing('Demos')
+        saved = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.mbMissingKinds)")
+        check('mb: ...of the kinds chosen there (Kinds…), straight away', demos == ['Early Tapes'] and 'demos' in saved, f'{demos} {saved}')
+        with page.expect_download() as dl:
+            page.click('.view .mb-missing-csv')
+        csv_text = open(dl.value.path(), encoding='utf-8-sig').read()
+        check('mb: ...and downloaded, all of them, with their MusicBrainz release groups', dl.value.suggested_filename.startswith('missing-albums-Glass-Harbour-')
+              and all(t in csv_text for t in ('Sea Glass', 'Undertow', 'Early Tapes', 'musicbrainz.org/release-group/')) and 'Tidal Lines' not in csv_text, csv_text[:300])
+        settings(page, {'mbMissingKinds': ['albums', 'singles', 'compilations', 'soundtracks', 'remixes']})
+
+        # An album Plex hasn't typed: grouped by MusicBrainz's kind for it,
+        # and, live, left out of a shuffle of the artist.
+        mock('/__mock/add-album?title=Harbour%20Lights%20Live&untyped=1')
+        artist_page('Glass Harbour', '.view section[data-group="Live albums"]')
+        live_group = group('Live albums')
+        page.locator('.view .hero-actions button[aria-label="Shuffle"]').click()
+        wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+        shuffled = player(page, 'p.queue.map((t) => t.album)')
+        player(page, 'p.pause()')
+        check('mb: an album Plex hasn\'t typed is grouped by MusicBrainz\'s kind, and as a live album, left out of a shuffle of the artist',
+              live_group == ['Harbour Lights Live'] and 'Harbour Lights Live' not in group('Albums') and shuffled and 'Harbour Lights Live' not in shuffled and 'Tidal Lines' in shuffled,
+              f'{live_group} {group("Albums")} {sorted(set(shuffled or []))}')
+
+        # Live tracks and demos left out of what the app picks for you, by
+        # their album's kind (Plex's) or their title; not with it off.
+        def shuffle_artist(name):
+            artist_page(name, '.view section[data-group="Live albums"]')
+            page.locator('.view .hero-actions button[aria-label="Shuffle"]').click()
+            wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+            got = player(page, 'p.queue.map((t) => t.album)')
+            player(page, 'p.pause()')
+            return set(got or [])
+        skipped = shuffle_artist('Marisol Vega')
+        settings(page, {'mbSkipLive': False})
+        kept = shuffle_artist('Marisol Vega')
+        settings(page, {'mbSkipLive': True})
+        titles = js(page, """() => import('./js/mb.js').then((m) => ['Song (Live)', 'Song - Live at the Fillmore', '[Live] Song', 'Live at Budokan', 'Song (Demo)', 'Song - Early Demo',
+            'Song (Rough Mix)', 'Live in the Moment', 'Live Wire', 'Alive', 'Demolition'].map(m.liveOrDemoTitle))""")
+        check('mb: Skip live tracks and demos: a shuffle of the artist leaves their live album out (not with it off)',
+              skipped == {'Noches de Cobre'} and kept == {'Noches de Cobre', 'Live at the Lantern'}, f'{skipped} {kept}')
+        check('mb: ...as it does tracks whose titles say they\'re live or demos', titles == [True] * 7 + [False] * 4, str(titles))
+
+        # Original release years: when an album first came out, where that's
+        # earlier than the year Plex has (a reissue's).
+        def hearthstone_year():
+            c = page.locator('.view section[data-group="Albums"] .card', has_text='Hearthstone')
+            return c.locator('.card-sub').inner_text() if c.count() else ''
+        artist_page('Juniper & Ash', '.view section[data-group="Albums"] .card')
+        wait_for(lambda: hearthstone_year() == '1998', 10, 0.3)
+        first_year = hearthstone_year()
+        page.locator('.view section[data-group="Albums"] .card', has_text='Hearthstone').locator('.card-title').click()
+        page.wait_for_selector('.hero-album')
+        page.wait_for_selector('.hero-first:not([hidden])', timeout=10000)
+        first_line = page.locator('.hero-first').inner_text()
+        shot(page, 'mb-03-album')
+        settings(page, {'mbOriginalYears': False})
+        artist_page('Juniper & Ash', '.view section[data-group="Albums"] .card')
+        page.wait_for_timeout(1500)
+        plex_year = hearthstone_year()
+        page.goto(APP_MB + f"#/album/{albums_of()['Hearthstone']['ratingKey']}")
+        page.wait_for_selector('.hero-album')
+        page.wait_for_timeout(1500)
+        no_line = page.locator('.hero-first:not([hidden])').count() == 0
+        settings(page, {'mbOriginalYears': True})
+        check('mb: Original release years: an artist\'s album with the year it first came out, and its page says so (not with it off)',
+              first_year == '1998' and first_line == 'First released in 1998' and plex_year == '2015' and no_line, f'{first_year} {first_line!r} {plex_year} {no_line}')
+        artist_page('Northbound Static', '.view section[data-group="Albums"] .card')
+        page.wait_for_timeout(1500)
+        interference = page.locator('.view section[data-group="Albums"] .card', has_text='Interference').locator('.card-sub').inner_text()
+        check('mb: ...an album of a title the artist has another of keeps the year Plex has (2016, not the other\'s 2009)', interference == '2016', interference)
+
+        # Other names: an artist not found by their name is looked for by
+        # the others MusicBrainz has for them (not without the features).
+        match = """() => import('./js/playlistio.js').then((m) => m.matchEntries([{ artist: 'Нортбаунд Статик', title: 'Signal Fires' }]).then((r) => r.map((x) => x && x.grandparentTitle)))"""
+        by_alias = js(page, match)
+        plain = browser.new_context(**MOBILE)
+        plain_page = plain.new_page()
+        attach(plain_page, 'mb-plain')
+        login(plain_page, APP)
+        without = js(plain_page, match)
+        check('mb: other names: an import finds an artist by the name MusicBrainz has for them in another script (not without the features)',
+              by_alias == ['Northbound Static'] and without == [None], f'{by_alias} {without}')
+        plain_page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
+        plain_page.wait_for_selector('.view section[data-similar=sonic]', timeout=10000)
+        plain_page.goto(APP + '#/settings')
+        plain_page.wait_for_selector('a.row[href="#/settings/ai"]')
+        check('mb: ...and without them, no MusicBrainz in Settings, nor missing albums on artist pages',
+              plain_page.locator('a.row[href="#/settings/musicbrainz"]').count() == 0, plain_page.url)
+        plain.close()
+
+        # For the server's owner: the years and genres to fix, in Plex,
+        # locked, with Undo.
+        tidal = albums_of()['Tidal Lines']['ratingKey']
+        mock(f'/__mock/config?nogenre={tidal}')
+        try:
+            page.goto(APP_MB + '#/settings/mbreview')
+            page.wait_for_selector('.mb-year-row:has-text("Hearthstone")', timeout=30000)
+            page.wait_for_selector('.mb-genre-row:has-text("Tidal Lines")', timeout=30000)
+            shot(page, 'mb-04-review')
+            year_line = page.locator('.mb-year-row', has_text='Hearthstone').inner_text()
+            page.locator('.mb-year-row', has_text='Hearthstone').locator('button').click()
+            wait_for(lambda: edits(), 10, 0.3)
+            fixed = edits()[-1]['q']
+            page.locator('.toast-action', has_text='Undo').last.click()
+            wait_for(lambda: len(edits()) >= 2, 10, 0.3)
+            undone = edits()[-1]['q']
+            check('mb: years to fix: Use 1998 changes the album\'s year in Plex, locked, and Undo puts it back, unlocked',
+                  '2015 in Plex, 1998 on MusicBrainz' in year_line and fixed.get('year.value') == '1998' and fixed.get('year.locked') == '1'
+                  and fixed.get('originallyAvailableAt.value') == '1998-03-01' and undone.get('year.value') == '2015' and undone.get('year.locked') == '0', f'{year_line!r} {fixed} {undone}')
+            years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
+            check('mb: ...an album of a title the artist has another of is matched by the year Plex has (Interference, 2016, isn\'t the 2009 one)',
+                  'Interference' not in years_listed and 'Hearthstone' in years_listed, str(years_listed))
+            page.locator('.mb-genre-row', has_text='Tidal Lines').locator('button').click()
+            wait_for(lambda: len(edits()) >= 3, 10, 0.3)
+            added = edits()[-1]['q']
+            page.locator('.toast-action', has_text='Undo').last.click()
+            wait_for(lambda: len(edits()) >= 4, 10, 0.3)
+            taken = edits()[-1]['q']
+            check('mb: genres to fix: Add gives an album without any MusicBrainz\'s, locked, and Undo takes them off again',
+                  added.get('genre[0].tag.tag') == 'Ambient' and added.get('genre[1].tag.tag') == 'Downtempo' and added.get('genre.locked') == '1'
+                  and urllib.parse.unquote(taken.get('genre[].tag.tag-', '')) == 'Ambient,Downtempo', f'{added} {taken}')
+            # Fix all, and Undo for all of them.
+            before = len(edits())
+            fixing = len(years_listed)
+            page.click('.mb-fix-years')
+            page.locator('.sheet.open button', has_text='Fix them').click()
+            wait_for(lambda: len(edits()) >= before + fixing, 15, 0.3)
+            all_fixed = edits()[before:]
+            page.wait_for_selector('.mb-undo-all', timeout=5000)
+            undo_button = page.locator('.mb-undo-all').inner_text()
+            page.locator('.toast-action', has_text='Undo').last.click()
+            wait_for(lambda: len(edits()) >= before + 2 * fixing, 15, 0.3)
+            all_back = edits()[before + fixing:]
+            page.wait_for_selector('.mb-undo-all', state='detached', timeout=5000)
+            check('mb: Fix all changes each in Plex, and its Undo (in a toast, and on the page till it\'s used) puts them all back',
+                  f'Undo the last {fixing} fixes' in undo_button and len(all_fixed) == fixing and all(e['q'].get('year.locked') == '1' for e in all_fixed)
+                  and len(all_back) == fixing and all(e['q'].get('year.locked') == '0' for e in all_back) and {e['id'] for e in all_back} == {e['id'] for e in all_fixed},
+                  f'{fixing} {all_fixed} {all_back}')
+            with page.expect_download() as dl:
+                page.locator('.mb-review-actions button', has_text='Download').click()
+            review_csv = open(dl.value.path(), encoding='utf-8-sig').read()
+            check('mb: ...and the list downloads, with each album\'s MusicBrainz release group (for Picard or beets)',
+                  'Hearthstone' in review_csv and 'Tidal Lines' in review_csv and 'musicbrainz.org/release-group/' in review_csv, review_csv[:300])
+        finally:
+            mock('/__mock/config?nogenre=')
+
+        # A friend: the features, but not the years and genres to fix.
+        friend = browser.new_context(**MOBILE)
+        fpage = friend.new_page()
+        attach(fpage, 'mb-friend')
+        login(fpage, APP_MB, 't2')
+        fpage.goto(APP_MB + '#/settings/musicbrainz')
+        fpage.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
+        no_row = fpage.locator('a.row[href="#/settings/mbreview"]').count() == 0
+        fpage.goto(APP_MB + '#/settings/mbreview')
+        fpage.wait_for_selector('.view .empty-state', timeout=10000)
+        told = fpage.locator('.view .empty-state').inner_text()
+        check('mb: a friend has the features but not the years and genres to fix (that\'s for the server\'s owner)', no_row and 'owner' in told, told)
+        friend.close()
+
+        # What went to MusicBrainz: artists' names, never an album's title.
+        asked = [urllib.parse.unquote_plus(a) for a in mock('/__mock/musicbrainz')['MediaContainer']['asked']]
+        check('mb: only artists\' names went to MusicBrainz, never an album\'s title',
+              asked and any('Glass Harbour' in a for a in asked) and not any(t in a for a in asked for t in ('Sea Glass', 'Tidal Lines', 'Hearthstone', 'Harbour Lights Live')),
+              str(asked[:6]))
+        ctx.close()
 
     # ---------- memory: a big library ----------
     # Waits here poll with evaluate() rather than using locators or

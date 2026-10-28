@@ -23,6 +23,8 @@ import {
   pointOut,
   learned,
   sheet,
+  download,
+  fileDate,
 } from '../ui.js';
 import { albumCard, artistCard, trackRow, numberedList, collectionCard, playlistArt } from '../components.js';
 import { sharingOn, freshShares, shareOf, syncShare, sharedPlaylistChanged, sharedMark, stopSharing, leaveShared } from '../sharing.js';
@@ -45,6 +47,9 @@ import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
+import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, RELEASE_KINDS, KIND_NAMES } from '../mb.js';
+import { chooseMissingKinds, missingKinds } from './mbsettings.js';
+import { copyText, toCsv } from '../missing.js';
 import { clearSelection } from '../selection.js';
 import { sortChoices, sortedOrder, restoreOrder, saveOrder } from '../sorting.js';
 
@@ -102,6 +107,8 @@ function codecBadge(tracks) {
 
 // ---------- Album ----------
 
+const FIRST_WAIT = 3000; // ms the player may wait on MusicBrainz for when an album first came out
+
 export async function albumView({ el, params }) {
   const s = app.server;
   const [album, children] = await Promise.all([s.metadata(params.id), s.children(params.id)]);
@@ -114,6 +121,10 @@ export async function albumView({ el, params }) {
   const meta = [year(album), genre].filter(Boolean).join(', ');
   const badge = codecBadge(tracks);
   const popular = popularIds(tracks);
+  // When it first came out, where MusicBrainz says that was before the year
+  // Plex has (a remaster's or a reissue's): with Original release years,
+  // and the player's MusicBrainz features (mb.js).
+  const first = h('div.hero-meta.hero-first', { hidden: true });
 
   el.append(
     head,
@@ -127,6 +138,7 @@ export async function albumView({ el, params }) {
         title,
         album.parentRatingKey ? h('a.hero-link', { href: `#/artist/${album.parentRatingKey}` }, album.parentTitle) : h('div.hero-link', null, album.parentTitle),
         meta || badge ? h('div.hero-meta', null, meta, badge) : null,
+        first,
         actionButtons([
           { icon: 'play', label: 'Play', primary: true, onClick: () => playAlbum(album, { tracks }) },
           { icon: 'shuffle', label: 'Shuffle', onClick: () => playAlbum(album, { tracks, shuffle: true }) },
@@ -166,6 +178,18 @@ export async function albumView({ el, params }) {
   );
   if (album.summary) el.append(h('section.block.about', null, sectionHeader('About this album'), h('div.pad', null, clampText(album.summary, 4))));
 
+  if (mbOn('mbOriginalYears') && album.parentTitle && norm(album.parentTitle) !== 'various artists') {
+    albumsOnMB([{ artist: album.parentTitle, title: album.title, year: Number(year(album)) || null }], { wait: FIRST_WAIT })
+      .then(([g]) => {
+        const was = firstYear(g && typeof g === 'object' ? g : null);
+        const own = Number(year(album)) || null;
+        if (!was || (own && was >= own)) return;
+        first.textContent = `First released in ${was}`;
+        first.hidden = false;
+      })
+      .catch(() => {});
+  }
+
   if (album.parentRatingKey) {
     s.children(album.parentRatingKey)
       .then((others) => {
@@ -180,29 +204,16 @@ export async function albumView({ el, params }) {
 
 // ---------- Artist ----------
 
-// The kinds of release on an artist's page, in this order: Plex's release
-// types (from MusicBrainz, as Plexamp shows them), its Format the main one
-// (album, EP, single) and its Subformat what else it is (live, a
-// compilation...). Albums are a grid, the rest shelves.
-const GROUP_ORDER = ['Albums', 'Singles & EPs', 'Live albums', 'Compilations', 'Soundtracks', 'Remixes', 'DJ mixes', 'Mixtapes', 'Demos'];
+// The kinds of release on an artist's page, in this order (releases.js
+// RELEASE_KINDS: Albums, Singles & EPs, Live albums, Compilations...): Plex's
+// release types (from MusicBrainz, as Plexamp shows them), its Format the
+// main one (album, EP, single) and its Subformat what else it is (live, a
+// compilation...); with the player's MusicBrainz features, MusicBrainz's own
+// for an album Plex hasn't typed. Albums are a grid, the rest shelves.
 
-const tagsOf = (v) => (Array.isArray(v) ? v.map((t) => t?.tag) : [v]).filter((t) => typeof t === 'string' && t).join(' ').toLowerCase();
 // Whether Plex said what kind of release it is.
-const typed = (m) => !!(tagsOf(m.Format) || tagsOf(m.Subformat) || tagsOf(m.format) || tagsOf(m.subformat));
-
-export function albumGroup(m) {
-  const sub = tagsOf(m.Subformat) || tagsOf(m.subformat);
-  const format = tagsOf(m.Format) || tagsOf(m.format);
-  if (sub.includes('compilation')) return 'Compilations';
-  if (sub.includes('live')) return 'Live albums';
-  if (sub.includes('soundtrack')) return 'Soundtracks';
-  if (sub.includes('remix')) return 'Remixes';
-  if (sub.includes('dj')) return 'DJ mixes';
-  if (sub.includes('mixtape')) return 'Mixtapes';
-  if (sub.includes('demo')) return 'Demos';
-  if (/\b(ep|single)\b/.test(format)) return 'Singles & EPs';
-  return 'Albums';
-}
+const typed = (m) => plexKind(m) !== null;
+export const albumGroup = (m) => KIND_NAMES[plexKind(m) || 'albums'];
 
 // Albums with their release types: Plex's listing of an artist's albums
 // leaves them out, so they're looked up (plex.js albumTypes: 40 albums to a
@@ -264,11 +275,20 @@ const tagKey = (t) => (t?.id != null ? String(t.id) : t?.filter ? String(t.filte
 
 const SHELF_ARTISTS = 20;
 const ALL_ARTISTS = 60;
+const MISSING_SHOWN = 50; // of each kind, on an artist's page
+
+// An artist's MusicBrainz id, where Plex has it (its Guid, asked for with
+// includeGuids).
+const mbidOf = (artist) =>
+  (Array.isArray(artist?.Guid) ? artist.Guid : [])
+    .map((g) => String(g?.id || ''))
+    .find((g) => /^mbid:\/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(g))
+    ?.slice(7) || null;
 
 export async function artistView({ el, params }) {
   const s = app.server;
   const sec = app.source.sectionKey;
-  const artist = await s.metadata(params.id);
+  const artist = await s.metadata(params.id, mbFeatures() ? { includeGuids: 1 } : undefined);
   if (!artist) throw Object.assign(new Error('Not found'), { status: 404 });
 
   const head = backHeader(artist.title, { collapse: true, actions: iconButton('more', 'More options', () => artistMenu(artist)) });
@@ -298,9 +318,10 @@ export async function artistView({ el, params }) {
 
   const popularSlot = h('div');
   const albumsBox = h('div.artist-albums');
+  const missingBox = h('div.artist-missing');
   const similarSlot = h('div');
   const sonicSlot = h('div');
-  el.append(popularSlot, albumsBox, similarSlot, sonicSlot);
+  el.append(popularSlot, albumsBox, missingBox, similarSlot, sonicSlot);
   // Its styles, each opening the library's artists of that style.
   const styles = (artist.Style || []).filter((t) => t?.tag && tagKey(t));
   if (styles.length) {
@@ -348,38 +369,159 @@ export async function artistView({ el, params }) {
     popularSlot.replaceWith(h('section.block', null, sectionHeader('Popular tracks'), list, more));
   });
 
-  // Their albums by kind: Plex's listing doesn't say which kind each is,
-  // so the kinds are looked up (see releaseTypes). For most artists that's
-  // one request, waited for; a big discography is shown as it is, and
-  // grouped again once they're in.
+  // What MusicBrainz says of them, with the player's MusicBrainz features
+  // (mb.js), where it's wanted: their release groups, for when their albums
+  // first came out (Original release years) and those the library hasn't
+  // (Missing albums on artist pages). (Not for Various Artists: theirs is
+  // no one's discography.)
+  const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums')) && norm(artist.title) !== 'various artists';
+  const mbP = wantMB ? artistOnMB(artist.title, { id: mbidOf(artist) }).catch(() => null) : Promise.resolve(null);
+
+  // Their albums by kind, each with its year (when it first came out, with
+  // Original release years, where MusicBrainz says that was earlier than
+  // the year Plex has), newest first. Plex's listing doesn't say which kind
+  // each is, so the kinds are looked up (see releaseTypes). For most
+  // artists that's one request, waited for, as MusicBrainz is (the player
+  // keeps what it says); a big discography, or a first look on
+  // MusicBrainz, is shown as it is, and again once they're in.
+  const placed = (albums, mb) => {
+    const groups = mb?.groups || [];
+    const origin = mbOn('mbOriginalYears');
+    return albums.map((m) => {
+      const plex = plexKind(m);
+      const own = Number(year(m)) || null;
+      const g = groups.length ? matchGroup(groups, m.title, plex, own) : null;
+      const was = origin ? firstYear(g) : null;
+      return { m, g, kind: plex || (g ? kindOf(g.primary, g.secondary) : 'albums'), year: was && (!own || was < own) ? was : own };
+    });
+  };
   let painted = '';
-  const paintAlbums = (albums) => {
-    const sorted = albums.slice().sort((a, b) => (year(b) || 0) - (year(a) || 0));
-    const groups = new Map();
-    for (const m of sorted) {
-      const g = albumGroup(m);
-      if (!groups.has(g)) groups.set(g, []);
-      groups.get(g).push(m);
+  const paintAlbums = (albums, mb) => {
+    paintMissing(albums, mb);
+    const list = placed(albums, mb).sort((a, b) => (b.year || 0) - (a.year || 0));
+    const kinds = new Map();
+    for (const x of list) {
+      if (!kinds.has(x.kind)) kinds.set(x.kind, []);
+      kinds.get(x.kind).push(x);
     }
     // (Grouped as they were: left as they are, so what has focus keeps it.)
-    const shape = JSON.stringify([...groups].map(([g, list]) => [g, list.map((m) => [m.ratingKey, year(m)])]));
+    const shape = JSON.stringify([...kinds].map(([k, xs]) => [k, xs.map((x) => [x.m.ratingKey, x.year])]));
     if (shape === painted) return;
     painted = shape;
-    const blocks = GROUP_ORDER.filter((g) => groups.has(g)).map((g) => {
-      const cards = groups.get(g).map((m) => albumCard(m, { subtitle: year(m) || '' }));
-      if (g === 'Albums') return h('section.block', { dataset: { group: g } }, sectionHeader(g), grid(cards, { centered: true }));
+    const blocks = RELEASE_KINDS.filter(([k]) => kinds.has(k)).map(([k, name]) => {
+      const cards = kinds.get(k).map((x) => albumCard(x.m, { subtitle: x.year ? String(x.year) : '' }));
+      if (k === 'albums') return h('section.block', { dataset: { group: name } }, sectionHeader(name), grid(cards, { centered: true }));
       const strip = shelf(cards);
-      return h('section.block', { dataset: { group: g } }, sectionHeader(g, null, null, strip), strip);
+      return h('section.block', { dataset: { group: name } }, sectionHeader(name, null, null, strip), strip);
     });
     albumsBox.replaceChildren(...(blocks.length ? blocks : [emptyState('No albums for this artist.')]));
   };
+
+  // Not in your library (Missing albums on artist pages): their release
+  // groups on MusicBrainz that none of the library's albums is, of the
+  // kinds chosen (Kinds…), newest first, by kind, each linked to
+  // MusicBrainz; to copy or download, all of them.
+  let missingPainted = '';
+  const paintMissing = (albums, mb) => {
+    const groups = mb?.groups || [];
+    if (!mbOn('mbMissingAlbums') || !groups.length) {
+      missingPainted = '';
+      return missingBox.replaceChildren();
+    }
+    const have = new Set();
+    const titles = new Set();
+    for (const m of albums) {
+      const g = matchGroup(groups, m.title, plexKind(m), Number(year(m)) || null);
+      if (g) have.add(g.id);
+      titles.add(albumKey(m.title));
+    }
+    const chosen = missingKinds();
+    const missing = groups
+      .filter((g) => !have.has(g.id) && !titles.has(albumKey(g.title)) && chosen.includes(kindOf(g.primary, g.secondary)))
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    // (As it was: left as it is, so what has focus keeps it.)
+    const shape = JSON.stringify([chosen, missing.map((g) => g.id)]);
+    if (shape === missingPainted) return;
+    missingPainted = shape;
+    const kindsButton = h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albums, mb)) }, 'Kinds…');
+    const head = sectionHeader('Not in your library', null, kindsButton);
+    if (!missing.length) {
+      missingBox.replaceChildren(h('section.block.mb-missing', null, head, h('p.hint.pad', null, `Your library has all of ${artist.title}’s that MusicBrainz has, of the kinds chosen.`)));
+      return;
+    }
+    const name = (g) => KIND_NAMES[kindOf(g.primary, g.secondary)];
+    const line = (g) => [artist.title, g.title, name(g), firstYear(g)].filter(Boolean).join(' — ');
+    const link = (g) => `https://musicbrainz.org/release-group/${g.id}`;
+    const blocks = RELEASE_KINDS.map(([k, label]) => [label, missing.filter((g) => kindOf(g.primary, g.secondary) === k)])
+      .filter(([, list]) => list.length)
+      .map(([label, list]) =>
+        h(
+          'div.mb-missing-kind',
+          { dataset: { kind: label } },
+          h('h3.mb-missing-head.pad', null, `${label} (${fmt.number(list.length)})`),
+          h(
+            'div.rows',
+            null,
+            list.slice(0, MISSING_SHOWN).map((g) =>
+              h(
+                'a.row.mb-missing-row',
+                { href: link(g), target: '_blank', rel: 'noopener noreferrer' },
+                h('div.row-main', null, h('div.row-title', null, g.title), h('div.row-sub', null, firstYear(g) ? `First released in ${firstYear(g)}` : 'When it came out isn’t known')),
+                icon('external', 20, 'chev'),
+              ),
+            ),
+          ),
+          list.length > MISSING_SHOWN ? h('p.hint.pad', null, `and ${fmt.number(list.length - MISSING_SHOWN)} more (the copy and the download have them all)`) : null,
+        ),
+      );
+    const fileName = `${artist.title.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'artist'}`;
+    missingBox.replaceChildren(
+      h(
+        'section.block.mb-missing',
+        null,
+        head,
+        h(
+          'p.hint.pad',
+          null,
+          `${artist.title}’s releases on MusicBrainz that your library hasn’t, of ${chosen.length === RELEASE_KINDS.length ? 'every kind' : `these kinds: ${RELEASE_KINDS.filter(([k]) => chosen.includes(k)).map(([, label]) => label).join(', ')}`}.`,
+        ),
+        ...blocks,
+        h(
+          'div.pad.button-row.mb-missing-actions',
+          null,
+          h(
+            'button.btn.btn-secondary.mb-missing-copy',
+            { type: 'button', onclick: async () => toast((await copyText(`${missing.map(line).join('\n')}\n`)) ? 'Copied: artist — album — kind — year, one to a line' : 'Couldn’t copy here. Download it instead.') },
+            icon('stack', 20),
+            h('span', null, 'Copy the list'),
+          ),
+          h(
+            'button.btn.btn-secondary.mb-missing-csv',
+            {
+              type: 'button',
+              onclick: () => {
+                const rows = missing.map((g) => [artist.title, g.title, name(g), firstYear(g) || '', g.id, link(g)]);
+                download(toCsv(['Artist', 'Album', 'Kind', 'First released', 'MusicBrainz release group', 'Link'], rows), `missing-albums-${fileName}-${fileDate()}.csv`, 'text/csv;charset=utf-8');
+                toast('Downloaded, to open in a spreadsheet');
+              },
+            },
+            icon('arrowDown', 20),
+            h('span', null, 'Download (CSV)'),
+          ),
+        ),
+      ),
+    );
+  };
+
   const albumsP = s.children(artist.ratingKey).then(async (albums) => {
-    if (!albums.length || albums.some(typed)) return paintAlbums(albums);
-    const typing = releaseTypes(s, albums);
-    const soon = await Promise.race([typing, new Promise((r) => setTimeout(r, TYPES_WAIT))]);
-    if (soon) return paintAlbums(soon);
-    paintAlbums(albums);
-    paintAlbums(await typing);
+    const typing = !albums.length || albums.some(typed) ? null : releaseTypes(s, albums);
+    const soon = await Promise.race([Promise.all([typing || albums, mbP]), new Promise((r) => setTimeout(r, TYPES_WAIT))]);
+    if (soon) return paintAlbums(...soon);
+    // (Shown as it is, then again with each, as it comes.)
+    let now = albums;
+    let mb = null;
+    paintAlbums(now, mb);
+    await Promise.all([typing?.then((got) => paintAlbums((now = got), mb)), mbP.then((got) => got && paintAlbums(now, (mb = got)))]);
   });
 
   // Similar artists (Plex's, those in this library) and sonically similar

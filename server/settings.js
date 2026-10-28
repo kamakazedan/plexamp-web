@@ -58,6 +58,10 @@ export const SYNCED_SETTINGS = Object.freeze({
   quickSkip: 'boolean',
   skipBack: 'number',
   skipForward: 'number',
+  mbSkipLive: 'boolean',
+  mbMissingAlbums: 'boolean',
+  mbMissingKinds: 'kinds', // ['albums', 'singles', ...]
+  mbOriginalYears: 'boolean',
   home: 'layout', // { '*': { order, hidden, options, seen } }
 });
 
@@ -111,6 +115,7 @@ function cleanSetting(kind, v) {
   if (kind === 'number' && typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 1e6) return v;
   if (kind === 'choice' && typeof v === 'string' && CHOICE.test(v)) return v;
   if (kind === 'layout' && v && typeof v === 'object' && !Array.isArray(v)) return cleanValue(v, 0);
+  if (kind === 'kinds' && Array.isArray(v) && v.length <= 12 && v.every((x) => typeof x === 'string' && /^[a-z]{1,20}$/.test(x))) return [...new Set(v)];
   throw unreadable();
 }
 

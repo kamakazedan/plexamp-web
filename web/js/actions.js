@@ -9,6 +9,7 @@ import { sheet, toast, shuffleArray, fmt } from './ui.js';
 import { addToPlaylist, addToCollection, isAdminNow, tracksOf } from './editing.js';
 import { exportPlaylistFile } from './views/playlistfiles.js';
 import { lovedPlaylist, LOVED_TITLE } from './ratings.js';
+import { withoutLiveOrDemos } from './mb.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 const REMOTE_LIMIT = 500; // tracks sent to a Play Together session at once (player.js)
@@ -59,9 +60,12 @@ export const playAlbum = (album, { shuffle = false, start = 0, tracks } = {}) =>
     playList(list, start, ctx(album.title, `/album/${album.ratingKey}`), { shuffle });
   });
 
+// (Shuffled, it's picked for you: without live tracks and demos, where
+// they're skipped: see mb.js.)
 export const playArtist = (artist, { shuffle = false } = {}) =>
   guard(async () => {
-    const list = (await app.server.allLeaves(artist.ratingKey)).map(normTrack);
+    let list = (await app.server.allLeaves(artist.ratingKey)).map(normTrack);
+    if (shuffle) list = await withoutLiveOrDemos(list);
     playList(list, 0, ctx(artist.title, `/artist/${artist.ratingKey}`), { shuffle });
   });
 
@@ -127,7 +131,7 @@ export const artistRadio = (artist) =>
     let tracks = [...own, ...others.flat()];
     if (tracks.length < 10) tracks = tracks.concat(await s.allLeaves(artist.ratingKey));
     const seen = new Set();
-    const list = shuffleArray(tracks.filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey))).map(normTrack);
+    const list = await withoutLiveOrDemos(shuffleArray(tracks.filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey))).map(normTrack), { keep: 10 });
     playList(list, 0, ctx(`${artist.title} radio`, `/artist/${artist.ratingKey}`));
   });
 
@@ -135,7 +139,7 @@ export const artistRadio = (artist) =>
 // tracks replace what's up next; otherwise playback starts from it.
 export const similarRadio = (track) =>
   guard(async () => {
-    const similar = (await app.server.nearest(track.id, { limit: 60 })).filter((m) => m.type === 'track').map(normTrack);
+    const similar = await withoutLiveOrDemos((await app.server.nearest(track.id, { limit: 60 })).filter((m) => m.type === 'track').map(normTrack));
     if (!similar.length) {
       toast('No similar tracks found. Sonic analysis needs to be turned on for this library in Plex.');
       return;
@@ -191,6 +195,8 @@ export const playlistRadio = (pl) =>
     if (!own.length) return toast('That playlist has no tracks to start a radio from.');
     let more = (await Promise.all(pick(own, 8).map((t) => s.nearest(t.ratingKey, { limit: 12 }).catch(() => [])))).flat();
     if (once(more).length < 20) more = more.concat(await tracksFrom(artistsOf(own, 8), 6));
+    // (The playlist's own, as they are; what's added, picked for you.)
+    more = await withoutLiveOrDemos(once(more));
     const list = shuffleArray(once([...pick(own, 40), ...more])).slice(0, 100).map(normTrack);
     playList(list, 0, ctx(`${pl.title} radio`, `/playlist/${pl.ratingKey}`));
   });
@@ -207,13 +213,15 @@ export const favouritesRadio = () =>
     const near = (await Promise.all(artists.slice(0, 4).map((a) => s.nearest(a, { limit: 4 }).catch(() => [])))).flat();
     const alike = [...new Set(near.filter((m) => m.type === 'artist').map((m) => String(m.ratingKey)))].filter((id) => !artists.includes(id)).slice(0, 8);
     const [theirs, others] = await Promise.all([tracksFrom(artists, 6), tracksFrom(alike, 4)]);
-    const list = shuffleArray(once([...pick(loved, 20), ...theirs, ...others])).slice(0, 100).map(normTrack);
+    // (Your favourites, as they are; the rest, picked for you.)
+    const picked = await withoutLiveOrDemos(once([...theirs, ...others]));
+    const list = shuffleArray(once([...pick(loved, 20), ...picked])).slice(0, 100).map(normTrack);
     playList(list, 0, ctx('Favourites radio', `/playlist/${pl.ratingKey}`));
   });
 
 export const shuffleLibrary = () =>
   guard(async () => {
-    const list = (await app.server.randomTracks(app.source.sectionKey, 150)).map(normTrack);
+    const list = await withoutLiveOrDemos((await app.server.randomTracks(app.source.sectionKey, 150)).map(normTrack), { keep: 20 });
     playList(list, 0, ctx(app.source.sectionTitle, '/search'));
   });
 
@@ -224,8 +232,8 @@ export const deepCutsRadio = () =>
   guard(async () => {
     const { items } = await app.server.list(app.source.sectionKey, 10, { sort: 'viewCount:asc', size: 400 });
     const unplayed = items.filter((m) => !m.viewCount);
-    const pool = unplayed.length >= 20 ? unplayed : items;
-    playList(shuffleArray(pool).slice(0, 100).map(normTrack), 0, ctx('Deep cuts radio', null));
+    const pool = await withoutLiveOrDemos(shuffleArray(unplayed.length >= 20 ? unplayed : items).slice(0, 150).map(normTrack), { keep: 20 });
+    playList(pool.slice(0, 100), 0, ctx('Deep cuts radio', null));
   });
 
 // A random decade from this library, and tracks from its albums.
@@ -237,7 +245,7 @@ export const timeTravelRadio = () =>
     if (!decades.length) return shuffleLibrary();
     const d = decades[Math.floor(Math.random() * decades.length)];
     const { items } = await s.list(sec, 10, { sort: 'random', size: 100, filters: { 'album.decade': d.key } });
-    playList(items.map(normTrack), 0, ctx(`Time travel: the ${String(d.key).slice(2)}s`, `/browse/albums?${new URLSearchParams({ decade: d.key, title: `The ${d.title || `${d.key}s`}` })}`));
+    playList(await withoutLiveOrDemos(items.map(normTrack), { keep: 10 }), 0, ctx(`Time travel: the ${String(d.key).slice(2)}s`, `/browse/albums?${new URLSearchParams({ decade: d.key, title: `The ${d.title || `${d.key}s`}` })}`));
   });
 
 export const randomAlbum = () =>
@@ -249,11 +257,13 @@ export const randomAlbum = () =>
 
 export const sonicPath = (from, to) =>
   guard(async () => {
-    const list = (await app.server.computePath(app.source.sectionKey, from.id, to.id)).filter((m) => m.type === 'track').map(normTrack);
+    let list = (await app.server.computePath(app.source.sectionKey, from.id, to.id)).filter((m) => m.type === 'track').map(normTrack);
     if (list.length < 2) {
       toast('Plex could not build a path between those tracks. Sonic analysis needs to be turned on for this library.');
       return;
     }
+    // (The two you chose, as they are; the way between, picked for you.)
+    if (list.length > 2) list = [list[0], ...(await withoutLiveOrDemos(list.slice(1, -1))), list[list.length - 1]];
     playList(list, 0, ctx(`${from.title} to ${to.title}`, null));
   });
 

@@ -65,6 +65,12 @@ export const DEFAULT_SETTINGS = {
   skipBack: 10,
   skipForward: 30,
 
+  // MusicBrainz features, where the player has them (MUSICBRAINZ_ADVANCED: mb.js)
+  mbSkipLive: true, // live tracks and demos left out of what the app picks
+  mbMissingAlbums: true, // an artist's albums the library hasn't, on their page
+  mbMissingKinds: ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'], // ...those of these kinds (mb.js RELEASE_KINDS)
+  mbOriginalYears: true, // albums by the year they first came out
+
   // Home screen, one for every library: { '*': { order, hidden, options, seen } }
   home: {},
 };

@@ -3,6 +3,66 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.26.0 - 2026-10-28
+
+### New
+
+- **MusicBrainz features** (`MUSICBRAINZ_ADVANCED=true`, with
+  `MUSICBRAINZ_URL`): the player looks your library's artists up on
+  MusicBrainz (their other names, their genres, and their release
+  groups: every album, EP and single, its kinds and when it first came
+  out), by artist, and keeps what it says for a month, in `/data`. Only
+  artists' names go to MusicBrainz: albums' titles are matched in the
+  player, and an artist is looked up by the MusicBrainz id Plex has for
+  them, where it has one. Off unless the container's host turns them on,
+  as they ask about your whole library (a mirror of your own is best:
+  musicbrainz.org answers once a second); then each one can be turned
+  off for you, in **Settings › MusicBrainz**. When MusicBrainz doesn't
+  answer, the player asks it nothing new for a minute, so imports and
+  pages don't wait on it artist after artist:
+  - **Skip live tracks and demos** (on to begin with): left out of what
+    the app picks for you (radio and stations, shuffling an artist or
+    your library, the Guest DJs), by their album's kind (Plex's, or
+    MusicBrainz's where Plex hasn't one) or their title ("(Live)", "-
+    Live at…", "(Demo)", "Rough Mix"). An album or playlist you play
+    yourself plays as it is.
+  - **Missing albums on artist pages**: **Not in your library**, under
+    an artist's albums, lists the release groups MusicBrainz has of
+    theirs that your library hasn't, by kind, of the kinds you choose
+    (**Kinds…**: albums, singles & EPs, compilations, soundtracks and
+    remixes to begin with), each linked to MusicBrainz, to copy or
+    download (CSV).
+  - **Original release years**: an artist's albums with the year they
+    first came out where that's earlier than the year Plex has (a
+    remaster's or a reissue's), and in that order, and an album's page
+    says when it first came out.
+  - **Other names**: an artist who isn't found by their name, importing
+    a playlist or checking Missing tracks again, is looked for by the
+    other names MusicBrainz has for them (other spellings and scripts,
+    what they were called before).
+  - **For the server's owner, years and genres to fix** (Settings ›
+    MusicBrainz): your albums whose year in Plex isn't the year they
+    first came out, and those without a genre that MusicBrainz has
+    genres for, fixed in Plex one at a time or all at once, locked so
+    Plex's next refresh leaves them (with Undo, for one or all of them).
+    Genres go on as your library names them. Albums of one title (a
+    self-titled album, say) are told apart by the year Plex has, and
+    left alone where they can't be; a year MusicBrainz has as later than
+    Plex's is shown, to check, but not fixed with the rest. Plex never
+    writes to your files, so the list downloads too, with each album's
+    MusicBrainz release group, for MusicBrainz Picard or beets to fix
+    their tags.
+- With them, an album Plex hasn't matched (one without a release type) is
+  grouped on its artist's page by MusicBrainz's kind for it.
+
+### Changed
+
+- Docs: the README, configuration.md, features.md, SECURITY.md, the
+  compose file and the Proxmox defaults (`MUSICBRAINZ_ADVANCED`).
+- Tests: the mb section (against a copy of the app with
+  `MUSICBRAINZ_ADVANCED=true`), unit tests for the service's MusicBrainz
+  features, their limits and what's kept, and the container's.
+
 ## 0.25.0 - 2026-10-28
 
 ### New

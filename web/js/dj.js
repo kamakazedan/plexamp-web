@@ -19,6 +19,7 @@ import { aiReady, djPick, describeAIError, norm } from './ai.js';
 import { coreTitle } from './membership.js';
 import { describeError } from './router.js';
 import { toast } from './ui.js';
+import { withoutLiveOrDemos } from './mb.js';
 
 // Another of your devices plays, and this one follows it (devices.js).
 const followingDevice = () => player.cast?.kind === 'device';
@@ -45,6 +46,9 @@ function fresh(items, { avoid, songs }) {
       return true;
     });
 }
+
+// ...and not live tracks or demos, where they're skipped (see mb.js).
+const picks = async (items, ctx) => withoutLiveOrDemos(fresh(items, ctx));
 
 // One of the first few (the closest), not by the artists just played if
 // any of those few aren't: some variety, without straying from the sound.
@@ -151,19 +155,19 @@ async function distancesFrom(t) {
 // Each pick function returns a list of { track, note } (usually one).
 const PICKERS = {
   async echo({ cur, ctx, dj }) {
-    let list = fresh(await nearest(cur, 30), ctx);
+    let list = await picks(await nearest(cur, 30), ctx);
     if (!list.length) {
       dj.noSonic();
-      list = fresh(await sameGenre(cur), ctx);
+      list = await picks(await sameGenre(cur), ctx);
     }
     return list.length ? [{ track: list[0] }] : [];
   },
 
   async steady({ cur, ctx, dj }) {
-    let list = fresh(await nearest(cur, 40), ctx);
+    let list = await picks(await nearest(cur, 40), ctx);
     if (!list.length) {
       dj.noSonic();
-      list = fresh(await sameGenre(cur), ctx);
+      list = await picks(await sameGenre(cur), ctx);
     }
     const t = varied(list, ctx.recentArtists, 8);
     return t ? [{ track: t }] : [];
@@ -177,7 +181,7 @@ const PICKERS = {
       const path = (await server().computePath(section(), cur.id, next.id).catch(() => [])).filter(
         (m) => String(m.ratingKey) !== String(cur.id) && String(m.ratingKey) !== String(next.id),
       );
-      const ok = new Set(fresh(path, ctx).map((t) => t.id));
+      const ok = new Set((await picks(path, ctx)).map((t) => t.id));
       const mid = (path.length - 1) / 2;
       const best = path
         .map((m, i) => ({ m, off: Math.abs(i - mid) }))
@@ -190,8 +194,8 @@ const PICKERS = {
 
   async double({ cur, ctx }) {
     if (!cur.artistId) return [];
-    let list = fresh(await server().popularTracks(section(), cur.artistId, 25).catch(() => []), ctx);
-    if (list.length < 3) list = list.concat(fresh(await server().allLeaves(cur.artistId).catch(() => []), ctx));
+    let list = await picks(await server().popularTracks(section(), cur.artistId, 25).catch(() => []), ctx);
+    if (list.length < 3) list = list.concat(await picks(await server().allLeaves(cur.artistId).catch(() => []), ctx));
     const t = pickOne(list, 10);
     return t ? [{ track: t }] : [];
   },
@@ -199,20 +203,20 @@ const PICKERS = {
   async era({ cur, ctx, dj }) {
     const year = Number(cur.year) || 0;
     if (year) {
-      const near = fresh(await nearest(cur, 50), ctx).filter((t) => t.year && Math.abs(Number(t.year) - year) <= 5);
+      const near = (await picks(await nearest(cur, 50), ctx)).filter((t) => t.year && Math.abs(Number(t.year) - year) <= 5);
       if (near.length) return [{ track: varied(near, ctx.recentArtists, 5) }];
     }
     const decade = decadeOf(year);
     if (!decade) return PICKERS.steady({ cur, ctx, dj });
     const genre = await albumTag(cur);
-    let list = genre ? fresh(await randomTracks({ 'album.decade': decade, 'album.genre': genre }, 20), ctx) : [];
-    if (!list.length) list = fresh(await randomTracks({ 'album.decade': decade }, 20), ctx);
+    let list = genre ? await picks(await randomTracks({ 'album.decade': decade, 'album.genre': genre }, 20), ctx) : [];
+    if (!list.length) list = await picks(await randomTracks({ 'album.decade': decade }, 20), ctx);
     return list.length ? [{ track: list[0] }] : [];
   },
 
   async superfan({ cur, ctx }) {
     if (!cur.artistId) return [];
-    const t = pickOne(fresh(await server().allLeaves(cur.artistId).catch(() => []), ctx));
+    const t = pickOne(await picks(await server().allLeaves(cur.artistId).catch(() => []), ctx));
     return t ? [{ track: t }] : [];
   },
 
@@ -262,14 +266,14 @@ async function aiCandidates(cur, ctx, anchor) {
     artists = fits.length >= 3 ? fits : [...fits, ...artists.filter((a, i) => !fit(a, i))];
   }
   const tops = await Promise.all(artists.slice(0, 8).map((a) => popularOf(a.id)));
-  const per = tops.map((items) => fresh(items, ctx).slice(0, 3));
+  const per = (await Promise.all(tops.map((items) => picks(items, ctx)))).map((list) => list.slice(0, 3));
   const candidates = [];
   for (let i = 0; i < 3; i++) for (const l of per) if (l[i] && candidates.length < 24) candidates.push(l[i]);
   const popular = new Set(candidates.map((t) => t.id));
   // Hardly any popular tracks known: other tracks by artists not just
   // played, so there's still a choice.
   if (candidates.length < 6) {
-    const more = fresh([...near, ...(await sameGenre(cur, 12))], ctx).filter((t) => !avoid.has(norm(t.artist)) && !popular.has(t.id));
+    const more = (await picks([...near, ...(await sameGenre(cur, 12))], ctx)).filter((t) => !avoid.has(norm(t.artist)) && !popular.has(t.id));
     candidates.push(...more.slice(0, 12 - candidates.length));
   }
   return { candidates, popular };

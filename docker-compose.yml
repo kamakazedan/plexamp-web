@@ -25,6 +25,13 @@
 #                       https://musicbrainz.org the suggested names go there
 #                       (no account needed); your own mirror, such as
 #                       http://192.168.1.30:5000, keeps them on your network.
+#   MUSICBRAINZ_ADVANCED "true" turns on the MusicBrainz features, with
+#                       MUSICBRAINZ_URL: live tracks and demos left out of
+#                       radio and shuffles, the albums an artist's page is
+#                       missing, original release years, artists found by
+#                       their other names, and for the server's owner, the
+#                       years and genres to fix in Plex. They look your whole
+#                       library up, so a mirror of your own is best.
 #   PLAY_TOGETHER       "false" turns off listening in sync with Plex friends.
 #   CASTING             "false" turns off Play on (other Plex players on your
 #                       network, for your server's owner: needs PLEX_SERVER_URL).
@@ -66,6 +73,7 @@ services:
       OLLAMA_MODEL: ""
       OLLAMA_AUTH: "plex"
       # MUSICBRAINZ_URL: "https://musicbrainz.org"
+      # MUSICBRAINZ_ADVANCED: "true"
       PLAY_TOGETHER: "true"
       CASTING: "true"
       PLAYLIST_SHARING: "true"

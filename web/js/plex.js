@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.25.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.26.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -451,8 +451,10 @@ export class PlexServer {
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0 };
   }
 
-  async metadata(id) {
-    const mc = await this.get(`/library/metadata/${id}`);
+  // (`params`: { includeGuids: 1 } for the other services' ids for it, say:
+  // MusicBrainz's.)
+  async metadata(id, params) {
+    const mc = await this.get(`/library/metadata/${id}`, params);
     return asArray(mc.Metadata)[0] || null;
   }
 
@@ -799,6 +801,31 @@ export class PlexServer {
   async deleteCollection(id) {
     await this.send('DELETE', `/library/collections/${id}`);
     this.forgetCollections();
+  }
+
+  // An album's year (`year`, and the day it came out: `date`, YYYY-MM-DD)
+  // or genres (`genres`: all it's to have; `removeGenres`: those it's not
+  // to have any more) changed, each locked so Plex's next refresh of its
+  // metadata leaves it be: for the server's admin (the MusicBrainz
+  // features' review: mbreview.js). Genres go as Plex's own apps send them:
+  // each one escaped, then all of them as one value.
+  // (`unlock`: as an Undo, the fields changed are left unlocked again, for
+  // Plex's next refresh; `date` '' clears it.)
+  async editAlbum(section, id, { year, date, genres, removeGenres, unlock = false } = {}) {
+    const params = { type: 9, id };
+    const locked = unlock ? 0 : 1;
+    if (year) Object.assign(params, { 'year.value': year, 'year.locked': locked });
+    if (date != null) Object.assign(params, { 'originallyAvailableAt.value': date, 'originallyAvailableAt.locked': locked });
+    if (genres?.length) {
+      genres.forEach((g, i) => (params[`genre[${i}].tag.tag`] = g));
+      params['genre.locked'] = locked;
+    }
+    if (removeGenres?.length) {
+      params['genre[].tag.tag-'] = removeGenres.map((g) => encodeURIComponent(g)).join(',');
+      params['genre.locked'] = locked;
+    }
+    await this.send('PUT', `/library/sections/${section}/all`, params);
+    this.cache.delete(`album:${id}`);
   }
 
   forgetCollections() {
