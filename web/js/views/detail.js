@@ -464,7 +464,11 @@ export async function artistView({ el, params }) {
         'section.block.mb-missing',
         null,
         head,
-        h('p.hint.pad', null, `${artist.title}’s on MusicBrainz that your library hasn’t (${chosen.length === RELEASE_KINDS.length ? 'every kind' : RELEASE_KINDS.filter(([k]) => chosen.includes(k)).map(([, label]) => label).join(', ')}).`),
+        h(
+          'p.hint.pad',
+          null,
+          `${artist.title}’s releases on MusicBrainz that your library hasn’t, of ${chosen.length === RELEASE_KINDS.length ? 'every kind' : `these kinds: ${RELEASE_KINDS.filter(([k]) => chosen.includes(k)).map(([, label]) => label).join(', ')}`}.`,
+        ),
         ...blocks,
         h(
           'div.pad.button-row.mb-missing-actions',
