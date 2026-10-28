@@ -53,7 +53,9 @@ web/
   js/sharing.js          shared playlists: keeping your copies the same as everyone's
   js/sorting.js          sorting playlists and collections with the fewest moves
   js/membership.js       Appears in: the albums a song is on, and the playlists and collections it's in
-  js/missing.js          missing tracks from AI playlists, checking them on MusicBrainz, exporting them
+  js/missing.js          missing tracks from AI playlists and imports, checking them on MusicBrainz, exporting them
+  js/missinglist.js      how a Missing tracks list changes: the same file as server/missinglist.js
+  js/missingsync.js      Missing tracks that follow your account, and everyone's for the server's owner
   js/ratings.js          ratings in the player and in track lists, and keeping ❤️ Tracks
   js/live.js             live updates: WebSocket, event stream or polling
   js/ai.js               Ollama client, AI playlists and the AI DJ's picks
@@ -65,7 +67,8 @@ web/
   js/ui.js, components.js, actions.js, preview.js
   js/views/              home, library, detail pages, search, Play Together, AI playlist, settings, sign-in
 server/                  the service behind /api/: Play Together, Play on, your devices, the shared AI model,
-                         MusicBrainz checks, shared playlists, sign-in checks, debug log
+                         MusicBrainz checks, shared playlists, settings and Missing tracks that follow each
+                         account, sign-in checks, debug log
 docker/                  nginx config, start-up script and container tests
 proxmox/                 the Proxmox VE script, and the installer it runs in the container
 dev/                     fake Plex and Ollama servers for development

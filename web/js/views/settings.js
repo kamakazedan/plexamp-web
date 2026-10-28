@@ -5,8 +5,8 @@ import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, error
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
-import { missingTracksView } from './missingtracks.js';
-import { missingCount, mbOffered, mbWhere } from '../missing.js';
+import { missingTracksView, missingShareRow } from './missingtracks.js';
+import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
@@ -88,9 +88,15 @@ function accountView({ el }) {
           onclick: () =>
             sheet({
               title: 'Sign out?',
-              subtitle: app.config.settingsSync
-                ? 'Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays. Settings kept for your account stay with it, for when you sign in again.'
-                : 'Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays.',
+              subtitle: `Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays.${
+                app.config.settingsSync && app.config.missingSync
+                  ? ' Settings and missing tracks kept for your account stay with it, for when you sign in again.'
+                  : app.config.settingsSync
+                    ? ' Settings kept for your account stay with it, for when you sign in again.'
+                    : app.config.missingSync
+                      ? ' Missing tracks kept for your account stay with it, for when you sign in again.'
+                      : ''
+              }`,
               actions: [
                 {
                   icon: 'signOut',
@@ -768,17 +774,34 @@ function saveAI(patch) {
 }
 
 // Show missing tracks: on or off, and the list (shown while it's on, or
-// while there's anything on it).
+// while there's anything on it); for a friend, where the player keeps them
+// for each account, whether theirs are kept for their account.
 function missingSection(onDispose) {
   const count = h('span.row-value');
   const listRow = row({ href: '/settings/missing', title: 'Missing tracks', subtitle: 'See them, export them, or check again', right: count, chevron: true, cls: 'missing-link' });
-  const paint = () => {
+  const show = toggleRow({
+    title: 'Show missing tracks',
+    subtitle: '',
+    checked: aiSettings().missing === true,
+    onChange: (v) => {
+      saveAI({ missing: v });
+      paint();
+    },
+  });
+  const showSub = h('div.row-sub');
+  show.querySelector('.row-main').append(showSub);
+  const share = h('div.missing-share-slot');
+  function paint() {
     const n = missingCount();
     count.textContent = n ? fmt.number(n) : '';
     listRow.hidden = !aiSettings().missing && !n;
-  };
+    showSub.textContent = `List the songs and artists AI playlists suggest that aren’t in your library, so you can export the list and go looking.${missingKeptNote()}`;
+    const r = missingShareRow({ after: paint });
+    share.replaceChildren(...(r ? [r] : []));
+  }
   paint();
-  // An AI playlist made meanwhile can add to it.
+  // An AI playlist made meanwhile can add to it (and the player says whose
+  // the server is).
   onDispose?.(on('missing', paint));
   return h(
     'div.ai-missing-settings',
@@ -787,15 +810,8 @@ function missingSection(onDispose) {
     h(
       'div.rows',
       null,
-      toggleRow({
-        title: 'Show missing tracks',
-        subtitle: 'List the songs and artists AI playlists suggest that aren’t in your library, so you can export the list and go looking.',
-        checked: aiSettings().missing === true,
-        onChange: (v) => {
-          saveAI({ missing: v });
-          paint();
-        },
-      }),
+      show,
+      share,
       // AI models make songs up: MusicBrainz knows which are real.
       mbOffered()
         ? toggleRow({
@@ -854,6 +870,9 @@ function aiView({ el, onDispose }) {
   const waitBox = waitRow();
   const notes = notesSection();
   const missing = missingSection(onDispose);
+  // (Friends' too, for the server's owner, once the player has said: then
+  // the list is shown with AI off on this device as well.)
+  onDispose?.(on('missing', () => (missing.hidden = chosen() === 'off' && !missingCount())));
 
   el.append(
     h(

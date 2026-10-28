@@ -1,10 +1,17 @@
 // Songs and artists that AI playlists suggested but the library doesn't
 // have, and the tracks of playlists imported from Spotify it doesn't have
 // (via: 'spotify'), in Settings › AI › Missing tracks, so whoever looks
-// after the server can go and find them. Kept on this device (until it's cleared, or you sign
-// out), each with the Plex server and library it's missing from: the list
-// shows the server in use's (different servers have different music). It's
-// exported as a spreadsheet (CSV) or plain text.
+// after the server can go and find them. Each with the Plex server and
+// library it's missing from: the list shows the server in use's (different
+// servers have different music). Kept on this device (until it's cleared,
+// or you sign out), and where this player keeps them for each Plex account
+// (missingsync.js), for yours: then every browser you sign in on has them,
+// and the server's owner sees everyone's who shares theirs, one list
+// (`others`: whose, and how often for them). It's exported as a spreadsheet
+// (CSV) or plain text.
+//
+// How each change goes is the same here and in the player's service
+// (missinglist.js): it's made here, and sent as that change.
 //
 // AI models make songs up, and take albums for songs. Where the player has
 // a MusicBrainz to ask (MUSICBRAINZ_URL) and Settings › AI › Check
@@ -13,51 +20,273 @@
 // know, and albums, never come here, and those it knows are marked (mb:
 // 'real'). Ones listed without being checked (before there was a
 // MusicBrainz to ask) can be checked from the list (checkMissingOnMusicBrainz).
-import { store } from './plex.js';
-import { app, emit } from './state.js';
-import { norm, songInLibrary, artistInLibrary, aiSettings } from './ai.js';
+import { app } from './state.js';
+import { songInLibrary, artistInLibrary, aiSettings } from './ai.js';
+import { MISSING_LIMITS, MISSING_LISTS, keyOf, idOf, listId, sourceOf, applyNote, applyForget, applyClear, applyVerdicts, applyRestore } from './missinglist.js';
+import { loadMissing as load, saveMissing as save, queueMissing, missingOthers, editMissingOthers, ownsServer, syncs } from './missingsync.js';
 
-const KEY = 'aiMissing';
-// Each server keeps the most recent of each: what AI playlists suggested, and
-// what playlists from Spotify had (a whole account's can be thousands: an
-// import's spreadsheet has all of its own). One doesn't push the other out,
-// nor one server another's.
-export const MISSING_LIMITS = { ai: 500, spotify: 1000 };
-const sourceOf = (m) => (m.via === 'spotify' ? 'spotify' : 'ai');
+export { MISSING_LIMITS, MISSING_LISTS };
 
-const keyOf = (m) => `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
-const sameServer = (m, src = app.source) => !!src && m.server === (src.serverId || src.uri);
+const serverOf = (src = app.source) => (src ? src.serverId || src.uri : '');
+const sameServer = (m, src = app.source) => !!src && m.server === serverOf(src);
 const sameLibrary = (m, src = app.source) => sameServer(m, src) && String(m.section) === String(src.sectionKey);
 const libraryName = (src = app.source) => (src ? `${src.sectionTitle} (${src.serverName})` : '');
+// In one change, to go in one request: ids (the player takes up to 2,000),
+// what an import didn't find, and entries put back.
+const KEYS = 1000;
+const ITEMS = 250;
+const ENTRIES = 200;
+const chunks = (list, n) => Array.from({ length: Math.ceil(list.length / n) }, (_, i) => list.slice(i * n, (i + 1) * n));
 
-// (0.12.0 kept what MusicBrainz didn't know, and albums, hidden: they go.)
-function load() {
-  const list = store.get(KEY, []);
-  return Array.isArray(list) ? list.filter((m) => m && (m.kind === 'track' || m.kind === 'artist') && typeof m.artist === 'string' && m.mb !== 'unknown' && m.mb !== 'album') : [];
+// Whether what's listed for the server in use is everyone's: the player
+// keeps them for each account, and says this one owns the server. Then
+// taking some off the list, or clearing it, is for everyone's.
+export const everyoneShown = (src = app.source) => !!src && syncs(serverOf(src)) && ownsServer(serverOf(src)) === true;
+
+// How they're kept, for saying so where they're turned on: on this device
+// only (null: until the player has said whose the server is, too), for your
+// account where the server's owner sees them too ({ owner: false }: a friend
+// who shares theirs), or for yours as that owner ({ owner: true }).
+export function missingKept() {
+  const server = serverOf();
+  if (ownsServer(server) === undefined || !syncs(server)) return null;
+  return { owner: ownsServer(server) === true };
 }
 
-// Whether it was kept (the browser may be out of room).
-function save(list) {
-  const kept = store.set(KEY, list);
-  emit('missing', missingCount());
-  return kept;
-}
-
-{
-  const kept = store.get(KEY, []);
-  if (Array.isArray(kept) && kept.some((m) => m?.mb === 'unknown' || m?.mb === 'album')) store.set(KEY, load());
+// ...said where they're turned on (Show missing tracks, an import's "Put
+// what isn't here on Missing tracks"): a sentence, or nothing.
+export function missingKeptNote() {
+  const kept = missingKept();
+  if (!kept) return '';
+  const server = app.source?.serverName || 'the server';
+  return kept.owner
+    ? ' Kept for your Plex account, on every device, with what friends who keep theirs for their account are missing too.'
+    : ` Kept for your Plex account, on every device, and whoever runs ${server} sees them too.`;
 }
 
 // What's kept for the server in use, artists first, then by artist and
-// title.
+// title, one for each: this account's own (`mine`: its entry), and for the
+// server's owner everyone else's too (`others`: how often for them, and
+// whose). `last` is the latest of everyone's.
 export function missingList() {
   const by = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
-  return load()
-    .filter((m) => sameServer(m))
-    .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
+  const server = serverOf();
+  const rows = new Map();
+  for (const m of load()) if (sameServer(m)) rows.set(idOf(m), { ...m, mine: m, others: null });
+  for (const o of missingOthers(server)) {
+    const id = idOf(o);
+    const r = rows.get(id);
+    if (r) {
+      r.others = o;
+      r.first = Math.min(r.first || o.first, o.first || r.first);
+      r.last = Math.max(r.last || 0, o.last || 0);
+      if (o.mb === 'real') r.mb = 'real';
+    } else {
+      rows.set(id, { kind: o.kind, artist: o.artist, title: o.title, section: o.section, library: o.library, server, first: o.first, last: o.last, ...(o.mb === 'real' ? { mb: 'real' } : {}), mine: null, others: o });
+    }
+  }
+  return [...rows.values()].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
 }
 
-export const missingCount = () => load().filter((m) => sameServer(m)).length;
+export const missingCount = () => missingList().length;
+// This account's own, on the server in use.
+export const myMissingCount = () => load().filter((m) => sameServer(m)).length;
+
+// How often AI playlists suggested one, and how many Spotify playlists had
+// it (everyone's, for the server's owner), and whether that's past what's
+// counted ("20+").
+export function tally(m) {
+  const own = m.mine || null;
+  const ai = (own && sourceOf(own) === 'ai' ? own.times || 1 : 0) + (m.others?.ai || 0);
+  const spotify = (own && sourceOf(own) === 'spotify' ? own.times || 1 : 0) + (m.others?.spotify || 0);
+  const more = (!!own && sourceOf(own) === 'spotify' && (own.lists?.length || 0) >= MISSING_LISTS) || !!m.others?.more;
+  return { ai, spotify, more };
+}
+
+// What it was last suggested for, or the Spotify playlist it was last in:
+// this device's own, while it noted it last.
+export const promptOf = (m) => (m.mine?.prompt && (m.mine.last || 0) >= (m.last || 0) ? m.mine.prompt : '');
+
+// What an AI playlist found missing (and found there), for the request
+// `prompt`: new ones are added, ones seen before counted again (once a
+// call: a song twice in a playlist is one), and ones now in the library let
+// go, as are those in `drop` (what MusicBrainz says isn't real, kept from
+// before it was asked). Those MusicBrainz knows come with mb: 'real'. `via`:
+// where they came from instead ('spotify', with the playlist's name as
+// `prompt`): real songs, never asked about on MusicBrainz, counted once for
+// each playlist they're in. One from somewhere else now is counted afresh
+// (see applyNote). Returns how many of them there are ({ of }), and how many
+// are on the list now ({ kept }: all, unless there wasn't room), with their
+// `keys`, to count again later (keptCounter: a later import can push them
+// out); the keys of those found in the library (`found`), and whether the
+// list was kept (`saved`: the browser may be out of room).
+export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [], via = '' } = {}) {
+  const src = app.source;
+  if (!src) return { kept: 0, of: 0, keys: [], found: [], saved: false };
+  const server = serverOf(src);
+  const inLibrary = new Set([
+    ...(seen.songs || []).map((x) => keyOf({ kind: 'track', artist: x.artist || '', title: x.title || '' })),
+    ...(seen.artists || []).map((a) => keyOf({ kind: 'artist', artist: a, title: '' })),
+  ]);
+  const before = load();
+  const here = new Set(before.filter((m) => sameLibrary(m, src)).map(keyOf));
+  const items = [];
+  const noted = new Set();
+  for (const m of missing) {
+    if (m?.kind !== 'track' && m?.kind !== 'artist') continue;
+    const entry = { kind: m.kind, artist: String(m.artist || '').slice(0, 120), title: m.kind === 'track' ? String(m.title || '').slice(0, 160) : '' };
+    if (!entry.artist && !entry.title) continue;
+    const k = keyOf(entry);
+    // (Found as well, in the same call, it's found: a lookup that failed once.)
+    if (noted.has(k) || inLibrary.has(k)) continue;
+    noted.add(k);
+    items.push(m.mb === 'real' ? { ...entry, mb: 'real' } : entry);
+  }
+  const spotify = via === 'spotify';
+  const op = {
+    type: 'note',
+    // (Of more, only these would be kept: see trimMissing.)
+    items: items.slice(-MISSING_LIMITS[spotify ? 'spotify' : 'ai']),
+    // Those on the list (here) now in the library, and those MusicBrainz
+    // doesn't know.
+    found: [...here].filter((k) => inLibrary.has(k)).slice(0, KEYS),
+    // (Of those, only the ones on the list here go.)
+    unreal: [...new Set(drop.map((m) => keyOf({ kind: m.kind, artist: m.artist || '', title: m.kind === 'track' ? m.title || '' : '' })))]
+      .filter((k) => here.has(k))
+      .slice(0, KEYS),
+    via: spotify ? 'spotify' : '',
+    ...(spotify ? { list: listId(prompt) } : {}),
+    section: String(src.sectionKey),
+    library: libraryName(src),
+    at: Math.round(Date.now() / 1000),
+  };
+  const { list, keys } = applyNote(before, { ...op, items }, { server, prompt: String(prompt) });
+  const saved = save(list);
+  // (Sent a few at a time: each is in one of them, so it's counted once.)
+  const parts = chunks(op.items, ITEMS);
+  if (!parts.length && (op.found.length || op.unreal.length)) parts.push([]);
+  parts.forEach((part, i) => queueMissing(server, { ...op, items: part, ...(i ? { found: [], unreal: [] } : {}) }, { prompt: String(prompt) }));
+  // (What's kept, as read back: a browser out of room keeps nothing new.)
+  return { kept: keptCounter(src)(keys), of: keys.length, keys, found: [...inLibrary], saved };
+}
+
+// How many of noteMissing's `keys` are on this library's list now: read
+// once, to count for each of many.
+export function keptCounter(src = app.source) {
+  const kept = new Set(src ? load().filter((m) => sameLibrary(m, src)).map(keyOf) : []);
+  return (keys = []) => keys.filter((k) => kept.has(k)).length;
+}
+
+// Whether this server's list of those from `via` is as long as it's kept
+// (MISSING_LIMITS): one that isn't on it was pushed off, rather than the
+// device out of room for it.
+export function missingFull(via = '', src = app.source) {
+  const kind = sourceOf({ via });
+  return !!src && load().filter((m) => sameServer(m, src) && sourceOf(m) === kind).length >= MISSING_LIMITS[kind];
+}
+
+// Those with these ids taken off the server in use's list: this account's,
+// and for its owner everyone's.
+function forget(ids) {
+  const server = serverOf();
+  if (!server || !ids.length) return;
+  save(applyForget(load(), ids, { server }));
+  const everyone = everyoneShown();
+  if (everyone) {
+    const gone = new Set(ids);
+    editMissingOthers(server, (rows) => rows.filter((r) => !gone.has(idOf(r))));
+  }
+  for (const part of chunks(ids, KEYS)) queueMissing(server, { type: 'forget', ids: part, ...(everyone ? { everyone: true } : {}) });
+}
+
+export function forgetMissing(entry) {
+  forget([idOf(entry)]);
+}
+
+// The server in use's list, cleared (other servers' stay): for its owner,
+// everyone's.
+export function clearMissing() {
+  const server = serverOf();
+  if (!server) return;
+  save(applyClear(load(), { server }));
+  const everyone = everyoneShown();
+  if (everyone) editMissingOthers(server, () => []);
+  queueMissing(server, { type: 'clear', ...(everyone ? { everyone: true } : {}) });
+}
+
+// Looks for each of the server in use's again, in the library it was
+// missing from (after adding music), and lets go of what's there now.
+// Resolves to how many were found.
+export async function checkMissingAgain({ signal, onProgress } = {}) {
+  const todo = missingList();
+  const found = [];
+  let n = 0;
+  for (const m of todo) {
+    if (signal?.aborted) break;
+    const section = m.section || app.source.sectionKey;
+    const there = m.kind === 'artist' ? await artistInLibrary(m.artist, signal, section) : await songInLibrary({ artist: m.artist, title: m.title }, signal, { section });
+    if (there) found.push(idOf(m));
+    onProgress?.(++n, todo.length);
+  }
+  forget(found);
+  return found.length;
+}
+
+// The server in use's that MusicBrainz could be asked about: this
+// account's own (a friend's are checked as they choose, on their devices),
+// not checked yet, and suggested by an AI (what came from Spotify is real).
+export const askable = (m) => sameServer(m) && !!m.mine && m.mb !== 'real' && tally(m).spotify === 0;
+
+// The ones listed without being checked on MusicBrainz (made before there
+// was one to ask, or while it couldn't be asked), looked up there now: those
+// it doesn't know (most likely made up) and albums taken for songs are let
+// go, those it knows are marked so they're not asked about again. Resolves
+// to { asked, real, dropped (the entries let go, with mb: 'unknown' or
+// 'album'), unsure (couldn't be checked this time) }. If MusicBrainz can't
+// be asked, what it said before that still counts, and it throws with
+// err.result set.
+export async function checkMissingOnMusicBrainz({ signal, onProgress } = {}) {
+  const server = serverOf();
+  const todo = missingList().filter(askable);
+  let verdicts;
+  let failed = null;
+  try {
+    verdicts = await checkSuggestions(todo, { signal, onProgress });
+  } catch (err) {
+    verdicts = err.verdicts || [];
+    failed = err;
+  }
+  const real = [];
+  const dropped = [];
+  todo.forEach((m, i) => {
+    const v = verdicts[i];
+    if (v === 'unknown' || v === 'album') dropped.push({ ...m, mb: v });
+    else if (v === 'real') real.push(idOf(m));
+  });
+  if (dropped.length || real.length) {
+    const gone = dropped.map(idOf);
+    save(applyVerdicts(load(), { real, dropped: gone }, { server }).list);
+    const parts = Math.max(1, Math.ceil(real.length / KEYS), Math.ceil(gone.length / KEYS));
+    for (let i = 0; i < parts; i += 1) {
+      const slice = (list) => list.slice(i * KEYS, (i + 1) * KEYS);
+      queueMissing(server, { type: 'mb', real: slice(real), dropped: slice(gone) });
+    }
+  }
+  const answered = verdicts.filter(Boolean).length;
+  const result = { asked: todo.length, real: real.length, dropped, unsure: todo.length - answered };
+  if (failed) throw Object.assign(failed, { result });
+  return result;
+}
+
+// Puts entries let go back on the list (an undo, of checking on
+// MusicBrainz), unchecked again.
+export function restoreMissing(entries = []) {
+  const server = serverOf();
+  if (!server) return;
+  const mine = entries.filter((m) => m.mine).map((m) => m.mine);
+  save(applyRestore(load(), mine, { server }));
+  for (const part of chunks(mine, ENTRIES)) queueMissing(server, { type: 'restore', entries: part });
+}
 
 // ---------- MusicBrainz ----------
 
@@ -118,237 +347,6 @@ export async function checkSuggestions(list, { signal, onProgress } = {}) {
   return verdicts;
 }
 
-// The most recent of each server's, of each kind (see MISSING_LIMITS): by
-// when each was last noted, and of those noted the same second, the last
-// noted (the list is in the order they were), kept in that order.
-function trim(list) {
-  const groups = new Map();
-  for (const m of list) {
-    const k = `${m.server}\n${sourceOf(m)}`;
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(m);
-  }
-  const out = [];
-  for (const g of groups.values()) {
-    const cap = MISSING_LIMITS[sourceOf(g[0])];
-    if (g.length <= cap) {
-      out.push(...g);
-      continue;
-    }
-    const kept = new Set(
-      g
-        .map((m, i) => [m, i])
-        .sort(([a, i], [b, j]) => (b.last || 0) - (a.last || 0) || j - i)
-        .slice(0, cap)
-        .map(([m]) => m),
-    );
-    out.push(...g.filter((m) => kept.has(m)));
-  }
-  return out;
-}
-
-// A Spotify playlist, by its name, in a few characters: a track's `lists`
-// count the playlists it was in (each once, however often it's imported,
-// up to MISSING_LISTS) without keeping their names.
-function listId(name) {
-  let x = 0x811c9dc5;
-  for (const ch of String(name || '').trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
-  return x.toString(36);
-}
-export const MISSING_LISTS = 20;
-
-// What an AI playlist found missing (and found there), for the request
-// `prompt`: new ones are added, ones seen before counted again (once a
-// call: a song twice in a playlist is one), and ones now in the library let
-// go, as are those in `drop` (what MusicBrainz says isn't real, kept from
-// before it was asked). Those MusicBrainz knows come with mb: 'real'. `via`:
-// where they came from instead ('spotify', with the playlist's name as
-// `prompt`): real songs, never asked about on MusicBrainz, counted once for
-// each playlist they're in. One from somewhere else now is counted afresh.
-// Returns how many of them there are ({ of }), and how many are on the list
-// now ({ kept }: all, unless there wasn't room), with their `keys`, to count
-// again later (keptCounter: a later import can push them out); the keys of
-// those found in the library (`found`), and whether the list was kept
-// (`saved`: the browser may be out of room).
-export function noteMissing(missing = [], seen = { songs: [], artists: [] }, prompt = '', { drop = [], via = '' } = {}) {
-  const src = app.source;
-  if (!src) return { kept: 0, of: 0, keys: [], found: [], saved: false };
-  const now = Math.round(Date.now() / 1000);
-  const here = (m) => sameLibrary(m, src);
-  const inLibrary = new Set([
-    ...(seen.songs || []).map((x) => keyOf({ kind: 'track', artist: x.artist || '', title: x.title || '' })),
-    ...(seen.artists || []).map((a) => keyOf({ kind: 'artist', artist: a, title: '' })),
-  ]);
-  // (What MusicBrainz doesn't know stays where it came from a Spotify
-  // playlist: Spotify has it, so it's real.)
-  const notReal = new Set(drop.map((m) => keyOf({ kind: m.kind, artist: m.artist || '', title: m.kind === 'track' ? m.title || '' : '' })));
-  const gone = (m) => here(m) && (inLibrary.has(keyOf(m)) || (notReal.has(keyOf(m)) && m.via !== 'spotify'));
-  const list = load().filter((m) => !gone(m));
-  const index = new Map();
-  for (const m of list) if (here(m)) index.set(keyOf(m), m);
-  const noted = new Set();
-  // Those noted now, in the order they are: last in the list (see trim).
-  const noting = [];
-  for (const m of missing) {
-    const entry = { kind: m.kind, artist: String(m.artist || '').slice(0, 120), title: m.kind === 'track' ? String(m.title || '').slice(0, 160) : '' };
-    if (!entry.artist && !entry.title) continue;
-    if (m.mb === 'real') entry.mb = 'real';
-    const k = keyOf(entry);
-    // (Found as well, in the same call, it's found: a lookup that failed once.)
-    if (noted.has(k) || inLibrary.has(k)) continue;
-    noted.add(k);
-    const have = index.get(k);
-    if (have) {
-      noting.push(have);
-      if ((have.via || '') !== via) {
-        have.times = 1;
-        delete have.lists;
-        // (One from Spotify that an AI suggests now is still a real song.)
-        if (via === 'spotify') have.lists = [listId(prompt)];
-        else have.mb = 'real';
-      } else if (via === 'spotify') {
-        // (Kept before 0.22.0: the playlist it was last in.)
-        // At most MISSING_LISTS: past that, it's in "20+" playlists, and
-        // counted no further (so imported again, it isn't counted again).
-        const lists = Array.isArray(have.lists) ? have.lists : [listId(have.prompt)];
-        if (!lists.includes(listId(prompt)) && lists.length < MISSING_LISTS) {
-          lists.push(listId(prompt));
-          have.times = (have.times || 1) + 1;
-        }
-        have.lists = lists;
-      } else {
-        have.times = (have.times || 1) + 1;
-      }
-      have.last = now;
-      have.prompt = String(prompt).slice(0, 200);
-      if (entry.mb) have.mb = entry.mb;
-      if (via) have.via = via;
-      else delete have.via;
-    } else {
-      noting.push({
-        ...entry,
-        ...(via ? { via } : {}),
-        ...(via === 'spotify' ? { lists: [listId(prompt)] } : {}),
-        times: 1,
-        first: now,
-        last: now,
-        prompt: String(prompt).slice(0, 200),
-        server: src.serverId || src.uri,
-        section: String(src.sectionKey),
-        library: libraryName(src),
-      });
-    }
-  }
-  const moved = new Set(noting);
-  const saved = save(trim([...list.filter((m) => !moved.has(m)), ...noting]));
-  // (What's kept, as read back: a browser out of room keeps nothing new.)
-  const keys = [...noted];
-  return { kept: keptCounter(src)(keys), of: keys.length, keys, found: [...inLibrary], saved };
-}
-
-// How many of noteMissing's `keys` are on this library's list now: read
-// once, to count for each of many.
-export function keptCounter(src = app.source) {
-  const kept = new Set(src ? load().filter((m) => sameLibrary(m, src)).map(keyOf) : []);
-  return (keys = []) => keys.filter((k) => kept.has(k)).length;
-}
-
-// Whether this server's list of those from `via` is as long as it's kept
-// (MISSING_LIMITS): one that isn't on it was pushed off, rather than the
-// device out of room for it.
-export function missingFull(via = '', src = app.source) {
-  const kind = sourceOf({ via });
-  return !!src && load().filter((m) => sameServer(m, src) && sourceOf(m) === kind).length >= MISSING_LIMITS[kind];
-}
-
-export function forgetMissing(entry) {
-  const k = keyOf(entry);
-  save(load().filter((m) => !(keyOf(m) === k && m.server === entry.server && m.section === entry.section)));
-}
-
-// The server in use's list, cleared (other servers' stay).
-export function clearMissing() {
-  save(load().filter((m) => !sameServer(m)));
-}
-
-// Looks for each of the server in use's again, in the library it was
-// missing from (after adding music), and lets go of what's there now.
-// Resolves to how many were found.
-export async function checkMissingAgain({ signal, onProgress } = {}) {
-  const todo = load().filter((m) => sameServer(m));
-  const found = new Set();
-  let n = 0;
-  for (const m of todo) {
-    if (signal?.aborted) break;
-    const section = m.section || app.source.sectionKey;
-    const there = m.kind === 'artist' ? await artistInLibrary(m.artist, signal, section) : await songInLibrary({ artist: m.artist, title: m.title }, signal, { section });
-    if (there) found.add(`${keyOf(m)}|${m.server}|${m.section}`);
-    onProgress?.(++n, todo.length);
-  }
-  if (found.size) save(load().filter((m) => !found.has(`${keyOf(m)}|${m.server}|${m.section}`)));
-  return found.size;
-}
-
-const idOf = (m) => `${keyOf(m)}|${m.server}|${m.section}`;
-
-// The server in use's that MusicBrainz could be asked about: not checked yet,
-// and suggested by an AI (what came from Spotify is real).
-export const askable = (m) => sameServer(m) && m.mb !== 'real' && m.via !== 'spotify';
-
-// The ones listed without being checked on MusicBrainz (made before there
-// was one to ask, or while it couldn't be asked), looked up there now: those
-// it doesn't know (most likely made up) and albums taken for songs are let
-// go, those it knows are marked so they're not asked about again. Resolves
-// to { asked, real, dropped (the entries let go, with mb: 'unknown' or
-// 'album'), unsure (couldn't be checked this time) }. If MusicBrainz can't
-// be asked, what it said before that still counts, and it throws with
-// err.result set.
-export async function checkMissingOnMusicBrainz({ signal, onProgress } = {}) {
-  const todo = load().filter(askable);
-  let verdicts;
-  let failed = null;
-  try {
-    verdicts = await checkSuggestions(todo, { signal, onProgress });
-  } catch (err) {
-    verdicts = err.verdicts || [];
-    failed = err;
-  }
-  const said = new Map(todo.map((m, i) => [idOf(m), verdicts[i] || null]));
-  const dropped = [];
-  let real = 0;
-  const kept = [];
-  for (const m of load()) {
-    const v = said.get(idOf(m));
-    if (v === 'unknown' || v === 'album') {
-      dropped.push({ ...m, mb: v });
-      continue;
-    }
-    if (v === 'real') {
-      m.mb = 'real';
-      real += 1;
-    }
-    kept.push(m);
-  }
-  if (dropped.length || real) save(kept);
-  const answered = verdicts.filter(Boolean).length;
-  const result = { asked: todo.length, real, dropped, unsure: todo.length - answered };
-  if (failed) throw Object.assign(failed, { result });
-  return result;
-}
-
-// Puts entries let go back on the list (an undo), unchecked again.
-export function restoreMissing(entries = []) {
-  const list = load();
-  const have = new Set(list.map(idOf));
-  for (const m of entries) {
-    if (!m || have.has(idOf(m))) continue;
-    const entry = { ...m };
-    delete entry.mb;
-    list.push(entry);
-    have.add(idOf(m));
-  }
-  save(trim(list));
-}
 
 // ---------- export ----------
 
@@ -363,15 +361,22 @@ function cell(v) {
 
 // A spreadsheet (CSV), with a byte-order mark, so spreadsheet apps read it
 // as UTF-8 ("—", "é").
-export const toCsv = (head, rows) => `\ufeff${[head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`;
+export const toCsv = (head, rows) => `﻿${[head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`;
 
 // What's shared with whoever finds the music: what's missing, and where
-// from (an AI playlist, or a playlist from Spotify), not what you asked the
-// AI for (that's only shown here).
+// from (an AI playlist, or a playlist from Spotify), not what anyone asked
+// the AI for, nor whose it is.
 export function missingCsv(list = missingList()) {
   const head = ['Artist', 'Title', 'Missing', 'Times suggested', 'Last suggested', 'Library', 'From'];
-  const times = (m) => (m.via === 'spotify' && m.lists?.length >= MISSING_LISTS ? `${MISSING_LISTS}+` : m.times || 1);
-  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', times(m), day(m.last), m.library, m.via === 'spotify' ? 'A Spotify playlist' : 'An AI playlist']));
+  const times = (m) => {
+    const t = tally(m);
+    return `${t.ai + t.spotify || 1}${t.more ? '+' : ''}`;
+  };
+  const from = (m) => {
+    const t = tally(m);
+    return t.ai && t.spotify ? 'AI playlists and Spotify playlists' : t.spotify ? 'A Spotify playlist' : 'An AI playlist';
+  };
+  return toCsv(head, list.map((m) => [m.artist, m.title, m.kind === 'artist' ? 'Artist' : 'Track', times(m), day(m.last), m.library, from(m)]));
 }
 
 export function missingText(list = missingList()) {

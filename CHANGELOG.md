@@ -3,6 +3,50 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.24.0 - 2026-10-28
+
+### New
+
+- **Missing tracks follow your Plex account.** The player can keep each
+  account's list for each Plex server (in `/data`), so every browser it
+  signs in on has the same one: what's added or taken off on one is on
+  the others when they next look (as the app opens or is shown again,
+  every few minutes while it's on screen, and when Missing tracks is
+  opened). A change made offline goes once the player can be reached.
+  The first time a browser that had a list of its own meets the
+  account's, the two are put together. What anyone asks an AI for, and
+  their Spotify playlists' names, never leave the device they asked on:
+  another device shows the rest (a Spotify one's playlists are counted
+  by a short hash of each name).
+- **The server's owner sees everyone's who keeps theirs.** Signed in as
+  the owner of the Plex server (plex.tv says who that is), your list is
+  kept for your account as you use it, and Missing tracks has your
+  friends' that are kept for theirs too: what their AI playlists and
+  Spotify imports didn't find, whose each is (their names as your Plex
+  friends) and how often in all, never what they asked for or what their
+  playlists are called. Taking one off, Clear the list and Check again
+  change everyone's list then, friends' too; Check on MusicBrainz checks
+  your own. The spreadsheet has them all, without whose.
+- **A friend's stays on their device until they choose**: **Keep them
+  for your Plex account**, on Missing tracks and under Settings › AI ›
+  Show missing tracks, says that whoever runs the server (and the
+  player) can see them then. Nothing of their list goes to the player
+  before. Turned off, theirs is taken off the player, and each of their
+  devices keeps its own. Friends never see anyone's but their own.
+- `SYNC_MISSING_TRACKS=false` keeps each browser's list its own, as
+  before.
+
+### Changed
+
+- Under an AI playlist, Not in your library says where its missing
+  tracks are kept, when that's for your account; so do Show missing
+  tracks and an import's Put what isn't here on Missing tracks.
+- Signing out says Missing tracks kept for your account stay with it.
+- Tests: the missingsync section (two browsers of one account, a friend
+  before and after they keep theirs for their account, the owner,
+  offline, signing out and in over someone), unit tests for the lists the
+  service keeps, and the container's.
+
 ## 0.23.0 - 2026-10-27
 
 ### New

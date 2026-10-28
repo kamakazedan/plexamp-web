@@ -63,7 +63,7 @@ TV=PLEX_TV_URL=http://pwb-plex:32400
 # Every test signs in as the same few accounts, so settings that follow an
 # account would carry one section's changes into the next: only the
 # DEBUG=true app keeps them (its sections test that).
-docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" -e SYNC_SETTINGS=false \
+docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" -e SYNC_SETTINGS=false -e SYNC_MISSING_TRACKS=false \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e OLLAMA_URL=http://pwb-ollama:11434 -e OLLAMA_MODEL=llama3.1:8b \
     -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pwb-plex:32400 \
     -e SPOTIFY_FILE_IMPORT=true "$IMAGE" >/dev/null

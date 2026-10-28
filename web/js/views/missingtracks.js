@@ -1,9 +1,12 @@
 // Settings › AI › Missing tracks: the songs and artists AI playlists
 // suggested, and the tracks of playlists imported from Spotify, that the
-// library doesn't have, to export and go looking for.
+// library doesn't have, to export and go looking for. Where this player
+// keeps them for each Plex account: the server's owner's on every device,
+// with everyone's who shares theirs, saying whose each is; a friend's, once
+// they choose to keep it for their account (missingShareRow).
 import { app, on } from '../state.js';
 import { describeError } from '../router.js';
-import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction, download, fileDate } from '../ui.js';
+import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction, download, fileDate, toggleRow } from '../ui.js';
 import {
   missingList,
   forgetMissing,
@@ -15,29 +18,81 @@ import {
   missingCsv,
   missingText,
   copyText,
+  everyoneShown,
   mbOn,
   mbWhere,
-  MISSING_LISTS,
+  tally,
+  promptOf,
+  missingKept,
 } from '../missing.js';
+import { pullMissing, missingSharing, shareMissing } from '../missingsync.js';
 import { aiSettings } from '../ai.js';
+
+// Whose one of everyone's is (for the server's owner): you and their names,
+// as your Plex friends have them, and how many others (who aren't any more).
+export function whose(m) {
+  if (!m.others) return '';
+  const names = [...(m.mine ? ['you'] : []), ...(m.others.who || [])];
+  const unknown = Math.max(0, (m.others.people || 0) - (m.others.who?.length || 0));
+  if (unknown) names.push(`${fmt.number(unknown)} ${unknown === 1 ? 'other' : 'others'}`);
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0] || '';
+}
+
+// For a friend (not the server's owner), where the player keeps them for
+// each account: whether theirs are kept for their account, where whoever
+// runs the server sees them too. Off to begin with: then they're this
+// device's own, as before 0.24.0. `after`: once it's changed (or not).
+export function missingShareRow({ after } = {}) {
+  const sh = missingSharing();
+  if (!sh.on || sh.owner !== false) return null;
+  const server = app.source?.serverName || 'the server';
+  return toggleRow({
+    title: 'Keep them for your Plex account',
+    subtitle: `Then every device you sign in on has them, and whoever runs ${server} (and this player) can see them too, with your Plex name, to go and find them: never what you asked for, or your Spotify playlists’ names. Off: they’re kept on this device only.`,
+    checked: sh.shared,
+    onChange: async (v) => {
+      try {
+        await shareMissing(v);
+        toast(v ? `Kept for your Plex account: whoever runs ${server} sees them too.` : 'Kept on this device only now, and taken off this player.');
+      } catch (err) {
+        toast(`Couldn’t change that. ${describeError(err)}`);
+      }
+      after?.();
+    },
+  });
+}
 
 export function missingTracksView({ el, onDispose }) {
   const server = app.source?.serverName || 'this server';
-  el.append(
-    backHeader('Missing tracks', { fallback: '/settings/ai' }),
-    h(
-      'p.lede',
-      null,
-      `Songs and artists that AI playlists suggested, and tracks of playlists imported from Spotify, that ${server} doesn’t have, kept on this device so you can go and find them (each server has a list of its own). ` +
-        (mbOn()
-          ? 'AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
-          : 'AI models sometimes suggest songs that don’t exist, so check before you go looking.'),
-    ),
-  );
+  const lede = h('p.lede.missing-lede');
+  const paintLede = () => {
+    const kept = missingKept();
+    const what = 'Songs and artists that AI playlists suggested, and tracks of playlists imported from Spotify';
+    lede.textContent =
+      (!kept
+        ? `${what}, that ${server} doesn’t have, kept on this device so you can go and find them (each server has a list of its own). `
+        : kept.owner
+          ? `${what}, that ${server} doesn’t have: yours, and those of your friends who keep theirs for their account, so you can go and find them. Kept for your Plex account on every device; what anyone asked an AI for, and their Spotify playlists’ names, stay on the device they asked on. `
+          : `${what}, that ${server} doesn’t have, kept for your Plex account on every device. Whoever runs ${server} sees them too, to go and find them, but not what you asked for or your Spotify playlists’ names: those stay on the device you asked on. `) +
+      (mbOn()
+        ? 'AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
+        : 'AI models sometimes suggest songs that don’t exist, so check before you go looking.');
+  };
+  // (For a friend: whether theirs are kept for their account.)
+  const share = h('div.rows.missing-share');
+  const paintShare = () => {
+    const r = missingShareRow({ after: paintShare });
+    share.replaceChildren(...(r ? [r] : []));
+    share.hidden = !r;
+  };
+  paintLede();
+  paintShare();
+  el.append(backHeader('Missing tracks', { fallback: '/settings/ai' }), lede, share);
   const actions = h('div.pad.button-row.missing-actions');
   const status = h('p.hint.pad.missing-status', { role: 'status' });
   const body = h('div.missing-body');
-  el.append(actions, status, body);
+  const note = h('p.hint.pad.missing-sync-note');
+  el.append(actions, status, body, note);
 
   let checking = null;
   let asking = null;
@@ -47,18 +102,33 @@ export function missingTracksView({ el, onDispose }) {
   }
 
   function render() {
+    paintLede();
+    paintShare();
     const list = missingList();
+    const everyone = everyoneShown();
     const artists = list.filter((m) => m.kind === 'artist');
     const tracks = list.filter((m) => m.kind === 'track');
     const libraries = new Set(list.map((m) => m.library));
     const where = (m) => (libraries.size > 1 && m.library ? ` · ${m.library}` : '');
-    const times = (m) => (m.times > 1 ? `suggested ${m.times} times, last ` : 'suggested ');
+    const who = (m) => (whose(m) ? ` · ${whose(m)}` : '');
+    const times = (m) => {
+      const { ai } = tally(m);
+      return ai > 1 ? `suggested ${fmt.number(ai)} times, last ` : 'suggested ';
+    };
     // Where a track came from: what it was suggested for, or the Spotify
-    // playlist it was in.
-    const told = (m) =>
-      m.via === 'spotify'
-        ? `${m.times > 1 ? `in ${m.lists?.length >= MISSING_LISTS ? `${MISSING_LISTS}+` : m.times} playlists from Spotify, last “${m.prompt}”` : `in “${m.prompt}” from Spotify`}, ${fmt.ago(m.last)}`
-        : `${times(m)}${fmt.ago(m.last)}${m.prompt ? ` for “${m.prompt}”` : ''}`;
+    // playlist it was in (this device's own, while it noted it last), and
+    // how often, everyone's for the server's owner.
+    const told = (m) => {
+      const { ai, spotify, more } = tally(m);
+      const prompt = promptOf(m);
+      const lists = `${fmt.number(spotify)}${more ? '+' : ''} playlists`;
+      if (ai && spotify) return `suggested ${ai === 1 ? 'once' : `${fmt.number(ai)} times`} and in ${spotify === 1 && !more ? 'a playlist' : lists} from Spotify, last ${fmt.ago(m.last)}`;
+      if (spotify) {
+        if (spotify > 1 || more) return `in ${lists} from Spotify${prompt ? `, last “${prompt}”` : ''}, ${fmt.ago(m.last)}`;
+        return `${prompt ? `in “${prompt}”` : 'in a playlist'} from Spotify, ${fmt.ago(m.last)}`;
+      }
+      return `${times(m)}${fmt.ago(m.last)}${prompt ? ` for “${prompt}”` : ''}`;
+    };
 
     actions.replaceChildren(
       ...(list.length
@@ -81,7 +151,7 @@ export function missingTracksView({ el, onDispose }) {
     if (checking) actions.querySelector('.missing-check')?.setAttribute('disabled', '');
 
     const remove = (m) =>
-      iconButton('close', `Take ${m.title || m.artist} off the list`, () => {
+      iconButton('close', `Take ${m.title || m.artist} off ${everyone ? 'everyone’s list' : 'the list'}`, () => {
         forgetMissing(m);
         render();
       });
@@ -99,7 +169,7 @@ export function missingTracksView({ el, onDispose }) {
             'div.rows.missing-rows',
             null,
             artists.map((m) =>
-              row({ lead: lead('mic'), title: m.artist, subtitle: [found(m), `None of their music · ${times(m)}${fmt.ago(m.last)}${where(m)}`], right: remove(m), cls: 'missing-row' }),
+              row({ lead: lead('mic'), title: m.artist, subtitle: [found(m), `None of their music · ${times(m)}${fmt.ago(m.last)}${where(m)}${who(m)}`], right: remove(m), cls: 'missing-row' }),
             ),
           ),
         ),
@@ -118,7 +188,7 @@ export function missingTracksView({ el, onDispose }) {
               row({
                 lead: lead('note'),
                 title: m.title,
-                subtitle: [found(m), `${m.artist || 'Unknown artist'} · ${told(m)}${where(m)}`],
+                subtitle: [found(m), `${m.artist || 'Unknown artist'} · ${told(m)}${where(m)}${who(m)}`],
                 right: remove(m),
                 cls: 'missing-row',
               }),
@@ -137,7 +207,13 @@ export function missingTracksView({ el, onDispose }) {
             {
               type: 'button',
               onclick: async () => {
-                const sure = await confirmAction({ title: 'Clear the list?', message: `Everything on ${server}’s list is taken off (other servers’ lists stay). Nothing changes in your library.`, confirm: 'Clear the list' });
+                const sure = await confirmAction({
+                  title: 'Clear the list?',
+                  message: everyone
+                    ? `Everything on ${server}’s list is taken off, your friends’ on it too (other servers’ lists stay). Nothing changes in your library.`
+                    : `Everything on ${server}’s list is taken off (other servers’ lists stay). Nothing changes in your library.`,
+                  confirm: 'Clear the list',
+                });
                 if (!sure) return;
                 clearMissing();
                 render();
@@ -150,13 +226,17 @@ export function missingTracksView({ el, onDispose }) {
     } else {
       kids.push(
         emptyState(
-          aiSettings().missing
-            ? 'Nothing missing so far. When an AI playlist suggests songs or artists your library doesn’t have, they’re listed here.'
-            : 'Nothing here. Turn on Show missing tracks in Settings › AI, and the songs and artists AI playlists suggest that your library doesn’t have are listed here.',
+          everyone
+            ? `Nothing missing so far. When AI playlists suggest songs or artists ${server} doesn’t have, or Spotify playlists brought over have them, yours or those of friends who keep theirs for their account, they’re listed here.`
+            : aiSettings().missing
+              ? 'Nothing missing so far. When an AI playlist suggests songs or artists your library doesn’t have, they’re listed here.'
+              : 'Nothing here. Turn on Show missing tracks in Settings › AI, and the songs and artists AI playlists suggest that your library doesn’t have are listed here.',
         ),
       );
     }
     body.replaceChildren(...kids);
+    note.textContent = missingSharing().full ? `This player has no room for more missing tracks just now, so your list for ${server} is kept on this device until there is.` : '';
+    note.hidden = !note.textContent;
   }
 
   async function checkAgain() {
@@ -223,8 +303,11 @@ export function missingTracksView({ el, onDispose }) {
   }
 
   render();
-  // An AI playlist made meanwhile may add to it.
+  // An AI playlist made meanwhile may add to it, and another device (or for
+  // the server's owner, a friend) may have: what's kept for the account,
+  // read again.
   onDispose?.(on('missing', render));
+  pullMissing();
   onDispose?.(() => {
     checking?.abort();
     asking?.abort();

@@ -149,6 +149,9 @@ export const SYNCED_BEFORE = 'syncedBefore';
 // settings as this browser last had them. Not the next account's.)
 export const SYNC_PENDING = 'syncPending';
 export const SYNC_REV = 'syncRev';
+// (missingsync.js: someone signed in over someone else here, so the Missing
+// tracks list here may be theirs, never to go to the next account.)
+export const MISSING_OVER = 'aiMissingOver';
 
 export function setAuth(auth) {
   const over = app.auth?.token && app.auth.token !== auth?.token;
@@ -156,6 +159,7 @@ export function setAuth(auth) {
   if (over) {
     store.set(SYNC_PENDING, null);
     store.set(SYNC_REV, null);
+    store.set(MISSING_OVER, true);
   }
   app.auth = auth;
   store.set('auth', auth);

@@ -40,7 +40,7 @@ All optional, as environment variables on the container (on Proxmox: `pct exec <
 | `PLEX_SERVER_URL` | Your Plex server's address, such as `http://192.168.1.10:32400`, for the container to reach it for browsers that can't. It also keeps the player's shared features to people who can use that server. |
 | `OLLAMA_URL`, `OLLAMA_MODEL` | An [Ollama](https://ollama.com) server, and its model, for AI playlists and the AI DJ, shared with everyone who uses the player. |
 | `MUSICBRAINZ_URL` | `https://musicbrainz.org` (or your own mirror), to check AI suggestions are real songs. Not set: nothing goes to MusicBrainz. |
-| `PLAY_TOGETHER`, `CASTING`, `PLAYLIST_SHARING`, `SYNC_SETTINGS` | `false` turns off Play Together, Play on with Plex players (for the server's owner, with `PLEX_SERVER_URL`), shared playlists, or settings that follow each Plex account. |
+| `PLAY_TOGETHER`, `CASTING`, `PLAYLIST_SHARING`, `SYNC_SETTINGS`, `SYNC_MISSING_TRACKS` | `false` turns off Play Together, Play on with Plex players (for the server's owner, with `PLEX_SERVER_URL`), shared playlists, settings that follow each Plex account, or Missing tracks that do (with everyone's for a Plex server's owner). |
 | `SPOTIFY_FILE_IMPORT`, `SPOTIFY_LINK_IMPORT` | `true` turns on making playlists from Spotify's download of your data (read in the browser), or from a public Spotify playlist's link (read from Spotify's public page for it). Each is off unless set: see [docs/configuration.md](docs/configuration.md). |
 | `DISABLE_WEBSOCKETS` | `true` for networks that block WebSockets. |
 | `DEBUG` | `true` writes extra detail to the container log, with tokens removed. |

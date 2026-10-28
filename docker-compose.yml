@@ -27,6 +27,9 @@
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends.
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
 #                       here, so they follow it to every browser it signs in on.
+#   SYNC_MISSING_TRACKS "false" turns off keeping each Plex account's Missing
+#                       tracks here, so they follow it to every browser, and
+#                       a Plex server's owner sees everyone's for it.
 #   SPOTIFY_FILE_IMPORT "true": Search › From Spotify makes playlists from
 #                       Spotify's download of your data, read in the browser.
 #                       Off unless set, for now.
@@ -60,6 +63,7 @@ services:
       CASTING: "true"
       PLAYLIST_SHARING: "true"
       SYNC_SETTINGS: "true"
+      SYNC_MISSING_TRACKS: "true"
       SPOTIFY_FILE_IMPORT: ""
       SPOTIFY_LINK_IMPORT: ""
       DEBUG: ""

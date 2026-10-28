@@ -23,6 +23,7 @@ import { SharedModel, AIRequestError, cleanChat, errorText, AI_LIMITS } from './
 import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
 import { Shares, ShareError } from './shares.js';
 import { SettingsStore, SettingsError } from './settings.js';
+import { MissingStore, MissingError, SERVER_ID } from './missing.js';
 import { Spotify, SpotifyError, playlistId, NOT_A_LINK } from './spotify.js';
 import { listenForNginx } from './syslog.js';
 import { plainPath, clientIp } from './paths.js';
@@ -51,6 +52,9 @@ function loadConfig() {
     // Settings that follow each Plex account (SYNC_SETTINGS), kept in a file
     // in dataDir too.
     settingsSync: env.PW_SERVICE_SETTINGS_SYNC ? env.PW_SERVICE_SETTINGS_SYNC === 'true' : cfg.settingsSync !== false,
+    // Missing tracks that follow each Plex account, and that a server's
+    // owner sees everyone's of (SYNC_MISSING_TRACKS), kept in dataDir too.
+    missingSync: env.PW_SERVICE_MISSING_SYNC ? env.PW_SERVICE_MISSING_SYNC === 'true' : cfg.missingSync !== false,
     dataDir: env.PW_SERVICE_DATA_DIR ?? cfg.dataDir ?? '',
     // Search › From Spotify by link (SPOTIFY_LINK_IMPORT, or SPOTIFY_IMPORT):
     // off unless it's turned on. Its address is for tests (the mock's).
@@ -93,6 +97,7 @@ const spotify = config.spotify ? new Spotify({ base: config.spotifyUrl || 'https
 // that keeps the file.
 let shares = null;
 let accountSettings = null;
+let missingLists = null;
 
 // ---------- rate limits ----------
 
@@ -664,6 +669,25 @@ async function serverAllowed(token, serverId, { strict = false } = {}) {
   return can(String(serverId || ''));
 }
 
+// As serverAllowed (strict), with whether the account owns the server, from
+// the same answer of plex.tv's: { ok, owned }.
+async function serverAccessOf(token, serverId) {
+  const access = async (id) => {
+    try {
+      return await auth.serverAccess(token, String(id || ''));
+    } catch (err) {
+      if (err instanceof AuthError) throw new HttpError(401, err.message);
+      throw new HttpError(503, 'plex.tv didn’t answer just now. Try again in a minute.');
+    }
+  };
+  if (config.plexServerUrl) {
+    const id = await auth.loadServerId();
+    if (!id) throw new HttpError(503, 'This player’s Plex server isn’t answering. Try again in a minute.');
+    if (!(await access(id)).ok) return { ok: false, owned: false };
+  }
+  return access(serverId);
+}
+
 function serverAccessMessage(server) {
   return `You can’t play from ${server.name}. Ask its owner to share their music library with you.`;
 }
@@ -1029,6 +1053,74 @@ async function settingsRoute(req, res, parts, url) {
   throw new HttpError(405, 'Not allowed.');
 }
 
+// ---------- Missing tracks that follow an account ----------
+
+// GET ?server=ID[&mine=REV&all=REV]: this account's Missing tracks for that
+// Plex server ({ account, owner, shared, rev, entries, done }), and for the
+// server's owner everyone else's who shares theirs (`others`, each with
+// whose: the owner's Plex friends' names, as plex.tv has them), each left
+// out if it's as the browser last had it (its revs). POST ?server=ID { ops:
+// [...] }: changes to it (see server/missing.js), and from the owner to
+// everyone's ({ everyone: true }). Only for the account behind the
+// request's sign-in, on a Plex server it can use, and with PLEX_SERVER_URL
+// set only for people who can use that one, as the rest of the service is.
+// Whether it owns the server, plex.tv says; anyone else's is kept only
+// while they share it.
+async function missingRoute(req, res, parts, url) {
+  if (!missingLists) throw new HttpError(404, 'This player doesn’t keep missing tracks for each account.');
+  if (parts.length) throw new HttpError(404, 'Not found.');
+  const { user, token } = await signedIn(req);
+  if (!allow(`missing|${user.id}`, 120)) throw new HttpError(429, 'Too many changes in a short time. Wait a minute.');
+  const server = String(url.searchParams.get('server') || '');
+  if (!SERVER_ID.test(server)) throw new HttpError(400, 'Which Plex server’s missing tracks?');
+  // Whether it can use the server and owns it, as plex.tv says (a brief
+  // outage isn't a no: the app tries again later).
+  const access = await serverAccessOf(token, server);
+  if (!access.ok) throw new HttpError(403, 'Missing tracks are kept for Plex accounts that can use this player’s Plex server, and yours can’t.');
+  const owner = access.owned === true;
+  try {
+    if (req.method === 'GET') {
+      const rev = (k) => {
+        const v = url.searchParams.get(k);
+        return v && /^[a-f0-9]{8}\.\d{1,12}$/.test(v) ? v : null;
+      };
+      const got = missingLists.view(user.id, server, { owner, have: { mine: rev('mine'), all: rev('all') } });
+      const out = { account: user.id, owner, shared: got.shared, rev: owner ? got.rev : { mine: got.rev.mine } };
+      if (got.entries) Object.assign(out, { entries: got.entries, done: got.done });
+      if (got.others) out.others = await named(token, got.others);
+      return send(res, 200, out);
+    }
+    if (req.method === 'POST') {
+      const body = await readBody(req, 512 * 1024);
+      const ops = Array.isArray(body.ops) ? body.ops : null;
+      if (!ops) throw new HttpError(400, 'Those changes couldn’t be read.');
+      const r = missingLists.apply(user.id, server, ops, { owner });
+      const mineOnly = ({ mine }) => ({ mine });
+      return send(res, 200, { rev: owner ? r.rev : mineOnly(r.rev), before: owner ? r.before : mineOnly(r.before), skipped: r.skipped, refused: r.refused, full: r.full });
+    }
+  } catch (err) {
+    if (err instanceof MissingError) throw new HttpError(err.status, err.message);
+    throw err;
+  }
+  throw new HttpError(405, 'Not allowed.');
+}
+
+// Whose each of everyone else's is, for the server's owner: those of their
+// own Plex friends (and Plex Home) by name, as plex.tv has them, and how
+// many people in all (`people`: some may not be friends any more). Ids
+// stay here.
+async function named(token, rows) {
+  let names = new Map();
+  if (rows.length) {
+    try {
+      names = new Map((await auth.friends(token)).map((f) => [f.id, f.title]));
+    } catch (err) {
+      log.debug(`missing tracks: couldn't load the owner's Plex friends for names: ${err.message}`);
+    }
+  }
+  return rows.map(({ who, ...r }) => ({ ...r, who: who.map((id) => names.get(id)).filter(Boolean), people: who.length }));
+}
+
 // Which way nginx passed a request on (X-PW-Route, which it sets itself and
 // clears from everyone else's): its sign-in checks for /pms/ ("internal"),
 // the shared AI model at /ollama/ ("ai"), or neither.
@@ -1050,7 +1142,7 @@ async function handle(req, res) {
     if (parts[0] !== 'api') throw new HttpError(404, 'Not found.');
     const [area, ...rest] = parts.slice(1);
     if (area === 'health')
-      return send(res, 200, { ok: true, together: config.together, cast: config.cast && !!config.plexServerUrl, devices: config.devices, sharing: !!shares, settings: !!accountSettings, spotify: !!spotify, debug: config.debug });
+      return send(res, 200, { ok: true, together: config.together, cast: config.cast && !!config.plexServerUrl, devices: config.devices, sharing: !!shares, settings: !!accountSettings, missing: !!missingLists, spotify: !!spotify, debug: config.debug });
     if (area === 'internal' && rest[0] === 'pms-auth' && routeOf(req) === 'internal') return await pmsAuth(req, res);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
     if (area === 'together') return await togetherRoute(req, res, rest, url);
@@ -1060,6 +1152,7 @@ async function handle(req, res) {
     if (area === 'musicbrainz') return await musicbrainzRoute(req, res, rest);
     if (area === 'shares') return await sharesRoute(req, res, rest, url);
     if (area === 'settings') return await settingsRoute(req, res, rest, url);
+    if (area === 'missing') return await missingRoute(req, res, rest, url);
     if (area === 'spotify') return await spotifyRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
@@ -1128,12 +1221,14 @@ function started() {
   }
   startSharing();
   startSettings();
+  startMissing();
   const off = [
     !config.together && 'Play Together',
     !config.cast && 'playing on other devices',
     !config.devices && 'sharing playback between devices',
     !shares && 'shared playlists',
     !accountSettings && 'settings that follow each account',
+    !missingLists && 'missing tracks that follow each account',
   ].filter(Boolean);
   log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${spotify ? ', importing from Spotify by link on' : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
@@ -1169,6 +1264,21 @@ function startSettings() {
   accountSettings = new SettingsStore({ dir: config.dataDir || null, log });
 }
 
+// Missing tracks that follow each Plex account, kept in the data folder too
+// (it has to be this service's to write, or they're off).
+function startMissing() {
+  if (!config.missingSync) return;
+  if (config.dataDir) {
+    try {
+      accessSync(config.dataDir, fsConstants.W_OK);
+    } catch {
+      log.error(`missing tracks that follow each account are off: ${config.dataDir} can't be written to by this service`);
+      return;
+    }
+  }
+  missingLists = new MissingStore({ dir: config.dataDir || null, log });
+}
+
 server.on('error', (err) => {
   log.error(`couldn't start: ${err.message}`);
   process.exit(1);
@@ -1191,6 +1301,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     shares?.flush();
     accountSettings?.flush();
+    missingLists?.flush();
     server.close();
     process.exit(0);
   });

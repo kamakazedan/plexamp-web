@@ -26,8 +26,8 @@ and t3 (Alex, a friend without access).
 
 Sections: core ws ai dj djs nows blocked poll custom desktop nav library edit
 lists pictures missing files sharing routes privacy np stream cast ratings
-devices fades together settings home formats select spotify debug memory
-(default: all).
+devices fades together settings home formats select spotify debug sync
+missingsync memory (default: all).
 """
 
 import json
@@ -6221,6 +6221,271 @@ with sync_playwright() as pw:
             c.close()
         account('t', 'DELETE')
         account('t2', 'DELETE')
+
+    # ---------- missingsync: Missing tracks that follow each account, and everyone's for the server's owner ----------
+    if run('missingsync') and APP_DEBUG:
+        SRV = 'mock-server-1'
+
+        def lists(token, method='GET', body=None):
+            req = urllib.request.Request(APP_DEBUG + f'api/missing?server={SRV}', method=method, data=json.dumps(body).encode() if body is not None else None,
+                                         headers={'X-Plex-Token': token, 'Content-Type': 'application/json', 'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read() or b'{}')
+
+        def status_of(token):
+            try:
+                lists(token)
+                return 200
+            except urllib.error.HTTPError as err:
+                return err.code
+
+        def op_id():
+            return f'{random.getrandbits(48):012x}'
+
+        def titles(token):
+            return sorted(m['title'] or m['artist'] for m in lists(token)['entries'])
+
+        def note(pg, items, prompt, via=''):
+            return js(pg, f"() => import('./js/missing.js').then((m) => m.noteMissing({json.dumps(items)}, {{ songs: [], artists: [] }}, {json.dumps(prompt)}, {{ via: {json.dumps(via)} }}).of)")
+
+        def queued(pg):
+            return js(pg, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.aiMissingOp.')).length")
+
+        def sent(pg, timeout=10):
+            return wait_for(lambda: queued(pg) == 0, timeout, 0.3)
+
+        def here(pg):
+            return js(pg, "() => JSON.parse(localStorage.getItem('pw.aiMissing') || '[]').map((m) => m.title || m.artist).sort()")
+
+        def rows(pg, until=None, timeout=10):
+            pg.goto(APP_DEBUG + '#/settings/ai')
+            pg.goto(APP_DEBUG + '#/settings/missing')
+            pg.wait_for_selector('.missing-row, .missing-body .empty-state', timeout=10000)
+            got = lambda: pg.locator('.missing-row').all_inner_texts()
+            # (Read again as it opens: until it says what's expected, if anything is.)
+            if until:
+                wait_for(lambda: until(got()), timeout, 0.3)
+            else:
+                pg.wait_for_timeout(1200)
+            return got()
+
+        def device(name, token='t', seed=None):
+            c = browser.new_context(**MOBILE)
+            if seed is not None:
+                # A browser that had the app before, signed in, with a list
+                # of its own (as 0.23.0 kept it).
+                c.add_init_script("if (!sessionStorage.getItem('pw-test-seeded')) { sessionStorage.setItem('pw-test-seeded', '1');"
+                                  f" for (const [k, v] of Object.entries({json.dumps(seed)})) localStorage.setItem(k, JSON.stringify(v)); }}")
+            pg = c.new_page()
+            attach(pg, name)
+            bodies = []
+            pg.on('request', lambda r: 'api/missing' in r.url and bodies.append(r.post_data or ''))
+            if seed is not None:
+                pg.goto(APP_DEBUG)
+                pg.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+            else:
+                login(pg, APP_DEBUG, token, app_defaults=True)
+            return c, pg, bodies
+
+        # (Everyone's on the server, cleared by its owner, and Sam's not
+        # shared: as if new.)
+        lists('t', 'POST', {'ops': [{'type': 'clear', 'id': op_id(), 'everyone': True}]})
+        lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
+
+        # The server's owner's browser with a list from before (0.23.0): it
+        # goes to the account, put together, without what was asked for or
+        # the playlist's name.
+        desk_ctx, desk, desk_sent = device('missing-desk')
+        was = js(desk, "() => import('./js/state.js').then(({ app }) => ({ auth: app.auth, source: app.source }))")
+        sec = was['source']['sectionKey']
+        lib = f"{was['source']['sectionTitle']} ({was['source']['serverName']})"
+        now = int(time.time())
+        legacy = [
+            {'kind': 'artist', 'artist': 'Legacy Band', 'title': '', 'times': 2, 'first': now - 1000, 'last': now - 500, 'prompt': 'dan old secret', 'server': SRV, 'section': sec, 'library': lib},
+            {'kind': 'track', 'artist': 'Old Spotify', 'title': 'Old Tune', 'via': 'spotify', 'times': 1, 'first': now - 900, 'last': now - 400, 'prompt': 'Dans Old List', 'server': SRV, 'section': sec, 'library': lib},
+            {'kind': 'track', 'artist': 'Elsewhere', 'title': 'Other Server Song', 'times': 1, 'first': now - 100, 'last': now - 100, 'prompt': 'x', 'server': 'another-server', 'section': '1', 'library': 'X'},
+        ]
+        old_ctx, old, old_sent = device('missing-old', seed={'pw.auth': was['auth'], 'pw.source': was['source'], 'pw.aiMissing': legacy})
+        up = wait_for(lambda: titles('t') == ['Legacy Band', 'Old Tune'], 10, 0.3)
+        kept = lists('t')
+        tune = next((m for m in kept['entries'] if m['title'] == 'Old Tune'), {})
+        check('missingsync: the owner\'s list from before goes to their account, as it is (that server\'s, put together)', up and next(m for m in kept['entries'] if m['artist'] == 'Legacy Band')['times'] == 2
+              and len(tune.get('lists', [])) == 1, json.dumps(kept)[:300])
+        check('missingsync: ...without what was asked for, or the Spotify playlist\'s name (they stay on that device)',
+              not any(w in json.dumps(kept) + ' '.join(old_sent) for w in ('secret', 'Dans Old List')), ' '.join(old_sent)[:300])
+        old_rows = rows(old, lambda r: any('Dans Old List' in x for x in r))
+        check('missingsync: ...where they\'re still shown', any('Dans Old List' in r for r in old_rows), str(old_rows))
+
+        # Another browser of the same account has them: what was asked for
+        # isn't there. The server's owner is told the list is everyone's.
+        desk_rows = rows(desk, lambda r: len(r) == 2)
+        lede = desk.locator('.missing-lede').inner_text()
+        shot(desk, 'missingsync-01-another-device')
+        check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
+        check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
+        check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (and there\'s no switch to share theirs)',
+              'yours, and those of your friends' in lede and 'Kept for your Plex account' in lede and desk.locator('.missing-share label').count() == 0, lede)
+
+        # Noted on one device, on the other once it's read again; counted again.
+        note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')
+        sent(desk)
+        note(old, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan again')
+        sent(old)
+        again = rows(desk, lambda r: any(x.startswith('Shared Song') and 'suggested 2 times' in x for x in r))
+        check('missingsync: noted on one device, counted on the other', any(r.startswith('Shared Song') and 'suggested 2 times' in r for r in again), str(again))
+
+        # A friend: their list stays on their device until they choose to
+        # keep it for their account, told that whoever runs the server sees
+        # it; nothing goes before that.
+        sam_ctx, sam, sam_sent = device('missing-sam', 't2')
+        js(sam, f"""() => {{ const l = JSON.parse(localStorage.getItem('pw.aiMissing') || '[]');
+            l.push({json.dumps({'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend Before', 'times': 1, 'first': now - 50, 'last': now - 50, 'prompt': 'friend old secret', 'server': SRV, 'section': sec, 'library': lib})});
+            localStorage.setItem('pw.aiMissing', JSON.stringify(l)); }}""")
+        note(sam, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}, {'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend Only'}], 'friend secret request')
+        note(sam, [{'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend Spotify'}], 'Friends Gym', via='spotify')
+        sam.wait_for_timeout(1500)
+        posts = [b for b in sam_sent if b]
+        check('missingsync: a friend\'s list stays on their device to begin with: nothing goes to the player', posts == [] and lists('t2')['entries'] == [] and not lists('t2')['shared'],
+              f'{posts[:2]} {lists("t2")}')
+        sam_rows = rows(sam, lambda r: len(r) == 4)
+        sam_lede = sam.locator('.missing-lede').inner_text()
+        switch = sam.locator('.missing-share label.toggle-row')
+        offered = switch.count() == 1 and not switch.locator('input').is_checked() and 'whoever runs ' in switch.inner_text()
+        shot(sam, 'missingsync-02-friend-before')
+        check('missingsync: ...says so, and offers to keep it for their account, saying whoever runs the server sees it then',
+              'kept on this device' in sam_lede and offered and len(sam_rows) == 4, f'{sam_rows} {sam_lede} {switch.all_inner_texts()}')
+        check('missingsync: ...and the server\'s owner doesn\'t see it', not any('Friend' in r for r in rows(desk)), str(rows(desk)))
+        sam.goto(APP_DEBUG + '#/settings/ai')
+        sam.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
+        check('missingsync: ...as Settings › AI does, under Show missing tracks', sam.locator('.ai-missing-settings label.toggle-row', has_text='Keep them for your Plex account').count() == 1)
+        # Kept for their account: this device's list goes with it (without
+        # what was asked for, or the playlist's name).
+        rows(sam)
+        sam.locator('.missing-share label.toggle-row').click()
+        went = wait_for(lambda: titles('t2') == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'], 10, 0.3)
+        theirs = lists('t2')
+        check('missingsync: kept for their account, their list goes to it, as it is', went and theirs['shared'] and 'others' not in theirs and set(theirs['rev']) == {'mine'},
+              json.dumps(theirs)[:300])
+        check('missingsync: ...never with what they asked for, or their playlist\'s name (in what\'s sent, or kept)',
+              not any(w in json.dumps(theirs) + ' '.join(sam_sent) for w in ('friend secret', 'friend old secret', 'Friends Gym')), ' '.join(sam_sent)[:300])
+        sam_rows = rows(sam, lambda r: len(r) == 4)
+        sam_lede = sam.locator('.missing-lede').inner_text()
+        shot(sam, 'missingsync-03-friend-shared')
+        check('missingsync: ...their page has theirs only, and says whoever runs the server sees them',
+              sorted(r.split('\n')[0] for r in sam_rows) == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'] and 'Whoever runs ' in sam_lede and 'sees them too' in sam_lede,
+              f'{sam_rows} {sam_lede}')
+        sam.goto(APP_DEBUG + '#/settings/ai')
+        sam.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
+        told = sam.locator('label.toggle-row', has_text='Show missing tracks').inner_text()
+        check('missingsync: ...as Settings › AI › Show missing tracks does', 'sees them too' in told, told)
+        check('missingsync: someone who can\'t use the server can\'t have a list for it', status_of('t3') == 403)
+        refused = lists('t2', 'POST', {'ops': [{'type': 'clear', 'id': op_id(), 'everyone': True}]})
+        check('missingsync: ...and a friend can\'t change everyone\'s', refused.get('skipped') == 1 and len(titles('t2')) == 4, json.dumps(refused))
+
+        # The server's owner sees everyone's: whose, and how often in all.
+        owner_rows = rows(desk, lambda r: any(x.startswith('Friend Only') for x in r))
+        shot(desk, 'missingsync-04-owner')
+        shared = next((r for r in owner_rows if r.startswith('Shared Song')), '')
+        friend = next((r for r in owner_rows if r.startswith('Friend Only')), '')
+        spot = next((r for r in owner_rows if r.startswith('Friend Spotify')), '')
+        check('missingsync: the server\'s owner sees friends\' who share, whose, and how often in all',
+              'suggested 3 times' in shared and 'you and Sam' in shared and friend.endswith('· Sam') and 'in a playlist from Spotify' in spot, str(owner_rows))
+        check('missingsync: ...never what they asked for, or their playlist\'s name', not any(w in ' '.join(owner_rows) for w in ('friend secret', 'Friends Gym')), str(owner_rows))
+        with desk.expect_download() as dl:
+            desk.click('.missing-csv')
+        csv_text = open(dl.value.path(), encoding='utf-8-sig').read()
+        check('missingsync: ...and the spreadsheet has them all, without whose', 'Friend Only' in csv_text and 'Sam' not in csv_text and 'you and' not in csv_text, csv_text[:300])
+
+        # The owner takes one off: off the friend's list too.
+        desk.locator('.missing-row', has_text='Friend Only').locator('button').click()
+        sent(desk)
+        check('missingsync: one the owner takes off is off the friend\'s list too', 'Friend Only' not in titles('t2')
+              and not any(r.startswith('Friend Only') for r in rows(sam, lambda r: not any(x.startswith('Friend Only') for x in r))), str(titles('t2')))
+
+        # Changed offline: kept here, and sent once it's back.
+        desk_ctx.set_offline(True)
+        rows(desk)
+        desk.locator('.missing-row', has_text='Shared Song').locator('button').click()
+        desk.wait_for_timeout(1500)
+        waiting = queued(desk)
+        desk_ctx.set_offline(False)
+        desk.evaluate("() => window.dispatchEvent(new Event('online'))")
+        went = sent(desk, 15)
+        check('missingsync: a change made offline is kept, and sent once it\'s back', waiting == 1 and went and 'Shared Song' not in titles('t') and 'Shared Song' not in titles('t2'),
+              f'{waiting} {titles("t")} {titles("t2")}')
+
+        # Check again, for the owner: found in the library now, it's off
+        # everyone's.
+        real = mock('/library/sections/1/all?type=10&X-Plex-Container-Size=1&X-Plex-Token=t')['MediaContainer']['Metadata'][0]
+        note(sam, [{'kind': 'track', 'artist': real.get('originalTitle') or real['grandparentTitle'], 'title': real['title']}], 'friend secret 2')
+        sent(sam)
+        rows(desk, lambda r: any(x.startswith(real['title']) for x in r))
+        desk.click('.missing-check')
+        desk.wait_for_selector('.missing-status:has-text("off the list"), .missing-status:has-text("yet")', timeout=30000)
+        sent(desk)
+        check('missingsync: Check again, for the owner, takes what\'s in the library now off the friend\'s list too', real['title'] not in titles('t2'), str(titles('t2')))
+
+        # The friend stops keeping theirs for their account: it's off the
+        # player (the owner doesn't see it), and stays on their device.
+        rows(sam, lambda r: sorted(x.split('\n')[0] for x in r) == ['Friend Before', 'Friend Spotify'])
+        before_here = here(sam)
+        sam.locator('.missing-share label.toggle-row').click()
+        gone = wait_for(lambda: not lists('t2')['shared'] and lists('t2')['entries'] == [], 10, 0.3)
+        check('missingsync: a friend who stops keeping theirs for their account takes it off the player, and keeps it on their device',
+              gone and here(sam) == before_here and not any('Friend' in r for r in rows(desk, lambda r: not any('Friend' in x for x in r))), f'{lists("t2")} {here(sam)}')
+        note(sam, [{'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend After'}], 'friend secret 3')
+        sam.wait_for_timeout(1500)
+        check('missingsync: ...and nothing more goes', 'Friend After' not in titles('t2') and queued(sam) == 0, str(titles('t2')))
+
+        # Signing out leaves the account's; the next account on that browser
+        # gets none of it.
+        before = titles('t')
+        desk.goto(APP_DEBUG + '#/settings/account')
+        desk.click('.account-card button:has-text("Sign out")')
+        desk.click('.sheet.open .sheet-action:has-text("Sign out")')
+        desk.wait_for_url('**#/login')
+        login(desk, APP_DEBUG, 't2', app_defaults=True)
+        desk.wait_for_timeout(2000)
+        check('missingsync: signing out leaves the account\'s list, and the next account on that browser gets none of it', titles('t') == before and titles('t2') == [] and here(desk) == [],
+              f'{titles("t")} {titles("t2")} {here(desk)}')
+        # Signed in over someone (without signing out): theirs isn't the new
+        # account's, even once it shares.
+        lists('t2', 'POST', {'ops': [{'type': 'share', 'id': op_id()}]})
+        js(old, "() => import('./js/state.js').then(({ setAuth, app }) => setAuth({ ...app.auth, token: 't2', username: 'sam' }))")
+        old.evaluate("() => { location.hash = '#/'; }")
+        old.reload()
+        old.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+        old.wait_for_timeout(2000)
+        check('missingsync: signed in over someone, what that browser had isn\'t the new account\'s', titles('t2') == [] and 'Legacy Band' not in here(old), f'{titles("t2")} {here(old)}')
+        lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
+
+        # Clear the list, for the owner: everyone's.
+        lists('t2', 'POST', {'ops': [{'type': 'share', 'id': op_id()}, {'type': 'note', 'id': op_id(), 'items': [{'kind': 'artist', 'artist': 'Sams Band'}], 'section': sec, 'library': lib}]})
+        own_ctx, own, _ = device('missing-owner')
+        rows(own, lambda r: any(x.startswith('Sams Band') for x in r))
+        own.click('.missing-clear button')
+        own.click('.ask-form .btn-danger')
+        sent(own)
+        check('missingsync: the owner\'s Clear the list clears friends\' too', lists('t')['entries'] == [] and lists('t2')['entries'] == [], f'{titles("t")} {titles("t2")}')
+        lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
+        for c in (desk_ctx, old_ctx, sam_ctx, own_ctx):
+            c.close()
+
+        # Where the player doesn't keep them for each account, nothing goes
+        # to it: each device has its own, as before.
+        local_ctx = browser.new_context()
+        local = local_ctx.new_page()
+        attach(local, 'missing-local')
+        asked = []
+        local.on('request', lambda r: 'api/missing' in r.url and asked.append(r.url))
+        login(local, APP)
+        note(local, [{'kind': 'track', 'artist': 'Local Artist', 'title': 'Local Song'}], 'here only')
+        local.goto(APP + '#/settings/missing')
+        local.wait_for_selector('.missing-row')
+        local_lede = local.locator('.missing-lede').inner_text()
+        check('missingsync: with SYNC_MISSING_TRACKS=false, nothing goes to the player, and the list says it\'s this device\'s',
+              not asked and 'kept on this device' in local_lede and local.locator('.missing-share label').count() == 0, f'{asked} {local_lede}')
+        local_ctx.close()
 
     # ---------- memory: a big library ----------
     # Waits here poll with evaluate() rather than using locators or

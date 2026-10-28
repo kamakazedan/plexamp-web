@@ -13,6 +13,7 @@ import { popOverlay } from '../router.js';
 import { h, sheet, fmt, icon } from '../ui.js';
 import { readSpotifyPlaylist, spotifyLinkKind, spotifyEntries, spotifyOffered, spotifyFilesOffered, sortSpotifyFiles, readSpotifyFiles, SPOTIFY_PRIVACY_URL, LIKED_SONGS } from '../spotify.js';
 import { runImport } from './playlistfiles.js';
+import { missingKeptNote } from '../missing.js';
 import { FILE_LIMITS } from '../playlistio.js';
 
 const where = () => app.source?.sectionTitle || 'this library';
@@ -291,7 +292,7 @@ function choosePlaylists({ playlists, tooBig, more, moreIn, moreAlone, files, re
         'label.import-choice.spotify-keep',
         null,
         keep,
-        h('span.import-choice-text', null, h('span.import-choice-title', null, 'Put what isn’t here on Missing tracks'), h('span.import-choice-sub', null, 'Listed in Settings › AI › Missing tracks, to go and find')),
+        h('span.import-choice-text', null, h('span.import-choice-title', null, 'Put what isn’t here on Missing tracks'), h('span.import-choice-sub', null, `Listed in Settings › AI › Missing tracks, to go and find${missingKeptNote() ? `.${missingKeptNote()}` : ''}`)),
       ),
       go,
     ),
@@ -401,7 +402,7 @@ function fromLink() {
         'label.import-choice.spotify-keep',
         null,
         keep,
-        h('span.import-choice-text', null, h('span.import-choice-title', null, 'Put what isn’t here on Missing tracks'), h('span.import-choice-sub', null, 'Listed in Settings › AI › Missing tracks, to go and find')),
+        h('span.import-choice-text', null, h('span.import-choice-title', null, 'Put what isn’t here on Missing tracks'), h('span.import-choice-sub', null, `Listed in Settings › AI › Missing tracks, to go and find${missingKeptNote() ? `.${missingKeptNote()}` : ''}`)),
       ),
       h('button.btn.btn-primary', { type: 'submit' }, 'Make the playlist'),
     );

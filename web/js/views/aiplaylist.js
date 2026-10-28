@@ -1,7 +1,7 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
 import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError, norm } from '../ai.js';
-import { noteMissing, missingCount, mbOn, mbWhere, checkSuggestions } from '../missing.js';
+import { noteMissing, myMissingCount, mbOn, mbWhere, checkSuggestions, missingKeptNote } from '../missing.js';
 import { on, emit } from '../state.js';
 import { playList } from '../actions.js';
 import { player } from '../player.js';
@@ -88,7 +88,7 @@ function startJob(prompt) {
 // 'failed', done, of, verdicts (see checkSuggestions), error }.
 function keepMissing(found, prompt) {
   if (!found?.missing && !found?.seen) return;
-  if (!aiSettings().missing && !missingCount()) return;
+  if (!aiSettings().missing && !myMissingCount()) return;
   const missing = aiSettings().missing ? found.missing || [] : [];
   if (!missing.length || !mbOn()) {
     noteMissing(missing, found.seen || {}, prompt);
@@ -153,6 +153,9 @@ function missingBlock(found, onDispose) {
   const list = h('ul.ai-missing-list');
   const left = h('div.ai-missing-left');
   const note = h('p.ai-missing-mb');
+  // Where they're kept (for your account, where whoever runs the server sees
+  // them too), said where they're noted.
+  const kept = missingKeptNote().trim();
   const el = h(
     'details.ai-missing',
     null,
@@ -160,6 +163,7 @@ function missingBlock(found, onDispose) {
     list,
     left,
     note,
+    kept ? h('p.ai-missing-mb.ai-missing-kept', null, kept) : null,
     h('a.link-btn.ai-missing-all', { href: '#/settings/missing' }, 'All missing tracks, to export'),
   );
   const group = (why, items) => h('div.ai-missing-group', null, h('p.ai-missing-why', null, why), h('ul.ai-missing-list.out', null, items.map((m) => h('li', null, missingLine(m)))));

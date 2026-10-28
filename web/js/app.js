@@ -29,6 +29,7 @@ import { devices } from './devices.js';
 import { refreshRows } from './ratings.js';
 import { initSharing, invitations } from './sharing.js';
 import { startSync } from './sync.js';
+import { startMissingSync } from './missingsync.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
@@ -305,8 +306,10 @@ function boot() {
   startRouter({ mainEl: document.getElementById('main'), changed: onRouteChange });
 
   if (app.server) {
-    // Settings that follow your account (sync.js), as early as can be.
+    // Settings that follow your account (sync.js), as early as can be, and
+    // Missing tracks (missingsync.js).
     startSync();
+    startMissingSync();
     player.restore();
     // Still playing on another Plex player since the page was opened last?
     cast.resume();
@@ -326,6 +329,7 @@ function boot() {
   }
   on('source', () => app.config.together && !together.inviteTimer && together.watch());
   on('source', () => app.server && startSync());
+  on('source', () => app.server && startMissingSync());
   // Whether menus offer collection changes (only the server's admin can).
   on('source', () => app.server && isAdmin().catch(() => {}));
 

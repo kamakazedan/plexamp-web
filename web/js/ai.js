@@ -18,6 +18,7 @@
 import { app, on } from './state.js';
 import { normTrack } from './plex.js';
 import { debugLog } from './debug.js';
+import { norm } from './missinglist.js';
 
 // How long to wait for the model to start answering (loading it, and
 // reading a long prompt, can take minutes) is a setting: Settings › AI ›
@@ -463,16 +464,9 @@ const clean = (v, max = 120) =>
     .replace(/\s+/g, ' ')
     .slice(0, max);
 
-export const norm = (v) =>
-  String(v || '')
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
-    .replace(/^the\s+/, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
+// (Names as they're compared: the same as Missing tracks' lists, see
+// missinglist.js.)
+export { norm };
 
 export function describeTrack(t) {
   const extra = [t.album, t.year].filter(Boolean).join(', ');

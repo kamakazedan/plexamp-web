@@ -297,6 +297,28 @@ KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/settings.json; cat /data
 contains "settings: kept in /data, the service's alone" "nginx 600" "$KEPT"
 lacks "settings: ...without anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
 contains "settings: ...and forgotten when asked" '{"settings":{},"changed":{},"rev":0,"off":false}' "$(cb -H 'X-Plex-Token: t' -X DELETE "$SET" >/dev/null; cb -H 'X-Plex-Token: t' "$SET")"
+# Missing tracks that follow each account: each account's own, and for the
+# server's owner everyone's, whose by their Plex name; never what anyone
+# asked an AI for. Kept in /data, the service's alone; only on a Plex server
+# the account can use.
+MIS="$W/api/missing?server=mock-server-1"
+contains "missing tracks: none kept yet" '"entries":[]' "$(cb -H 'X-Plex-Token: t2' "$MIS")"
+contains "missing tracks: a friend's change isn't kept before they choose to keep theirs" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789aa","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music"}]}' "$MIS")"
+contains "missing tracks: ...and is once they have" '"skipped":0' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"share","id":"0123456789a9"},{"type":"note","id":"0123456789ab","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music","prompt":"not-for-keeping"}]}' "$MIS")"
+KEPT="$(cb -H 'X-Plex-Token: t2' "$MIS")"
+contains "missing tracks: ...and read back" '"title":"Friend Song"' "$KEPT"
+lacks "missing tracks: ...never what it was asked for" "not-for-keeping" "$KEPT"
+lacks "missing tracks: ...nor, for a friend, everyone else's" '"others"' "$KEPT"
+contains "missing tracks: the server's owner sees everyone's, whose by name" '"who":["Sam"]' "$(cb -H 'X-Plex-Token: t' "$MIS")"
+contains "missing tracks: ...and a friend can't change everyone's" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"clear","id":"0123456789ac","everyone":true}]}' "$MIS")"
+expect "missing tracks: only for people who can use the server" 403 "$(c -H 'X-Plex-Token: t3' "$MIS")"
+expect "missing tracks: ...on a server they can use" 403 "$(c -H 'X-Plex-Token: t' "$W/api/missing?server=someone-elses")"
+expect "missing tracks: not without a sign-in" 401 "$(c "$MIS")"
+sleep 3
+KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/missing.json; cat /data/missing.json')"
+contains "missing tracks: kept in /data, the service's alone" "nginx 600" "$KEPT"
+lacks "missing tracks: ...without what anyone asked for" "not-for-keeping" "$KEPT"
+lacks "missing tracks: ...or anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
 # A sign-in the service hasn't seen is checked with plex.tv: a few a minute
 # from each address, so made-up tokens can't keep plex.tv busy. (Last here:
 # the restart below starts the counts again.)
@@ -318,7 +340,7 @@ docker run -d --name pw-web2 --network "$NET" -v "$DATA_VOLUME:/data" "$IMAGE" >
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
 lacks "defaults: with a volume at /data, nothing is said about it" "which isn't a volume" "$(docker logs pw-web2 2>&1)"
-expect "defaults: Play Together, your devices, shared playlists and account settings, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together, your devices, shared playlists, and account settings and missing tracks, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true, missingSync: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
 contains "defaults: Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner)" "Play on with Plex players needs PLEX_SERVER_URL" "$(docker logs pw-web2 2>&1)"
 expect "defaults: ...so the service has no players for anyone" 404 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/cast/players)"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
@@ -399,16 +421,17 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true -e SPOTIFY_IMPORT=true -e SPOTIFY_LINK_IMPORT=false "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7b. Playing on other Plex players off ----------
 docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
-    -e SPOTIFY_LINK_IMPORT=true "$IMAGE" >/dev/null
+    -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false and SYNC_SETTINGS=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone)" "window.PW_CONFIG = { together: true, devices: true, spotify: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false, SYNC_SETTINGS=false and SYNC_MISSING_TRACKS=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone)" "window.PW_CONFIG = { together: true, devices: true, spotify: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "SYNC_MISSING_TRACKS=false: no missing tracks kept for each account" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/missing?server=mock-server-1')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
 expect "PLAYLIST_SHARING=false: no shared playlists" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/shares?server=mock-server-1')"
@@ -474,6 +497,7 @@ bad "rejects an unclear true/false value" "expected true or false" -e DISABLE_WE
 bad "rejects an unclear PLAY_TOGETHER" "PLAY_TOGETHER: expected true or false" -e PLAY_TOGETHER=sometimes
 bad "rejects an unclear CASTING" "CASTING: expected true or false" -e CASTING=sometimes
 bad "rejects an unclear PLAYLIST_SHARING" "PLAYLIST_SHARING: expected true or false" -e PLAYLIST_SHARING=sometimes
+bad "rejects an unclear SYNC_MISSING_TRACKS" "SYNC_MISSING_TRACKS: expected true or false" -e SYNC_MISSING_TRACKS=sometimes
 bad "rejects a DATA_DIR that isn't a full path" "DATA_DIR must be a full path" -e DATA_DIR=data
 bad "rejects a DATA_DIR with .. in it" "without . or .. in it" -e DATA_DIR=/data/../etc
 bad "rejects a DATA_DIR in a system folder" "DATA_DIR can't be in a system folder" -e DATA_DIR=/etc/plexamp-web
