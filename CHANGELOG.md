@@ -46,9 +46,11 @@ you're running is shown in **Settings › About**.
   looked through. Their rules are read once, three at a time, and kept
   until the playlist changes.
 - **Back never shows the last person's pages**: after signing out, or
-  switching user, going back to a page from before shows Home instead.
-  And anything another open tab kept in the moment before it followed
-  (its queue, say) goes too.
+  switching user, going back to a page from before shows Home instead
+  (once, pages from before this update do too), as does a tab of theirs
+  the browser brings back, without what was typed in it. And anything
+  another open tab kept in the moment before it followed (its queue,
+  say) goes too.
 
 ## 0.28.0 - 2026-10-28
 

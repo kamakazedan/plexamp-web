@@ -215,6 +215,17 @@ export function startRouter({ mainEl, changed }) {
   });
 
   const st = forgetTyped(history.state) || {};
+  if (st.k && st.e && st.e !== ownMark()) {
+    // Someone else's page, in a tab the browser brought back (Reopen
+    // closed tab, say), with what they'd typed in its pages: none of it.
+    try {
+      sessionStorage.removeItem(NAV_KEY);
+    } catch {
+      /* storage unavailable */
+    }
+    render(startStacks('home', hashOf('/')), false);
+    return;
+  }
   const saved = loadSaved();
   // A reload: the history and the stacks are as they were (unless they're
   // from a version of the app with other tabs).

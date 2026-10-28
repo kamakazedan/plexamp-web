@@ -3596,6 +3596,19 @@ with sync_playwright() as pw:
         check('privacy: ...so after signing out, someone signing in next on the tab finds none of it going Back: each of the last person\'s pages is Home',
               'glass' not in tab_after and 'harbour' not in tab_after and len(trail) >= 3 and reached <= {'#/', '#/login'}
               and not any(t[1] for t in trail) and not any('glass' in t[2] or 'harbour' in t[2] for t in trail), f'{tab_after} {trail}')
+        # A tab the browser brings back with someone else's page in it
+        # (Reopen closed tab, with the tab's own record of its pages):
+        # Home, without what they'd typed.
+        page.goto(APP + '#/browse/artists')
+        page.wait_for_selector('.within input')
+        page.fill('.within input', 'glass')
+        wait_for(lambda: 'glass' in js(page, "() => sessionStorage.getItem('pw.nav') || ''"), 8)
+        js(page, "() => history.replaceState({ ...history.state, e: '0123456789abcdef' }, '', location.hash)")
+        page.reload()
+        page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+        page.wait_for_timeout(500)
+        check('privacy: a tab brought back with someone else\'s page in it starts at Home, without what they\'d typed',
+              js(page, '() => location.hash') == '#/' and 'glass' not in js(page, "() => sessionStorage.getItem('pw.nav') || ''"))
         ctx.close()
 
     # ---------- np: the player's sleep timer and converted tracks ----------
