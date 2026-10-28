@@ -25,6 +25,12 @@
 #                       own (http://192.168.1.30:5000, say). Not set: no
 #                       checks. (MUSICBRAINZ, from 0.12.0: "false" still
 #                       turns them off; "true" alone means musicbrainz.org.)
+#   MUSICBRAINZ_ADVANCED "true" turns on the app's MusicBrainz features, with
+#                       MUSICBRAINZ_URL: live tracks and demos left out of
+#                       what the app picks, albums missing from artists'
+#                       pages, original release years, other names for
+#                       artists, genres where Plex has none (off by default:
+#                       they ask MusicBrainz a lot more, best with your own)
 #   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends
 #                       (on by default)
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
@@ -344,6 +350,13 @@ if [ -n "$MB_URL" ]; then
     esac
 fi
 
+# The app's MusicBrainz features: they ask MusicBrainz about the library's
+# artists and albums, so they're the host's to turn on, with MUSICBRAINZ_URL.
+MB_ADV=false
+if truthy MUSICBRAINZ_ADVANCED "${MUSICBRAINZ_ADVANCED:-}"; then
+    if [ "$MB" = true ]; then MB_ADV=true; else say "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL (the MusicBrainz to ask), so the MusicBrainz features are off"; fi
+fi
+
 PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
 case "$PLEX_TV" in
     http://* | https://*) ;;
@@ -648,6 +661,7 @@ CONF
     fi
     if [ "$CAST" = true ]; then add_config 'cast: true'; fi
     if [ "$MB" = true ]; then add_config "musicbrainz: \"$MB_KIND\""; fi
+    if [ "$MB_ADV" = true ]; then add_config 'musicbrainzAdvanced: true'; fi
     add_config 'devices: true'
     if [ "$SHARING" = true ]; then add_config 'sharing: true'; fi
     if [ "$SETTINGS_SYNC" = true ]; then add_config 'settingsSync: true'; fi
@@ -660,6 +674,7 @@ else
     TOGETHER=false
     CAST=false
     MB=false
+    MB_ADV=false
     SHARING=false
     SETTINGS_SYNC=false
     MISSING_SYNC=false
@@ -672,6 +687,9 @@ if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each Plex account
 if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each Plex account are kept in $DATA_DIR (everyone's, and a Plex server's owner sees them all)"; fi
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
+fi
+if [ "$MB_ADV" = true ]; then
+    say "the MusicBrainz features are on: the library's artists and albums are looked up on MusicBrainz at $(safe_url "$MB_URL")$([ "$MB_KIND" = public ] && echo ', at most once a second'), and what it says is kept in $DATA_DIR"
 fi
 if [ "$SPOTIFY" = true ]; then say "importing from Spotify by link is on: playlists are read from Spotify's public pages"; fi
 # (In the browser: no service needed.)
@@ -731,6 +749,7 @@ if [ "$SERVICE" = true ]; then
   "cast": $CAST,
   "musicbrainz": $MB,
   "musicbrainzUrl": "$(json "$MB_URL")",
+  "musicbrainzAdvanced": $MB_ADV,
   "version": "$(json "$APP_VERSION")",
   "devices": $SERVICE,
   "sharing": $SHARING,
@@ -793,7 +812,7 @@ if [ "$DEBUG_ON" = true ]; then
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
     say "  WEBSOCKETS=$WS_MODE${DISABLE_WEBSOCKETS:+  DISABLE_WEBSOCKETS=$DISABLE_WEBSOCKETS}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
-    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  SYNC_SETTINGS=$SETTINGS_SYNC  SYNC_MISSING_TRACKS=$MISSING_SYNC  SPOTIFY_FILE_IMPORT=$SPOTIFY_FILES  SPOTIFY_LINK_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
+    say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  MUSICBRAINZ_ADVANCED=$MB_ADV  PLAYLIST_SHARING=$SHARING  SYNC_SETTINGS=$SETTINGS_SYNC  SYNC_MISSING_TRACKS=$MISSING_SYNC  SPOTIFY_FILE_IMPORT=$SPOTIFY_FILES  SPOTIFY_LINK_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"
     # Checked in the background so a slow or missing server doesn't hold up
     # start-up. Only status codes are printed.

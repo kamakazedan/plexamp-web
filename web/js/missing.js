@@ -24,6 +24,7 @@ import { app } from './state.js';
 import { songInLibrary, artistInLibrary, aiSettings } from './ai.js';
 import { MISSING_LIMITS, MISSING_LISTS, keyOf, idOf, listId, sourceOf, applyNote, applyForget, applyClear, applyVerdicts, applyRestore } from './missinglist.js';
 import { loadMissing as load, saveMissing as save, queueMissing, missingOthers, editMissingOthers, ownsServer, syncs } from './missingsync.js';
+import { aliasesOf } from './mb.js';
 
 export { MISSING_LIMITS, MISSING_LISTS };
 
@@ -217,16 +218,22 @@ export function clearMissing() {
 }
 
 // Looks for each of the server in use's again, in the library it was
-// missing from (after adding music), and lets go of what's there now.
-// Resolves to how many were found.
+// missing from (after adding music), and lets go of what's there now: by
+// its artist's name, and (with the player's MusicBrainz features: see
+// mb.js) the other names MusicBrainz has for them. Resolves to how many
+// were found.
 export async function checkMissingAgain({ signal, onProgress } = {}) {
   const todo = missingList();
   const found = [];
   let n = 0;
+  const here = (m, artist, section) => (m.kind === 'artist' ? artistInLibrary(artist, signal, section) : songInLibrary({ artist, title: m.title }, signal, { section }));
   for (const m of todo) {
     if (signal?.aborted) break;
     const section = m.section || app.source.sectionKey;
-    const there = m.kind === 'artist' ? await artistInLibrary(m.artist, signal, section) : await songInLibrary({ artist: m.artist, title: m.title }, signal, { section });
+    let there = await here(m, m.artist, section);
+    for (const alias of there || !m.artist ? [] : (await aliasesOf(m.artist)).slice(0, 3)) {
+      if (signal?.aborted || (there = await here(m, alias, section))) break;
+    }
     if (there) found.push(idOf(m));
     onProgress?.(++n, todo.length);
   }

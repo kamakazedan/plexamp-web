@@ -6,6 +6,9 @@ import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { missingTracksView } from './missingtracks.js';
+import { musicbrainzSettingsView } from './mbsettings.js';
+import { mbReviewView } from './mbreview.js';
+import { mbFeatures } from '../mb.js';
 import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
@@ -42,6 +45,7 @@ export async function settingsView({ el }) {
         subtitle: app.config.devices ? 'Streaming quality, crossfade and your devices' : 'Streaming quality, gapless playback and crossfade',
       }),
       row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
+      mbFeatures() ? row({ href: '/settings/musicbrainz', lead: lead('disc'), title: 'MusicBrainz', subtitle: 'Live tracks and demos, missing albums, original years' }) : null,
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'Server address and diagnostics' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
     ),
@@ -61,6 +65,8 @@ export async function settingsPageView(ctx) {
     playback: playbackView,
     ai: aiView,
     missing: missingTracksView,
+    musicbrainz: musicbrainzSettingsView,
+    mbreview: mbReviewView,
     debug: debugView,
     about: aboutView,
   };

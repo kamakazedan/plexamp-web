@@ -757,6 +757,28 @@ export class PlexServer {
     this.forgetCollections();
   }
 
+  // An album's year (`year`, and the day it came out: `date`, YYYY-MM-DD)
+  // or genres (`genres`: all it's to have; `removeGenres`: those it's not
+  // to have any more) changed, each locked so Plex's next refresh of its
+  // metadata leaves it be: for the server's admin (the MusicBrainz
+  // features' review: mbreview.js). Genres go as Plex's own apps send them:
+  // each one escaped, then all of them as one value.
+  async editAlbum(section, id, { year, date, genres, removeGenres } = {}) {
+    const params = { type: 9, id };
+    if (year) Object.assign(params, { 'year.value': year, 'year.locked': 1 });
+    if (date) Object.assign(params, { 'originallyAvailableAt.value': date, 'originallyAvailableAt.locked': 1 });
+    if (genres?.length) {
+      genres.forEach((g, i) => (params[`genre[${i}].tag.tag`] = g));
+      params['genre.locked'] = 1;
+    }
+    if (removeGenres?.length) {
+      params['genre[].tag.tag-'] = removeGenres.map((g) => encodeURIComponent(g)).join(',');
+      params['genre.locked'] = 1;
+    }
+    await this.send('PUT', `/library/sections/${section}/all`, params);
+    this.cache.delete(`album:${id}`);
+  }
+
   forgetCollections() {
     for (const k of this.cache.keys()) if (k.startsWith('collections:')) this.cache.delete(k);
   }

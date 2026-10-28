@@ -20,7 +20,7 @@ import { Together, TogetherError } from './together.js';
 import { Cast, CastError } from './cast.js';
 import { Devices, DevicesError, LIMITS as LIMITS_DEVICES } from './devices.js';
 import { SharedModel, AIRequestError, cleanChat, errorText, AI_LIMITS } from './ai.js';
-import { MusicBrainz, MusicBrainzError, MB_LIMITS } from './musicbrainz.js';
+import { MusicBrainz, MusicBrainzError, MB_LIMITS, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
 import { Shares, ShareError } from './shares.js';
 import { SettingsStore, SettingsError } from './settings.js';
 import { MissingStore, MissingError, SERVER_ID } from './missing.js';
@@ -44,6 +44,9 @@ function loadConfig() {
     // Checking AI playlists' suggestions on MusicBrainz (MUSICBRAINZ_URL):
     // where, if anywhere.
     musicbrainzUrl: env.PW_SERVICE_MUSICBRAINZ_URL ?? (cfg.musicbrainz === false ? '' : cfg.musicbrainzUrl) ?? '',
+    // ...and the app's MusicBrainz features (MUSICBRAINZ_ADVANCED): what
+    // they look up is kept in dataDir too.
+    musicbrainzAdvanced: env.PW_SERVICE_MUSICBRAINZ_ADVANCED ? env.PW_SERVICE_MUSICBRAINZ_ADVANCED === 'true' : cfg.musicbrainzAdvanced === true,
     version: cfg.version || env.PW_SERVICE_VERSION || '',
     devices: env.PW_SERVICE_DEVICES ? env.PW_SERVICE_DEVICES === 'true' : cfg.devices !== false,
     // Shared playlists (PLAYLIST_SHARING), kept in a file in dataDir (none:
@@ -449,6 +452,7 @@ let mbChecks = 0;
 
 async function musicbrainzRoute(req, res, parts) {
   if (!musicbrainz) throw new HttpError(404, 'Checking on MusicBrainz is turned off on this player.');
+  if ((parts[0] === 'artist' || parts[0] === 'albums') && parts.length === 1) return musicbrainzFeatures(req, res, parts[0]);
   if (parts[0] !== 'check' || parts.length > 1) throw new HttpError(404, 'Not found.');
   if (req.method !== 'POST') throw new HttpError(405, 'Not allowed.');
   const { key } = await plexAllowed(req, {
@@ -479,6 +483,49 @@ async function musicbrainzRoute(req, res, parts) {
     if (n > 0) mbBusy.set(key, n);
     else mbBusy.delete(key);
   }
+}
+
+// The app's MusicBrainz features (MUSICBRAINZ_ADVANCED), for the people
+// MusicBrainz checks are for:
+//   POST /api/musicbrainz/artist { name, groups } -> { artist: { id, name,
+//     aliases, genres } | null, groups: [{ id, title, primary, secondary,
+//     date }] }: an artist's other names and genres, and (unless `groups` is
+//     false) their release groups.
+//   POST /api/musicbrainz/albums { items: [{ artist, title }], genres, wait }
+//     -> { results: [{ id, title, primary, secondary, date, genres? } |
+//     null | 'pending'] }: albums' release groups as far as they're known;
+//     what isn't is looked up in the background (waited for `wait` ms at
+//     most), to ask about again.
+// Only names go to MusicBrainz: an artist's (and an album's title is matched
+// here, against the artist's release groups).
+async function musicbrainzFeatures(req, res, what) {
+  if (!musicbrainz.adv) throw new HttpError(404, 'The MusicBrainz features are turned off on this player.');
+  if (req.method !== 'POST') throw new HttpError(405, 'Not allowed.');
+  const { key } = await plexAllowed(req, {
+    what: 'the MusicBrainz features',
+    signIn: 'Sign in to Plex first.',
+    noAccess: 'The MusicBrainz features are for people who can use this player’s Plex server, and your Plex account can’t.',
+  });
+  if (!allow(`mba|${key}`, 120)) throw new HttpError(429, 'Too many requests in a short time. Wait a minute and try again.');
+  const body = await readBody(req, 256 * 1024);
+  const name = (v) => String(v || '').slice(0, 200);
+  const ctrl = new AbortController();
+  res.on('close', () => !res.writableFinished && ctrl.abort());
+  if (what === 'artist') {
+    const timer = setTimeout(() => ctrl.abort(), MB_ADVANCED_LIMITS.artistMs);
+    try {
+      const artist = await musicbrainz.artistInfo(name(body.name), { signal: ctrl.signal });
+      const groups = artist && body.groups !== false ? await musicbrainz.releaseGroups(artist.id, { signal: ctrl.signal }) : [];
+      return send(res, 200, { artist, groups });
+    } catch (err) {
+      if (ctrl.signal.aborted && !res.writableEnded) throw new HttpError(504, 'MusicBrainz took too long to answer. Try again later.');
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const items = (Array.isArray(body.items) ? body.items : []).slice(0, MB_ADVANCED_LIMITS.perRequest).map((it) => ({ artist: name(it?.artist), title: name(it?.title) }));
+  return send(res, 200, { results: await musicbrainz.albums(items, { genres: body.genres === true, waitMs: Number(body.wait) || 0, signal: ctrl.signal }) });
 }
 
 // Search › From Spotify by link (SPOTIFY_LINK_IMPORT): a public playlist's name and
@@ -1221,6 +1268,7 @@ function started() {
   startSharing();
   startSettings();
   startMissing();
+  startMusicBrainzKept();
   const off = [
     !config.together && 'Play Together',
     !config.cast && 'playing on other devices',
@@ -1229,7 +1277,7 @@ function started() {
     !accountSettings && 'settings that follow each account',
     !missingLists && 'missing tracks that follow each account',
   ].filter(Boolean);
-  log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${spotify ? ', importing from Spotify by link on' : ''}${config.debug ? ', debug mode on' : ''}`);
+  log.info(`ready${off.length ? ` (${off.join(' and ')} off)` : ''}${spotify ? ', importing from Spotify by link on' : ''}${musicbrainz?.adv ? ', MusicBrainz features on' : ''}${config.debug ? ', debug mode on' : ''}`);
   auth.loadServerId();
 }
 
@@ -1261,6 +1309,23 @@ function startSettings() {
     }
   }
   accountSettings = new SettingsStore({ dir: config.dataDir || null, log });
+}
+
+// What the app's MusicBrainz features look up (MUSICBRAINZ_ADVANCED), kept
+// in the data folder too, so a restart doesn't ask again (in memory only
+// if it can't be written to).
+function startMusicBrainzKept() {
+  if (!musicbrainz || !config.musicbrainzAdvanced) return;
+  let dir = config.dataDir || null;
+  if (dir) {
+    try {
+      accessSync(dir, fsConstants.W_OK);
+    } catch {
+      log.warn(`musicbrainz: ${dir} can't be written to by this service, so what's looked up is kept in memory only (until it restarts)`);
+      dir = null;
+    }
+  }
+  musicbrainz.advanced(new MBKept({ dir, log }));
 }
 
 // Missing tracks that follow each Plex account, kept in the data folder too
@@ -1301,6 +1366,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     shares?.flush();
     accountSettings?.flush();
     missingLists?.flush();
+    musicbrainz?.adv?.flush();
     server.close();
     process.exit(0);
   });

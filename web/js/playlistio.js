@@ -10,6 +10,7 @@
 // of tracks, with the fewest changes.
 import { app } from './state.js';
 import { norm, sameTitle, mapLimit, findArtist } from './ai.js';
+import { aliasesOf } from './mb.js';
 import { saveOrder } from './sorting.js';
 import { toCsv } from './missing.js';
 
@@ -284,18 +285,35 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
     // A common title: among the artist's own tracks.
     const want = norm(e.title);
     const needle = want.split(' ').find((w) => w.length >= 3) || want;
-    for (const sec of libraries) {
-      const artist = await findArtist(e.artist || e.albumArtist, signal, sec);
-      if (!artist) continue;
-      const { items } = await s.list(sec, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal });
-      const mine = best(e, items);
-      if (mine) return mine;
-    }
-    // Its album, and its number there.
-    if (!e.album) return null;
-    const found = await s.search(e.album, everywhere, { signal, limit: 10 });
-    for (const album of (found.album || []).filter((a) => sameAlbum(e, a)).slice(0, 3)) {
-      const there = onAlbum(e, await s.children(album.ratingKey));
+    const theirs = async (e) => {
+      for (const sec of libraries) {
+        const artist = await findArtist(e.artist || e.albumArtist, signal, sec);
+        if (!artist) continue;
+        const { items } = await s.list(sec, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal });
+        const mine = best(e, items);
+        if (mine) return mine;
+      }
+      return null;
+    };
+    // Its album, and its number there (the album looked for once, if it's
+    // needed).
+    let albums = null;
+    const onIts = async (e) => {
+      albums ||= e.album ? s.search(e.album, everywhere, { signal, limit: 10 }).then((r) => r.album || []) : Promise.resolve([]);
+      for (const album of (await albums).filter((a) => sameAlbum(e, a)).slice(0, 3)) {
+        const there = onAlbum(e, await s.children(album.ratingKey));
+        if (there) return there;
+      }
+      return null;
+    };
+    const found = (await theirs(e)) || (await onIts(e));
+    if (found) return found;
+    // Not found by the artist's name: by the other names MusicBrainz has for
+    // them (with the player's MusicBrainz features: see mb.js), "Мумий
+    // Тролль" for "Mumiy Troll", say.
+    for (const alias of (await aliasesOf(e.artist || e.albumArtist)).slice(0, 3)) {
+      const as = { ...e, artist: alias, albumArtist: '' };
+      const there = best(as, res.track || []) || (await theirs(as)) || (await onIts(as));
       if (there) return there;
     }
     return null;

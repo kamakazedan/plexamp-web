@@ -92,13 +92,13 @@ OLLAMA_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}
 docker run -d --name pw-web --network "$NET" --add-host "ollama.box:$OLLAMA_IP" -e "$TV" \
     -e PLEX_SERVER_URL=http://pw-plex:32400 -e DISABLE_WEBSOCKETS=true \
     -e OLLAMA_URL=http://ollama.box:11434 -e OLLAMA_MODEL=llama3.1:8b \
-    -e MUSICBRAINZ_URL=http://pw-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pw-plex:32400 \
+    -e MUSICBRAINZ_URL=http://pw-plex:32400 -e MUSICBRAINZ_ADVANCED=true -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pw-plex:32400 \
     -e SPOTIFY_FILE_IMPORT=true "$IMAGE" >/dev/null
 wait_http pw-web http://pw-web/
 wait_service pw-web
 W=http://pw-web
 
-contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true, cast: true, musicbrainz: "own"' "$(cb $W/config.js)"
+contains "config.js has all settings" 'serverProxy: "pms/", websockets: false, ai: { proxy: "ollama/", model: "llama3.1:8b" }, together: true, cast: true, musicbrainz: "own", musicbrainzAdvanced: true' "$(cb $W/config.js)"
 expect "app is served" 200 "$(c $W/)"
 expect "hls.js is bundled" 200 "$(c $W/vendor/hls.min.js)"
 # The service starts as root to make its socket, then gives up root and
@@ -186,6 +186,20 @@ contains "MusicBrainz: says which are real, unknown, or albums" '{"results":["re
 MB_SEEN="$(cb 'http://pw-plex:32400/__mock/musicbrainz?X-Plex-Token=t')"
 contains "MusicBrainz: asks as this app, with its version" '"plexamp-web/' "$MB_SEEN"
 contains "MusicBrainz: ...and where to find it" ' ( https://github.com/kamakazedan/plexamp-web )' "$MB_SEEN"
+# The MusicBrainz features (MUSICBRAINZ_ADVANCED): an artist's other names,
+# genres and release groups; albums' release groups, looked up in the
+# background where they aren't known yet; for people who can use the
+# server; what's looked up kept in /data, the service's alone.
+expect "MusicBrainz features: for people who can use the server" 403 "$(c -H 'X-Plex-Token: t3' -H "$JSON" -X POST -d '{"name":"Glass Harbour"}' $W/api/musicbrainz/artist)"
+MBA="$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"name":"Glass Harbor"}' $W/api/musicbrainz/artist)"
+contains "MusicBrainz features: an artist by another name, with their genres" '"name":"Glass Harbour","aliases":["Glass Harbour","Glass Harbor"],"genres":["Electronic","Ambient"]' "$MBA"
+contains "MusicBrainz features: ...and their release groups, those the library hasn't too" '"title":"Sea Glass","primary":"Album","secondary":[],"date":"2016-03-01"' "$MBA"
+MBALB='{"items":[{"artist":"Juniper & Ash","title":"Hearthstone"},{"artist":"Nobody At All","title":"X"}],"genres":true,"wait":8000}'
+contains "MusicBrainz features: an album's release group, with when it first came out and its genres" '"date":"1998-03-01","genres":["Folk","Singer-Songwriter"]' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d "$MBALB" $W/api/musicbrainz/albums)"
+sleep 6
+KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/musicbrainz.json; cat /data/musicbrainz.json')"
+contains "MusicBrainz features: what's looked up is kept in /data, the service's alone" "nginx 600" "$KEPT"
+lacks "MusicBrainz features: ...nothing about who asked" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
 
 # Spotify import by link (SPOTIFY_IMPORT here, the name before 0.22.0): a
 # public playlist, read from Spotify's page for it (the mock's here), for
@@ -425,7 +439,7 @@ contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7b. Playing on other Plex players off ----------
-docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
+docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e MUSICBRAINZ_ADVANCED=true -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
     -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true -e WEBSOCKETS=on -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
@@ -435,6 +449,7 @@ contains "...and that DISABLE_WEBSOCKETS=true is left aside" "DISABLE_WEBSOCKETS
 expect "SYNC_MISSING_TRACKS=false: no missing tracks kept for each account" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/missing?server=mock-server-1')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
+contains "MUSICBRAINZ_ADVANCED without a MusicBrainz to ask: off, saying why" "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL" "$(docker logs pw-web8 2>&1)"
 expect "PLAYLIST_SHARING=false: no shared playlists" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/shares?server=mock-server-1')"
 expect "without PLEX_SERVER_URL, anyone signed in to Plex can use the service, on a server of their own" 200 "$(c -H 'X-Plex-Token: t3' "http://pw-web8/api/devices?device=chk-device-9&name=Check&server=mock-server-2&wait=0")"
 
@@ -501,6 +516,7 @@ bad "rejects an unclear PLAY_TOGETHER" "PLAY_TOGETHER: expected true or false" -
 bad "rejects an unclear CASTING" "CASTING: expected true or false" -e CASTING=sometimes
 bad "rejects an unclear PLAYLIST_SHARING" "PLAYLIST_SHARING: expected true or false" -e PLAYLIST_SHARING=sometimes
 bad "rejects an unclear SYNC_MISSING_TRACKS" "SYNC_MISSING_TRACKS: expected true or false" -e SYNC_MISSING_TRACKS=sometimes
+bad "rejects an unclear MUSICBRAINZ_ADVANCED" "MUSICBRAINZ_ADVANCED: expected true or false" -e MUSICBRAINZ_ADVANCED=sometimes
 bad "rejects a DATA_DIR that isn't a full path" "DATA_DIR must be a full path" -e DATA_DIR=data
 bad "rejects a DATA_DIR with .. in it" "without . or .. in it" -e DATA_DIR=/data/../etc
 bad "rejects a DATA_DIR in a system folder" "DATA_DIR can't be in a system folder" -e DATA_DIR=/etc/plexamp-web

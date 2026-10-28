@@ -41,8 +41,10 @@ testing, these endpoints need no token:
         listed in them, not found by id. hidden= none; stall=ID&bytes=N: the
         next time that track's file is asked for, its first N bytes come,
         then nothing more for a minute (as through a proxy that's stopped
-        passing it on), stall= none
+        passing it on), stall= none; nogenre=ID,... takes those albums'
+        genres away (as an album Plex has none for), nogenre= puts them back
     /__mock/add-album?title=...   adds an album and announces it
+    /__mock/edits[?reset=1]       the album edits made (year, date, genres)
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
                                   in silence (for testing transitions)
@@ -96,7 +98,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 try:
     # (MOCK_NO_PILLOW=1: as in CI, where the mock runs without it.)
@@ -658,6 +660,47 @@ MB_EXTRA = {
 }
 MB_SEEN = {'requests': 0, 'agents': [], 'last': ''}
 
+# What the mock MusicBrainz says of the library's artists, for the app's
+# MusicBrainz features: other names, genres, release groups (the library's
+# albums, with when they first came out, and some it doesn't have), and the
+# groups' genres.
+MB_ALIASES = {'Northbound Static': ['Нортбаунд Статик'], 'Glass Harbour': ['Glass Harbor']}
+MB_GENRES = {'Glass Harbour': [('electronic', 4), ('ambient', 2)], 'Juniper & Ash': [('folk', 3)]}
+MB_MORE_GROUPS = {
+    'Glass Harbour': [('Sea Glass', 'Album', [], '2016-03-01'), ('Harbour Lights Live', 'Album', ['Live'], '2019-07-01'),
+                      ('Early Tapes', 'Album', ['Demo'], '2012-01-01'), ('Undertow', 'Single', [], '2020-02-02')],
+}
+MB_FIRST_DATES = {'Hearthstone': '1998-03-01'}  # (the library's is a reissue)
+MB_GROUP_GENRES = {'Tidal Lines': [('ambient', 3), ('downtempo', 1)], 'Hearthstone': [('folk', 2), ('singer-songwriter', 1)]}
+
+
+def mb_id(text):
+    h = hashlib.sha1(('mb|' + text).encode()).hexdigest()
+    return f'{h[:8]}-{h[8:12]}-4{h[13:16]}-8{h[17:20]}-{h[20:32]}'
+
+
+def mb_artists():
+    out = []
+    for a in artists:
+        out.append({'id': mb_id('artist|' + a['title']), 'name': a['title'], 'sort-name': a['title'],
+                    'aliases': [{'name': x, 'sort-name': x} for x in MB_ALIASES.get(a['title'], [])],
+                    'genres': [{'name': g, 'count': n} for g, n in MB_GENRES.get(a['title'], [])]})
+    return out
+
+
+def mb_groups(artist_name):
+    out = []
+    for al in albums:
+        if al['parentTitle'] != artist_name:
+            continue
+        sub = [t['tag'] for t in al.get('Subformat', [])]
+        fmt = (al.get('Format') or [{'tag': 'Album'}])[0]['tag']
+        out.append({'id': mb_id('group|' + artist_name + '|' + al['title']), 'title': al['title'], 'primary-type': fmt, 'secondary-types': sub,
+                    'first-release-date': MB_FIRST_DATES.get(al['title'], f"{al.get('year') or 2000}-05-01")})
+    for title, primary, sub, date in MB_MORE_GROUPS.get(artist_name, []):
+        out.append({'id': mb_id('group|' + artist_name + '|' + title), 'title': title, 'primary-type': primary, 'secondary-types': sub, 'first-release-date': date})
+    return out
+
 # Pictures uploaded to playlists and collections (Plex calls them posters),
 # by the SHA-1 of their bytes.
 PICTURES = {}
@@ -853,6 +896,8 @@ def hls_playlist(seconds):
 # ---------------------------------------------------------------- notifications
 
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None}
+EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
+NO_GENRE = {}  # album id -> its genres, taken away (/__mock/config?nogenre=)
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
 listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
 listeners_lock = threading.Lock()
@@ -993,6 +1038,10 @@ def pms_token_ok(token):
 
 def role(token):
     return SERVER_TOKENS.get(token) or SERVER_TOKENS.get(TRANSIENT.get(token, ''))
+
+
+def parts_of(path):
+    return [x for x in path.split('/') if x]
 
 
 def is_admin(token):
@@ -1380,8 +1429,27 @@ class Handler(BaseHTTPRequestHandler):
         field = lambda name: (re.search(name + r':"([^"]*)"', query) or [None, ''])[1].strip().lower()
         MB_SEEN['requests'] += 1
         MB_SEEN['agents'] = sorted(set(MB_SEEN['agents']) | {self.headers.get('User-Agent', '')})
-        MB_SEEN['last'] = query
+        MB_SEEN['last'] = query or p
         artists_ = {a['title'].lower() for a in artists} | {a.lower() for a in MB_EXTRA['artists']}
+        # (The MusicBrainz features: an artist by name or other name, looked
+        # up by id, and their release groups, and a group's genres.)
+        if p == '/ws/2/artist' and ' OR alias:' in query:
+            names = {m.lower() for m in re.findall(r':"([^"]*)"', query)}
+            hits = [a for a in mb_artists() if a['name'].lower() in names or any(x['name'].lower() in names for x in a['aliases'])]
+            return self.send_json_plain({'artists': [dict(a, score=100) for a in hits]})
+        if p.startswith('/ws/2/artist/'):
+            hit = next((a for a in mb_artists() if a['id'] == parts_of(p)[-1]), None)
+            return self.send_json_plain(hit) if hit else self.not_found()
+        if p == '/ws/2/release-group' and 'artist' in q and not query:
+            who = next((a['name'] for a in mb_artists() if a['id'] == q['artist'][0]), None)
+            groups = mb_groups(who) if who else []
+            start = int(q.get('offset', ['0'])[0])
+            size = int(q.get('limit', ['25'])[0])
+            return self.send_json_plain({'release-group-count': len(groups), 'release-groups': groups[start:start + size]})
+        if p.startswith('/ws/2/release-group/'):
+            gid = parts_of(p)[-1]
+            title = next((al['title'] for al in albums if mb_id('group|' + al['parentTitle'] + '|' + al['title']) == gid), None)
+            return self.send_json_plain({'id': gid, 'genres': [{'name': g, 'count': n} for g, n in MB_GROUP_GENRES.get(title, [])]})
         if p == '/ws/2/artist':
             name = field('artist')
             hit = name in artists_ or f'the {name}' in artists_
@@ -1688,6 +1756,14 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['quiet'] = [x for x in q['quiet'][0].split(',') if x]
             if 'hidden' in q:
                 MOCK['hidden'] = [x for x in q['hidden'][0].split(',') if x]
+            if 'nogenre' in q:
+                for k, was in list(NO_GENRE.items()):
+                    if k in items:
+                        items[k]['Genre'] = was
+                    del NO_GENRE[k]
+                for k in (x for x in q['nogenre'][0].split(',') if x in items):
+                    NO_GENRE[k] = items[k].get('Genre', [])
+                    items[k]['Genre'] = []
             if 'codec' in q:
                 set_codecs(q['codec'][0])
             if 'stall' in q:
@@ -1734,6 +1810,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.musicbrainz(p, q)
         if p == '/__mock/musicbrainz':
             return self.send_json(dict(MB_SEEN))
+        if p == '/__mock/edits':
+            if q.get('reset', ['0'])[0] == '1':
+                EDITS.clear()
+            return self.send_json({'edits': EDITS})
         if p == '/__mock/picture':  # what was uploaded as an item's picture, if anything
             it = items.get(q.get('id', [''])[0]) or {}
             data = PICTURES.get(it.get('_poster') or '')
@@ -1817,6 +1897,24 @@ class Handler(BaseHTTPRequestHandler):
             if sec != SECTION:
                 return self.send_json({'size': 0, 'totalSize': 0, 'Metadata': []})
             typ = int(q.get('type', ['9'])[0])
+            if sub == 'all' and self.command == 'PUT' and typ == 9:  # an album's year, date or genres (locked)
+                al = items.get(q.get('id', [''])[0])
+                if not al or al.get('type') != 'album':
+                    return self.not_found()
+                if not is_admin(token):
+                    return self.send_json({'error': 'Forbidden'}, 403)
+                if 'year.value' in q:
+                    al['year'] = int(q['year.value'][0])
+                if 'originallyAvailableAt.value' in q:
+                    al['originallyAvailableAt'] = q['originallyAvailableAt.value'][0][:10]
+                genres = [q[k][0] for k in sorted((k for k in q if re.fullmatch(r'genre\[\d+\]\.tag\.tag', k)), key=lambda k: int(re.search(r'\d+', k).group()))]
+                if genres:
+                    al['Genre'] = [tag('genre', g) for g in genres]
+                if 'genre[].tag.tag-' in q:
+                    gone = {unquote(x) for x in q['genre[].tag.tag-'][0].split(',')}
+                    al['Genre'] = [t for t in al.get('Genre', []) if t['tag'] not in gone]
+                EDITS.append({'id': al['ratingKey'], 'q': {k: v[0] for k, v in q.items() if not k.startswith('X-Plex')}})
+                return self.send_json({})
             if sub == 'all' and self.command == 'PUT' and typ == 18:  # rename a collection
                 c = items.get(q.get('id', [''])[0])
                 if not c or c.get('type') != 'collection':

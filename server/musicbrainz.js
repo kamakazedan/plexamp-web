@@ -6,7 +6,14 @@
 // at a time for everyone using the player; musicbrainz.org at most once a
 // second (its rule for each address), with a User-Agent saying what's
 // asking, as it asks. What it says is kept for a week.
+//
+// With MUSICBRAINZ_ADVANCED, the app's MusicBrainz features too (see the
+// end of this file): what MusicBrainz says of the library's artists and
+// albums, by artist, kept on disk for a month.
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { norm } from './missinglist.js';
+import { albumKey, matchGroup } from './releases.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org (your own: none)
@@ -71,21 +78,45 @@ export const isPublic = (base) => {
 };
 
 export class MusicBrainz {
-  constructor({ base = 'https://musicbrainz.org', version = '', fetchImpl = globalThis.fetch, gapMs, log } = {}) {
+  constructor({ base = 'https://musicbrainz.org', version = '', fetchImpl = globalThis.fetch, gapMs, log, now = () => Date.now() } = {}) {
     this.base = String(base).replace(/\/+$/, '');
     this.fetch = fetchImpl;
     this.public = isPublic(this.base);
     this.gapMs = gapMs ?? (this.public ? MB_LIMITS.gapMs : 0);
     this.agent = `plexamp-web${/^[0-9][0-9.]*$/.test(version) ? `/${version}` : ''} ( https://github.com/kamakazedan/plexamp-web )`;
     this.log = log;
+    this.now = now;
     this.kept = new Map(); // key -> { answer, at }
     this.queue = Promise.resolve();
     this.last = 0;
+    this.waiting = 0; // requests someone's waiting on (the background waits for them)
+    // The advanced features (see advanced()): what's kept of them, and
+    // what's waiting to be looked up in the background.
+    this.adv = null;
+    this.todo = new Map(); // key -> { artist, title, genres }
+    this.working = false;
   }
 
   // One request to MusicBrainz, after the one before it by gapMs (skipped
-  // if `signal` says whoever wanted it has gone).
-  ask(path, params, signal) {
+  // if `signal` says whoever wanted it has gone). In the background
+  // (`background`): once no one's waiting on one.
+  ask(path, params, signal, { background = false } = {}) {
+    if (background) {
+      return (async () => {
+        while (this.waiting > 0) {
+          if (signal?.aborted) throw new Gone();
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        return this.asked(path, params, signal);
+      })();
+    }
+    this.waiting += 1;
+    return this.asked(path, params, signal).finally(() => {
+      this.waiting -= 1;
+    });
+  }
+
+  asked(path, params, signal) {
     const run = async () => {
       if (signal?.aborted) throw new Gone();
       const wait = this.last + this.gapMs - Date.now();
@@ -186,5 +217,309 @@ export class MusicBrainz {
       }
     }
     return out;
+  }
+
+  // ---------- the app's MusicBrainz features (MUSICBRAINZ_ADVANCED) ----------
+  // What they need of an artist: their MusicBrainz id, their other names
+  // (aliases: other spellings and scripts), genres, and release groups
+  // (albums, singles, EPs..., each with its kinds and when it first came
+  // out); and of a release group, its genres. Asked about by artist, so an
+  // album needs no request of its own but for its genres. `kept`: where
+  // the answers are kept (an MBKept).
+  advanced(kept) {
+    this.adv = kept;
+    return this;
+  }
+
+  // What's kept, or undefined for what isn't (null: MusicBrainz has none).
+  had(key) {
+    return this.adv ? this.adv.get(key) : undefined;
+  }
+
+  // An artist, by name (or one of their other names): { id, name, aliases,
+  // genres }, or null where MusicBrainz has no such artist.
+  async artistInfo(name, { signal, background = false } = {}) {
+    const want = norm(name);
+    if (!want || !this.adv) return null;
+    const key = `artist|${want}`;
+    const kept = this.had(key);
+    if (kept !== undefined) return kept;
+    const opts = { background };
+    const found = await this.ask('/ws/2/artist', { query: `artist:${phrase(name)} OR alias:${phrase(name)}`, limit: '10' }, signal, opts);
+    const hit = pickArtist(found.artists, want);
+    if (!hit) return this.adv.set(key, null);
+    const full = await this.ask(`/ws/2/artist/${hit.id}`, { inc: 'aliases genres' }, signal, opts);
+    const names = [full.name, full['sort-name'], ...(Array.isArray(full.aliases) ? full.aliases : []).flatMap((a) => [a?.name, a?.['sort-name']])];
+    return this.adv.set(key, cleanArtist({ id: hit.id, name: full.name || hit.name, aliases: names, genres: topGenres(full.genres) }));
+  }
+
+  // An artist's release groups, by their MusicBrainz id: [{ id, title,
+  // primary, secondary, date }] (those they're credited with, up to 500).
+  async releaseGroups(artistId, { signal, background = false } = {}) {
+    if (!this.adv || !MBID.test(String(artistId))) return [];
+    const key = `groups|${artistId}`;
+    const kept = this.had(key);
+    if (kept !== undefined) return kept;
+    const out = [];
+    for (let page = 0; page < MB_ADVANCED_LIMITS.groupPages; page += 1) {
+      const data = await this.ask('/ws/2/release-group', { artist: artistId, limit: '100', offset: String(page * 100) }, signal, { background });
+      const list = Array.isArray(data['release-groups']) ? data['release-groups'] : [];
+      for (const g of list) {
+        const clean = cleanGroup(g);
+        if (clean) out.push(clean);
+      }
+      if (list.length < 100 || (page + 1) * 100 >= (Number(data['release-group-count']) || 0)) break;
+    }
+    return this.adv.set(key, out);
+  }
+
+  // A release group's genres (MusicBrainz's, the most voted first).
+  async groupGenres(id, { signal, background = false } = {}) {
+    if (!this.adv || !MBID.test(String(id))) return [];
+    const key = `genres|${id}`;
+    const kept = this.had(key);
+    if (kept !== undefined) return kept;
+    const data = await this.ask(`/ws/2/release-group/${id}`, { inc: 'genres' }, signal, { background });
+    return this.adv.set(key, topGenres(data.genres));
+  }
+
+  // One of an artist's albums, by its title: its release group (with
+  // `genres`, and its genres), or null where MusicBrainz has no such
+  // artist, or no such album of theirs.
+  async album(artist, title, { genres = false, signal, background = false } = {}) {
+    const info = await this.artistInfo(artist, { signal, background });
+    if (!info) return null;
+    const g = matchGroup(await this.releaseGroups(info.id, { signal, background }), title);
+    if (!g) return null;
+    return genres ? { ...g, genres: await this.groupGenres(g.id, { signal, background }) } : g;
+  }
+
+  // ...as far as it's known now, without asking: undefined where it isn't.
+  knownAlbum(artist, title, { genres = false } = {}) {
+    const who = norm(artist);
+    if (!this.adv || !who || !albumKey(title)) return null;
+    const info = this.had(`artist|${who}`);
+    if (!info) return info;
+    const groups = this.had(`groups|${info.id}`);
+    if (groups === undefined) return undefined;
+    const g = matchGroup(groups, title);
+    if (!g || !genres) return g;
+    const got = this.had(`genres|${g.id}`);
+    return got === undefined ? undefined : { ...g, genres: got };
+  }
+
+  // Albums to look up in the background (an owner looking through their
+  // library, say): one at a time, once no one's waiting on MusicBrainz for
+  // anything else. At most MB_ADVANCED_LIMITS.queued waiting: false if
+  // there's no room for this one now.
+  later(artist, title, { genres = false } = {}) {
+    if (!this.adv || !norm(artist) || !albumKey(title)) return false;
+    const key = `${norm(artist)}|${albumKey(title)}|${genres ? 1 : 0}`;
+    if (this.todo.has(key)) return true;
+    if (this.todo.size >= MB_ADVANCED_LIMITS.queued) return false;
+    this.todo.set(key, { artist: String(artist), title: String(title), genres: !!genres, tries: 0 });
+    this.work();
+    return true;
+  }
+
+  async work() {
+    if (this.working) return;
+    this.working = true;
+    try {
+      while (this.todo.size) {
+        const [key, it] = this.todo.entries().next().value;
+        try {
+          await this.album(it.artist, it.title, { genres: it.genres, background: true });
+          this.todo.delete(key);
+        } catch (err) {
+          // MusicBrainz busy or out of reach: a rest, and again (three
+          // times at most, each to the back of the queue).
+          this.todo.delete(key);
+          it.tries += 1;
+          if (it.tries < 3) this.todo.set(key, it);
+          else this.log?.debug(`musicbrainz: gave up on "${it.title}" by ${it.artist}: ${err.message}`);
+          await new Promise((r) => setTimeout(r, MB_ADVANCED_LIMITS.restMs));
+        }
+      }
+    } finally {
+      this.working = false;
+    }
+  }
+
+  // For the app: each album's release group as far as it's known ('pending'
+  // where it isn't yet: looked up in the background), waiting up to
+  // `waitMs` for those.
+  async albums(items, { genres = false, waitMs = 0, signal } = {}) {
+    const answer = () =>
+      items.map((it) => {
+        const v = this.knownAlbum(it.artist, it.title, { genres });
+        return v === undefined ? 'pending' : v;
+      });
+    let out = answer();
+    out.forEach((v, i) => v === 'pending' && this.later(items[i].artist, items[i].title, { genres }));
+    const until = Date.now() + Math.max(0, Math.min(Number(waitMs) || 0, MB_ADVANCED_LIMITS.waitMs));
+    while (out.includes('pending') && Date.now() < until && !signal?.aborted) {
+      await new Promise((r) => setTimeout(r, 200));
+      out = answer();
+    }
+    return out;
+  }
+}
+
+// ---------- the advanced features' answers, and how they're kept ----------
+
+export const MB_ADVANCED_LIMITS = {
+  keepMs: 30 * 86400000, // what's kept: a month
+  kept: 20000, // answers kept
+  bytes: 30 * 1024 * 1024, // ...in all, as JSON
+  queued: 5000, // albums waiting to be looked up in the background
+  perRequest: 200, // albums asked about in one request from the app
+  waitMs: 10000, // how long a request from the app may wait for answers
+  groupPages: 5, // of an artist's release groups, 100 to a page
+  artistMs: 30000, // how long one artist's lookups may take for the app
+  restMs: 30000, // after MusicBrainz doesn't answer, in the background
+};
+
+const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const DATE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
+const text = (v, n) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, n) : '');
+
+// The artist among MusicBrainz's search results: one of that name, or else
+// one with it among their other names, and a good match either way.
+function pickArtist(list, want) {
+  const ok = (Array.isArray(list) ? list : []).filter((a) => a && MBID.test(String(a.id)) && Number(a.score) >= 80);
+  const aliased = (a) => norm(a['sort-name']) === want || (Array.isArray(a.aliases) ? a.aliases : []).some((x) => norm(x?.name) === want || norm(x?.['sort-name']) === want);
+  return ok.find((a) => norm(a.name) === want) || ok.find(aliased) || null;
+}
+
+// A release group as it's kept, or null.
+function cleanGroup(g) {
+  if (!g || !MBID.test(String(g.id))) return null;
+  const title = text(g.title, 300);
+  if (!title) return null;
+  const secondary = (Array.isArray(g['secondary-types'] ?? g.secondary) ? g['secondary-types'] ?? g.secondary : []).map((x) => text(x, 40)).filter(Boolean).slice(0, 8);
+  const date = text(g['first-release-date'] ?? g.date, 10);
+  return { id: g.id, title, primary: text(g['primary-type'] ?? g.primary, 40), secondary, date: DATE.test(date) ? date : '' };
+}
+
+function cleanArtist(a) {
+  if (!a || !MBID.test(String(a.id))) return null;
+  const list = (v, n, each) => [...new Set((Array.isArray(v) ? v : []).map((x) => text(x, each)).filter(Boolean))].slice(0, n);
+  return { id: a.id, name: text(a.name, 200), aliases: list(a.aliases, 40, 200), genres: list(a.genres, 5, 60) };
+}
+
+// MusicBrainz's genres, as Plex names them ("alternative rock": Alternative
+// Rock), the most voted first: five at most.
+const UPPER = new Set(['r&b', 'edm', 'idm', 'ebm', 'uk', 'us', 'dnb', 'ost']);
+const genreName = (s) =>
+  String(s)
+    .trim()
+    .split(/(\s+|-)/)
+    .map((w) => (UPPER.has(w.toLowerCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join('');
+function topGenres(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((g) => typeof g?.name === 'string' && g.name.trim() && (Number(g.count) || 0) > 0)
+    .sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0))
+    .slice(0, 5)
+    .map((g) => text(genreName(g.name), 60));
+}
+
+// A kept answer, checked as it's read back (undefined: it doesn't check out).
+function cleanKept(key, v) {
+  if (key.startsWith('artist|')) return v === null ? null : cleanArtist(v) || undefined;
+  if (key.startsWith('groups|')) return Array.isArray(v) ? v.map(cleanGroup).filter(Boolean) : undefined;
+  if (key.startsWith('genres|')) return Array.isArray(v) ? v.map((x) => text(x, 60)).filter(Boolean).slice(0, 5) : undefined;
+  return undefined;
+}
+
+// The advanced features' answers, kept for a month: in a file
+// (musicbrainz.json in the data folder, readable by the service only) when
+// there's one to keep them in, so a restart doesn't ask MusicBrainz again.
+// What MusicBrainz says of artists and release groups, nothing of who asked.
+export class MBKept {
+  constructor({ dir = null, log = null, now = () => Date.now(), writeDelayMs = 5000 } = {}) {
+    this.file = dir ? join(dir, 'musicbrainz.json') : null;
+    this.log = log;
+    this.now = now;
+    this.writeDelayMs = writeDelayMs;
+    this.map = new Map(); // key -> { v, at, size }, oldest first
+    this.bytes = 0;
+    this.timer = null;
+    this.load();
+  }
+
+  get(key) {
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    if (this.now() - hit.at > MB_ADVANCED_LIMITS.keepMs) {
+      this.drop(key);
+      return undefined;
+    }
+    return hit.v;
+  }
+
+  set(key, v, at = this.now()) {
+    this.drop(key);
+    const size = key.length + JSON.stringify(v ?? null).length;
+    this.map.set(key, { v, at, size });
+    this.bytes += size;
+    while (this.map.size > MB_ADVANCED_LIMITS.kept || this.bytes > MB_ADVANCED_LIMITS.bytes) this.drop(this.map.keys().next().value);
+    this.changed();
+    return v;
+  }
+
+  drop(key) {
+    const hit = this.map.get(key);
+    if (!hit) return;
+    this.bytes -= hit.size;
+    this.map.delete(key);
+  }
+
+  load() {
+    if (!this.file || !existsSync(this.file)) return;
+    try {
+      const data = JSON.parse(readFileSync(this.file, 'utf8'));
+      const rows = Array.isArray(data?.kept) ? data.kept : [];
+      const now = this.now();
+      for (const row of rows) {
+        if (!Array.isArray(row) || typeof row[0] !== 'string' || row[0].length > 500 || !Number.isFinite(row[2])) continue;
+        if (row[2] > now || now - row[2] > MB_ADVANCED_LIMITS.keepMs) continue;
+        const v = cleanKept(row[0], row[1]);
+        if (v !== undefined) this.set(row[0], v, row[2]);
+      }
+      clearTimeout(this.timer);
+      this.timer = null;
+    } catch (err) {
+      this.log?.warn(`musicbrainz: couldn't read ${this.file} (${err.message}); starting without what was kept`);
+    }
+  }
+
+  // Written soon after a change (a burst of changes, once).
+  changed() {
+    if (!this.file || this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.write();
+    }, this.writeDelayMs);
+    this.timer.unref?.();
+  }
+
+  write() {
+    if (!this.file) return;
+    const tmp = `${this.file}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ version: 1, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) }), { mode: 0o600 });
+      renameSync(tmp, this.file);
+    } catch (err) {
+      this.log?.error(`musicbrainz: couldn't save what was looked up to ${this.file}: ${err.message}`);
+    }
+  }
+
+  flush() {
+    if (!this.timer) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.write();
   }
 }

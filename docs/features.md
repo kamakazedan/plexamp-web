@@ -10,6 +10,7 @@
 - [Play Together](#play-together)
 - [Play on](#play-on)
 - [Guest DJ](#guest-dj)
+- [MusicBrainz features](#musicbrainz-features)
 - [Settings in the app](#settings-in-the-app)
 - [Good to know](#good-to-know)
 
@@ -142,7 +143,17 @@ Choose a DJ with the DJ button in Now Playing. It plays along with your queue un
 | Queue Echo | Adds nothing. As each track starts, whichever of your next 40 sounds most like it moves up to play next. |
 | Queue Bridge | Adds nothing. When your next track sounds far from the one playing, one from later in your queue that sits between them plays first. |
 
-No DJ adds a song you've played since opening the player (the last 300), or one that's queued, and another version of a song (on a compilation, a live album or a remaster) counts as the same song. Up next and Now Playing say which tracks a DJ added or moved, and why. The sound-based DJs need Plex's sonic analysis (see [Good to know](#good-to-know)); without it, the ones that add tracks match on genre.
+No DJ adds a song you've played since opening the player (the last 300), or one that's queued, and another version of a song (on a compilation, a live album or a remaster) counts as the same song. Up next and Now Playing say which tracks a DJ added or moved, and why. The sound-based DJs need Plex's sonic analysis (see [Good to know](#good-to-know)); without it, the ones that add tracks match on genre. With the [MusicBrainz features](#musicbrainz-features), they leave live tracks and demos out.
+
+## MusicBrainz features
+
+With `MUSICBRAINZ_ADVANCED=true` on the container (and a `MUSICBRAINZ_URL`: see [configuration.md](configuration.md#container-settings)), the player looks your library's artists up on [MusicBrainz](https://musicbrainz.org): their other names, their genres, and their release groups (every album, EP and single, with its kinds and when it first came out). It asks by artist, so an album needs nothing more but its genres, and keeps what MusicBrainz says for a month, in `/data`. Only names go to MusicBrainz: an artist's (an album's title is matched in the player). On musicbrainz.org it asks once a second at most, its rule, so the first look at a big library takes a while; a mirror of your own answers as fast as it can, and keeps the names on your network. Each one can be turned off for you in **Settings › MusicBrainz**.
+
+- **Skip live tracks and demos** (on to begin with): they're left out of what the app picks for you, so radio and stations, shuffling an artist or the library, and the Guest DJs keep to studio recordings. A track is live or a demo by its album's kind (Plex's, which comes from MusicBrainz, or else MusicBrainz's own, as the player knows it) or by its title ("(Live)", "- Live at…", "(Demo)", "Rough Mix"). An album or playlist you play yourself plays as it is, and where leaving them out would leave nothing (an artist with nothing but live albums), they're played.
+- **Missing albums on artist pages**: **Not in your library**, under an artist's albums, lists their release groups the library doesn't have, by kind, each linked to MusicBrainz, to copy or download (CSV). Which kinds are listed is yours to choose (**Kinds…**, or Settings › MusicBrainz): albums, singles & EPs, compilations, soundtracks and remixes to begin with, without live albums, demos, DJ mixes, mixtapes and the rest.
+- **Original release years**: an artist's albums are in the order they first came out, with that year (Plex often has a remaster's or reissue's year), and an album's page says when it first came out where that's earlier.
+- **Other names**: an artist who isn't found by their name, importing a playlist (from Spotify or a file) or checking Missing tracks again, is looked for by the other names MusicBrainz has for them: other spellings and scripts ("Мумий Тролль" and "Mumiy Troll"), what they were called before.
+- **For the server's owner: years and genres to fix** (Settings › MusicBrainz › Years and genres to fix): your albums whose year in Plex isn't the year they first came out, and those without a genre that MusicBrainz has genres for. **Use 1977** (or **Fix all**) and **Add** (or **Add all**) change them in Plex, for everyone and for every Plex app, locked so Plex's next refresh leaves them (with Undo; on an album in Plex, Unlock and Refresh Metadata puts back what Plex had). Then decade browsing, Time travel radio, the Era DJ and genre browsing go by them too. Plex never writes to your files, so the list downloads too (CSV), with each album's MusicBrainz release group, for [MusicBrainz Picard](https://picard.musicbrainz.org) or [beets](https://beets.io) to fix the files' tags. The player looks the whole library up in the background, carrying on if you leave the page.
 
 ## Settings in the app
 
