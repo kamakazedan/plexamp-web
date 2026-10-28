@@ -443,6 +443,7 @@ export const MB_ADVANCED_LIMITS = {
   kept: 20000, // answers kept
   bytes: 30 * 1024 * 1024, // ...in all, as JSON
   writeMs: 5 * 60000, // written at most this often (and as the service stops)
+  firstWriteMs: 10000, // ...the first time since it started, this soon after the first answer
   queued: 5000, // albums waiting to be looked up in the background
   queuedEach: 2000, // ...of any one account's
   downMs: 60000, // after MusicBrainz doesn't answer, nothing new asked of it for this long
@@ -554,11 +555,13 @@ function cleanKept(key, v) {
 // there's one to keep them in, so a restart doesn't ask MusicBrainz again.
 // What MusicBrainz says of artists and release groups, nothing of who asked.
 export class MBKept {
-  constructor({ dir = null, log = null, now = () => Date.now(), writeDelayMs = MB_ADVANCED_LIMITS.writeMs } = {}) {
+  constructor({ dir = null, log = null, now = () => Date.now(), writeDelayMs = MB_ADVANCED_LIMITS.writeMs, firstWriteMs = MB_ADVANCED_LIMITS.firstWriteMs } = {}) {
     this.file = dir ? join(dir, 'musicbrainz.json') : null;
     this.log = log;
     this.now = now;
     this.writeDelayMs = writeDelayMs;
+    this.firstWriteMs = Math.min(firstWriteMs, writeDelayMs);
+    this.wrote = 0; // when it was last written (Date.now()), 0 before the first time
     this.map = new Map(); // key -> { v, at, size }, oldest first
     this.bytes = 0;
     this.timer = null;
@@ -611,19 +614,26 @@ export class MBKept {
     }
   }
 
-  // Written soon after a change (a burst of changes, once).
+  // Written soon after the first change since the service started, then at
+  // most every writeDelayMs (a burst of changes, once). In a container the
+  // service stops without being told (nginx is PID 1), so what's waiting to
+  // be written then is lost; a stop systemd asks for is written first.
   changed() {
     if (!this.file || this.timer) return;
+    // (Never longer than writeDelayMs, should the clock be put back.)
+    const wait = this.wrote ? Math.min(this.writeDelayMs, Math.max(this.firstWriteMs, this.wrote + this.writeDelayMs - Date.now())) : this.firstWriteMs;
     this.timer = setTimeout(() => {
       this.timer = null;
       this.write();
-    }, this.writeDelayMs);
+    }, wait);
     this.timer.unref?.();
   }
 
   write() {
     if (!this.file) return;
     const tmp = `${this.file}.tmp`;
+    // (Tried again no sooner than the next time it would be written.)
+    this.wrote = Date.now();
     try {
       writeFileSync(tmp, JSON.stringify({ version: 1, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) }), { mode: 0o600 });
       renameSync(tmp, this.file);

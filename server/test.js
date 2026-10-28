@@ -920,9 +920,31 @@ test('MusicBrainz features: when MusicBrainz doesn\'t answer, nothing new is ask
   mb.downUntil = Date.now() - 1;
   down = false;
   assert.equal((await mb.artistInfo('Mumiy Troll')).name, 'Мумий Тролль');
-  // And what's kept is written now and then, not after each answer.
+  // And what's kept is written now and then, not after each answer (the
+  // first time soon after the first).
   assert.equal(new MBKept().writeDelayMs, MB_ADVANCED_LIMITS.writeMs);
   assert.ok(MB_ADVANCED_LIMITS.writeMs >= 60000);
+  assert.ok(new MBKept().firstWriteMs <= 15000);
+});
+
+test('MusicBrainz features: what\'s kept is written soon after the first answer, then no more often than every so often', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-mbw-'));
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const has = (key) => JSON.parse(readFileSync(join(dir, 'musicbrainz.json'), 'utf8')).kept.some((row) => row[0] === key);
+  try {
+    const kept = new MBKept({ dir, writeDelayMs: 600, firstWriteMs: 30 });
+    kept.set('artist|a', null);
+    assert.throws(() => statSync(join(dir, 'musicbrainz.json')), 'not straight away');
+    await wait(200);
+    assert.ok(has('artist|a'), 'soon after the first answer');
+    kept.set('artist|b', null);
+    await wait(200);
+    assert.ok(!has('artist|b'), 'not again so soon');
+    await wait(500);
+    assert.ok(has('artist|b'), 'then, once it\'s time');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('MusicBrainz features: an artist by name or other name, their other names and genres, kept', async () => {

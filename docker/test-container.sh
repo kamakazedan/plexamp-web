@@ -196,7 +196,11 @@ contains "MusicBrainz features: an artist by another name, with their genres" '"
 contains "MusicBrainz features: ...and their release groups, those the library hasn't too" '"title":"Sea Glass","primary":"Album","secondary":[],"date":"2016-03-01"' "$MBA"
 MBALB='{"items":[{"artist":"Juniper & Ash","title":"Hearthstone"},{"artist":"Nobody At All","title":"X"}],"genres":true,"wait":8000}'
 contains "MusicBrainz features: an album's release group, with when it first came out and its genres" '"date":"1998-03-01","genres":["Folk","Singer-Songwriter"]' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d "$MBALB" $W/api/musicbrainz/albums)"
-sleep 6
+# (Written ten seconds after the first answer, then every five minutes.)
+for _ in $(seq 1 30); do
+    docker exec pw-web test -f /data/musicbrainz.json && break
+    sleep 1
+done
 KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/musicbrainz.json; cat /data/musicbrainz.json')"
 contains "MusicBrainz features: what's looked up is kept in /data, the service's alone" "nginx 600" "$KEPT"
 lacks "MusicBrainz features: ...nothing about who asked" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
