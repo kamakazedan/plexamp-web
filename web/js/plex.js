@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.26.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.27.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -359,6 +359,13 @@ export const TAG_FIELDS = new Set(['genre', 'style', 'mood', 'decade', 'year', '
 const MEMO_LIMIT = 300;
 const TYPES_LIMIT = 5000; // albums' release types kept (see albumTypes)
 const WRITE_BATCH = 200; // items per request when adding to a playlist or collection
+const HUB_COUNT = 100; // items in each of an artist's hubs (see artistHubs)
+// What's in a list as no more than each entry's id (and the list's size):
+// Plex leaves the rest out, where it can (a server that can't sends it all).
+const LIGHT = {
+  includeFields: 'ratingKey,size,totalSize,offset,leafCount',
+  excludeElements: 'Media,Genre,Mood,Style,Collection,Label,Guid,Field,Image,UltraBlurColors,Country',
+};
 
 const chunks = (list, size) => {
   const out = [];
@@ -490,13 +497,16 @@ export class PlexServer {
     return { meta: asArray(meta.Metadata)[0] || null, items: asArray(items.Metadata) };
   }
 
-  // A page of what's in a collection, in its order.
-  async collectionItems(id, { start = 0, size = 500 } = {}) {
+  // A page of what's in a collection, in its order (`ids`: only each one's
+  // id, as LIGHT asks).
+  async collectionItems(id, { start = 0, size = 500, ids = false } = {}) {
     const mc = await this.get(`/library/collections/${id}/children`, {
+      ...(ids ? LIGHT : {}),
       'X-Plex-Container-Start': start,
       'X-Plex-Container-Size': size,
     });
-    return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0 };
+    // (`counted`: how many Plex says there are, null if it doesn't say.)
+    return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0, counted: mc.totalSize ?? null };
   }
 
   // Music playlists; with a section, only those with music from it.
@@ -514,12 +524,22 @@ export class PlexServer {
     return asArray((await this.get(`/playlists/${id}`)).Metadata)[0] || null;
   }
 
-  async playlistItems(id, { start = 0, size = 100 } = {}) {
+  // (`ids`: only each entry's id, as LIGHT asks.)
+  async playlistItems(id, { start = 0, size = 100, ids = false } = {}) {
     const mc = await this.get(`/playlists/${id}/items`, {
+      ...(ids ? LIGHT : {}),
       'X-Plex-Container-Start': start,
       'X-Plex-Container-Size': size,
     });
-    return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.leafCount ?? mc.size ?? 0 };
+    return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.leafCount ?? mc.size ?? 0, counted: mc.totalSize ?? mc.leafCount ?? null };
+  }
+
+  // Plex's hubs for an artist's page (Plexamp's rows: their releases by
+  // kind, what they appear on, their popular tracks...), `count` items in
+  // each at most. See hubs.js.
+  async artistHubs(id, { count = HUB_COUNT } = {}) {
+    if (!/^\d+$/.test(String(id))) return [];
+    return asArray((await this.get(`/hubs/metadata/${id}`, { count })).Hub);
   }
 
   // Searches one library, or every library on the server without one.

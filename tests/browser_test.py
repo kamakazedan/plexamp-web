@@ -1305,10 +1305,14 @@ with sync_playwright() as pw:
             crate = [a for a in mock('/library/sections/1/all?type=9&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata'] if a['title'] == 'Crate Digger']
             hires_album = max(crate, key=lambda a: int(a['ratingKey']))['ratingKey']
             hires = {t['ratingKey'] for t in mock(f'/library/metadata/{hires_album}/children?X-Plex-Token=t')['MediaContainer']['Metadata']}
+            either = {t['ratingKey'] for a in crate for t in mock(f"/library/metadata/{a['ratingKey']}/children?X-Plex-Token=t")['MediaContainer']['Metadata']}
             page.fill('.search-box input', 'kilo meridian')
             wait_for(lambda: page.locator('.search-tracks .track-codec').count() > 0, 8)
             page.wait_for_timeout(800)
-            rows = page.locator('.search-tracks .track').evaluate_all('rs => rs.map((r) => [r.dataset.trackId, r.querySelector(".track-title").textContent, r.querySelector(".track-codec")?.textContent || "", !!r.querySelector(".track-codec.hires")])')
+            # (Crate Digger's songs: not their tracks on others' albums, which
+            # the search finds by who they're by.)
+            rows = [r for r in page.locator('.search-tracks .track').evaluate_all('rs => rs.map((r) => [r.dataset.trackId, r.querySelector(".track-title").textContent, r.querySelector(".track-codec")?.textContent || "", !!r.querySelector(".track-codec.hires")])')
+                    if r[0] in either]
             shot(page, 'library-01c-editions')
             check('library: search shows one of each song, not each copy', len(rows) == len({r[1] for r in rows}) and len(rows) >= 3, str(rows))
             check('library: ...the best-sounding copy, with its format (FLAC 24/96, marked hi-res)', all(r[0] in hires and r[2] == 'FLAC 24/96' and r[3] for r in rows), str(rows))
@@ -1485,19 +1489,28 @@ with sync_playwright() as pw:
         named = {a['title']: a for a in mock('/library/sections/1/all?type=8&X-Plex-Container-Size=100&X-Plex-Token=t')['MediaContainer']['Metadata']}
         untyped = not any('Format' in a or 'Subformat' in a for a in mock(f"/library/metadata/{named['Glass Harbour']['ratingKey']}/children?X-Plex-Token=t")['MediaContainer']['Metadata'])
         group = lambda g: page.locator(f'.view section[data-group="{g}"] .card-title').all_inner_texts()
+        # What Glass Harbour appear on, as Plex's row for it has it: the
+        # compilation and the soundtrack with tracks of theirs.
+        rows = mock(f"/hubs/metadata/{named['Glass Harbour']['ratingKey']}?count=100&X-Plex-Token=t")['MediaContainer']['Hub']
+        want_on = [m['title'] for m in sorted(next(r for r in rows if r['hubIdentifier'] == 'artist.appearsOn')['Metadata'], key=lambda m: -m['year'])]
         page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
         page.wait_for_selector('.view section[data-similar=sonic]', timeout=10000)
         page.wait_for_selector('.view section[data-group="Singles & EPs"]', timeout=10000)
+        page.wait_for_selector('.view section[data-group="Appears on"]', timeout=10000)
         heads = [t.upper() for t in page.locator('.view .block h2').all_inner_texts()]
-        order = [x for x in heads if x in ('ALBUMS', 'SINGLES & EPS', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT')]
+        order = [x for x in heads if x in ('ALBUMS', 'SINGLES & EPS', 'APPEARS ON', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT')]
         shot(page, 'library-02-artist')
         # (Other sections add albums to this artist: those are albums too.)
         check('library: an artist\'s page: Albums, then Singles & EPs, though Plex\'s listing of their albums doesn\'t say which is which',
               untyped and order[:2] == ['ALBUMS', 'SINGLES & EPS'] and {'Low Light Signals', 'Tidal Lines'} <= set(group('Albums')) and 'Buoy' not in group('Albums')
               and group('Singles & EPs') == ['Buoy'], f'{untyped} {heads} {group("Albums")} {group("Singles & EPs")}')
+        on_subs = page.locator('.view section[data-group="Appears on"] .card-sub').all_inner_texts()
+        check('library: ...then Appears on: others\' albums with their tracks on, newest first, by whom and when',
+              len(want_on) == 2 and group('Appears on') == want_on and all(s.startswith('Various Artists · 20') for s in on_subs)
+              and not set(want_on) & set(group('Albums')), f'{group("Appears on")} vs {want_on} {on_subs}')
         similar = page.locator('.view section[data-similar=similar] .card-title').all_inner_texts()
         check('library: ...then the artists Plex says are like them that the library has (in Plex\'s order), those that sound like them, their styles and About',
-              order == ['ALBUMS', 'SINGLES & EPS', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT'] and similar == ['Kilo Meridian', 'Marisol Vega'], f'{order} {similar}')
+              order == ['ALBUMS', 'SINGLES & EPS', 'APPEARS ON', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT'] and similar == ['Kilo Meridian', 'Marisol Vega'], f'{order} {similar}')
         styles = page.locator('.view .artist-style-chips a.chip').all_inner_texts()
         page.locator('.view .artist-style-chips a.chip', has_text='Ambient').click()
         page.wait_for_selector('.view a.row[href^="#/artist/"]', timeout=10000)
@@ -1519,6 +1532,113 @@ with sync_playwright() as pw:
         page.wait_for_selector('.view section[data-group="Compilations"]', timeout=10000)
         check('library: ...and live albums, Compilations and Soundtracks, each of their own', live_albums == ['Live at the Lantern'] and group('Compilations') == ['Night Drive Vol. 1']
               and group('Soundtracks') == ['The Lighthouse (Original Score)'] and not group('Albums'), f'{live_albums} {group("Compilations")} {group("Soundtracks")} {group("Albums")}')
+        page.wait_for_timeout(800)
+        check('library: ...and Various Artists appear on nothing (all theirs are their own)', page.locator('.view section[data-group="Appears on"]').count() == 0)
+
+        # Plex's rows for an artist's page: which kind each row holds, by
+        # its identifier, else its title; whose each album is; tracks in a
+        # row of what they appear on stand for their albums.
+        hub_kinds = js(page, """() => import('./js/hubs.js').then(({ hubKind }) => [
+            { hubIdentifier: 'artist.albums.ep' }, { hubIdentifier: 'hub.7', title: 'Singles & EPs' }, { hubIdentifier: 'artist.appearsOn', title: 'Appears On' },
+            { hubIdentifier: 'artist.liveAlbums' }, { hubIdentifier: 'artist.albums.djMix' }, { hubIdentifier: 'artist.albums', title: 'Albums' },
+            { hubIdentifier: 'artist.popular.tracks', title: 'Popular Tracks' }, { title: 'Live-Alben' }, { hubIdentifier: 'hub.3', context: 'hub.artist.compilations' }, {},
+        ].map(hubKind))""")
+        check('library: Plex\'s rows for an artist\'s page are told apart by their identifiers, or else their titles',
+              hub_kinds == ['singles', 'singles', 'appears', 'live', 'djmixes', 'albums', None, 'live', 'compilations', None], str(hub_kinds))
+        from_rows = js(page, """() => import('./js/hubs.js').then(({ releasesFromHubs }) => {
+            const own = (id, more = {}) => ({ type: 'album', ratingKey: String(id), parentRatingKey: '7', title: 'A' + id, ...more });
+            const got = releasesFromHubs([
+                { hubIdentifier: 'artist.albums', type: 'album', Metadata: [own(1), own(2, { Format: [{ tag: 'EP' }] }), own(3)] },
+                { hubIdentifier: 'artist.albums.single', type: 'album', Metadata: [own(3)] },
+                { hubIdentifier: 'artist.albums.live', type: 'album', Metadata: [own(4), { type: 'album', ratingKey: '9', parentRatingKey: '8', title: 'Theirs' }] },
+                { hubIdentifier: 'artist.appearsOn', type: 'track', Metadata: [
+                    { type: 'track', ratingKey: '50', parentRatingKey: '10', parentTitle: 'Mix', grandparentRatingKey: '8', grandparentTitle: 'Various Artists', parentYear: 1999 },
+                    { type: 'track', ratingKey: '51', parentRatingKey: '5', grandparentRatingKey: '7' }] },
+                { hubIdentifier: 'artist.similar', type: 'artist', Metadata: [{ type: 'artist', ratingKey: '11' }] },
+                { hubIdentifier: 'artist.appearsOn', type: 'album', Metadata: { type: 'album', ratingKey: '9', parentRatingKey: '8', title: 'Theirs' } },
+                { hubIdentifier: 'hub.9', title: 'Appears On', type: 'album', Metadata: [{ type: 'album', ratingKey: '12', title: 'Untold' }, own(13, { title: 'Mine' }),
+                    { type: 'album', ratingKey: '9', parentRatingKey: '8', title: 'Theirs' }] },
+                { hubIdentifier: 'artist.appearances', type: 'album', Metadata: [{ ratingKey: '14', parentRatingKey: '8', title: 'No type said' }] },
+                null, { Metadata: 'nonsense' },
+            ], 7);
+            return { kinds: Object.fromEntries(got.kinds), appears: got.appears.map((m) => [m.ratingKey, m.title, m.parentTitle || '', m.year || null]) };
+        })""")
+        check('library: ...an album\'s own kind first, the row that says more than albums, and others\' albums (once each) where a row says they appear on them',
+              from_rows == {'kinds': {'1': 'albums', '2': 'singles', '3': 'singles', '4': 'live'},
+                            'appears': [['10', 'Mix', 'Various Artists', 1999], ['9', 'Theirs', '', None], ['12', 'Untold', '', None], ['14', 'No type said', '', None]]}, str(from_rows))
+
+        # Who a track's credited to: its whole credit, or a name either side
+        # of a featured one, never part of a name with "&" in it. So someone
+        # whose name is part of a duo's (Ash, and Juniper & Ash on the
+        # soundtrack) appears on nothing of the duo's, by Plex's rows or its
+        # search.
+        credits = js(page, """() => import('./js/hubs.js').then(({ creditedTo }) => [
+            ['Sam & Dave', 'dave'], ['Dave feat. Sam', 'dave'], ['Earth, Wind & Fire', 'earth'], ['Love and Rockets', 'love'],
+            ['Underworld vs. Blondie', 'blondie'], ['Iggy Pop; Blondie', 'blondie'], ['Blondie / Iggy Pop', 'blondie'], ['Glass Harbour', 'glass harbour'],
+            ['David Guetta, Sia', 'sia', []], ['Sam & Dave', 'dave', ['dave']], ['Earth, Wind & Fire', 'earth', []], ['Tyler, The Creator', 'tyler', ['tyler the creator']],
+        ].map(([originalTitle, want, known]) => creditedTo({ originalTitle }, want, known ? new Set(known) : null)))""")
+        check('library: a track\'s credited to an artist by its whole credit, either side of a featured one, or in a list with commas that isn\'t a library artist\'s name, never by part of a name with & in it',
+              credits == [False, True, False, False, True, True, True, True, True, False, False, False], str(credits))
+        ash = mock('/__mock/add-artist?name=Ash')['MediaContainer']['Metadata'][0]
+        try:
+            seen = {}
+            for config in ('hubs=on', 'hubs=off'):
+                mock(f'/__mock/config?{config}')
+                page.goto('about:blank')
+                page.goto(APP + f"#/artist/{ash['ratingKey']}")
+                page.wait_for_selector('.view section[data-group]', timeout=15000)
+                page.wait_for_timeout(1500)
+                seen[config] = (group('Albums'), group('Appears on'))
+            check('library: ...so Ash appear on nothing of Juniper & Ash\'s, by Plex\'s rows or its search',
+                  all(albums == ['Ash Alone'] and not on for albums, on in seen.values()), str(seen))
+        finally:
+            mock('/__mock/config?hubs=on')
+            mock(f"/__mock/add-artist?remove={ash['ratingKey']}")
+
+        # Where an album's details don't say what kind it is (as on some
+        # servers), Plex's rows do; where they say only by their titles,
+        # those do; with no rows (an older server), its details do, and
+        # what they appear on is found by Plex's search (which finds tracks
+        # by who they're by). Each from the start, as nothing's kept.
+        def kinds_with(config):
+            mock(f'/__mock/config?{config}')
+            out = {}
+            for name in ('Glass Harbour', 'Marisol Vega', 'Various Artists'):
+                # (Opened afresh, so nothing's kept from before.)
+                page.goto('about:blank')
+                page.goto(APP + f"#/artist/{named[name]['ratingKey']}")
+                page.wait_for_selector('.view section[data-group]', timeout=15000)
+                page.wait_for_timeout(1500)
+                out[name] = {g: group(g) for g in ('Albums', 'Singles & EPs', 'Live albums', 'Compilations', 'Soundtracks', 'Appears on') if group(g)}
+            return out
+        def appears_on(name):  # as the mock's row for it has them
+            rows = mock(f"/hubs/metadata/{named[name]['ratingKey']}?count=100&X-Plex-Token=t")['MediaContainer']['Hub']
+            return [m['title'] for r in rows if r['hubIdentifier'] == 'artist.appearsOn' for m in r['Metadata']]
+        try:
+            want_kinds = {'Glass Harbour': {'Albums': ['Tidal Lines', 'Low Light Signals'], 'Singles & EPs': ['Buoy']},
+                          'Marisol Vega': {'Albums': ['Noches de Cobre'], 'Live albums': ['Live at the Lantern']},
+                          'Various Artists': {'Compilations': ['Night Drive Vol. 1'], 'Soundtracks': ['The Lighthouse (Original Score)']}}
+            for name, kinds in want_kinds.items():
+                if appears_on(name):
+                    kinds['Appears on'] = appears_on(name)
+            for config, says in (('types=off&hubs=on', 'by Plex\'s rows for the page, though its details don\'t say'),
+                                 ('types=off&hubs=titles', '...and by their titles, where only those say'),
+                                 ('types=on&hubs=off', 'by its details, with no rows for the page, and Appears on by Plex\'s search')):
+                got = kinds_with(config)
+                # (Albums other sections added to an artist aren't counted.)
+                for name, kinds in got.items():
+                    known = sum(want_kinds[name].values(), [])
+                    got[name] = {g: sorted(t for t in v if g != 'Albums' or t in known) for g, v in kinds.items()}
+                    got[name] = {g: v for g, v in got[name].items() if v}
+                ok = all(got[n] == {g: sorted(v) for g, v in want_kinds[n].items()} for n in want_kinds)
+                check(f'library: an artist\'s releases by kind {says}', ok, str(got))
+            got = kinds_with('types=off&hubs=off')
+            gh = got['Glass Harbour']
+            check('library: ...and with neither, all of them albums, and still what they appear on',
+                  {'Tidal Lines', 'Low Light Signals', 'Buoy'} <= set(gh.get('Albums', [])) and 'Singles & EPs' not in gh and sorted(gh.get('Appears on', [])) == sorted(want_on),
+                  str(got))
+        finally:
+            mock('/__mock/config?types=on&hubs=on')
         ctx.close()
 
     # ---------- edit: the queue, playlists and collections ----------
@@ -1772,6 +1892,9 @@ with sync_playwright() as pw:
 
     # ---------- lists: Appears in, and sorting playlists and collections ----------
     if run('lists'):
+        # (With a smart collection too, which says nothing on its items: on
+        # before signing in, as Home lists the collections, kept a minute.)
+        mock('/__mock/config?smartcollection=1')
         ctx = browser.new_context(**MOBILE)
         page = ctx.new_page()
         attach(page, 'lists', expected=('Error: Not found',))  # an album's id, below
@@ -1804,6 +1927,8 @@ with sync_playwright() as pw:
         page.wait_for_selector('.view .tracks .track')
         page.locator('.view .tracks .track .track-more').first.click()
         page.wait_for_selector('.sheet.open')
+        asked = []
+        page.on('request', lambda r: asked.append(r.url) if re.search(r'/(items|children)\?', r.url) else None)
         page.locator('.sheet.open .sheet-action', has_text='Appears in').click()
         done_looking()
         shot(page, 'lists-01-appears-in')
@@ -1814,6 +1939,16 @@ with sync_playwright() as pw:
         twice = [k for k, v in want_pl.items() if v > 1]
         check('lists: ...saying when it\'s in one more than once', twice and all(f'in it {want_pl[k]} times' in subs[k] for k in twice), str(subs))
         check('lists: ...and the collections it\'s in (its own, its album\'s or its artist\'s)', set(got_col) == want_col, f'{got_col} vs {want_col}')
+        # Collections as Plex says (what each of them is in), none of them
+        # read but smart ones (whose rules decide what's in them); playlists
+        # read as their entries' ids, no more, in pages Plex takes.
+        smart = {c['ratingKey'] for c in cols if c.get('smart')}
+        read = [u for u in asked if '/library/collections/' in u]
+        read_ids = {re.search(r'/library/collections/(\d+)/', u).group(1) for u in read}
+        light = [u for u in asked if re.search(r'/playlists/\d+/items\?', u)]
+        check('lists: ...collections as Plex says what\'s in them: none read but smart ones, a page Plex takes at a time',
+              smart and read_ids <= smart and all(int(re.search(r'X-Plex-Container-Size=(\d+)', u).group(1)) <= 120 for u in read), str(read))
+        check('lists: ...and playlists read as their entries\' ids', light and all('includeFields=ratingKey' in urllib.parse.unquote(u) and 'Media' in urllib.parse.unquote(u) for u in light), str(light[:2]))
         check('lists: ...in order of name', got_pl == sorted(got_pl, key=str.casefold), str(got_pl))
         page.locator('.appears-playlists a.row', has_text='Favourite tracks').click()
         page.wait_for_timeout(500)
@@ -1871,6 +2006,18 @@ with sync_playwright() as pw:
         done_looking()
         from_compilation = page.locator('.appears-albums .row-title').all_inner_texts()
         check('lists: from a compilation, the artist\'s own albums are found', from_compilation == ['Night Drive Vol. 1', 'Tidal Lines', 'Buoy'], str(from_compilation))
+
+        # A track of a track collection, whose album's in an album
+        # collection and a smart one: each found.
+        buoy = next(m for m in library if m['parentTitle'] == 'Buoy')
+        key_for = {'track': buoy['ratingKey'], 'album': buoy['parentRatingKey'], 'artist': buoy['grandparentRatingKey']}
+        want_buoy = {c['title'] for c in cols
+                     if key_for.get(c['subtype']) in [m['ratingKey'] for m in mc(f"/library/collections/{c['ratingKey']}/children").get('Metadata', [])]}
+        page.goto(APP + f"#/appears/{buoy['ratingKey']}")
+        done_looking()
+        got_buoy = set(page.locator('.appears-collections .row-title').all_inner_texts())
+        check('lists: ...a track\'s own collection, its album\'s and a smart one, each found', {'Best of 2022', 'Rainy day albums', 'Electronic picks'} <= want_buoy
+              and got_buoy == want_buoy, f'{got_buoy} vs {want_buoy}')
 
         # The fewest moves: checked against every order of a few lists, made
         # move by move as Plex makes them.
@@ -2082,6 +2229,7 @@ with sync_playwright() as pw:
             ['Don’t Stop Me Now', 'Born Slippy .NUXX', 'Signal Fires - Radio Edit', 'Your Woman (Remastered 2011)', 'Song [Live] – 2015 Remaster', 'I Will Survive'].map(searchTerm))""")
         check('lists: a song is looked for by its name, without what marks a version of it',
               terms == ['Stop Me Now', 'Born Slippy', 'Signal Fires', 'Your Woman', 'Song', 'Will Survive'], str(terms))
+        mock('/__mock/config?smartcollection=0')
         ctx.close()
 
         # Very long smart playlists aren't read: one of the whole library (by

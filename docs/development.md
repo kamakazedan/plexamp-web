@@ -53,6 +53,9 @@ web/
   js/sharing.js          shared playlists: keeping your copies the same as everyone's
   js/sorting.js          sorting playlists and collections with the fewest moves
   js/membership.js       Appears in: the albums a song is on, and the playlists and collections it's in
+  js/hubs.js             Plex's rows for an artist's page: their releases by kind, and what they appear on
+  js/releases.js         what kind of release an album is: the same file as server/releases.js
+  js/mb.js               the MusicBrainz features (MUSICBRAINZ_ADVANCED)
   js/missing.js          missing tracks from AI playlists and imports, checking them on MusicBrainz, exporting them
   js/missinglist.js      how a Missing tracks list changes: the same file as server/missinglist.js
   js/missingsync.js      Missing tracks that follow your account, and everyone's for the server's owner

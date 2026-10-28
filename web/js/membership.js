@@ -1,13 +1,17 @@
 // What a track appears in (the "Appears in" page): the albums the song is
 // on, your playlists, and collections.
 //
-// Plex can't be asked which lists hold a track, so each list's contents are
-// read, a page at a time, and kept until the list changes (Plex says when it
-// last did), so looking again is quick. Smart lists follow their rules and
-// change without saying so: they're read again after a minute. Very long
-// smart playlists aren't read: one whose rules take in a whole library (a
-// playlist of everything) holds every track there, which its rules say
-// without reading it; any other is left out, and the page says so.
+// Plex says which collections a track, its album and its artist are in (in
+// their details), but for smart ones, which follow their rules. It can't be
+// asked which playlists hold a track, so those, and smart collections (and
+// any collection of what Plex didn't give the details of), are read, a page
+// at a time (each entry's id and no more, where Plex can leave the rest
+// out), and kept until the list changes (Plex says when it last did), so
+// looking again is quick. Smart lists change without saying so:
+// they're read again after a minute. Very long smart playlists aren't read:
+// one whose rules take in a whole library (a playlist of everything) holds
+// every track there, which its rules say without reading it; any other is
+// left out, and the page says so.
 //
 // Plex doesn't link the same song on different albums either, so they're
 // found by the song's name and artist.
@@ -16,7 +20,9 @@ import { norm, sameTitle } from './ai.js';
 
 export const SMART_LIMIT = 2000; // smart lists longer than this aren't read
 export const LIST_LIMIT = 10000; // nor are other lists longer than this
-const PAGE = 500;
+// Entries asked for at a time: a playlist's, and a collection's (Plex
+// refuses more than 120 of those, on some servers).
+const PAGE = { playlist: 500, collection: 120 };
 const SMART_TTL = 60000;
 const CACHE_LIMIT = 100000; // track ids kept, over all lists
 
@@ -38,20 +44,36 @@ async function contents(kind, list, signal) {
   const key = `${s.uri}|${kind}|${list.ratingKey}`;
   const stamp = stampOf(list);
   const hit = cache.get(key);
-  if (hit && hit.stamp === stamp && (!list.smart || Date.now() - hit.at < SMART_TTL)) {
+  if (hit && hit.stamp === stamp && (!isSmart(list) || Date.now() - hit.at < SMART_TTL)) {
     cache.delete(key);
     cache.set(key, hit); // most recently used last
     return hit.counts;
   }
   const counts = new Map();
-  for (let start = 0; start < LIST_LIMIT; start += PAGE) {
+  const size = PAGE[kind];
+  let ids = true;
+  let last = null;
+  // (Until Plex's count of them, or a page short of what was asked for
+  // where it gives none: a server that gives fewer at a time is read on.)
+  for (let start = 0; start < LIST_LIMIT; ) {
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { aborted: true });
-    const page = kind === 'playlist' ? await s.playlistItems(list.ratingKey, { start, size: PAGE }) : await s.collectionItems(list.ratingKey, { start, size: PAGE });
+    const page = kind === 'playlist' ? await s.playlistItems(list.ratingKey, { start, size, ids }) : await s.collectionItems(list.ratingKey, { start, size, ids });
+    // (A server that left even the ids out: read in full.)
+    if (ids && page.items.length && !page.items.some((m) => m?.ratingKey != null)) {
+      ids = false;
+      continue;
+    }
+    // (The same page again: a server that doesn't page, so that's all.)
+    const sig = page.items.map((m) => m?.ratingKey).join(',');
+    if (start && sig === last) break;
+    last = sig;
     for (const m of page.items) {
       const id = String(m.ratingKey);
       counts.set(id, (counts.get(id) || 0) + 1);
     }
-    if (page.items.length < PAGE || (page.total && start + page.items.length >= page.total)) break;
+    start += page.items.length;
+    // (More than was asked for: a server that gave it all at once.)
+    if (!page.items.length || page.items.length > size || (page.counted != null ? start >= page.counted : page.items.length < size)) break;
   }
   if (hit) cached -= hit.counts.size;
   cache.delete(key);
@@ -115,6 +137,24 @@ async function byRules(list, section) {
 
 // ---------- playlists and collections ----------
 
+// The collections Plex says an item is in (its details' Collection tags):
+// each one's id, which is the collection's index, and its title.
+function collectionTags(item) {
+  const tags = Array.isArray(item?.Collection) ? item.Collection : item?.Collection ? [item.Collection] : [];
+  const ids = new Set();
+  const titles = new Set();
+  for (const t of tags) {
+    const id = String(t?.id ?? String(t?.filter || '').split('=')[1] ?? '');
+    if (/^\d+$/.test(id)) ids.add(id);
+    if (typeof t?.tag === 'string' && t.tag) titles.add(t.tag);
+  }
+  return { ids, titles };
+}
+// (By its index, where the collection and the tags have them; by its title
+// where they haven't.)
+const tagged = (c, tags) => (/^\d+$/.test(String(c.index ?? '')) && tags.ids.size ? tags.ids.has(String(c.index)) : tags.titles.has(c.title));
+const isSmart = (list) => list.smart === true || list.smart === 1 || list.smart === '1';
+
 // What a track (as normTrack makes them) is in. Results come as they're
 // found, through onFound('playlist', { list, times, every }) and
 // onFound('collection', { list, via }), where `every` marks a smart
@@ -123,26 +163,45 @@ async function byRules(list, section) {
 // skipped (lists too long to read), checked }.
 export async function appearsIn(track, { signal, onFound, onProgress } = {}) {
   const s = app.server;
-  const meta = await s.trackDetail(track.id).catch(() => null);
+  // (Its details as they are now, for the collections it's in.)
+  const meta = await s.metadata(track.id).catch(() => null);
   const ids = {
     track: String(track.id),
     album: String(meta?.parentRatingKey ?? track.albumId ?? ''),
     artist: String(meta?.grandparentRatingKey ?? track.artistId ?? ''),
   };
   const section = meta?.librarySectionID ?? app.source.sectionKey;
-  const [playlists, collections] = await Promise.all([s.playlists().catch(() => []), s.collections(section).catch(() => [])]);
+  const details = (id) => (/^\d+$/.test(id) ? s.metadata(id).catch(() => null) : null);
+  const [playlists, collections, album, artist] = await Promise.all([
+    s.playlists().catch(() => []),
+    s.collections(section).catch(() => []),
+    details(ids.album),
+    details(ids.artist),
+  ]);
+  // (Null where its details couldn't be had: those collections are read.)
+  const tags = { track: meta && collectionTags(meta), album: album && collectionTags(album), artist: artist && collectionTags(artist) };
+  const found = { playlists: [], collections: [] };
+  // Collections, as Plex says (but smart ones, read with the playlists).
+  const ofKind = collections.filter((c) => ids[c.subtype || 'album']);
+  const toRead = (c) => isSmart(c) || !tags[c.subtype || 'album'];
+  for (const list of ofKind.filter((c) => !toRead(c))) {
+    const via = list.subtype || 'album';
+    if (!tagged(list, tags[via])) continue;
+    const entry = { list, via };
+    found.collections.push(entry);
+    onFound?.('collection', entry);
+  }
   const lists = [
     ...playlists.filter((p) => (p.playlistType || 'audio') === 'audio').map((list) => ({ kind: 'playlist', list })),
-    ...collections.filter((c) => ids[c.subtype || 'album']).map((list) => ({ kind: 'collection', list })),
+    ...ofKind.filter(toRead).map((list) => ({ kind: 'collection', list })),
   ];
-  const found = { playlists: [], collections: [] };
   const skipped = [];
   const long = [];
-  const todo = lists.filter(({ list }) => {
-    const n = sizeOf(list);
+  const todo = lists.filter((x) => {
+    const n = sizeOf(x.list);
     if (n === 0) return false; // empty
-    if (n > (list.smart ? SMART_LIMIT : LIST_LIMIT)) {
-      long.push(list);
+    if (n > (isSmart(x.list) ? SMART_LIMIT : LIST_LIMIT)) {
+      long.push(x);
       return false;
     }
     return true;
@@ -150,8 +209,8 @@ export async function appearsIn(track, { signal, onFound, onProgress } = {}) {
   // Too long to read: a smart playlist of everything still counts, and one
   // of another library doesn't.
   await Promise.all(
-    long.map(async (list) => {
-      const said = list.smart ? await byRules(list, section) : 'unknown';
+    long.map(async ({ kind, list }) => {
+      const said = kind === 'playlist' && isSmart(list) ? await byRules(list, section) : 'unknown';
       if (said === 'all') {
         const entry = { list, times: 1, every: true };
         found.playlists.push(entry);

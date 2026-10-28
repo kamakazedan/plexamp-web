@@ -48,6 +48,7 @@ import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
 import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, RELEASE_KINDS, KIND_NAMES } from '../mb.js';
+import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
 import { chooseMissingKinds, missingKinds } from './mbsettings.js';
 import { copyText, toCsv } from '../missing.js';
 import { clearSelection } from '../selection.js';
@@ -208,8 +209,12 @@ export async function albumView({ el, params }) {
 // RELEASE_KINDS: Albums, Singles & EPs, Live albums, Compilations...): Plex's
 // release types (from MusicBrainz, as Plexamp shows them), its Format the
 // main one (album, EP, single) and its Subformat what else it is (live, a
-// compilation...); with the player's MusicBrainz features, MusicBrainz's own
-// for an album Plex hasn't typed. Albums are a grid, the rest shelves.
+// compilation...), or else the row of Plex's for the artist's page that
+// it's in (hubs.js), as Plexamp has them; with the player's MusicBrainz
+// features, MusicBrainz's own for an album Plex hasn't typed. Albums are a
+// grid, the rest shelves. Then what they appear on: others' albums with
+// their tracks on (compilations, soundtracks, someone else's with them
+// featured).
 
 // Whether Plex said what kind of release it is.
 const typed = (m) => plexKind(m) !== null;
@@ -217,7 +222,7 @@ export const albumGroup = (m) => KIND_NAMES[plexKind(m) || 'albums'];
 
 // Albums with their release types: Plex's listing of an artist's albums
 // leaves them out, so they're looked up (plex.js albumTypes: 40 albums to a
-// request, kept while the app's open).
+// request, kept while the app's open), as are Plex's rows for the page.
 const TYPES_WAIT = 700; // ms the albums wait for them, before they're shown without
 const keptFor = (id) => `${app.source?.serverId || app.source?.uri || ''}|${id}`;
 async function releaseTypes(s, albums) {
@@ -270,6 +275,42 @@ async function sonicallySimilar(s, artist, { limit, maxDistance }) {
   return items.filter((m) => m.type === 'artist' && String(m.ratingKey) !== String(artist.ratingKey));
 }
 
+// What an artist appears on, where Plex's rows for their page don't say:
+// the albums of others' with a track credited to them (hubs.js
+// creditedTo), as Plex's search finds them (by who a track's by, as well as
+// its title), and its list of tracks by title (which takes in who they're
+// by, on some servers). Kept a few minutes, for going back to the page.
+const APPEARS_SEARCH = 100; // tracks looked through, of each
+const APPEARS_KEPT_MS = 5 * 60000;
+const ROWS_KEPT_MS = 5 * 60000; // what Plex's rows for an artist's page say
+function appearsBySearch(s, sec, artist) {
+  const me = String(artist.ratingKey);
+  const want = norm(artist.title);
+  if (!want) return Promise.resolve([]);
+  return s.memo(
+    `appears:${sec}:${me}`,
+    async () => {
+      const [found, listed] = await Promise.all([
+        s.search(artist.title, sec, { limit: APPEARS_SEARCH }).catch(() => null),
+        s.list(sec, 10, { filters: { title: artist.title }, size: APPEARS_SEARCH }).catch(() => null),
+      ]);
+      // (The library's artists the search found: a credit that's one of
+      // theirs is never split. None where the search failed: nothing is.)
+      const known = found ? new Set((found.artist || []).map((a) => norm(a.title)).filter(Boolean)) : null;
+      const out = new Map();
+      for (const t of [...(found?.track || []), ...(listed?.items || [])]) {
+        const album = albumOfTrack(t);
+        if (!album || album.parentRatingKey === me || out.has(album.ratingKey)) continue;
+        // (Plex's search may look further than this library.)
+        if (t.librarySectionID != null && String(t.librarySectionID) !== String(sec)) continue;
+        if (creditedTo(t, want, known)) out.set(album.ratingKey, album);
+      }
+      return [...out.values()];
+    },
+    APPEARS_KEPT_MS,
+  );
+}
+
 // A tag's key, for a library list filtered by it ("style=123").
 const tagKey = (t) => (t?.id != null ? String(t.id) : t?.filter ? String(t.filter).split('=').pop() : '');
 
@@ -318,10 +359,11 @@ export async function artistView({ el, params }) {
 
   const popularSlot = h('div');
   const albumsBox = h('div.artist-albums');
+  const appearsBox = h('div.artist-appears');
   const missingBox = h('div.artist-missing');
   const similarSlot = h('div');
   const sonicSlot = h('div');
-  el.append(popularSlot, albumsBox, missingBox, similarSlot, sonicSlot);
+  el.append(popularSlot, albumsBox, appearsBox, missingBox, similarSlot, sonicSlot);
   // Its styles, each opening the library's artists of that style.
   const styles = (artist.Style || []).filter((t) => t?.tag && tagKey(t));
   if (styles.length) {
@@ -374,31 +416,46 @@ export async function artistView({ el, params }) {
   // first came out (Original release years) and those the library hasn't
   // (Missing albums on artist pages). (Not for Various Artists: theirs is
   // no one's discography.)
-  const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums')) && norm(artist.title) !== 'various artists';
+  const various = norm(artist.title) === 'various artists';
+  const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums')) && !various;
   const mbP = wantMB ? artistOnMB(artist.title, { id: mbidOf(artist) }).catch(() => null) : Promise.resolve(null);
+  // Plex's rows for the page (hubs.js): which kind each of their albums is,
+  // and what they appear on.
+  // (What they say, not the rows themselves, kept a few minutes: going
+  // back to the page.)
+  const hubsP = s
+    .memo(`rows:${artist.ratingKey}`, () => s.artistHubs(artist.ratingKey).then((hubs) => releasesFromHubs(hubs, artist.ratingKey)), ROWS_KEPT_MS)
+    .catch(() => null);
 
   // Their albums by kind, each with its year (when it first came out, with
   // Original release years, where MusicBrainz says that was earlier than
   // the year Plex has), newest first. Plex's listing doesn't say which kind
-  // each is, so the kinds are looked up (see releaseTypes). For most
-  // artists that's one request, waited for, as MusicBrainz is (the player
-  // keeps what it says); a big discography, or a first look on
-  // MusicBrainz, is shown as it is, and again once they're in.
-  const placed = (albums, mb) => {
+  // each is, so the kinds are looked up (see releaseTypes), and Plex's rows
+  // for the page are asked for. For most artists that's a request or two,
+  // waited for, as MusicBrainz is (the player keeps what it says); a big
+  // discography, or a first look on MusicBrainz, is shown as it is, and
+  // again once they're in. An album's kind: Plex's type for it, else the
+  // row of Plex's it's in, unless that says no more than albums (as it may
+  // of one Plex hasn't typed, which MusicBrainz may know better), else
+  // MusicBrainz's.
+  const rowOf = (m, rows) => rows?.kinds.get(String(m.ratingKey)) || null;
+  const saidOf = (m, rows) => plexKind(m) || (rowOf(m, rows) !== 'albums' ? rowOf(m, rows) : null);
+  const placed = (albums, mb, rows) => {
     const groups = mb?.groups || [];
     const origin = mbOn('mbOriginalYears');
     return albums.map((m) => {
-      const plex = plexKind(m);
+      const row = rowOf(m, rows);
+      const said = saidOf(m, rows);
       const own = Number(year(m)) || null;
-      const g = groups.length ? matchGroup(groups, m.title, plex, own) : null;
+      const g = groups.length ? matchGroup(groups, m.title, said, own) : null;
       const was = origin ? firstYear(g) : null;
-      return { m, g, kind: plex || (g ? kindOf(g.primary, g.secondary) : 'albums'), year: was && (!own || was < own) ? was : own };
+      return { m, g, kind: said || (g ? kindOf(g.primary, g.secondary) : null) || row || 'albums', year: was && (!own || was < own) ? was : own };
     });
   };
   let painted = '';
-  const paintAlbums = (albums, mb) => {
-    paintMissing(albums, mb);
-    const list = placed(albums, mb).sort((a, b) => (b.year || 0) - (a.year || 0));
+  const paintAlbums = (albums, mb, rows) => {
+    paintMissing(albums, mb, rows);
+    const list = placed(albums, mb, rows).sort((a, b) => (b.year || 0) - (a.year || 0));
     const kinds = new Map();
     for (const x of list) {
       if (!kinds.has(x.kind)) kinds.set(x.kind, []);
@@ -422,7 +479,7 @@ export async function artistView({ el, params }) {
   // kinds chosen (Kinds…), newest first, by kind, each linked to
   // MusicBrainz; to copy or download, all of them.
   let missingPainted = '';
-  const paintMissing = (albums, mb) => {
+  const paintMissing = (albums, mb, rows) => {
     const groups = mb?.groups || [];
     if (!mbOn('mbMissingAlbums') || !groups.length) {
       missingPainted = '';
@@ -431,7 +488,7 @@ export async function artistView({ el, params }) {
     const have = new Set();
     const titles = new Set();
     for (const m of albums) {
-      const g = matchGroup(groups, m.title, plexKind(m), Number(year(m)) || null);
+      const g = matchGroup(groups, m.title, saidOf(m, rows), Number(year(m)) || null);
       if (g) have.add(g.id);
       titles.add(albumKey(m.title));
     }
@@ -443,7 +500,7 @@ export async function artistView({ el, params }) {
     const shape = JSON.stringify([chosen, missing.map((g) => g.id)]);
     if (shape === missingPainted) return;
     missingPainted = shape;
-    const kindsButton = h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albums, mb)) }, 'Kinds…');
+    const kindsButton = h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albums, mb, rows)) }, 'Kinds…');
     const head = sectionHeader('Not in your library', null, kindsButton);
     if (!missing.length) {
       missingBox.replaceChildren(h('section.block.mb-missing', null, head, h('p.hint.pad', null, `Your library has all of ${artist.title}’s that MusicBrainz has, of the kinds chosen.`)));
@@ -515,14 +572,38 @@ export async function artistView({ el, params }) {
 
   const albumsP = s.children(artist.ratingKey).then(async (albums) => {
     const typing = !albums.length || albums.some(typed) ? null : releaseTypes(s, albums);
-    const soon = await Promise.race([Promise.all([typing || albums, mbP]), new Promise((r) => setTimeout(r, TYPES_WAIT))]);
+    // (Where Plex's listing has every album's type, its rows can't change
+    // one: not waited for.)
+    const rowsP = albums.length && albums.every(typed) ? Promise.resolve(null) : hubsP;
+    const soon = await Promise.race([Promise.all([typing || albums, mbP, rowsP]), new Promise((r) => setTimeout(r, TYPES_WAIT))]);
     if (soon) return paintAlbums(...soon);
     // (Shown as it is, then again with each, as it comes.)
     let now = albums;
     let mb = null;
-    paintAlbums(now, mb);
-    await Promise.all([typing?.then((got) => paintAlbums((now = got), mb)), mbP.then((got) => got && paintAlbums(now, (mb = got)))]);
+    let rows = null;
+    paintAlbums(now, mb, rows);
+    await Promise.all([
+      typing?.then((got) => paintAlbums((now = got), mb, rows)),
+      mbP.then((got) => got && paintAlbums(now, (mb = got), rows)),
+      rowsP.then((got) => got && paintAlbums(now, mb, (rows = got))),
+    ]);
   });
+
+  // Appears on: others' albums they're on, newest first, as Plex's rows
+  // for the page have them, or else as its search finds them. (Not for
+  // Various Artists, who are on everything of theirs.)
+  const appearsP = various
+    ? null
+    : hubsP.then(async (rows) => {
+        const albums = rows?.appears.length ? rows.appears : await appearsBySearch(s, sec, artist);
+        if (!albums.length) return;
+        const cards = albums
+          .slice()
+          .sort((a, b) => (Number(year(b)) || 0) - (Number(year(a)) || 0))
+          .map((m) => albumCard(m, { subtitle: [m.parentTitle, year(m)].filter(Boolean).join(' · ') }));
+        const strip = shelf(cards);
+        appearsBox.replaceChildren(h('section.block', { dataset: { group: 'Appears on' } }, sectionHeader('Appears on', null, null, strip), strip));
+      });
 
   // Similar artists (Plex's, those in this library) and sonically similar
   // ones, each a shelf, with a page of more.
@@ -534,7 +615,7 @@ export async function artistView({ el, params }) {
   const similarP = similarInLibrary(s, sec, artist, SHELF_ARTISTS).then((artists) => artistShelf(similarSlot, 'Similar artists', `/artist/${artist.ratingKey}/similar`, artists));
   const sonicP = sonicallySimilar(s, artist, { limit: SHELF_ARTISTS }).then((artists) => artistShelf(sonicSlot, 'Sonically similar artists', `/artist/${artist.ratingKey}/sonic`, artists));
 
-  await Promise.allSettled([popularP, albumsP, similarP, sonicP]);
+  await Promise.allSettled([popularP, albumsP, appearsP, similarP, sonicP]);
 }
 
 // All of an artist's similar artists in the library (`kind`: 'similar',

@@ -27,7 +27,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/
 
 Then open `http://<host>:8080` (on Proxmox, the address it shows when it's done), choose **Sign in with Plex**, and pick your server and music library.
 
-`PLEX_SERVER_URL` is optional, but recommended: it's your Plex server's address on your network, and it gives browsers that can't reach Plex directly a route through the container. The `/data` volume keeps shared playlists when the container is replaced (by an update, say).
+`PLEX_SERVER_URL` is optional, but recommended: it's your Plex server's address on your network, and it gives browsers that can't reach Plex directly a route through the container. The `/data` volume keeps shared playlists, each account's settings and Missing tracks, and what the MusicBrainz features look up, when the container is replaced (by an update, say).
 
 More on installing, updating and running it behind HTTPS: [docs/setup.md](docs/setup.md).
 

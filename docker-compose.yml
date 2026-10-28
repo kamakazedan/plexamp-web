@@ -56,8 +56,9 @@
 #   DEBUG               "true" writes extra detail to the log, with tokens and
 #                       keys removed. Turn it off when you're done.
 #
-# Shared playlists and each account's settings are kept in /data: the volume
-# below, or a folder of your own (./plexamp-web-data:/data). To build from this folder instead of using
+# Shared playlists, each account's settings and Missing tracks, and what the
+# MusicBrainz features look up, are kept in /data: the volume below, or a
+# folder of your own (./plexamp-web-data:/data). To build from this folder instead of using
 # the published image, replace the image line with:  build: .
 
 services:

@@ -3,6 +3,38 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.27.0 - 2026-10-28
+
+### New
+
+- **Appears on, on artist pages**, as Plexamp has it: other artists'
+  albums with tracks of theirs on (a compilation, a soundtrack, someone
+  else's album they're featured on), after their own, newest first, each
+  saying whose it is and when. They come from the row Plex has for it on
+  the artist's page or, where Plex has none, from Plex's search, which
+  finds tracks by who they're by.
+
+### Fixed
+
+- **Singles & EPs, Compilations and the rest on artist pages** could all
+  show as Albums, where Plex's details for the albums didn't say what
+  kind each is. The app now goes by the rows Plex has for the artist's
+  page too (the ones Plexamp shows), so they're grouped as Plexamp groups
+  them. An album that Plex has as an album stays one, as it does in
+  Plexamp.
+- **Appears in left out collections** on Plex servers that refuse to give
+  more than 120 of a collection's entries at a time. They're read 120 at
+  a time now.
+
+### Changed
+
+- **Appears in is quicker.** Plex says which collections a track, its
+  album and its artist are in, so those show straight away instead of
+  every collection being looked through. Smart collections still are,
+  as their rules decide what's in them. Playlists are looked through as
+  their tracks' ids and no more, where Plex can leave the rest out, and
+  what was found is kept until a playlist changes, as before.
+
 ## 0.26.0 - 2026-10-28
 
 ### New

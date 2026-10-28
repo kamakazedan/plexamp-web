@@ -46,10 +46,11 @@
 #                       playlist's link, read from Spotify's public page for
 #                       it (off by default: see server/spotify.js).
 #                       (SPOTIFY_IMPORT, its name before 0.22.0, still works.)
-#   DATA_DIR            where shared playlists, and each account's settings and
-#                       Missing tracks, are kept (default /data: give the
-#                       container a volume there). A folder of its own: it's made the service's
-#                       alone.
+#   DATA_DIR            where shared playlists, each account's settings and
+#                       Missing tracks, and what the MusicBrainz features look
+#                       up, are kept (default /data: give the container a
+#                       volume there). A folder of its own: it's made the
+#                       service's alone.
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
 set -eu
@@ -651,7 +652,12 @@ CONF
             # In a container, a folder that isn't a volume goes when the
             # container is replaced (an update, say), and what's in it.
             if [ -f /.dockerenv ] && ! is_mount "$DATA_DIR"; then
-                say "shared playlists, account settings and missing tracks are kept in $DATA_DIR, which isn't a volume, so they'd be lost when this container is replaced (by an update, say). Give the container a volume there (see docker-compose.yml)."
+                kept=""
+                if [ "$SHARING" = true ]; then kept="$kept, shared playlists"; fi
+                if [ "$SETTINGS_SYNC" = true ]; then kept="$kept, account settings"; fi
+                if [ "$MISSING_SYNC" = true ]; then kept="$kept, missing tracks"; fi
+                if [ "$MB_ADV" = true ]; then kept="$kept, what the MusicBrainz features look up"; fi
+                say "${kept#, }: kept in $DATA_DIR, which isn't a volume, so they'd be lost when this container is replaced (by an update, say). Give the container a volume there (see docker-compose.yml)."
             fi
         fi
     fi
