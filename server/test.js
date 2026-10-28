@@ -8,12 +8,12 @@ import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
 import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped } from './plex.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
-import { MusicBrainz, MusicBrainzError, isPublic } from './musicbrainz.js';
+import { MusicBrainz, MusicBrainzError, isPublic, sameTitle } from './musicbrainz.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
-import { applyNote, applyMerge, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
+import { applyNote, applyMerge, applyRestore, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -669,14 +669,20 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
   assert.deepEqual(await tiring.check([{ kind: 'artist', artist: 'A' }, { kind: 'artist', artist: 'B' }, { kind: 'artist', artist: 'C' }]), ['real', null, null]);
 });
 
-test('MusicBrainz: an artist in another script is the one MusicBrainz has of that name, not any in that script', async () => {
+test('MusicBrainz: an artist in another script, and their songs, are checked by name (before 0.25.0, the artist was taken for made up, and their song for real if anyone had one of that title)', async () => {
   const fetchImpl = async (url) => {
     const u = new URL(url);
-    // Whatever's asked for, an artist in the same script.
-    return { ok: true, status: 200, json: async () => (u.pathname === '/ws/2/artist' ? { artists: [{ name: 'Кино', score: 100 }] } : { recordings: [], 'release-groups': [] }) };
+    // Whatever's asked for: an artist in the same script, and someone
+    // else's song of that title.
+    if (u.pathname === '/ws/2/artist') return { ok: true, status: 200, json: async () => ({ artists: [{ name: 'Кино', score: 100 }] }) };
+    if (u.pathname === '/ws/2/recording') return { ok: true, status: 200, json: async () => ({ recordings: [{ title: 'First Love', score: 100, 'artist-credit': [{ name: 'Someone Else' }] }] }) };
+    return { ok: true, status: 200, json: async () => ({ 'release-groups': [] }) };
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 });
-  assert.deepEqual(await mb.check([{ kind: 'artist', artist: 'Аквариум' }, { kind: 'artist', artist: 'КИНО' }]), ['unknown', 'real']);
+  assert.deepEqual(
+    await mb.check([{ kind: 'artist', artist: 'Аквариум' }, { kind: 'artist', artist: 'КИНО' }, { kind: 'track', artist: '宇多田ヒカル', title: 'First Love' }]),
+    ['unknown', 'real', 'unknown'],
+  );
 });
 
 test('MusicBrainz: musicbrainz.org once a second, your own server as fast as it answers, saying which version asks', async () => {
@@ -1395,7 +1401,7 @@ const longListId = (name) => {
   return x.toString(36);
 };
 
-test('missing tracks: a playlist\'s listId is twelve bits of a hash of its name, too few to check a name guessed (and one kept before 0.25.0 is cut down)', () => {
+test('missing tracks: a playlist\'s listId is twelve bits of a hash of its name, too few to work a name out from (and one kept before 0.25.0 is cut down)', () => {
   const names = Array.from({ length: 5000 }, (_, i) => `Playlist ${i}`);
   const ids = names.map(listId);
   assert.ok(ids.every((id) => /^[a-z0-9]{1,3}$/.test(id) && parseInt(id, 36) < 4096), ids.find((id) => parseInt(id, 36) >= 4096));
@@ -1404,34 +1410,60 @@ test('missing tracks: a playlist\'s listId is twelve bits of a hash of its name,
   assert.equal(listId('  Road Trip '), listId('road trip'));
   // One from before is cut down as listId cuts it, wherever it's met: what a
   // browser sends, and what the player kept.
-  for (const name of ['Road trip', 'Gym', 'Late night', '夜']) {
-    assert.ok(longListId(name).length >= 4, name);
+  // (Mix 954's whole hash was short: 5jz.)
+  for (const name of ['Road trip', 'Gym', 'Late night', '夜', 'Mix 954']) {
+    assert.ok(parseInt(longListId(name), 36) > 4095, name);
     assert.equal(shortList(longListId(name)), listId(name), name);
     assert.equal(shortList(listId(name)), listId(name), name);
   }
+  assert.equal(longListId('Mix 954'), '5jz');
   assert.equal(cleanOp(noteOp([song('S', 'Tune')], { via: 'spotify', list: longListId('Gym') }), AT).list, listId('Gym'));
   const e = cleanEntry({ kind: 'track', artist: 'S', title: 'Tune', via: 'spotify', lists: [longListId('Gym'), listId('Gym'), longListId('Road trip')], last: AT, section: '1' }, AT);
   assert.deepEqual(e.lists, [listId('Gym'), listId('Road trip')]);
-  // ...and by the app's rules, as a browser's own list meets the account's.
+  // ...and by the app's rules: noted, put together with another list, or
+  // put back.
   const st = store();
   asOwner(st, [noteOp([song('S', 'Tune')], { via: 'spotify', list: longListId('Gym') }), noteOp([song('S', 'Tune')], { via: 'spotify', list: listId('Gym') })]);
   assert.deepEqual(mineOf(st, dan.id)[0].lists, [listId('Gym')]);
+  const old = { kind: 'track', artist: 'T', title: 'Other', via: 'spotify', lists: [longListId('Road trip')], times: 1, first: AT, last: AT, section: '1', library: 'L' };
+  assert.deepEqual(applyMerge([], [old], { server: SRV })[0].lists, [listId('Road trip')]);
+  assert.deepEqual(applyRestore([], [old], { server: SRV })[0].lists, [listId('Road trip')]);
 });
 
 test('names in other scripts are told apart (norm), as Latin ones always were', () => {
-  assert.equal(norm('The Beatles'), 'beatles');
-  assert.equal(norm('Sigur Rós & Friends (Live)'), 'sigur ros and friends');
+  // Latin letters and numbers alone: as they always were.
+  for (const [name, was] of [['The Beatles', 'beatles'], ['Sigur Rós & Friends (Live)', 'sigur ros and friends'], ['Mø', 'm'], ['Røyksopp', 'r yksopp'], ['2002', '2002'], ['!!!', ''], ['ＡＢＣ １２３', 'abc 123'], ['Israel Kamakawiwoʻole', 'israel kamakawiwo ole']]) {
+    assert.equal(norm(name), was, name);
+  }
+  // ...the same, however they're written: an ʻokina or an apostrophe;
+  // Arabic and Hebrew with their vowel points and tatweel or without.
+  // Greek in capitals (without its accents) or not, Russian's ё as е, and
+  // Persian's ی and ک as Arabic's ي and ك.
+  for (const [a, b] of [["Israel Kamakawiwo'ole", 'Israel Kamakawiwoʻole'], ['مـرحبا', 'مرحبا'], ['שָׁלוֹם', 'שלום'], ['µ-Ziq', 'μ-Ziq'], ['Αγάπη μου', 'ΑΓΑΠΗ ΜΟΥ'],
+    ['Θεοδωράκης', 'ΘΕΟΔΩΡΑΚΗΣ'], ['Ἀθῆναι', 'ΑΘΗΝΑΙ'], ['Пётр Чайковский', 'Петр Чайковский'], ['Всё идёт по плану', 'Все идет по плану'], ['ایران', 'ايران']]) {
+    assert.equal(norm(a), norm(b), `${a} / ${b}`);
+  }
+  // Another script: its letters and numbers as they're written.
   assert.equal(norm('КИНО'), 'кино');
-  assert.notEqual(norm('宇多田ヒカル'), norm('椎名林檎'));
-  assert.notEqual(norm('Кино'), '');
-  // (Latin where there is some, as before.)
-  assert.equal(norm('BTS 방탄소년단'), 'bts');
-  assert.equal(norm('!!!'), '');
+  assert.equal(norm('그리움'), '그리움', 'composed, not in parts');
+  const apart = [['宇多田ヒカル', '椎名林檎'], ['Симфония № 5', 'Концерт № 5'], ['第9番', '9月'], ['Мой', 'Мои'], ['그리움', '그리운'], ['Love 사랑', 'Love 이별'], ['BTS 방탄소년단', 'BTS'], ['ラーメン', 'ラメン'], ['Київ', 'Киів']];
+  for (const [a, b] of apart) assert.notEqual(norm(a), norm(b), `${a} / ${b}`);
+  // ...and not taken for each other as a letter or two different, where
+  // one character can be another word.
+  assert.equal(sameTitle(norm('君の名は希望だ'), norm('君の名は希望か')), false);
+  assert.equal(sameTitle(norm('Out of Spacee'), norm('Out of Space')), true);
+  // Nor are titles with other numbers, in any script's digits (though a
+  // number's leading zeros don't count).
+  for (const [a, b] of [['Symphony No. 5', 'Symphony No. 6'], ['Piano Sonata No. 1', 'Piano Sonata No. 10'], ['BWV 846', 'BWV 847'], ['Симфония № 5', 'Симфония № 6'], ['سمفونية رقم ٥', 'سمفونية رقم ٦'], ['सिम्फनी ५', 'सिम्फनी ६']]) {
+    assert.equal(sameTitle(norm(a), norm(b)), false, `${a} / ${b}`);
+  }
+  assert.equal(sameTitle(norm('Symphony No. 5'), norm('Symphony No. 5 - Allegro con brio')), true);
+  assert.equal(sameTitle(norm('Interlude 01'), norm('Interlude 1')), true);
   // Two songs of the same name by two artists in another script are two
   // entries, not one.
   const st = store();
-  asOwner(st, [noteOp([song('宇多田ヒカル', 'First Love'), song('椎名林檎', 'First Love')])]);
-  assert.equal(mineOf(st, dan.id).length, 2);
+  asOwner(st, [noteOp([song('宇多田ヒカル', 'First Love'), song('椎名林檎', 'First Love'), song('Чайковский', 'Симфония № 5'), song('Чайковский', 'Концерт № 5'), song('久石譲', '第9番'), song('久石譲', '9月')])]);
+  assert.equal(mineOf(st, dan.id).length, 6);
 });
 
 test('missing tracks: what the app sends that isn\'t kept (what it was asked for) never is, and what can\'t be read is left out', () => {

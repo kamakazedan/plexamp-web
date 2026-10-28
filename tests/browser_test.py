@@ -6607,6 +6607,20 @@ with sync_playwright() as pw:
         for c in (desk_ctx, old_ctx, sam_ctx, own_ctx):
             c.close()
 
+        # A change made before 0.25.0 and still to go (made offline, say, or
+        # as a page closed): sent with its playlist's id cut down too.
+        dan_id = lists('t')['account']
+        qop = {'type': 'note', 'id': op_id(), 'items': [{'kind': 'track', 'artist': 'Queued Artist', 'title': 'Queued Song'}], 'found': [], 'unreal': [],
+               'via': 'spotify', 'list': list_id('Dans Queued List', True), 'section': sec, 'library': lib, 'at': now}
+        q_ctx, q_pg, q_sent = device('missing-queued', seed={'pw.auth': was['auth'], 'pw.source': was['source'], 'pw.aiMissingSynced': {'account': dan_id, 'servers': {SRV: ''}},
+                                                            'pw.aiMissingOp.00000000000000001qqq': {'account': dan_id, 'server': SRV, 'op': qop}})
+        went = wait_for(lambda: 'Queued Song' in titles('t'), 10, 0.3)
+        q = next((m for m in lists('t')['entries'] if m['title'] == 'Queued Song'), {})
+        check('missingsync: a change from before 0.25.0, still to go, is sent with its playlist\'s id cut down',
+              went and q.get('lists') == [list_id('Dans Queued List')] and list_id('Dans Queued List', True) not in ' '.join(q_sent), f'{q} {" ".join(q_sent)[:300]}')
+        q_ctx.close()
+        lists('t', 'POST', {'ops': [{'type': 'clear', 'id': op_id(), 'everyone': True}]})
+
         # Where the player doesn't keep them for each account, nothing goes
         # to it: each device has its own, as before.
         local_ctx = browser.new_context()

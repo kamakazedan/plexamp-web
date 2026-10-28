@@ -60,10 +60,12 @@ you're running is shown in **Settings › About**.
   follows the player now (`WEBSOCKETS=off` is Off for everyone).
 - **A Spotify playlist is counted by twelve bits of a hash of its name**
   on Missing tracks (one name in 4,096 has the same), not the whole
-  hash: too few for what's kept to be used to check whether someone has
-  a playlist of a name guessed. What was kept before is cut down the
-  first time 0.25.0 reads it, on the player and in each browser. Now and
-  then, two of someone's playlists count as one.
+  hash: too few to work a name out from (a list of 100,000 names leaves
+  about 24 for each), though a single likely guess could still be
+  checked against it by someone who can read the player's files. What
+  was kept before is cut down the first time 0.25.0 reads it, on the
+  player and in each browser, and as changes made before it are sent.
+  Now and then, two of someone's playlists count as one.
 - New Proxmox installs write `WEBSOCKETS=auto` in their settings; existing
   ones keep theirs (`DISABLE_WEBSOCKETS=` empty is `auto`).
 - Docs: the README, configuration.md (WEBSOCKETS, SYNC_MISSING_TRACKS and
@@ -78,14 +80,33 @@ you're running is shown in **Settings › About**.
 
 ### Fixed
 
-- **Names in other scripts** (宇多田ヒカル, Кино, 방탄소년단) are told apart
-  where the app compares names: before, every one of them came out the
-  same, as nothing, so two songs of the same title by two such artists
-  were one on Missing tracks, an AI playlist's suggestion could be taken
-  for the wrong artist's song, a check on MusicBrainz took any artist in
-  that script it found for the one asked about, and searching a list in
-  that script didn't narrow it. Names with any Latin letters in them are compared as
-  before.
+- **Names in other scripts** (宇多田ヒカル, Кино, 방탄소년단, and those with
+  numbers too, like 久石譲's 第9番) are told apart wherever the app compares
+  names: before, all that was left of one was its Latin letters and
+  numbers, if any, so most came out the same, or as nothing. Importing a
+  playlist, or a playlist backup, found none of their tracks, even by
+  Plex id; two songs of the same title by two such artists were one on
+  Missing tracks, as were 第9番 and 9月; an AI playlist's suggestion could
+  be taken for the wrong song; a check on MusicBrainz took an artist in
+  that script for made up, and a song by one for real if anyone at all
+  had a song of that title; and searching a list in that script didn't
+  narrow it. Arabic and Hebrew are the same with their vowel points or
+  without, Greek in capitals (which go without accents) or not, Russian
+  with ё or е, and Persian typed with Arabic's ي and ك or not; and a
+  title in Chinese, Japanese or Korean is no longer taken for one a
+  character different from it, as a typo would be. Names of Latin
+  letters and numbers alone are compared as before (with an ʻokina or an
+  apostrophe, Kamakawiwoʻole is Kamakawiwo'ole). Songs that were one
+  entry on Missing tracks can't be told apart again: import those
+  playlists again to list them all. (One of those names taken off a list
+  by a tab still open on an older version, or by a change made offline
+  before, comes back: take it off again once that tab's reloaded.)
+- **A title with another number isn't taken for the same song**:
+  Symphony No. 5 for No. 6, BWV 846 for 847, "Song 2" for "Song 3" (in
+  any script's digits), as a typo a letter different would be. (No. 02
+  is still No. 2.) A playlist imported from Spotify could get the wrong
+  one, and a suggestion of one the library hadn't wasn't listed as
+  missing.
 
 ## 0.24.0 - 2026-10-28
 

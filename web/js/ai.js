@@ -18,7 +18,7 @@
 import { app, on } from './state.js';
 import { normTrack } from './plex.js';
 import { debugLog } from './debug.js';
-import { norm } from './missinglist.js';
+import { norm, otherScript } from './missinglist.js';
 
 // How long to wait for the model to start answering (loading it, and
 // reading a long prompt, can take minutes) is a setting: Settings › AI ›
@@ -581,11 +581,31 @@ async function findSong(song, signal) {
 }
 
 // Titles (normalised, see norm) that are the same song, near enough: "Out
-// of Space" and "Out Of Space (Remastered)", or a letter or two different.
+// of Space" and "Out Of Space (Remastered)", or a letter or two different
+// (not in Chinese, Japanese or Korean, where one character can be another
+// word, nor a number: Symphony No. 5 isn't No. 6).
+const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
 export function sameTitle(a, b) {
   if (!a || !b) return false;
   if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
+  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
+  // (Nor are titles with other numbers, in any script's digits: Symphony
+  // No. 5 isn't No. 6. No. 02 is No. 2.)
+  if (numbersOf(a) !== numbersOf(b)) return false;
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
+}
+
+// The word of a title it's looked for by among an artist's tracks (Plex's
+// title filter): its first of three letters or more, as norm has it, or in
+// another script with its capitals, as it's written (Plex may tell them
+// apart there), where that's all that's different.
+export function titleWord(title) {
+  const want = norm(title);
+  const word = want.split(' ').find((w) => w.length >= 3) || want;
+  if (!otherScript(word)) return word;
+  const raw = String(title || '').normalize('NFKC').split(/[^\p{L}\p{M}\p{N}]+/u);
+  return raw.find((w) => w.toLowerCase() === word) || word;
 }
 
 // Whether a song ({ artist, title }) is in the library: looked for by its
@@ -601,9 +621,8 @@ export async function songInLibrary(song, signal, { searched = false, section = 
   if (!want) return true; // nothing to look for
   const artist = await findArtist(song.artist, signal, section);
   if (!artist) return false;
-  const needle = want.split(' ').find((w) => w.length >= 3) || want;
   const { items } = await app.server
-    .list(section, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: needle }, signal })
+    .list(section, 10, { size: 50, filters: { 'artist.id': artist.ratingKey, title: titleWord(song.title) }, signal })
     .catch(() => ({ items: [] }));
   return items.some((m) => sameTitle(norm(m.title), want));
 }

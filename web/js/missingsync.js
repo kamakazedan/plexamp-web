@@ -24,7 +24,7 @@
 // is only ever in memory.
 import { app, on, emit, MISSING_OVER } from './state.js';
 import { store } from './plex.js';
-import { applyOp, idOf, listId, shortList, shortLists, sourceOf } from './missinglist.js';
+import { applyOp, idOf, listId, shortList, withShortLists, sourceOf } from './missinglist.js';
 
 const LIST = 'aiMissing'; // the list here, every server's
 // Each change still to go: aiMissingOp.<when><n><tab>, in the order they
@@ -48,16 +48,12 @@ const bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
 
 const valid = (m) => !!m && (m.kind === 'track' || m.kind === 'artist') && typeof m.artist === 'string';
 
-// A Spotify one's playlists, as they're counted now: one counted before
-// 0.25.0, by the whole hash of its name, is cut down (see listId).
-const longLists = (m) => Array.isArray(m?.lists) && m.lists.some((x) => shortList(x) !== x);
-const shortened = (m) => (longLists(m) ? { ...m, lists: shortLists(m.lists) } : m);
-
 // The list here. (0.12.0 kept what MusicBrainz didn't know, and albums,
-// hidden: they go.)
+// hidden: they go. A Spotify one's playlists counted before 0.25.0, by the
+// whole hash of each name, are cut down: see listId.)
 export function loadMissing() {
   const list = store.get(LIST, []);
-  return Array.isArray(list) ? list.filter((m) => valid(m) && m.mb !== 'unknown' && m.mb !== 'album').map(shortened) : [];
+  return Array.isArray(list) ? list.filter((m) => valid(m) && m.mb !== 'unknown' && m.mb !== 'album').map(withShortLists) : [];
 }
 
 // Whether it was kept (the browser may be out of room).
@@ -69,7 +65,7 @@ export function saveMissing(list) {
 
 {
   const kept = store.get(LIST, []);
-  if (Array.isArray(kept) && kept.some((m) => m?.mb === 'unknown' || m?.mb === 'album' || longLists(m))) store.set(LIST, loadMissing());
+  if (Array.isArray(kept) && kept.some((m) => m?.mb === 'unknown' || m?.mb === 'album' || withShortLists(m) !== m)) store.set(LIST, loadMissing());
 }
 
 const ms = {
@@ -183,9 +179,14 @@ function compact(server) {
   for (let i = 0; i < here.length; i += MERGE_CHUNK) enqueue({ account: ms.account, server, op: { type: 'merge', id: randomId(), entries: here.slice(i, i + MERGE_CHUNK) } });
 }
 
-// A change as it's sent: what's this device's own stays here.
+// A change as it's sent: what's this device's own stays here. (One made
+// before 0.25.0 and still to go: with its playlists' ids cut down.)
 const bare = ({ prompt, server, ...e }) => e;
-const forSending = (op) => (op.type === 'merge' || op.type === 'restore' ? { ...op, entries: op.entries.map(bare) } : op);
+function forSending(op) {
+  if (op.type === 'merge' || op.type === 'restore') return { ...op, entries: op.entries.map((e) => withShortLists(bare(e))) };
+  if (op.type === 'note' && op.via === 'spotify') return { ...op, list: shortList(op.list) };
+  return op;
+}
 // (A Spotify one kept before 0.22.0: the playlist it was last in.)
 const withLists = (m) => (m.via === 'spotify' && !Array.isArray(m.lists) ? { ...m, lists: [listId(m.prompt)] } : m);
 

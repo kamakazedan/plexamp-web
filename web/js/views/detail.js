@@ -43,7 +43,6 @@ import {
 } from '../actions.js';
 import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
-import { mapLimit } from '../ai.js';
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
 import { clearSelection } from '../selection.js';
@@ -205,32 +204,14 @@ export function albumGroup(m) {
   return 'Albums';
 }
 
-// Albums' release types: Plex's listing of an artist's albums leaves them
-// out (an album's own details have them), so they're read from those, 40
-// albums to a request, three requests at a time, and kept while the app's
-// open, in a list of their own (a big discography mustn't push the Plex
-// client's other answers out of what it keeps).
-const TYPES_KEPT = 5000;
+// Albums with their release types: Plex's listing of an artist's albums
+// leaves them out, so they're looked up (plex.js albumTypes: 40 albums to a
+// request, kept while the app's open).
 const TYPES_WAIT = 700; // ms the albums wait for them, before they're shown without
-const typesKept = new Map(); // `${server}|${album id}` -> { Format, Subformat }
 const keptFor = (id) => `${app.source?.serverId || app.source?.uri || ''}|${id}`;
 async function releaseTypes(s, albums) {
-  const want = [...new Set(albums.map((m) => String(m.ratingKey)))].filter((id) => /^\d+$/.test(id) && !typesKept.has(keptFor(id)));
-  const parts = Array.from({ length: Math.ceil(want.length / 40) }, (_, i) => want.slice(i * 40, i * 40 + 40));
-  await mapLimit(parts, 3, async (part) => {
-    let got;
-    try {
-      got = await s.metadataMany(part);
-    } catch {
-      return; // (asked again next time)
-    }
-    const byId = new Map(got.map((m) => [String(m.ratingKey), m]));
-    // (One Plex didn't give has nothing to say.)
-    for (const id of part) typesKept.set(keptFor(id), { Format: byId.get(id)?.Format || [], Subformat: byId.get(id)?.Subformat || [] });
-  });
-  const out = albums.map((m) => ({ ...m, ...(typesKept.get(keptFor(m.ratingKey)) || {}) }));
-  while (typesKept.size > TYPES_KEPT) typesKept.delete(typesKept.keys().next().value);
-  return out;
+  const types = await s.albumTypes(albums.map((m) => m.ratingKey));
+  return albums.map((m, i) => ({ ...m, ...(types[i] || {}) }));
 }
 
 // The library's artist of that name (as the app compares names), or null:
@@ -259,12 +240,17 @@ function artistNamed(s, sec, name) {
 }
 
 // The artists Plex says are like this one (its metadata's similar artists)
-// that this library has, in Plex's order.
+// that this library has, in Plex's order: looked for four at a time, until
+// there are `limit`.
 async function similarInLibrary(s, sec, artist, limit) {
   const names = [...new Set((artist.Similar || []).map((t) => t?.tag).filter((t) => typeof t === 'string' && t.trim()))].slice(0, 40);
-  const found = await mapLimit(names, 4, (name) => artistNamed(s, sec, name));
   const seen = new Set([String(artist.ratingKey)]);
-  return found.filter((a) => a && !seen.has(String(a.ratingKey)) && seen.add(String(a.ratingKey))).slice(0, limit);
+  const out = [];
+  for (let i = 0; i < names.length && out.length < limit; i += 4) {
+    const found = await Promise.all(names.slice(i, i + 4).map((name) => artistNamed(s, sec, name)));
+    for (const a of found) if (a && !seen.has(String(a.ratingKey)) && seen.add(String(a.ratingKey))) out.push(a);
+  }
+  return out.slice(0, limit);
 }
 
 // Those that sound like it (Plex's sonic analysis): its nearest artists.
@@ -366,6 +352,7 @@ export async function artistView({ el, params }) {
   // so the kinds are looked up (see releaseTypes). For most artists that's
   // one request, waited for; a big discography is shown as it is, and
   // grouped again once they're in.
+  let painted = '';
   const paintAlbums = (albums) => {
     const sorted = albums.slice().sort((a, b) => (year(b) || 0) - (year(a) || 0));
     const groups = new Map();
@@ -374,6 +361,10 @@ export async function artistView({ el, params }) {
       if (!groups.has(g)) groups.set(g, []);
       groups.get(g).push(m);
     }
+    // (Grouped as they were: left as they are, so what has focus keeps it.)
+    const shape = JSON.stringify([...groups].map(([g, list]) => [g, list.map((m) => [m.ratingKey, year(m)])]));
+    if (shape === painted) return;
+    painted = shape;
     const blocks = GROUP_ORDER.filter((g) => groups.has(g)).map((g) => {
       const cards = groups.get(g).map((m) => albumCard(m, { subtitle: year(m) || '' }));
       if (g === 'Albums') return h('section.block', { dataset: { group: g } }, sectionHeader(g), grid(cards, { centered: true }));

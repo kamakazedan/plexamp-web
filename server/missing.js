@@ -12,8 +12,8 @@
 //
 // Never what an AI playlist was asked for, or a Spotify playlist's name:
 // those stay on the device that asked (a Spotify one's playlists are counted
-// by listId, twelve bits of a hash of each name, too few to check a name
-// guessed). No sign-ins or names: the owner
+// by listId, twelve bits of a hash of each name, too few to work a name out
+// from). No sign-ins or names: the owner
 // sees whose each is by their own Plex friends, as plex.tv has them, looked
 // up as they look (see the route in index.js).
 //

@@ -52,10 +52,18 @@ function editDistance(a, b) {
 }
 
 // Close enough to be the same title: "Out of Space" and "Out Of Space
-// (Remastered)", or a letter or two different (as the app judges it).
+// (Remastered)", or a letter or two different (as the app judges it: not
+// in Chinese, Japanese or Korean, where one character can be another word,
+// nor a number).
+const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
 export function sameTitle(a, b) {
   if (!a || !b) return false;
   if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
+  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
+  // (Nor are titles with other numbers, in any script's digits: Symphony
+  // No. 5 isn't No. 6. No. 02 is No. 2.)
+  if (numbersOf(a) !== numbersOf(b)) return false;
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
 }
 
