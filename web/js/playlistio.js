@@ -9,7 +9,7 @@
 // Also used for shared playlists (sharing.js): making a playlist hold a list
 // of tracks, with the fewest changes.
 import { app } from './state.js';
-import { norm, sameTitle, mapLimit, findArtist } from './ai.js';
+import { norm, sameTitle, mapLimit, findArtist, titleWord } from './ai.js';
 import { saveOrder } from './sorting.js';
 import { toCsv } from './missing.js';
 
@@ -282,8 +282,7 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
     const hit = best(e, res.track || []);
     if (hit) return hit;
     // A common title: among the artist's own tracks.
-    const want = norm(e.title);
-    const needle = want.split(' ').find((w) => w.length >= 3) || want;
+    const needle = titleWord(e.title);
     for (const sec of libraries) {
       const artist = await findArtist(e.artist || e.albumArtist, signal, sec);
       if (!artist) continue;

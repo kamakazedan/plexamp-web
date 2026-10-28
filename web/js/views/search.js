@@ -80,10 +80,14 @@ export async function searchView({ el, query, saved, key, onDispose }) {
     tags.replaceChildren(
       ...words.map((w, i) =>
         h(
-          'button.chip.filter-chip',
-          { type: 'button', role: 'listitem', 'aria-label': `Remove “${w}”`, onclick: () => (words.splice(i, 1), update()) },
-          h('span', null, w),
-          icon('close', 16),
+          'span.chip-item',
+          { role: 'listitem' },
+          h(
+            'button.chip.filter-chip',
+            { type: 'button', 'aria-label': `Remove “${w}”`, onclick: () => (words.splice(i, 1), update()) },
+            h('span', null, w),
+            icon('close', 16),
+          ),
         ),
       ),
     );
@@ -278,7 +282,7 @@ async function oneOfEach(res, popular = []) {
 // been asked about: one request for them all), "MP3 320".
 const kHz = (hz) => (hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 function formatBadge(t) {
-  if (app.settings.searchCodecs === false || !t.codec) return null;
+  if (app.settings.codecInfo === false || !t.codec) return null;
   return h('span.track-codec', null, !isLossless(t.codec) && t.bitrate ? `${fmt.codec(t.codec)} ${Math.round(t.bitrate)}` : fmt.codec(t.codec));
 }
 

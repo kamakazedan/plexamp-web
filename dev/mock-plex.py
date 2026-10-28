@@ -196,6 +196,11 @@ def lighten(hexc, f):
     return '%02x%02x%02x' % tuple(min(255, int(c + (255 - c) * f)) if f > 0 else int(c * (1 + f)) for c in (r, g, b))
 
 
+# Artists Plex says are like an artist (its similar artists, from its
+# metadata: some in the library, some not), and an artist's styles.
+SIMILAR = {'Glass Harbour': ['Kilo Meridian', 'Boards of Canada', 'Marisol Vega', 'Tycho']}
+ARTIST_STYLES = {'Glass Harbour': ['Ambient', 'Downtempo']}
+
 for idx, (name, genres, bio) in enumerate(ARTISTS):
     k = key()
     a = {
@@ -204,6 +209,10 @@ for idx, (name, genres, bio) in enumerate(ARTISTS):
         'art': f'/library/metadata/{k}/art/1', 'summary': bio, 'Genre': [tag('genre', g) for g in genres],
         'addedAt': NOW - 86400 * (300 - idx * 20), 'viewCount': 0, 'index': 1,
     }
+    if name in SIMILAR:
+        a['Similar'] = [tag('similar', x) for x in SIMILAR[name]]
+    if name in ARTIST_STYLES:
+        a['Style'] = [tag('style', x) for x in ARTIST_STYLES[name]]
     items[k] = a
     artists.append(a)
 
@@ -1879,8 +1888,10 @@ class Handler(BaseHTTPRequestHandler):
             if sub in ('posters', 'poster') or (sub == 'thumb' and self.command == 'DELETE'):
                 return self.pictures(it, sub, q, token)
             if sub == 'children':
-                kids = [a for a in albums if a['parentRatingKey'] == it['ratingKey']] if it['type'] == 'artist' else \
-                    [t for t in tracks if t['parentRatingKey'] == it['ratingKey']]
+                # (An artist's albums, as Plex lists them: without what kind
+                # each is, which an album's own details have.)
+                kids = [{k: v for k, v in a.items() if k not in ('Format', 'Subformat')} for a in albums if a['parentRatingKey'] == it['ratingKey']] \
+                    if it['type'] == 'artist' else [t for t in tracks if t['parentRatingKey'] == it['ratingKey']]
                 return self.page(kids, {'X-Plex-Container-Size': ['500']})
             if sub == 'allLeaves':
                 return self.page([t for t in tracks if t['grandparentRatingKey'] == it['ratingKey']], {'X-Plex-Container-Size': ['500']})

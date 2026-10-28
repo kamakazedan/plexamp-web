@@ -8,8 +8,8 @@
 #
 # Four copies of the app run: one with a shared AI model and WebSockets
 # allowed, checking on the mock's MusicBrainz (port 8081), one with DISABLE_WEBSOCKETS=true and no shared model
-# (port 8082), one with DEBUG=true and a shared model that won't take
-# "think" (port 8083), and one on a second mock server with a big library,
+# (port 8082), one with DEBUG=true, WEBSOCKETS=on and a shared model that
+# won't take "think" (port 8083), and one on a second mock server with a big library,
 # for the memory tests (port 8084). All reach
 # their mock Plex server through their /pms proxy, and their service uses
 # the mock for plex.tv too (its accounts are needed for Play Together).
@@ -70,7 +70,7 @@ docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" -e S
 docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 -e "$TV" -e SYNC_SETTINGS=false \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 docker run -d --name pwb-web3 --network "$NET" -p 127.0.0.1:8083:80 -e "$TV" \
-    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DEBUG=true \
+    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DEBUG=true -e WEBSOCKETS=on \
     -e SPOTIFY_LINK_IMPORT=true -e SPOTIFY_URL=http://pwb-plex:32400 \
     -e OLLAMA_URL=http://pwb-ollama2:11435 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
 docker run -d --name pwb-web4 --network "$NET" -p 127.0.0.1:8084:80 -e PLEX_TV_URL=http://pwb-plex-big:32401 -e SYNC_SETTINGS=false \

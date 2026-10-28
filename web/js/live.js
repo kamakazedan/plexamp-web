@@ -4,8 +4,9 @@
 // The quickest route is a WebSocket. Some networks (corporate proxies in
 // particular) block those, so the same notifications are also read from
 // Plex's event stream, which is plain HTTP, and as a last resort the app
-// checks for changes every minute. DISABLE_WEBSOCKETS on the container, or
-// "Without WebSockets" in Settings > Connection, skips the WebSocket.
+// checks for changes every minute. That's WEBSOCKETS=auto on the container
+// (the default); WEBSOCKETS=on uses WebSockets only, and off never does
+// (as DISABLE_WEBSOCKETS=true did before 0.25.0).
 import { app, on } from './state.js';
 import { store } from './plex.js';
 import { debugLog } from './debug.js';
@@ -18,6 +19,7 @@ const POLL_VISIBLE = 60000;
 const POLL_HIDDEN = 5 * 60000;
 const WS_BLOCKED_FOR = 6 * 3600 * 1000;
 const MAX_FAILURES = 3;
+const WS_ONLY_RETRY_MAX = 60000; // WebSockets only: the longest wait between tries
 
 const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 const EVENT_TYPES = ['timeline', 'activity', 'playing', 'status', 'progress', 'reachability', 'update.statechange'];
@@ -42,24 +44,27 @@ class LiveUpdates extends EventTarget {
     this.scanning = null;
     this.pending = { library: false, playlists: new Set(), items: new Set() };
     this.flushTimers = {};
-    this.pref = app.settings.liveUpdates;
 
     on('source', () => this.start());
     on('signout', () => this.stop());
-    on('settings', (s) => {
-      if (s.liveUpdates === this.pref) return;
-      this.pref = s.liveUpdates;
-      this.start();
-    });
     document.addEventListener('visibilitychange', () => !document.hidden && this.wakeFn?.());
     window.addEventListener('online', () => this.mode !== 'off' && this.start());
   }
 
+  // The player's choice (WEBSOCKETS on the container): 'auto' (a WebSocket,
+  // or whatever gets through where one doesn't), 'on' (WebSockets only) or
+  // 'off' (never).
+  wsMode() {
+    if (app.config.websockets === false) return 'off';
+    return app.config.websockets === 'on' ? 'on' : 'auto';
+  }
+
   // Why the WebSocket is skipped, or null when it may be tried.
   websocketBlockReason() {
-    if (app.config.websockets === false) return 'WebSockets are turned off for this app (DISABLE_WEBSOCKETS).';
-    if (app.settings.liveUpdates === 'nows') return 'WebSockets are turned off on this device.';
+    const mode = this.wsMode();
+    if (mode === 'off') return 'WebSockets are turned off for this player (WEBSOCKETS=off).';
     if (typeof WebSocket === 'undefined') return 'This browser has no WebSocket support.';
+    if (mode === 'on') return null; // (tried however often it's failed)
     const failedAt = store.get(this.blockKey());
     if (failedAt && Date.now() - failedAt < WS_BLOCKED_FOR) return 'A WebSocket couldn’t connect from this network recently, so it isn’t being tried.';
     return null;
@@ -79,8 +84,9 @@ class LiveUpdates extends EventTarget {
 
   start() {
     this.stop();
-    if (!app.server || !app.source || app.settings.liveUpdates === 'off') {
-      this.note = app.settings.liveUpdates === 'off' ? 'Turned off on this device.' : '';
+    const only = this.wsMode() === 'on';
+    if (!app.server || !app.source || (only && typeof WebSocket === 'undefined')) {
+      this.note = app.server && app.source ? 'This browser has no WebSocket support, and this player uses WebSockets only (WEBSOCKETS=on).' : '';
       this.setMode('off');
       return;
     }
@@ -103,13 +109,15 @@ class LiveUpdates extends EventTarget {
   }
 
   // Work down the chain: a transport that won't open, or keeps dropping,
-  // hands over to the next one.
+  // hands over to the next one. WebSockets only (WEBSOCKETS=on): the
+  // WebSocket, tried again and again.
   async run(gen) {
+    const only = this.wsMode() === 'on';
     const chain = [];
     const blocked = this.websocketBlockReason();
     if (!blocked) chain.push('websocket');
-    chain.push('eventsource', 'polling');
-    let note = blocked || '';
+    if (!only) chain.push('eventsource', 'polling');
+    let note = blocked || (only ? 'This player uses WebSockets only (WEBSOCKETS=on).' : '');
     this.note = note;
     this.setMode('connecting');
 
@@ -143,6 +151,13 @@ class LiveUpdates extends EventTarget {
         }
         if (gen !== this.gen) return;
         failures += 1;
+        // (Said while it waits, not once it's connected again.)
+        if (only) {
+          this.note = 'The WebSocket couldn’t connect from this network, so it’s tried again: this player uses WebSockets only (WEBSOCKETS=on).';
+          this.emit('mode', { mode: this.mode, note: this.note });
+          await this.sleep(Math.min(WS_ONLY_RETRY_MAX, 3000 * 2 ** Math.min(failures - 1, 5)), gen);
+          continue;
+        }
         if (kind === 'websocket' && (!opened || failures >= MAX_FAILURES)) {
           store.set(this.blockKey(), Date.now());
           note = 'A WebSocket couldn’t stay connected from this network, so live updates use another route.';

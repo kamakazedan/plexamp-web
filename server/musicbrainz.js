@@ -6,6 +6,8 @@
 // at a time for everyone using the player; musicbrainz.org at most once a
 // second (its rule for each address), with a User-Agent saying what's
 // asking, as it asks. What it says is kept for a week.
+import { norm } from './missinglist.js';
+
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org (your own: none)
   keepMs: 7 * 24 * 3600 * 1000,
@@ -27,18 +29,10 @@ export class MusicBrainzError extends Error {
   }
 }
 
-// As the app compares names (web/js/ai.js norm): case, accents, "the" and
-// punctuation aside.
-export const norm = (v) =>
-  String(v || '')
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
-    .replace(/^the\s+/, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
+// Names are compared as the app compares them (missinglist.js norm, a copy
+// of the app's): case, accents, "the" and punctuation aside, and a name in
+// another script by its letters (since 0.25.0: before, every one of those
+// came out the same, as nothing, so any artist in that script would do).
 
 // A phrase for MusicBrainz's search (Lucene): quoted, with what would end it
 // taken out.
@@ -58,10 +52,18 @@ function editDistance(a, b) {
 }
 
 // Close enough to be the same title: "Out of Space" and "Out Of Space
-// (Remastered)", or a letter or two different (as the app judges it).
+// (Remastered)", or a letter or two different (as the app judges it: not
+// in Chinese, Japanese or Korean, where one character can be another word,
+// nor a number).
+const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
 export function sameTitle(a, b) {
   if (!a || !b) return false;
   if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
+  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
+  // (Nor are titles with other numbers, in any script's digits: Symphony
+  // No. 5 isn't No. 6. No. 02 is No. 2.)
+  if (numbersOf(a) !== numbersOf(b)) return false;
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
 }
 

@@ -4,7 +4,11 @@
 # and starts the small service behind /api/:
 #
 #   PLEX_SERVER_URL     proxy one Plex server at /pms/ (WebSockets included)
-#   DISABLE_WEBSOCKETS  "true": the app never opens a WebSocket
+#   WEBSOCKETS          how live updates reach the app: "auto" (default:
+#                       WebSockets, or where they don't get through, an
+#                       event stream, or polling), "on" (WebSockets only) or
+#                       "off" (never). DISABLE_WEBSOCKETS=true, from before,
+#                       still means off.
 #   OLLAMA_URL          share an Ollama server's model with the app's users
 #                       (through the service, at /ollama/)
 #   OLLAMA_MODEL        the one model used, e.g. llama3.1:8b (default: the
@@ -26,9 +30,9 @@
 #   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
 #                       here, for all of its devices (on by default)
 #   SYNC_MISSING_TRACKS "false" turns off keeping each Plex account's Missing
-#                       tracks here, for all of its devices (the Plex server's
-#                       owner's, and friends' who choose to, for the owner to
-#                       see too; on by default)
+#                       tracks here, for all of its devices, and syncing
+#                       everyone's into the Plex server owner's, so they can
+#                       see what's missing from their server (on by default)
 #   SPOTIFY_FILE_IMPORT "true" turns on Search › From Spotify with Spotify's
 #                       download of your data: its playlist files, read in
 #                       the browser (off by default)
@@ -490,10 +494,37 @@ fi
 
 # ---------- WebSockets ----------
 
-if truthy DISABLE_WEBSOCKETS "${DISABLE_WEBSOCKETS:-}"; then
-    add_config 'websockets: false'
-    say "WebSockets turned off; live updates use an event stream or polling"
+# auto: nothing in config.js (the app tries a WebSocket first, and uses
+# whatever gets through where one doesn't). DISABLE_WEBSOCKETS (before
+# 0.25.0) is still read, and checked: "true" is off, unless WEBSOCKETS says
+# otherwise.
+WS_OLD=false
+if truthy DISABLE_WEBSOCKETS "${DISABLE_WEBSOCKETS:-}"; then WS_OLD=true; fi
+WS_MODE="$(lower "${WEBSOCKETS:-}")"
+if [ -z "$WS_MODE" ]; then
+    if [ "$WS_OLD" = true ]; then WS_MODE=off; else WS_MODE=auto; fi
 fi
+# (Not true: that could be taken for auto, and on is WebSockets only, never
+# anything else, even where they don't get through.)
+case "$WS_MODE" in
+    auto | on) ;;
+    off | false | no | 0) WS_MODE=off ;;
+    true | yes | 1) fail "WEBSOCKETS must be auto, on or off (got: $WEBSOCKETS): auto, the default, uses WebSockets where they get through, and on uses nothing else" ;;
+    *) fail "WEBSOCKETS must be auto, on or off (got: $WEBSOCKETS)" ;;
+esac
+if [ "$WS_OLD" = true ] && [ "$WS_MODE" != off ]; then
+    say "DISABLE_WEBSOCKETS=true is left aside: WEBSOCKETS=$WS_MODE says otherwise"
+fi
+case "$WS_MODE" in
+    on)
+        add_config 'websockets: "on"'
+        say "WebSockets only: live updates don't fall back to an event stream or polling"
+        ;;
+    off)
+        add_config 'websockets: false'
+        say "WebSockets turned off; live updates use an event stream or polling"
+        ;;
+esac
 
 # ---------- Ollama ----------
 
@@ -638,7 +669,7 @@ fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
 if [ "$SHARING" = true ]; then say "shared playlists are kept in $DATA_DIR"; fi
 if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each Plex account are kept in $DATA_DIR"; fi
-if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each Plex account are kept in $DATA_DIR (a Plex server's owner's, and friends' who choose to)"; fi
+if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each Plex account are kept in $DATA_DIR (everyone's, and a Plex server's owner sees them all)"; fi
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi
@@ -760,7 +791,7 @@ if [ "$DEBUG_ON" = true ]; then
     shown() { if [ -n "${1:-}" ]; then echo "set"; else echo "not set"; fi; }
     say "debug mode is on. Settings:"
     say "  PLEX_SERVER_URL=$(safe_url "${PLEX_SERVER_URL:-}")"
-    say "  DISABLE_WEBSOCKETS=${DISABLE_WEBSOCKETS:-}"
+    say "  WEBSOCKETS=$WS_MODE${DISABLE_WEBSOCKETS:+  DISABLE_WEBSOCKETS=$DISABLE_WEBSOCKETS}"
     say "  OLLAMA_URL=$(safe_url "${OLLAMA_URL:-}")  OLLAMA_MODEL=${OLLAMA_MODEL:-}  OLLAMA_AUTH=${OLLAMA_AUTH:-plex}  OLLAMA_API_KEY: $(shown "${OLLAMA_API_KEY:-}")"
     say "  PLAY_TOGETHER=$TOGETHER  CASTING=$CAST  MUSICBRAINZ_URL=$(safe_url "$MB_URL")  PLAYLIST_SHARING=$SHARING  SYNC_SETTINGS=$SETTINGS_SYNC  SYNC_MISSING_TRACKS=$MISSING_SYNC  SPOTIFY_FILE_IMPORT=$SPOTIFY_FILES  SPOTIFY_LINK_IMPORT=$SPOTIFY  DATA_DIR=$DATA_DIR  service: $([ "$SERVICE" = true ] && echo running || echo 'not available')"
     say "  config.js: $(cat "$HTML_DIR/config.js")"

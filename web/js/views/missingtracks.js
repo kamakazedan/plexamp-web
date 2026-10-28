@@ -1,12 +1,12 @@
 // Settings › AI › Missing tracks: the songs and artists AI playlists
 // suggested, and the tracks of playlists imported from Spotify, that the
 // library doesn't have, to export and go looking for. Where this player
-// keeps them for each Plex account: the server's owner's on every device,
-// with everyone's who shares theirs, saying whose each is; a friend's, once
-// they choose to keep it for their account (missingShareRow).
+// keeps them for each Plex account: on every device the account signs in
+// on, and for the server's owner with everyone's, saying whose each is, so
+// they can see everything that's missing from their server.
 import { app, on } from '../state.js';
 import { describeError } from '../router.js';
-import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction, download, fileDate, toggleRow } from '../ui.js';
+import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction, download, fileDate } from '../ui.js';
 import {
   missingList,
   forgetMissing,
@@ -25,7 +25,7 @@ import {
   promptOf,
   missingKept,
 } from '../missing.js';
-import { pullMissing, missingSharing, shareMissing } from '../missingsync.js';
+import { pullMissing, missingPlayerFull } from '../missingsync.js';
 import { aiSettings } from '../ai.js';
 
 // Whose one of everyone's is (for the server's owner): you and their names,
@@ -38,30 +38,6 @@ export function whose(m) {
   return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0] || '';
 }
 
-// For a friend (not the server's owner), where the player keeps them for
-// each account: whether theirs are kept for their account, where whoever
-// runs the server sees them too. Off to begin with: then they're this
-// device's own, as before 0.24.0. `after`: once it's changed (or not).
-export function missingShareRow({ after } = {}) {
-  const sh = missingSharing();
-  if (!sh.on || sh.owner !== false) return null;
-  const server = app.source?.serverName || 'the server';
-  return toggleRow({
-    title: 'Keep them for your Plex account',
-    subtitle: `Then every device you sign in on has them, and whoever runs ${server} (and this player) can see them too, with your Plex name, to go and find them: never what you asked for, or your Spotify playlists’ names. Off: they’re kept on this device only.`,
-    checked: sh.shared,
-    onChange: async (v) => {
-      try {
-        await shareMissing(v);
-        toast(v ? `Kept for your Plex account: whoever runs ${server} sees them too.` : 'Kept on this device only now, and taken off this player.');
-      } catch (err) {
-        toast(`Couldn’t change that. ${describeError(err)}`);
-      }
-      after?.();
-    },
-  });
-}
-
 export function missingTracksView({ el, onDispose }) {
   const server = app.source?.serverName || 'this server';
   const lede = h('p.lede.missing-lede');
@@ -71,23 +47,15 @@ export function missingTracksView({ el, onDispose }) {
     lede.textContent =
       (!kept
         ? `${what}, that ${server} doesn’t have, kept on this device so you can go and find them (each server has a list of its own). `
-        : kept.owner
-          ? `${what}, that ${server} doesn’t have: yours, and those of your friends who keep theirs for their account, so you can go and find them. Kept for your Plex account on every device; what anyone asked an AI for, and their Spotify playlists’ names, stay on the device they asked on. `
-          : `${what}, that ${server} doesn’t have, kept for your Plex account on every device. Whoever runs ${server} sees them too, to go and find them, but not what you asked for or your Spotify playlists’ names: those stay on the device you asked on. `) +
+        : kept.owner === true
+          ? `${what}, that ${server} doesn’t have: yours and your friends’, so you can see everything that’s missing from it and go and find it. Kept for your Plex account on every device; what anyone asked an AI for, and their Spotify playlists’ names, stay on the device they asked on. `
+          : `${what}, that ${server} doesn’t have, kept for your Plex account on every device. ${kept.owner === false ? `Whoever runs ${server}` : `The owner of ${server}`} sees them too, with your Plex name, so they can add them, but not what you asked for or your Spotify playlists’ names: those stay on the device you asked on. `) +
       (mbOn()
         ? 'AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
         : 'AI models sometimes suggest songs that don’t exist, so check before you go looking.');
   };
-  // (For a friend: whether theirs are kept for their account.)
-  const share = h('div.rows.missing-share');
-  const paintShare = () => {
-    const r = missingShareRow({ after: paintShare });
-    share.replaceChildren(...(r ? [r] : []));
-    share.hidden = !r;
-  };
   paintLede();
-  paintShare();
-  el.append(backHeader('Missing tracks', { fallback: '/settings/ai' }), lede, share);
+  el.append(backHeader('Missing tracks', { fallback: '/settings/ai' }), lede);
   const actions = h('div.pad.button-row.missing-actions');
   const status = h('p.hint.pad.missing-status', { role: 'status' });
   const body = h('div.missing-body');
@@ -103,7 +71,6 @@ export function missingTracksView({ el, onDispose }) {
 
   function render() {
     paintLede();
-    paintShare();
     const list = missingList();
     const everyone = everyoneShown();
     const artists = list.filter((m) => m.kind === 'artist');
@@ -227,7 +194,7 @@ export function missingTracksView({ el, onDispose }) {
       kids.push(
         emptyState(
           everyone
-            ? `Nothing missing so far. When AI playlists suggest songs or artists ${server} doesn’t have, or Spotify playlists brought over have them, yours or those of friends who keep theirs for their account, they’re listed here.`
+            ? `Nothing missing so far. When AI playlists suggest songs or artists ${server} doesn’t have, or Spotify playlists brought over have them, yours or your friends’, they’re listed here.`
             : aiSettings().missing
               ? 'Nothing missing so far. When an AI playlist suggests songs or artists your library doesn’t have, they’re listed here.'
               : 'Nothing here. Turn on Show missing tracks in Settings › AI, and the songs and artists AI playlists suggest that your library doesn’t have are listed here.',
@@ -235,7 +202,7 @@ export function missingTracksView({ el, onDispose }) {
       );
     }
     body.replaceChildren(...kids);
-    note.textContent = missingSharing().full ? `This player has no room for more missing tracks just now, so your list for ${server} is kept on this device until there is.` : '';
+    note.textContent = missingPlayerFull() ? `This player has no room for more missing tracks just now, so your list for ${server} is kept on this device until there is.` : '';
     note.hidden = !note.textContent;
   }
 

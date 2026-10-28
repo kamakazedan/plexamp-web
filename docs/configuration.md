@@ -14,7 +14,7 @@ All optional. Set them as environment variables on the container; on Proxmox VE,
 | Variable | Example | What it does |
 | --- | --- | --- |
 | `PLEX_SERVER_URL` | `http://192.168.1.10:32400` | Your Plex server's address on your network. The container proxies it at `/pms/`, giving browsers that can't reach Plex directly a route through the container (see below). `https://` works too. With it set, the container's service is for the people who can use that server: the shared AI model, MusicBrainz checks, Play Together, your devices and shared playlists (and Play on, for its owner). |
-| `DISABLE_WEBSOCKETS` | `true` | The app never opens a WebSocket. Live updates use Plex's event stream, or check every minute. |
+| `WEBSOCKETS` | `auto` (default), `on` or `off` | How live updates reach the app (see [Live updates](#live-updates)). `auto`: a WebSocket, and where WebSockets don't work (some proxies and firewalls block them), plexamp-web uses whatever is available instead: Plex's event stream, or checking every minute. `on`: WebSockets only, never anything else (for a network where you know they work). `off`: never a WebSocket. `DISABLE_WEBSOCKETS=true`, its name before 0.25.0, still means `off`, unless `WEBSOCKETS` is set too. Empty is `auto`; `false` is `off`; `true` isn't taken (it could be meant as either `auto` or `on`), and the container says so as it starts. |
 | `OLLAMA_URL` | `http://192.168.1.20:11434` | An Ollama server whose model the people who use the player share (see [ai.md](ai.md)). |
 | `OLLAMA_MODEL` | `llama3.1:8b` | The one model the app uses. The server's other models can't be used or seen. Not set: the first model installed. |
 | `OLLAMA_API_KEY` | | Sent as a bearer token, for an Ollama behind a proxy that asks for one. Never reaches browsers. |
@@ -24,7 +24,7 @@ All optional. Set them as environment variables on the container; on Proxmox VE,
 | `CASTING` | `true` (default) or `false` | Playing on other Plex players from the app, for the server's owner: it needs `PLEX_SERVER_URL`. AirPlay and Cast, which are the browser's own, aren't affected. |
 | `PLAYLIST_SHARING` | `true` (default) or `false` | Sharing playlists with Plex friends. |
 | `SYNC_SETTINGS` | `true` (default) or `false` | Each Plex account's settings kept here, so they follow it to every browser it signs in on (but those that are each device's own: see [features.md](features.md#settings-in-the-app)). For Plex accounts that can use the server the app is on, and with `PLEX_SERVER_URL` set, that server. Kept in `DATA_DIR`. |
-| `SYNC_MISSING_TRACKS` | `true` (default) or `false` | **Missing tracks** kept here for each Plex account, so they follow it to every browser it signs in on: the Plex server's owner's as they use it, a friend's once they turn on **Keep them for your Plex account**. The owner sees everyone's kept for their server, saying whose each is, to go and find them (see [ai.md](ai.md#on-every-device-and-for-the-servers-owner)). Never what anyone asked an AI for, or a Spotify playlist's name. For Plex accounts that can use the server the app is on, and with `PLEX_SERVER_URL` set, that server. Kept in `DATA_DIR`. `false`: each browser keeps its own. |
+| `SYNC_MISSING_TRACKS` | `true` (default) or `false` | When someone imports a playlist from Spotify (or an AI playlist suggests music) and some of its tracks aren't on your Plex server, they go on their **Missing tracks**, and this syncs them into the Plex server owner's Missing tracks, so the owner can see what's missing from their server and add it: everyone's, saying whose each is, how often and when (see [ai.md](ai.md#on-every-device-and-for-the-servers-owner)). Each account's list also follows it to every browser it signs in on. Never what anyone asked an AI for, or a Spotify playlist's name. For Plex accounts that can use the server the app is on, and with `PLEX_SERVER_URL` set, that server. Kept in `DATA_DIR`. `false`: each browser keeps its own, and the owner sees only theirs. |
 | `SPOTIFY_FILE_IMPORT` | `true`, or `false` (default) | **Search › From Spotify**, from Spotify's download of your data: all your playlists, however long, and your Liked Songs, with a free Spotify account (see [features.md](features.md#from-spotify)). Its playlist files are read in the browser: nothing goes to this container or to Spotify. Off unless you turn it on, for now, while it's tried with real downloads from Spotify. |
 | `SPOTIFY_LINK_IMPORT` | `true`, or `false` (default) | **Search › From Spotify** from a public Spotify playlist's link (**Use a link instead**, with `SPOTIFY_FILE_IMPORT` on too): paste the link, and the tracks you have make a playlist here, straight away (see [features.md](features.md#from-a-link)). Off unless you turn it on: Spotify's API only gives a playlist's tracks to the account that owns it, so the container reads them from the page Spotify shows anyone for the playlist instead. That page lists the first 100 tracks at most, Spotify's terms don't allow reading it like this, and it can stop working whenever Spotify changes it. For the people who can use your server, as the shared AI model is. (`SPOTIFY_IMPORT`, its name before 0.22.0, still works; `SPOTIFY_LINK_IMPORT`, when set, wins.) |
 | `DATA_DIR` | `/data` (default) | Where shared playlists, and each account's settings and Missing tracks, are kept: a folder of their own (give the container a volume there). |
@@ -55,16 +55,17 @@ An `https://` address works too, such as `https://192.168.1.10:32400` for a serv
 
 ## Live updates
 
-New music, playlist changes and ratings from other Plex apps show up without reloading. The app tries, in order:
+New music, playlist changes and ratings from other Plex apps show up without reloading. With `WEBSOCKETS=auto` (the default), the app tries, in order:
 
 1. **A WebSocket**: instant.
 2. **Plex's event stream**: also instant, over plain HTTP, so it gets through most proxies that block WebSockets. A proxy that holds the stream back is noticed within about 25 seconds.
 3. **Checking for changes every minute**: works through anything.
 
-When a WebSocket can't connect from a network, the app remembers that for six hours and goes straight to the event stream. Nothing else uses WebSockets: browsing, playback, ratings, playlists, Play Together and the AI features are ordinary HTTP requests.
+So where WebSockets don't work, nothing needs setting: each device uses whatever its network lets through. When a WebSocket can't connect from a network, the app remembers that for six hours and goes straight to the event stream. Nothing else uses WebSockets: browsing, playback, ratings, playlists, Play Together and the AI features are ordinary HTTP requests.
 
-- To turn WebSockets off for everyone, set `DISABLE_WEBSOCKETS=true`.
-- To turn them off on one device, such as a work laptop: **Settings › Connection › Live updates › Without WebSockets**.
+- `WEBSOCKETS=on` forces WebSockets: the app never falls back, and keeps trying a WebSocket where one won't connect.
+- `WEBSOCKETS=off` disables them completely: the event stream, or checking every minute.
+- **Settings › Connection › Live updates** shows how this device gets them, and why. **Test connection** there tries again from the top (a WebSocket first, even one that failed lately).
 - Behind a reverse proxy, turn on its WebSockets support if it has a switch for it.
 
 ## Debug mode

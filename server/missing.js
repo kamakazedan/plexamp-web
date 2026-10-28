@@ -2,20 +2,18 @@
 // for each Plex server, each account's list of what its AI playlists
 // suggested, and its imports from Spotify had, that the server's music
 // libraries don't, so every browser the account signs in on has the same
-// one; and for the server's owner, everyone's who shares theirs, to go and
-// find. Changed by the changes browsers send, each made once however often
-// it's sent, by the browser's own rules (missinglist.js, a copy of
-// web/js/missinglist.js).
+// one; and for the server's owner, everyone's, so they can see what's
+// missing from their server and go and find it. Changed by the changes
+// browsers send, each made once however often it's sent, by the browser's
+// own rules (missinglist.js, a copy of web/js/missinglist.js).
 //
-// The server's owner's own list is kept as they use it. Anyone else's is
-// kept only once they've chosen to keep it for their account, knowing the
-// server's owner sees it (`shared`, a change of its own: see share), and
-// goes when they choose not to (unshare): until then, nothing they send is
-// kept.
+// Everyone's is kept as they use it (the app tells friends that the
+// server's owner sees theirs).
 //
 // Never what an AI playlist was asked for, or a Spotify playlist's name:
 // those stay on the device that asked (a Spotify one's playlists are counted
-// by listId, a short hash of each name). No sign-ins or names: the owner
+// by listId, twelve bits of a hash of each name, too few to work a name out
+// from). No sign-ins or names: the owner
 // sees whose each is by their own Plex friends, as plex.tv has them, looked
 // up as they look (see the route in index.js).
 //
@@ -24,7 +22,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { MISSING_LIMITS, MISSING_LISTS, applyOp, applyForget, idOf, sourceOf, trimMissing } from './missinglist.js';
+import { MISSING_LIMITS, MISSING_LISTS, applyOp, applyForget, idOf, shortList, shortLists, sourceOf, trimMissing } from './missinglist.js';
 
 export const MISSING_STORE_LIMITS = {
   accounts: 500, // with a list on this player (on any server)
@@ -39,6 +37,9 @@ export const MISSING_STORE_LIMITS = {
   done: 2000,
   doneMs: 60 * 86400000,
 };
+
+// The file's: 2 since 0.25.0 (see load).
+const MISSING_FILE_VERSION = 2;
 
 export class MissingError extends Error {
   constructor(status, message) {
@@ -74,7 +75,9 @@ export function cleanEntry(raw, now) {
   const e = { kind: raw.kind, artist, title };
   if (raw.via === 'spotify') {
     e.via = 'spotify';
-    e.lists = Array.isArray(raw.lists) ? [...new Set(raw.lists.filter((x) => typeof x === 'string' && LIST.test(x)))].slice(0, MISSING_LISTS) : [];
+    // (A playlist kept before 0.25.0, by the whole hash of its name, is cut
+    // down: see listId.)
+    e.lists = Array.isArray(raw.lists) ? shortLists(raw.lists.filter((x) => typeof x === 'string' && LIST.test(x))).slice(0, MISSING_LISTS) : [];
   }
   e.times = counted(raw.times);
   e.first = Math.min(when(raw.first, now) || last, last);
@@ -116,7 +119,7 @@ export function cleanOp(raw, now) {
     if (!found || !unreal) return null;
     const via = raw.via === 'spotify' ? 'spotify' : '';
     if (via && !(typeof raw.list === 'string' && LIST.test(raw.list))) return null;
-    return { type: 'note', id, items, found, unreal, via, ...(via ? { list: raw.list } : {}), section, library: text(raw.library, 200), at: when(raw.at, now) || now };
+    return { type: 'note', id, items, found, unreal, via, ...(via ? { list: shortList(raw.list) } : {}), section, library: text(raw.library, 200), at: when(raw.at, now) || now };
   }
   if (raw.type === 'merge' || raw.type === 'restore') {
     if (!Array.isArray(raw.entries) || raw.entries.length > MISSING_STORE_LIMITS.entriesPerOp) return null;
@@ -132,7 +135,8 @@ export function cleanOp(raw, now) {
     const dropped = keys(raw.dropped);
     return real && dropped ? { type: 'mb', id, real, dropped } : null;
   }
-  if (raw.type === 'share' || raw.type === 'unshare') return { type: raw.type, id };
+  // (0.24.0's share and unshare, a friend's choice then, aren't changes any
+  // more: everyone's is kept.)
   return null;
 }
 
@@ -150,7 +154,7 @@ export class MissingStore {
     // (A fresh start's revs never pass for one from before: a change that
     // didn't get to the file could otherwise have the same.)
     this.epoch = randomBytes(4).toString('hex');
-    // server id -> { rev, accounts: Map(user id -> { rev, entries, done: [[op id, ms]], shared }) }
+    // server id -> { rev, accounts: Map(user id -> { rev, entries, done: [[op id, ms]] }) }
     this.servers = new Map();
     this.total = 0; // entries on all the lists
     this.timer = null;
@@ -166,6 +170,9 @@ export class MissingStore {
     try {
       const data = JSON.parse(readFileSync(this.file, 'utf8'));
       const now = this.seconds();
+      // (Written before 0.25.0: again, soon, as it's kept now, without the
+      // whole hash of a Spotify playlist's name, or 0.24.0's `shared`.)
+      if ((Number(data?.version) || 1) < MISSING_FILE_VERSION) this.changed();
       for (const [server, s] of Object.entries(data?.servers && typeof data.servers === 'object' ? data.servers : {})) {
         if (!SERVER_ID.test(server) || !s || typeof s !== 'object') continue;
         for (const [key, a] of Object.entries(s.accounts && typeof s.accounts === 'object' ? s.accounts : {})) {
@@ -179,14 +186,12 @@ export class MissingStore {
             byId.delete(idOf(e));
             byId.set(idOf(e), { ...e, server });
           }
-          let entries = trimMissing([...byId.values()]);
-          const shared = a.shared === true;
-          if ((!entries.length && !shared) || !this.room(server, uid)) continue;
-          if (this.total + entries.length > MISSING_STORE_LIMITS.entries) entries = [];
-          if (!entries.length && !shared) continue;
+          // (0.24.0's `shared`, a friend's choice then, goes: everyone's is
+          // kept.)
+          const entries = trimMissing([...byId.values()]);
+          if (!entries.length || !this.room(server, uid) || this.total + entries.length > MISSING_STORE_LIMITS.entries) continue;
           const rec = this.record(server, uid, { create: true });
           rec.entries = entries;
-          rec.shared = shared;
           rec.rev = Number.isSafeInteger(a.rev) && a.rev > 0 ? a.rev : 1;
           rec.done = (Array.isArray(a.done) ? a.done : [])
             .filter((x) => Array.isArray(x) && typeof x[0] === 'string' && OP_ID.test(x[0]) && Number.isSafeInteger(x[1]))
@@ -212,17 +217,16 @@ export class MissingStore {
     }
     let a = s.accounts.get(uid);
     if (!a && create) {
-      a = { rev: 0, entries: [], done: [], shared: false };
+      a = { rev: 0, entries: [], done: [] };
       s.accounts.set(uid, a);
     }
     return a || null;
   }
 
   // Whether there's room for this account to have a list for this server
-  // (it has one, or neither it nor the player has as many as it can). A list
-  // kept for a friend with nothing on it yet counts.
+  // (it has one, or neither it nor the player has as many as it can).
   room(server, uid) {
-    const kept = (a) => a.entries.length > 0 || a.shared;
+    const kept = (a) => a.entries.length > 0;
     const have = this.servers.get(server)?.accounts.get(uid);
     if (have && kept(have)) return true;
     let mine = 0;
@@ -242,15 +246,15 @@ export class MissingStore {
     return { mine: `${this.epoch}.${s?.accounts.get(uid)?.rev || 0}`, all: `${this.epoch}.${s?.rev || 0}` };
   }
 
-  // An account's own list for a server ({ rev, entries, done, shared }), and
-  // for its owner everyone else's (`others`: one for each entry, with how
-  // many of each kind and whose, by Plex id), left out where `have` ({ mine,
-  // all }) says they're as they were.
+  // An account's own list for a server ({ rev, entries, done }), and for its
+  // owner everyone else's (`others`: one for each entry, with how many of
+  // each kind and whose, by Plex id), left out where `have` ({ mine, all })
+  // says they're as they were.
   view(uid, server, { owner = false, have = {} } = {}) {
     const id = userId(uid);
     const rev = this.revs(server, id);
     const a = this.servers.get(server)?.accounts.get(id);
-    const out = { rev, shared: !!a?.shared };
+    const out = { rev };
     if (have.mine !== rev.mine) {
       out.entries = (a?.entries || []).map(bare);
       out.done = a ? a.done.map(([op]) => op) : [];
@@ -259,16 +263,16 @@ export class MissingStore {
     return out;
   }
 
-  // Everyone else's on a server who shares theirs, put together: one for
-  // each entry (by its id), with how often AI playlists suggested it (`ai`)
-  // and how many Spotify playlists had it (`spotify`; `more`: past what's
-  // counted for someone), as the latest has it, and whose (`who`: Plex ids).
+  // Everyone else's on a server, put together: one for each entry (by its
+  // id), with how often AI playlists suggested it (`ai`) and how many Spotify
+  // playlists had it (`spotify`; `more`: past what's counted for someone), as
+  // the latest has it, and whose (`who`: Plex ids).
   others(server, uid) {
     const s = this.servers.get(server);
     if (!s) return [];
     const rows = new Map();
     for (const [id, a] of s.accounts) {
-      if (id === uid || !a.shared) continue;
+      if (id === uid) continue;
       for (const e of a.entries) {
         const key = idOf(e);
         let r = rows.get(key);
@@ -313,12 +317,10 @@ export class MissingStore {
 
   // Changes from one account to its list for a server, in order (each made
   // once, however often it's sent), and from the server's owner,
-  // `everyone`'s: taking some off everyone's list for it, or clearing it.
-  // Someone else's are kept only while they share theirs (from `share`
-  // until `unshare`). A change that can't be read, or that isn't theirs to
-  // make, is left out (`skipped`), as is one that needs more room than the
-  // player has left (`refused`, by id; `full`). Returns the revs from before
-  // and after.
+  // `everyone`'s: taking some off everyone's list for it, or clearing it. A
+  // change that can't be read, or that isn't theirs to make, is left out
+  // (`skipped`), as is one that needs more room than the player has left
+  // (`refused`, by id; `full`). Returns the revs from before and after.
   apply(uid, server, ops, { owner = false } = {}) {
     const id = userId(uid);
     if (!id || !SERVER_ID.test(server) || !Array.isArray(ops)) throw unreadable();
@@ -329,24 +331,16 @@ export class MissingStore {
     const refused = [];
     for (const raw of ops) {
       const op = cleanOp(raw, now);
-      const own = op && this.record(server, id);
-      const choice = op && (op.type === 'share' || op.type === 'unshare');
-      const allowed = op && (op.everyone ? owner : owner || choice || !!own?.shared);
-      if (!allowed) {
+      if (!op || (op.everyone && !owner)) {
         skipped += 1;
         continue;
       }
-      // (The server's owner's list is kept as they use it: theirs to share,
-      // or not, is no choice of theirs.)
-      if (choice && owner) continue;
-      if (own?.done.some(([d]) => d === op.id)) continue;
+      if (this.record(server, id)?.done.some(([d]) => d === op.id)) continue;
       const done = op.everyone ? this.everyone(server, op) : this.own(server, id, op);
       if (done === 'full') {
         refused.push(op.id);
         continue;
       }
-      // (A choice made again is the same choice: nothing to remember.)
-      if (choice) continue;
       // (Sent again, say as the page went, it's made once: even one that
       // takes some off, which would take off what's been added since.)
       this.remember(this.record(server, id, { create: true }), op.id);
@@ -356,17 +350,6 @@ export class MissingStore {
 
   // A change to the account's own list.
   own(server, uid, op) {
-    if (op.type === 'share' || op.type === 'unshare') {
-      if (op.type === 'share' && !this.room(server, uid)) return 'full';
-      const rec = this.record(server, uid, { create: op.type === 'share' });
-      if (!rec) return 'same';
-      if (op.type === 'unshare') this.commit(server, rec, []);
-      if (rec.shared !== (op.type === 'share')) {
-        rec.shared = op.type === 'share';
-        this.changed();
-      }
-      return 'done';
-    }
     const adds = (op.type === 'note' && op.items.length) || ((op.type === 'merge' || op.type === 'restore') && op.entries.length);
     let rec = this.record(server, uid);
     if (!rec?.entries.length && !adds) return 'same';
@@ -403,13 +386,13 @@ export class MissingStore {
     for (const [server, s] of this.servers) {
       const accounts = {};
       for (const [uid, a] of s.accounts) {
-        if (a.entries.length || a.shared) accounts[uid] = { rev: a.rev, shared: a.shared, entries: a.entries.map(bare), done: a.done };
+        if (a.entries.length) accounts[uid] = { rev: a.rev, entries: a.entries.map(bare), done: a.done };
       }
       servers[server] = { rev: s.rev, accounts };
     }
     const tmp = `${this.file}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify({ version: 1, servers }), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ version: MISSING_FILE_VERSION, servers }), { mode: 0o600 });
       renameSync(tmp, this.file);
     } catch (err) {
       this.log?.error(`missing tracks: couldn't save them to ${this.file}: ${err.message}`);

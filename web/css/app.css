@@ -3124,6 +3124,29 @@ body.np-open #toasts {
   font-weight: 600;
 }
 
+/* A link that looks like a chip: an artist's styles, each opening the
+   library's artists of that style. */
+a.chip {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text);
+  text-decoration: none;
+}
+
+a.chip:hover {
+  border-color: var(--muted);
+}
+
+.artist-style-chips {
+  flex-wrap: wrap;
+  padding-top: 0;
+}
+
+/* Each chip in a list of them, keeping its own role (a link, a button). */
+.chip-item {
+  display: inline-flex;
+}
+
 /* A library list's filters (Electronic, 2020s), each removable. */
 .filter-chips {
   flex-wrap: wrap;

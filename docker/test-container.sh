@@ -303,8 +303,7 @@ contains "settings: ...and forgotten when asked" '{"settings":{},"changed":{},"r
 # the account can use.
 MIS="$W/api/missing?server=mock-server-1"
 contains "missing tracks: none kept yet" '"entries":[]' "$(cb -H 'X-Plex-Token: t2' "$MIS")"
-contains "missing tracks: a friend's change isn't kept before they choose to keep theirs" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789aa","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music"}]}' "$MIS")"
-contains "missing tracks: ...and is once they have" '"skipped":0' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"share","id":"0123456789a9"},{"type":"note","id":"0123456789ab","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music","prompt":"not-for-keeping"}]}' "$MIS")"
+contains "missing tracks: a friend's are kept for their account, for the server's owner to see" '"skipped":0' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789ab","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music","prompt":"not-for-keeping"}]}' "$MIS")"
 KEPT="$(cb -H 'X-Plex-Token: t2' "$MIS")"
 contains "missing tracks: ...and read back" '"title":"Friend Song"' "$KEPT"
 lacks "missing tracks: ...never what it was asked for" "not-for-keeping" "$KEPT"
@@ -427,10 +426,12 @@ expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://p
 
 # ---------- 7b. Playing on other Plex players off ----------
 docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
-    -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true "$IMAGE" >/dev/null
+    -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true -e WEBSOCKETS=on -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false, SYNC_SETTINGS=false and SYNC_MISSING_TRACKS=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone)" "window.PW_CONFIG = { together: true, devices: true, spotify: true };" "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false, SYNC_SETTINGS=false and SYNC_MISSING_TRACKS=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone; WEBSOCKETS=on over DISABLE_WEBSOCKETS=true: WebSockets only)" 'window.PW_CONFIG = { websockets: "on", together: true, devices: true, spotify: true };' "$(cb http://pw-web8/config.js | tr -d '\n')"
+contains "WEBSOCKETS=on: the log says so" "WebSockets only: live updates don't fall back" "$(docker logs pw-web8 2>&1)"
+contains "...and that DISABLE_WEBSOCKETS=true is left aside" "DISABLE_WEBSOCKETS=true is left aside: WEBSOCKETS=on says otherwise" "$(docker logs pw-web8 2>&1)"
 expect "SYNC_MISSING_TRACKS=false: no missing tracks kept for each account" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/missing?server=mock-server-1')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
@@ -494,6 +495,8 @@ bad() { # name expected-message docker-run-args...
 }
 bad "rejects a server address without http://" "PLEX_SERVER_URL must start with http://" -e PLEX_SERVER_URL=192.168.1.10:32400
 bad "rejects an unclear true/false value" "expected true or false" -e DISABLE_WEBSOCKETS=maybe
+bad "rejects an unclear WEBSOCKETS" "WEBSOCKETS must be auto, on or off" -e WEBSOCKETS=sometimes
+bad "...and WEBSOCKETS=true (on is WebSockets only, auto where they get through)" "auto, the default, uses WebSockets where they get through" -e WEBSOCKETS=true
 bad "rejects an unclear PLAY_TOGETHER" "PLAY_TOGETHER: expected true or false" -e PLAY_TOGETHER=sometimes
 bad "rejects an unclear CASTING" "CASTING: expected true or false" -e CASTING=sometimes
 bad "rejects an unclear PLAYLIST_SHARING" "PLAYLIST_SHARING: expected true or false" -e PLAYLIST_SHARING=sometimes

@@ -99,14 +99,13 @@ export function experienceView({ el }) {
         checked: s.lovedPlaylist,
         onChange: set('lovedPlaylist'),
       }),
-      toggleRow({ title: 'Show album codec badges', subtitle: 'Show the format and resolution on album pages, like FLAC 24/96.', checked: s.codecBadges, onChange: setAndRefresh('codecBadges') }),
       toggleRow({
-        title: 'Show codec badges on covers',
-        subtitle: 'Each album’s format over its cover as you browse (and in search). Your server is asked about each album as it comes into view.',
-        checked: s.coverBadges,
-        onChange: setAndRefresh('coverBadges'),
+        title: 'Show codec information',
+        subtitle:
+          'Formats and quality everywhere in the app, like FLAC 24/96 or MP3 320: on album pages, over albums’ covers as you browse (your server is asked about each album as it comes into view), in search, and in the player.',
+        checked: s.codecInfo !== false,
+        onChange: setAndRefresh('codecInfo'),
       }),
-      toggleRow({ title: 'Show formats in search', subtitle: 'Each track’s and album’s format in search results, like FLAC 24/96 or MP3 320.', checked: s.searchCodecs, onChange: setAndRefresh('searchCodecs') }),
       toggleRow({ title: 'Show popular tracks', subtitle: 'Mark an album’s best-known tracks.', checked: s.popularTracks, onChange: setAndRefresh('popularTracks') }),
       choiceRow({ title: 'Top plays list size', subtitle: 'How many items the Most played lists in Search show.', options: TOP_SIZES, value: Number(s.topListSize) || 25, onChange: setAndRefresh('topListSize') }),
       toggleRow({ title: 'Show preview buttons', subtitle: 'A button on tracks for a 15-second listen, without changing what’s queued.', checked: s.previewButtons, onChange: setAndRefresh('previewButtons') }),
@@ -186,7 +185,6 @@ export function playerSettingsView({ el }) {
     h(
       'div.rows',
       null,
-      toggleRow({ title: 'Show codec', subtitle: 'Show the track’s format and quality under its title, like FLAC 24/96.', checked: s.showCodec !== false, onChange: set('showCodec') }),
       toggleRow({ title: 'Show rating', subtitle: 'Show your rating of the track under its title, to change it there.', checked: s.showRating !== false, onChange: set('showRating') }),
       toggleRow({ title: 'Show volume control', subtitle: 'Show the volume slider in the player.', checked: s.showVolume, onChange: set('showVolume') }),
       choiceRow({ title: 'Seekbar style', subtitle: 'How the playback position is drawn.', options: SEEKBARS, value: s.seekbarStyle, onChange: set('seekbarStyle') }),

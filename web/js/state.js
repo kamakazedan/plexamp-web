@@ -25,7 +25,6 @@ export const DEFAULT_SETTINGS = {
   quietEndings: 'quiet', // smart fades start over a quiet ending: off | soft | quiet | hushed (transitions.js)
   shareDevices: true, // your devices share what's playing; one plays (devices.js)
   reportPlays: true, // "Sync recent plays": tell Plex what's played
-  liveUpdates: 'auto', // 'auto' (WebSocket first) | 'nows' (no WebSockets) | 'off'
   // mode: 'auto' (the app's shared model when there is one) | 'shared' | 'custom' | 'off'
   ai: { mode: 'auto', url: '', apiKey: '', model: '', notes: '' },
 
@@ -35,9 +34,7 @@ export const DEFAULT_SETTINGS = {
   ratingSystem: 'tick', // tick (favourite) | stars | thumbs | off
   listRatings: true, // ratings in track lists too
   lovedPlaylist: true, // five-star / thumbs-up tracks kept in ❤️ Tracks
-  codecBadges: true,
-  coverBadges: true, // albums' formats over their covers, and in search
-  searchCodecs: true, // each track's format in search results
+  codecInfo: true, // formats and quality everywhere: album pages, covers, search, the player (formats.js)
   popularTracks: true,
   topListSize: 25,
   previewButtons: false,
@@ -54,8 +51,7 @@ export const DEFAULT_SETTINGS = {
   backgroundStyle: 'gradient', // gradient (album colours) | artwork (blurred cover) | plain
 
   // Player
-  showCodec: true, // the track's format and quality, in the player
-  showRating: true, // your rating of it, there
+  showRating: true, // your rating of the track playing
   showVolume: true,
   seekbarStyle: 'smooth', // smooth | bars | simple
   sideBySide: true,
@@ -73,9 +69,12 @@ export const DEFAULT_SETTINGS = {
   home: {},
 };
 
+// The codec settings before 0.25.0 (codecInfo since).
+export const CODEC_SETTINGS = Object.freeze(['codecBadges', 'coverBadges', 'searchCodecs', 'showCodec']);
+
 // Settings kept by an earlier version, as they are now. (`version` is
 // what they were last saved by.)
-export const SETTINGS_VERSION = 3;
+export const SETTINGS_VERSION = 4;
 export function migrateSettings(s) {
   if (!(Number(s.version) >= 2)) {
     // 0.19.0: half stars went, and the favourite tick is the rating system
@@ -97,6 +96,16 @@ export function migrateSettings(s) {
     if (s.loudness === false) s.loudness = true;
     if (s.loadAhead === 0) s.loadAhead = 1;
   }
+  if (!(Number(s.version) >= 4)) {
+    // 0.25.0: one setting for codec information everywhere, for the four
+    // there were (album pages, covers, search, the player): off where all
+    // four were (one kept from before another was added, 0.23.0's covers,
+    // say, isn't all of them). And live updates are the player's to choose
+    // (WEBSOCKETS on the container), not each device's.
+    if (CODEC_SETTINGS.every((k) => s[k] === false)) s.codecInfo = false;
+    for (const k of CODEC_SETTINGS) delete s[k];
+    delete s.liveUpdates;
+  }
   s.version = SETTINGS_VERSION;
   return s;
 }
@@ -111,7 +120,8 @@ export const app = {
 
 function storedSettings() {
   const s = store.get('settings') || {};
-  // Until 0.9.1 the codec and the rating were one setting.
+  // Until 0.9.1 the codec and the rating were one setting (the codec went
+  // with the others in 0.25.0: see migrateSettings).
   if (s.showCodecRating === false) {
     s.showCodec ??= false;
     s.showRating ??= false;

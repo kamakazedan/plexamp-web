@@ -37,9 +37,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'ratingSystem',
   'listRatings',
   'lovedPlaylist',
-  'codecBadges',
-  'coverBadges',
-  'searchCodecs',
+  'codecInfo',
   'popularTracks',
   'topListSize',
   'previewButtons',
@@ -51,7 +49,6 @@ export const SYNCED_SETTINGS = Object.freeze([
   'keyboardShortcuts',
   'tintBackground',
   'backgroundStyle',
-  'showCodec',
   'showRating',
   'showVolume',
   'seekbarStyle',
@@ -66,7 +63,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'skipForward',
   'home',
 ]);
-export const DEVICE_SETTINGS = Object.freeze(['quality', 'route', 'liveUpdates', 'shareDevices', 'playerName', 'speed', 'ai', 'loadAhead', 'keepPlayed', 'version']);
+export const DEVICE_SETTINGS = Object.freeze(['quality', 'route', 'shareDevices', 'playerName', 'speed', 'ai', 'loadAhead', 'keepPlayed', 'version']);
 const SYNCED = new Set(SYNCED_SETTINGS);
 
 const API = 'api/settings';

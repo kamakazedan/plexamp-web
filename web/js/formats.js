@@ -143,7 +143,7 @@ function done(el, w, f) {
   if (!el.isConnected) return;
   observer?.unobserve(el);
   watched.delete(el);
-  if (f && app.settings.coverBadges !== false) w.put(f);
+  if (f && app.settings.codecInfo !== false) w.put(f);
 }
 
 // What's known of an album's format: undefined if nothing (or not lately).

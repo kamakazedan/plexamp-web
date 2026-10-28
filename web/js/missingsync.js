@@ -1,14 +1,8 @@
 // Missing tracks that follow your Plex account: this player's service keeps
 // each Plex server's list for your account (see server/missing.js), so
 // every browser you sign in on with this player has the same one; and for
-// the server's owner, everyone's who shares theirs, to go and find.
-//
-// The server's owner's list follows their account as they use it. Anyone
-// else's stays on their device, as before 0.24.0, until they choose to keep
-// it for their account (shareMissing: Settings › AI › Missing tracks), told
-// that whoever runs the server sees it; then this device's list goes with
-// it, and their other devices' too. Choosing not to takes it off the player
-// again, and each device keeps its own.
+// the server's owner, everyone's, so they can see what's missing from their
+// server and go and find it (friends are told so where theirs are listed).
 //
 // What an AI playlist was asked for, and a Spotify playlist's name, are never
 // sent: they stay on the device that asked (and are shown there while it's
@@ -30,7 +24,7 @@
 // is only ever in memory.
 import { app, on, emit, MISSING_OVER } from './state.js';
 import { store } from './plex.js';
-import { applyOp, idOf, listId, sourceOf } from './missinglist.js';
+import { applyOp, idOf, listId, shortList, withShortLists, sourceOf } from './missinglist.js';
 
 const LIST = 'aiMissing'; // the list here, every server's
 // Each change still to go: aiMissingOp.<when><n><tab>, in the order they
@@ -55,10 +49,11 @@ const bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
 const valid = (m) => !!m && (m.kind === 'track' || m.kind === 'artist') && typeof m.artist === 'string';
 
 // The list here. (0.12.0 kept what MusicBrainz didn't know, and albums,
-// hidden: they go.)
+// hidden: they go. A Spotify one's playlists counted before 0.25.0, by the
+// whole hash of each name, are cut down: see listId.)
 export function loadMissing() {
   const list = store.get(LIST, []);
-  return Array.isArray(list) ? list.filter((m) => valid(m) && m.mb !== 'unknown' && m.mb !== 'album') : [];
+  return Array.isArray(list) ? list.filter((m) => valid(m) && m.mb !== 'unknown' && m.mb !== 'album').map(withShortLists) : [];
 }
 
 // Whether it was kept (the browser may be out of room).
@@ -70,7 +65,7 @@ export function saveMissing(list) {
 
 {
   const kept = store.get(LIST, []);
-  if (Array.isArray(kept) && kept.some((m) => m?.mb === 'unknown' || m?.mb === 'album')) store.set(LIST, loadMissing());
+  if (Array.isArray(kept) && kept.some((m) => m?.mb === 'unknown' || m?.mb === 'album' || withShortLists(m) !== m)) store.set(LIST, loadMissing());
 }
 
 const ms = {
@@ -78,9 +73,7 @@ const ms = {
   read: new Set(), // servers whose list for the account has been read since the app started: nothing's sent before
   account: null, // the account's Plex id, as the player said
   owner: new Map(), // server id -> whether the player says this account owns it
-  shared: new Map(), // server id -> whether this account (not its owner) shares its list for it
   others: new Map(), // server id -> { all, rows }: everyone else's, for the server's owner
-  choice: 0, // shareMissing calls: a read from before one doesn't undo it
   pulling: null,
   pullAgain: false, // a read that came back while a change was on its way: read again after it
   sending: null,
@@ -108,17 +101,9 @@ function synced() {
 
 const keepSynced = (s) => store.set(SYNCED, s);
 
-// Whether this account's list for `server` follows it: it owns the server,
-// or it shares its list for it. Until the player has said whose the server
-// is (or while plex.tv can't say), as it was last time: a list that
-// followed the account then still does, and one that didn't, doesn't.
-export function syncs(server = serverNow()) {
-  if (!missingSyncOn() || server !== serverNow()) return false;
-  const owner = ms.owner.get(server);
-  if (owner === true) return true;
-  if (owner === false) return ms.shared.get(server) === true;
-  return server in synced().servers;
-}
+// Whether this account's list for `server` follows it: everyone's for the
+// server in use does, where the player keeps them (and has room).
+export const syncs = (server = serverNow()) => missingSyncOn() && server === serverNow();
 
 // 12 random hex characters: a change, by name.
 export const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -165,14 +150,12 @@ function onThisDeviceOnly() {
 if (!app.config.missingSync) onThisDeviceOnly();
 
 // A change made here (missing.js has made it to the list already), to send
-// for `server`'s list. `prompt`: what it was for, kept here only. Kept too
-// before the player has said whose the server is (the read that says
-// decides: a friend's they don't share goes nowhere), and what's taken off a
-// list the player had no room for (it goes with the list next time).
+// for `server`'s list. `prompt`: what it was for, kept here only. Kept too:
+// what's taken off a list the player had no room for (it goes with the list
+// next time).
 export function queueMissing(server, op, { prompt } = {}) {
-  const unknown = missingSyncOn() && server === serverNow() && !ms.owner.has(server);
   const takenOff = keeps() && server === serverNow() && ms.full.has(server) && !adds({ op });
-  if (!syncs(server) && !unknown && !takenOff) return;
+  if (!syncs(server) && !takenOff) return;
   enqueue({ account: ms.account, server, op: { ...op, id: randomId() }, ...(prompt != null ? { prompt: String(prompt).slice(0, 200) } : {}) });
   // (Many changes still to go, a big import offline say: as few as can be,
   // and at most so many, the oldest going.)
@@ -196,9 +179,14 @@ function compact(server) {
   for (let i = 0; i < here.length; i += MERGE_CHUNK) enqueue({ account: ms.account, server, op: { type: 'merge', id: randomId(), entries: here.slice(i, i + MERGE_CHUNK) } });
 }
 
-// A change as it's sent: what's this device's own stays here.
+// A change as it's sent: what's this device's own stays here. (One made
+// before 0.25.0 and still to go: with its playlists' ids cut down.)
 const bare = ({ prompt, server, ...e }) => e;
-const forSending = (op) => (op.type === 'merge' || op.type === 'restore' ? { ...op, entries: op.entries.map(bare) } : op);
+function forSending(op) {
+  if (op.type === 'merge' || op.type === 'restore') return { ...op, entries: op.entries.map((e) => withShortLists(bare(e))) };
+  if (op.type === 'note' && op.via === 'spotify') return { ...op, list: shortList(op.list) };
+  return op;
+}
 // (A Spotify one kept before 0.22.0: the playlist it was last in.)
 const withLists = (m) => (m.via === 'spotify' && !Array.isArray(m.lists) ? { ...m, lists: [listId(m.prompt)] } : m);
 
@@ -273,9 +261,8 @@ function rebuild(server, entries, ops) {
   saveMissing([...before.filter((m) => m.server !== server), ...list]);
 }
 
-// What the player said of `server`'s list (`choice`: shareMissing calls as
-// it was asked).
-function take(server, got, choice) {
+// What the player said of `server`'s list.
+function take(server, got) {
   // (Whose the server is, not said: nothing's taken from this read.)
   if (typeof got.owner !== 'boolean') return;
   const account = Number(got.account) || null;
@@ -292,20 +279,16 @@ function take(server, got, choice) {
   s.account = account;
   ms.account = account;
   store.set(MISSING_OVER, null);
-  if (got.owner === true || got.owner === false) ms.owner.set(server, got.owner);
-  if (typeof got.shared === 'boolean' && choice === ms.choice) ms.shared.set(server, got.shared);
+  ms.owner.set(server, got.owner);
   if (got.owner === false) ms.others.delete(server);
   if (got.owner === true && Array.isArray(got.others)) {
     ms.others.set(server, { all: got.rev?.all || '', rows: got.others.filter(valid).map((r) => ({ ...r, server })) });
   }
   ms.read.add(server);
   if (!syncs(server)) {
-    // A friend's they don't share (or no longer do): this device's own, as
-    // before 0.24.0, with nothing sent; and the next time it follows the
-    // account, put together with it.
-    delete s.servers[server];
+    // (No room on the player for it meanwhile: this device's own for now,
+    // as deviceOnly left it.)
     keepSynced(s);
-    dequeue(queued(server));
     emit('missing');
     return;
   }
@@ -333,7 +316,6 @@ async function pull({ force = false } = {}) {
   if (!ms.started || !missingSyncOn()) return;
   if (ms.pulling) return ms.pulling;
   const server = serverNow();
-  const choice = ms.choice;
   ms.lastPull = Date.now();
   ms.pulling = (async () => {
     try {
@@ -353,7 +335,7 @@ async function pull({ force = false } = {}) {
         ms.pullAgain = true;
         return;
       }
-      take(server, got, choice);
+      take(server, got);
     } catch (err) {
       failed(err, server);
     } finally {
@@ -467,42 +449,9 @@ export function editMissingOthers(server, fn) {
 // Whether the player says this account owns `server` (undefined: not known).
 export const ownsServer = (server) => ms.owner.get(server);
 
-// What's known of this account's list for the server in use: whether the
-// player keeps lists for accounts, for this one (`on`: a friend can choose,
-// see shareMissing), whether it owns the server (`owner`: undefined until
-// the player's said), whether it shares its list (`shared`, for anyone
-// else), whether it follows the account (`syncs`), and whether the player
-// had no room for it (`full`).
-export function missingSharing(server = serverNow()) {
-  return { on: keeps() && server === serverNow(), owner: ms.owner.get(server), shared: ms.shared.get(server) === true, syncs: syncs(server), full: ms.full.has(server) };
-}
-
-// A friend's choice (not the server's owner's): to keep their list for the
-// server in use for their account, where whoever runs the server sees it
-// too, and this device's list goes with it (`on`); or not: then it's taken
-// off the player, and each device keeps its own. Throws if the player
-// couldn't be told.
-export async function shareMissing(on) {
-  const server = serverNow();
-  if (!ms.started || !keeps()) throw new Error('This player doesn’t keep missing tracks for each account.');
-  const got = await call('POST', { body: { ops: [{ type: on ? 'share' : 'unshare', id: randomId() }] } });
-  if (got.refused?.length) throw new Error('This player has no room for more lists just now.');
-  if (got.skipped) throw new Error('This player couldn’t keep that just now.');
-  ms.choice += 1;
-  ms.shared.set(server, on);
-  const s = synced();
-  delete s.servers[server];
-  keepSynced(s);
-  if (!on) {
-    dequeue(queued(server));
-    emit('missing');
-    return;
-  }
-  // (This device's list goes with it, put together with the account's: read
-  // afresh, after any read already on its way.)
-  await ms.pulling;
-  await pull({ force: true });
-}
+// Whether the player had no room for this account's list for the server in
+// use, so it's this device's own for now.
+export const missingPlayerFull = (server = serverNow()) => ms.full.has(server);
 
 // What's kept for the account, now (when Missing tracks opens, say).
 export const pullMissing = (opts) => pull(opts);
@@ -560,7 +509,6 @@ on('signout', () => {
   stop();
   ms.account = null;
   ms.owner.clear();
-  ms.shared.clear();
   ms.others.clear();
   ms.full.clear();
   ms.refused.clear();

@@ -25,17 +25,49 @@ export const MISSING_LIMITS = { ai: 500, spotify: 1000 };
 export const MISSING_LISTS = 20;
 
 // A name as it's compared: case, accents, "&" and "and", what's in brackets,
-// a leading "The" and punctuation don't count.
-export const norm = (v) =>
+// a leading "The" and punctuation don't count. A name with letters of
+// another script in it (宇多田ヒカル, Кино, "BTS 방탄소년단") keeps all its
+// letters and numbers, as they're written (composed, NFKC: 한, not ㅎㅏㄴ;
+// й, not и), but for what's written one way or the other: Arabic's and
+// Hebrew's vowel points and the tatweel that stretches a word, Greek's
+// accents (its capitals go without), Russian's ё (often е), and Persian's
+// ی and ک (often typed as Arabic's ي and ك). (Since 0.25.0:
+// before, all that was left of one was its Latin letters and numbers, if
+// any, so many came out the same.) Names of Latin letters and numbers alone
+// (with the marks any script uses: Kamakawiwoʻole, with an ʻokina, is
+// Kamakawiwo'ole) are compared as they always were.
+const plain = (v) =>
   String(v || '')
     .toLowerCase()
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/&/g, ' and ')
     .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
     .replace(/^the\s+/, '')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
+const written = (v) =>
+  String(v || '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[\u0640\u064b-\u065f\u0670\u0591-\u05bd\u05bf\u05c1\u05c2\u05c4\u05c5\u05c7]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    .replace(/^the\s+/, '')
+    .toLowerCase()
+    .replace(/\p{Script=Greek}+/gu, (g) => g.normalize('NFD').replace(/\p{M}+/gu, '').normalize('NFC'))
+    .replace(/ё/g, 'е')
+    .replace(/[يى]/g, 'ی')
+    .replace(/ك/g, 'ک')
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
+    .trim();
+const OTHER_SCRIPT = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}\p{N}\p{M}\s]/u;
+// Whether there are letters of another script than Latin in it.
+export const otherScript = (v) => OTHER_SCRIPT.test(String(v || ''));
+export const norm = (v) => {
+  const w = written(v);
+  return OTHER_SCRIPT.test(w) ? w : plain(v) || w;
+};
 
 export const sourceOf = (m) => (m.via === 'spotify' ? 'spotify' : 'ai');
 // What it is, wherever it's missing from.
@@ -45,12 +77,27 @@ export const keyOf = (m) => `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
 export const idOf = (m) => `${keyOf(m)}|${m.section}`;
 
 // A Spotify playlist, by its name, in a few characters: a track's `lists`
-// count the playlists it was in without keeping their names.
+// count the playlists it was in without keeping their names. Twelve bits of
+// a hash of the name (since 0.25.0): one in 4,096 names has the same, so a
+// name can't be worked out from it (a list of names leaves thousands that
+// fit), though one likely guess could still be checked against it. (Now and
+// then, two of someone's playlists count as one.)
 export function listId(name) {
   let x = 0x811c9dc5;
   for (const ch of String(name || '').trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
-  return x.toString(36);
+  return (x >>> 20).toString(36);
 }
+
+// A listId as it is now: one kept before 0.25.0 (the whole hash: more than
+// 4,095, the most listId gives now) is cut down as listId cuts it.
+export function shortList(id) {
+  if (typeof id !== 'string' || !/^[a-z0-9]{1,8}$/.test(id)) return id;
+  const x = parseInt(id, 36);
+  return x > 4095 ? (x >>> 20).toString(36) : id;
+}
+// ...a list of them, each once; and an entry with its own cut down.
+export const shortLists = (lists) => [...new Set((Array.isArray(lists) ? lists : []).map(shortList))];
+export const withShortLists = (m) => (Array.isArray(m?.lists) && m.lists.some((x) => shortList(x) !== x) ? { ...m, lists: shortLists(m.lists).slice(0, MISSING_LISTS) } : m);
 
 // The most recent of each server's, of each kind (see MISSING_LIMITS): by
 // when each was last noted, and of those noted the same second, the last
@@ -97,6 +144,7 @@ const onServer = (server) => (m) => m.server === server;
 // the list, and the keys of those noted.
 export function applyNote(list, op, { server, prompt } = {}) {
   const via = op.via === 'spotify' ? 'spotify' : '';
+  op = via ? { ...op, list: shortList(op.list) } : op;
   const here = (m) => m.server === server && String(m.section) === String(op.section);
   const found = new Set(op.found || []);
   const unreal = new Set(op.unreal || []);
@@ -128,7 +176,7 @@ export function applyNote(list, op, { server, prompt } = {}) {
         // (Kept before 0.22.0: the playlist it was last in.) At most
         // MISSING_LISTS: past that, it's in "20+" playlists, and counted no
         // further (so imported again, it isn't counted again).
-        const lists = Array.isArray(have.lists) ? have.lists : [listId(have.prompt)];
+        const lists = Array.isArray(have.lists) ? shortLists(have.lists) : [listId(have.prompt)];
         if (!lists.includes(op.list) && lists.length < MISSING_LISTS) {
           lists.push(op.list);
           have.times = (have.times || 1) + 1;
@@ -174,7 +222,7 @@ export function applyMerge(list, entries = [], { server } = {}) {
   const index = new Map();
   out.forEach((m, i) => m.server === server && index.set(idOf(m), i));
   for (const e of entries) {
-    const m = { ...e, server };
+    const m = withShortLists({ ...e, server });
     const i = index.get(idOf(m));
     if (i === undefined) {
       index.set(idOf(m), out.length);
@@ -188,7 +236,7 @@ export function applyMerge(list, entries = [], { server } = {}) {
     }
     const merged = { ...have };
     if (sourceOf(m) === 'spotify') {
-      const lists = [...new Set([...(Array.isArray(have.lists) ? have.lists : []), ...(Array.isArray(m.lists) ? m.lists : [])])].slice(0, MISSING_LISTS);
+      const lists = shortLists([...(Array.isArray(have.lists) ? have.lists : []), ...(Array.isArray(m.lists) ? m.lists : [])]).slice(0, MISSING_LISTS);
       merged.lists = lists;
       merged.times = Math.max(have.times || 1, m.times || 1, lists.length);
     } else {
@@ -250,7 +298,7 @@ export function applyRestore(list, entries = [], { server } = {}) {
   const out = list.slice();
   const have = new Set(out.filter(onServer(server)).map(idOf));
   for (const e of entries) {
-    const m = { ...e, server };
+    const m = withShortLists({ ...e, server });
     delete m.mb;
     if (have.has(idOf(m))) continue;
     out.push(m);

@@ -860,7 +860,7 @@ function buildNowPlaying() {
     vol.el.hidden = app.settings.showVolume === false;
     // The format and quality, and the rating, each if they're wanted.
     const info = main.querySelector('.np-info');
-    const showCodec = app.settings.showCodec !== false;
+    const showCodec = app.settings.codecInfo !== false;
     const showRating = app.settings.showRating !== false && ratingMode() !== 'off';
     info.hidden = !showCodec && !showRating;
     info.classList.toggle('no-codec', !showCodec);

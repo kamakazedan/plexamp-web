@@ -8,12 +8,12 @@ import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
 import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped } from './plex.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
-import { MusicBrainz, MusicBrainzError, isPublic } from './musicbrainz.js';
+import { MusicBrainz, MusicBrainzError, isPublic, sameTitle } from './musicbrainz.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
-import { applyNote, applyMerge, keyOf, idOf, listId, MISSING_LIMITS } from './missinglist.js';
+import { applyNote, applyMerge, applyRestore, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -669,6 +669,22 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
   assert.deepEqual(await tiring.check([{ kind: 'artist', artist: 'A' }, { kind: 'artist', artist: 'B' }, { kind: 'artist', artist: 'C' }]), ['real', null, null]);
 });
 
+test('MusicBrainz: an artist in another script, and their songs, are checked by name (before 0.25.0, the artist was taken for made up, and their song for real if anyone had one of that title)', async () => {
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    // Whatever's asked for: an artist in the same script, and someone
+    // else's song of that title.
+    if (u.pathname === '/ws/2/artist') return { ok: true, status: 200, json: async () => ({ artists: [{ name: 'Кино', score: 100 }] }) };
+    if (u.pathname === '/ws/2/recording') return { ok: true, status: 200, json: async () => ({ recordings: [{ title: 'First Love', score: 100, 'artist-credit': [{ name: 'Someone Else' }] }] }) };
+    return { ok: true, status: 200, json: async () => ({ 'release-groups': [] }) };
+  };
+  const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 });
+  assert.deepEqual(
+    await mb.check([{ kind: 'artist', artist: 'Аквариум' }, { kind: 'artist', artist: 'КИНО' }, { kind: 'track', artist: '宇多田ヒカル', title: 'First Love' }]),
+    ['unknown', 'real', 'unknown'],
+  );
+});
+
 test('MusicBrainz: musicbrainz.org once a second, your own server as fast as it answers, saying which version asks', async () => {
   const seen = [];
   const fetchImpl = async (url, init) => {
@@ -1026,10 +1042,13 @@ test('account settings: the same ones follow an account here as in the app (web/
   assert.deepEqual([...app].sort(), Object.keys(SYNCED_SETTINGS).sort());
   const device = src.match(/export const DEVICE_SETTINGS = Object\.freeze\(\[([^\]]*)\]\)/);
   const own = [...device[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  for (const k of ['quality', 'route', 'playerName', 'ai', 'loadAhead', 'keepPlayed', 'shareDevices', 'speed', 'liveUpdates']) {
+  for (const k of ['quality', 'route', 'playerName', 'ai', 'loadAhead', 'keepPlayed', 'shareDevices', 'speed']) {
     assert.ok(own.includes(k), `${k} is a device's own`);
     assert.ok(!(k in SYNCED_SETTINGS), `${k} isn't kept for an account`);
   }
+  // (Gone in 0.25.0: live updates are the player's choice, WEBSOCKETS, and
+  // codecInfo is the four codec settings.)
+  for (const k of ['liveUpdates', 'codecBadges', 'coverBadges', 'searchCodecs', 'showCodec']) assert.ok(!own.includes(k) && !(k in SYNCED_SETTINGS), `${k} is no setting now`);
 });
 
 test('account settings: kept in a file only the service can read, and read back (what doesn\'t check out left out)', () => {
@@ -1083,12 +1102,50 @@ test('account settings: loudness levelling kept off from 0.19.0 (how it started 
     assert.equal(said.length, 1);
     assert.match(said[0], /1 account kept it off/);
     store.flush();
-    assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 2);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 3);
     // Only once: turned off from then on, it stays off.
     store.update(1, { set: { loudness: false } });
     store.flush();
     assert.deepEqual(new SettingsStore({ dir, log }).get(1).settings, { gapless: false, loudness: false });
     assert.equal(said.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('account settings: the four codec settings kept before 0.25.0 are one, off where they all were', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-settings-'));
+  try {
+    const file = join(dir, 'settings.json');
+    const all = (v) => ({ codecBadges: v, coverBadges: v, searchCodecs: v, showCodec: v });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 2,
+        accounts: {
+          1: { settings: { ...all(false), gapless: false }, changed: { codecBadges: 2, coverBadges: 2, searchCodecs: 2, showCodec: 2, gapless: 1 }, rev: 2 },
+          2: { settings: { ...all(false), searchCodecs: true }, rev: 3 },
+          3: { settings: { gridSize: 'large' }, rev: 1 },
+          4: { settings: {}, rev: 5, off: true },
+          // (Kept before 0.23.0 had covers': not all four.)
+          5: { settings: { codecBadges: false, searchCodecs: false, showCodec: false }, rev: 2 },
+        },
+      }),
+    );
+    const store = new SettingsStore({ dir });
+    assert.deepEqual(store.get(1), { settings: { gapless: false, codecInfo: false }, changed: { gapless: 1, codecInfo: 2 }, rev: 2, off: false });
+    assert.deepEqual(store.get(2).settings, {}, 'one of them on: codec information stays on, as it starts');
+    assert.deepEqual(store.get(3).settings, { gridSize: 'large' });
+    assert.deepEqual(store.get(4), { settings: {}, changed: {}, rev: 5, off: true });
+    assert.deepEqual(store.get(5).settings, {}, 'three of the four off, the fourth never kept: on, as each device has it');
+    store.flush();
+    const kept = readFileSync(file, 'utf8');
+    assert.equal(JSON.parse(kept).version, 3);
+    assert.ok(!/codecBadges|coverBadges|searchCodecs|showCodec/.test(kept), 'the four go from the file');
+    // Only once: turned on again from then on, it stays on.
+    store.update(1, { set: { codecInfo: true } });
+    store.flush();
+    assert.equal(new SettingsStore({ dir }).get(1).settings.codecInfo, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1249,10 +1306,9 @@ const opId = () => (++opN).toString(16).padStart(12, '0');
 const AT = 1_800_000_000; // seconds
 const song = (artist, title, extra = {}) => ({ kind: 'track', artist, title, ...extra });
 const noteOp = (items, extra = {}) => ({ type: 'note', id: opId(), items, found: [], unreal: [], via: '', section: '1', library: 'Music (Test)', at: AT, ...extra });
-const share = () => ({ type: 'share', id: opId() });
 const store = (opts = {}) => new MissingStore({ now: () => AT * 1000, ...opts });
 const mineOf = (st, uid) => st.view(uid, SRV).entries;
-// Dan owns the server; Sam and Eve are friends who share theirs.
+// Dan owns the server; Sam and Eve are friends.
 const asOwner = (st, ops, server = SRV) => st.apply(dan.id, server, ops, { owner: true });
 const asFriend = (st, who, ops, server = SRV) => st.apply(who.id, server, ops);
 
@@ -1263,51 +1319,21 @@ test('missing tracks: the rules are the same file in the app (web/js/missinglist
   assert.ok(!/^import /m.test(here), 'nothing imported: the same in a browser and in Node');
 });
 
-test('missing tracks: a friend\'s list is kept only once they share it, and goes when they stop', () => {
+test('missing tracks: a friend\'s list is kept for their account as they use it, for the owner to see (0.24.0\'s share and unshare are no changes now)', () => {
   const st = store();
-  const r = asFriend(st, sam, [noteOp([song('A', 'One')])]);
-  assert.equal(r.skipped, 1);
-  assert.deepEqual(mineOf(st, sam.id), []);
-  assert.equal(st.view(sam.id, SRV).shared, false);
-  asFriend(st, sam, [share(), noteOp([song('A', 'One')])]);
+  asFriend(st, sam, [noteOp([song('A', 'One')])]);
   assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One']);
-  assert.equal(st.view(sam.id, SRV).shared, true);
-  assert.equal(asOwner(st, []).skipped, 0);
+  assert.ok(!('shared' in st.view(sam.id, SRV)));
   assert.equal(st.view(dan.id, SRV, { owner: true }).others.length, 1);
-  // Stopping takes theirs off: the owner doesn't see it, and nothing more is kept.
-  asFriend(st, sam, [{ type: 'unshare', id: opId() }]);
-  assert.deepEqual(mineOf(st, sam.id), []);
-  assert.equal(st.view(sam.id, SRV).shared, false);
-  assert.deepEqual(st.view(dan.id, SRV, { owner: true }).others, []);
-  assert.equal(asFriend(st, sam, [noteOp([song('B', 'Two')])]).skipped, 1);
-  // The server's owner's own list needs no sharing.
+  // What a 0.24.0 page may still send: left out, nothing taken off, and not remembered.
+  const r = asFriend(st, sam, [{ type: 'unshare', id: opId() }, { type: 'share', id: opId() }]);
+  assert.equal(r.skipped, 2);
+  assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One']);
+  assert.equal(st.view(sam.id, SRV).done.length, 1);
+  assert.equal(st.view(dan.id, SRV, { owner: true }).others.length, 1);
+  // The server's owner's own, as ever.
   asOwner(st, [noteOp([song('C', 'Three')])]);
   assert.deepEqual(mineOf(st, dan.id).map((m) => m.title), ['Three']);
-});
-
-test('missing tracks: choosing to share is limited as lists are, never remembered as a change, and no choice for the owner', () => {
-  const st = store();
-  asOwner(st, [noteOp([song('A', 'One')])]);
-  // The owner's own list isn't theirs to share or not: unsharing changes nothing.
-  asOwner(st, [{ type: 'unshare', id: opId() }]);
-  assert.deepEqual(mineOf(st, dan.id).map((m) => m.title), ['One']);
-  // Toggling isn't kept as changes (they'd crowd out the ones that matter).
-  for (let i = 0; i < 20; i += 1) asFriend(st, sam, [share(), { type: 'unshare', id: opId() }]);
-  assert.deepEqual(st.view(sam.id, SRV).done, []);
-  // A friend sharing with nothing on their list yet counts toward the limits.
-  const few = store();
-  const was = MISSING_STORE_LIMITS.accounts;
-  MISSING_STORE_LIMITS.accounts = 2;
-  try {
-    asFriend(few, sam, [share()]);
-    asFriend(few, eve, [share()]);
-    const op = share();
-    const r = asFriend(few, { id: 7 }, [op]);
-    assert.deepEqual(r.refused, [op.id]);
-    assert.equal(few.view(7, SRV).shared, false);
-  } finally {
-    MISSING_STORE_LIMITS.accounts = was;
-  }
 });
 
 test('missing tracks: each account its own list; AI suggestions counted again, a change sent twice made once', () => {
@@ -1368,6 +1394,78 @@ test('missing tracks: a Spotify one is counted once for each playlist, by its li
   assert.equal(cleanOp({ ...sp('x'), list: 'Road trip' }, AT), null);
 });
 
+// listId before 0.25.0: the whole hash of the name.
+const longListId = (name) => {
+  let x = 0x811c9dc5;
+  for (const ch of String(name).trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
+  return x.toString(36);
+};
+
+test('missing tracks: a playlist\'s listId is twelve bits of a hash of its name, too few to work a name out from (and one kept before 0.25.0 is cut down)', () => {
+  const names = Array.from({ length: 5000 }, (_, i) => `Playlist ${i}`);
+  const ids = names.map(listId);
+  assert.ok(ids.every((id) => /^[a-z0-9]{1,3}$/.test(id) && parseInt(id, 36) < 4096), ids.find((id) => parseInt(id, 36) >= 4096));
+  // Many names to each: 5,000 names have at most 4,096 ids.
+  assert.ok(new Set(ids).size <= 4096);
+  assert.equal(listId('  Road Trip '), listId('road trip'));
+  // One from before is cut down as listId cuts it, wherever it's met: what a
+  // browser sends, and what the player kept.
+  // (Mix 954's whole hash was short: 5jz.)
+  for (const name of ['Road trip', 'Gym', 'Late night', '夜', 'Mix 954']) {
+    assert.ok(parseInt(longListId(name), 36) > 4095, name);
+    assert.equal(shortList(longListId(name)), listId(name), name);
+    assert.equal(shortList(listId(name)), listId(name), name);
+  }
+  assert.equal(longListId('Mix 954'), '5jz');
+  assert.equal(cleanOp(noteOp([song('S', 'Tune')], { via: 'spotify', list: longListId('Gym') }), AT).list, listId('Gym'));
+  const e = cleanEntry({ kind: 'track', artist: 'S', title: 'Tune', via: 'spotify', lists: [longListId('Gym'), listId('Gym'), longListId('Road trip')], last: AT, section: '1' }, AT);
+  assert.deepEqual(e.lists, [listId('Gym'), listId('Road trip')]);
+  // ...and by the app's rules: noted, put together with another list, or
+  // put back.
+  const st = store();
+  asOwner(st, [noteOp([song('S', 'Tune')], { via: 'spotify', list: longListId('Gym') }), noteOp([song('S', 'Tune')], { via: 'spotify', list: listId('Gym') })]);
+  assert.deepEqual(mineOf(st, dan.id)[0].lists, [listId('Gym')]);
+  const old = { kind: 'track', artist: 'T', title: 'Other', via: 'spotify', lists: [longListId('Road trip')], times: 1, first: AT, last: AT, section: '1', library: 'L' };
+  assert.deepEqual(applyMerge([], [old], { server: SRV })[0].lists, [listId('Road trip')]);
+  assert.deepEqual(applyRestore([], [old], { server: SRV })[0].lists, [listId('Road trip')]);
+});
+
+test('names in other scripts are told apart (norm), as Latin ones always were', () => {
+  // Latin letters and numbers alone: as they always were.
+  for (const [name, was] of [['The Beatles', 'beatles'], ['Sigur Rós & Friends (Live)', 'sigur ros and friends'], ['Mø', 'm'], ['Røyksopp', 'r yksopp'], ['2002', '2002'], ['!!!', ''], ['ＡＢＣ １２３', 'abc 123'], ['Israel Kamakawiwoʻole', 'israel kamakawiwo ole']]) {
+    assert.equal(norm(name), was, name);
+  }
+  // ...the same, however they're written: an ʻokina or an apostrophe;
+  // Arabic and Hebrew with their vowel points and tatweel or without.
+  // Greek in capitals (without its accents) or not, Russian's ё as е, and
+  // Persian's ی and ک as Arabic's ي and ك.
+  for (const [a, b] of [["Israel Kamakawiwo'ole", 'Israel Kamakawiwoʻole'], ['مـرحبا', 'مرحبا'], ['שָׁלוֹם', 'שלום'], ['µ-Ziq', 'μ-Ziq'], ['Αγάπη μου', 'ΑΓΑΠΗ ΜΟΥ'],
+    ['Θεοδωράκης', 'ΘΕΟΔΩΡΑΚΗΣ'], ['Ἀθῆναι', 'ΑΘΗΝΑΙ'], ['Пётр Чайковский', 'Петр Чайковский'], ['Всё идёт по плану', 'Все идет по плану'], ['ایران', 'ايران']]) {
+    assert.equal(norm(a), norm(b), `${a} / ${b}`);
+  }
+  // Another script: its letters and numbers as they're written.
+  assert.equal(norm('КИНО'), 'кино');
+  assert.equal(norm('그리움'), '그리움', 'composed, not in parts');
+  const apart = [['宇多田ヒカル', '椎名林檎'], ['Симфония № 5', 'Концерт № 5'], ['第9番', '9月'], ['Мой', 'Мои'], ['그리움', '그리운'], ['Love 사랑', 'Love 이별'], ['BTS 방탄소년단', 'BTS'], ['ラーメン', 'ラメン'], ['Київ', 'Киів']];
+  for (const [a, b] of apart) assert.notEqual(norm(a), norm(b), `${a} / ${b}`);
+  // ...and not taken for each other as a letter or two different, where
+  // one character can be another word.
+  assert.equal(sameTitle(norm('君の名は希望だ'), norm('君の名は希望か')), false);
+  assert.equal(sameTitle(norm('Out of Spacee'), norm('Out of Space')), true);
+  // Nor are titles with other numbers, in any script's digits (though a
+  // number's leading zeros don't count).
+  for (const [a, b] of [['Symphony No. 5', 'Symphony No. 6'], ['Piano Sonata No. 1', 'Piano Sonata No. 10'], ['BWV 846', 'BWV 847'], ['Симфония № 5', 'Симфония № 6'], ['سمفونية رقم ٥', 'سمفونية رقم ٦'], ['सिम्फनी ५', 'सिम्फनी ६']]) {
+    assert.equal(sameTitle(norm(a), norm(b)), false, `${a} / ${b}`);
+  }
+  assert.equal(sameTitle(norm('Symphony No. 5'), norm('Symphony No. 5 - Allegro con brio')), true);
+  assert.equal(sameTitle(norm('Interlude 01'), norm('Interlude 1')), true);
+  // Two songs of the same name by two artists in another script are two
+  // entries, not one.
+  const st = store();
+  asOwner(st, [noteOp([song('宇多田ヒカル', 'First Love'), song('椎名林檎', 'First Love'), song('Чайковский', 'Симфония № 5'), song('Чайковский', 'Концерт № 5'), song('久石譲', '第9番'), song('久石譲', '9月')])]);
+  assert.equal(mineOf(st, dan.id).length, 6);
+});
+
 test('missing tracks: what the app sends that isn\'t kept (what it was asked for) never is, and what can\'t be read is left out', () => {
   const st = store();
   const r = asOwner(st, [
@@ -1417,11 +1515,11 @@ test('missing tracks: a browser\'s own list, the first time, is put together wit
   assert.equal(m.times, 4);
 });
 
-test('missing tracks: the server\'s owner sees everyone else\'s who shares put together, whose by id, and takes some off everyone\'s', () => {
+test('missing tracks: the server\'s owner sees everyone else\'s put together, whose by id, and takes some off everyone\'s', () => {
   const st = store();
   asOwner(st, [noteOp([song('A', 'One')])]);
-  asFriend(st, sam, [share(), noteOp([song('A', 'One'), song('B', 'Two')]), noteOp([song('A', 'One')])]);
-  asFriend(st, eve, [share(), noteOp([song('a', 'ONE')], { via: 'spotify', list: listId('Gym') })]);
+  asFriend(st, sam, [noteOp([song('A', 'One'), song('B', 'Two')]), noteOp([song('A', 'One')])]);
+  asFriend(st, eve, [noteOp([song('a', 'ONE')], { via: 'spotify', list: listId('Gym') })]);
   // Only for its owner (the service asks plex.tv).
   assert.equal(st.view(sam.id, SRV).others, undefined);
   const others = st.view(dan.id, SRV, { owner: true }).others;
@@ -1440,7 +1538,7 @@ test('missing tracks: the server\'s owner sees everyone else\'s who shares put t
   assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['Two']);
   // Cleared: everyone's on this server.
   asFriend(st, sam, [noteOp([song('C', 'Three')])]);
-  asFriend(st, sam, [share(), noteOp([song('C', 'Three')])], 'other-server');
+  asFriend(st, sam, [noteOp([song('C', 'Three')])], 'other-server');
   asOwner(st, [{ type: 'clear', id: opId(), everyone: true }]);
   assert.deepEqual(mineOf(st, sam.id), []);
   assert.equal(st.view(sam.id, 'other-server').entries.length, 1);
@@ -1453,7 +1551,7 @@ test('missing tracks: revs say what changed since, and a fresh start never passe
   const same = st.view(dan.id, SRV, { owner: true, have: first.rev });
   assert.equal(same.entries, undefined);
   assert.equal(same.others, undefined);
-  asFriend(st, sam, [share(), noteOp([song('A', 'One')])]);
+  asFriend(st, sam, [noteOp([song('A', 'One')])]);
   const after = st.view(dan.id, SRV, { owner: true, have: first.rev });
   assert.equal(after.entries, undefined, 'their own: as it was');
   assert.equal(after.others.length, 1, 'everyone else\'s: changed');
@@ -1478,7 +1576,7 @@ test('missing tracks: limits, and what there\'s no room for is refused by id (no
   try {
     asOwner(few, [noteOp(many(2))]);
     const big = noteOp(many(2, 'U'));
-    const r2 = asFriend(few, sam, [share(), big]);
+    const r2 = asFriend(few, sam, [big]);
     assert.deepEqual(r2.refused, [big.id]);
     assert.deepEqual(mineOf(few, sam.id), []);
     // Taking some off is never refused.
@@ -1493,8 +1591,7 @@ test('missing tracks: kept in a file only the service can read, and read back (w
   try {
     const st = new MissingStore({ dir, now: () => AT * 1000 });
     asOwner(st, [noteOp([song('A', 'One')])]);
-    asFriend(st, sam, [share(), noteOp([song('B', 'Two')], { via: 'spotify', list: listId('Gym') })]);
-    asFriend(st, eve, [share()]);
+    asFriend(st, sam, [noteOp([song('B', 'Two')], { via: 'spotify', list: listId('Gym') })]);
     st.flush();
     const file = join(dir, 'missing.json');
     assert.equal(statSync(file).mode & 0o777, 0o600);
@@ -1502,13 +1599,24 @@ test('missing tracks: kept in a file only the service can read, and read back (w
     assert.ok(!readFileSync(file, 'utf8').includes('Gym'));
     data.servers[SRV].accounts.abc = { entries: [song('C', 'x')] };
     data.servers[SRV].accounts[7] = { rev: 2, shared: true, entries: [{ kind: 'track', artist: 'D', title: 'Four', last: AT, section: '1' }, { kind: 'album', artist: 'E', last: AT, section: '1' }, 'nonsense'], done: [['zz', AT * 1000], ['abcdef123456', AT * 1000], ['abcdef654321', 1000]] };
+    // (0.24.0's: a friend's choice to share, with nothing on their list yet.)
+    data.servers[SRV].accounts[8] = { rev: 1, shared: true, entries: [], done: [] };
     data.servers['../x'] = { accounts: { 1: { entries: [{ kind: 'track', artist: 'F', title: 'Five', last: AT, section: '1' }] } } };
+    writeFileSync(file, JSON.stringify(data));
+    // (Before 0.25.0, a playlist's whole hash, in a file of version 1.)
+    assert.equal(data.version, 2);
+    data.version = 1;
+    data.servers[SRV].accounts[sam.id].entries[0].lists = [longListId('Gym')];
     writeFileSync(file, JSON.stringify(data));
     const again = new MissingStore({ dir, now: () => AT * 1000 });
     assert.deepEqual(mineOf(again, dan.id).map((m) => m.title), ['One']);
     assert.deepEqual(mineOf(again, sam.id).map((m) => [m.title, m.lists]), [['Two', [listId('Gym')]]]);
-    assert.equal(again.view(sam.id, SRV).shared, true);
-    assert.equal(again.view(eve.id, SRV).shared, true, 'sharing kept, with nothing on the list yet');
+    // A file from before is written again soon, as it's kept now.
+    again.flush();
+    const now = readFileSync(file, 'utf8');
+    assert.equal(JSON.parse(now).version, 2);
+    assert.ok(!now.includes(longListId('Gym')) && !now.includes('"shared"'), now.slice(0, 300));
+    assert.ok(!again.servers.get(SRV).accounts.has(8), 'nothing kept for a choice that\'s no choice now');
     assert.deepEqual(mineOf(again, 7).map((m) => m.title), ['Four']);
     assert.deepEqual(again.view(7, SRV).done, ['abcdef123456'], 'what isn\'t a change, or is too old, left out');
     assert.deepEqual([...again.servers.keys()], [SRV]);
