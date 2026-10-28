@@ -7057,10 +7057,11 @@ with sync_playwright() as pw:
 
         # The right one: Kid, on the same server and library (with Kid's own
         # token for it), at Home, in this tab and the other. (The other tab
-        # keeps Dan's queue in the moment before it hears, as a tab busy
-        # just then could.)
+        # keeps Dan's queue and settings in the moment before it hears, as a
+        # tab busy just then could.)
         other.evaluate("""() => window.addEventListener('storage', () => { if (window.__kept) return; window.__kept = true;
             localStorage.setItem('pw.player.mock-server-1', JSON.stringify({ items: [{ id: 'dans-queued-track' }], index: 0 }));
+            localStorage.setItem('pw.settings', JSON.stringify({ playerName: 'Dan’s phone', ai: { mode: 'custom', url: 'http://192.0.2.1:11434', apiKey: 'dans-key', model: 'm', notes: '' } }));
             localStorage.setItem('test.kept', String(Date.now())); })""")
         js(page, COVER_WATCH)
         switch_to(page, 'Kid')
@@ -7087,8 +7088,9 @@ with sync_playwright() as pw:
               and not any(k.startswith('pw.player') or k in ('pw.libraryCounts', 'pw.syncPending', 'pw.syncRev') for k in keys)
               and 'harbour' not in tab and playing == [None, 0] and 'Dans Secret Song' not in kid_missing and 'Dans Secret Song' not in kid_stored
               and 'own prompt' not in kid_stored, f'{theirs} {keys} {tab[:200]} {playing} {kid_missing}')
-        check('plexhome: ...not even what another tab of Dan\'s kept in the moment before it heard (his queue)',
-              js(page, "() => localStorage.getItem('test.kept')") and 'dans-queued-track' not in kid_stored and 'pw.left' not in keys, kid_stored[:300])
+        check('plexhome: ...not even what another tab of Dan\'s kept in the moment before it heard (his queue, his settings)',
+              js(page, "() => localStorage.getItem('test.kept')") and 'dans-queued-track' not in kid_stored and 'dans-key' not in kid_stored
+              and 'pw.left' not in keys, kid_stored[:300])
         page.go_back()
         page.wait_for_timeout(1200)
         back_to = (js(page, '() => location.hash'), page.locator('.view .wide-card').count() > 0, page.locator('.account-card').count())

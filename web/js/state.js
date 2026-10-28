@@ -118,13 +118,41 @@ export function migrateSettings(s) {
   return s;
 }
 
-// The first start since someone signed out or switched user here (see
-// leave): what another tab of theirs kept in the moment before it heard
-// goes too (its queue, say). Only this device's id, what this browser has
-// met, its settings where they stay, and the next person's sign-in and
-// server stay. ('syncedBefore' is SYNCED_BEFORE, below.)
+// Set once this browser's settings may not be its next account's own (see
+// sync.js): they've followed an account, or someone signed out here (any
+// version: settings kept from before a sign-in are someone's), or signed in
+// over someone else.
+export const SYNCED_BEFORE = 'syncedBefore';
+
+// Someone signed out or switched user here (see leave): what's kept for
+// the next person, as it was kept ({ switch, auth, source }, or { settings }
+// on signing out), till the first start since.
 const LEFT = 'left';
-if (store.get(LEFT)) store.clear(['clientId', 'syncedBefore', 'settings', 'auth', 'source']);
+
+// What stays once someone has left: this device's id, what this browser
+// has met, a sign-in being started (Sign in with Plex), and what leaving
+// kept, exactly as it was kept: the next person's sign-in and server, or
+// this device's settings. Anything else (what another tab of theirs kept
+// in the moment before it heard, its queue, say) goes, as does anything
+// put in place of what was kept: then the next person signs in, or chooses
+// a server, or has the settings to begin with, afresh. Right before the
+// page goes (`stay`: the first start does it again), and at the first start
+// since, before anything's read. (Clearing isn't held back by the freeze.)
+function settleLeft(stay = false) {
+  const left = store.get(LEFT);
+  if (!left || typeof left !== 'object') return;
+  const same = (key, value) => JSON.stringify(store.get(key)) === JSON.stringify(value ?? null);
+  const keep = ['clientId', SYNCED_BEFORE, 'pendingPin'];
+  if (stay) keep.push(LEFT);
+  if (left.switch) {
+    if (same('auth', left.auth)) keep.push('auth');
+    if (same('source', left.source)) keep.push('source');
+  } else if (same('settings', left.settings)) {
+    keep.push('settings');
+  }
+  store.clear(keep);
+}
+settleLeft();
 
 export const app = {
   config: window.PW_CONFIG || {},
@@ -166,11 +194,6 @@ export const searchScope = () => (app.settings.searchAllLibraries ? undefined : 
 // its own until 0.19.0).
 export const homeKey = () => '*';
 
-// Set once this browser's settings may not be its next account's own (see
-// sync.js): they've followed an account, or someone signed out here (any
-// version: settings kept from before a sign-in are someone's), or signed in
-// over someone else.
-export const SYNCED_BEFORE = 'syncedBefore';
 // (sync.js: changes here not yet kept for the account, and the account's
 // settings as this browser last had them. Not the next account's.)
 export const SYNC_PENDING = 'syncPending';
@@ -234,8 +257,7 @@ function leave(next) {
     store.set('auth', next.auth);
     if (next.source) store.set('source', next.source);
   }
-  store.set(LEFT, true);
-  const kept = JSON.stringify(store.get('settings'));
+  store.set(LEFT, next ? { switch: true, auth: next.auth, source: next.source ?? null } : { settings: store.get('settings') });
   // Nothing more is kept from here on (what's playing, say, as the page goes).
   store.freeze();
   app.auth = null;
@@ -249,25 +271,9 @@ function leave(next) {
   // for one that couldn't carry cookies, though this player sets none.)
   const forget = fetch('signed-out', { cache: 'no-store', credentials: 'same-origin' }).catch(() => {});
   Promise.race([forget, new Promise((r) => setTimeout(r, 1500))]).then(() => {
-    settle(next, kept);
+    settleLeft(true);
     reloadClean(!!next);
   });
-}
-
-// Another tab of theirs follows once it hears (see below), but what it kept
-// in the moment before (its queue, say) goes too, as does anything put in
-// place of what's kept for the next person: then they sign in, or choose a
-// server, afresh. (Clearing isn't held back by the freeze.)
-function settle(next, settings) {
-  const same = (key, value) => JSON.stringify(store.get(key)) === JSON.stringify(value ?? null);
-  const keep = ['clientId', SYNCED_BEFORE, LEFT];
-  if (next) {
-    if (same('auth', next.auth)) keep.push('auth');
-    if (same('source', next.source)) keep.push('source');
-  } else if (JSON.stringify(store.get('settings')) === settings) {
-    keep.push('settings');
-  }
-  store.clear(keep);
 }
 
 // The page afresh, without this tab's history of pages (and searches) either

@@ -49,12 +49,17 @@ const hashOf = (path) => `#${path}`;
 
 const MARK = 'navMark';
 let mark = null;
+let markKept = true; // (false: this browser can't keep it, so a page's mark from before a reload says nothing)
 function ownMark() {
-  if (mark) return mark;
+  if (mark) {
+    // (Kept again where it went with something else's clearing up.)
+    if (!store.get(MARK)) store.set(MARK, mark);
+    return mark;
+  }
   const kept = store.get(MARK);
   if (typeof kept === 'string' && /^[0-9a-f]{16}$/.test(kept)) return (mark = kept);
   mark = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
-  store.set(MARK, mark);
+  markKept = store.set(MARK, mark);
   return mark;
 }
 
@@ -215,7 +220,8 @@ export function startRouter({ mainEl, changed }) {
   });
 
   const st = forgetTyped(history.state) || {};
-  if (st.k && st.e && st.e !== ownMark()) {
+  const own = ownMark();
+  if (markKept && st.k && st.e && st.e !== own) {
     // Someone else's page, in a tab the browser brought back (Reopen
     // closed tab, say), with what they'd typed in its pages: none of it.
     try {
