@@ -47,6 +47,9 @@ function loadConfig() {
     // ...and the app's MusicBrainz features (MUSICBRAINZ_ADVANCED): what
     // they look up is kept in dataDir too.
     musicbrainzAdvanced: env.PW_SERVICE_MUSICBRAINZ_ADVANCED ? env.PW_SERVICE_MUSICBRAINZ_ADVANCED === 'true' : cfg.musicbrainzAdvanced === true,
+    // (false: the start-up script found the data folder wasn't one to
+    // keep anything in, so it's kept in memory.)
+    musicbrainzKeep: cfg.musicbrainzKeep !== false,
     version: cfg.version || env.PW_SERVICE_VERSION || '',
     devices: env.PW_SERVICE_DEVICES ? env.PW_SERVICE_DEVICES === 'true' : cfg.devices !== false,
     // Shared playlists (PLAYLIST_SHARING), kept in a file in dataDir (none:
@@ -1322,7 +1325,7 @@ function startSettings() {
 // if it can't be written to).
 function startMusicBrainzKept() {
   if (!musicbrainz || !config.musicbrainzAdvanced) return;
-  let dir = config.dataDir || null;
+  let dir = (config.musicbrainzKeep && config.dataDir) || null;
   if (dir) {
     try {
       accessSync(dir, fsConstants.W_OK);

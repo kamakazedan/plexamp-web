@@ -122,26 +122,26 @@ data_dir_problem() {
             [ -e "$e" ] || [ -L "$e" ] || continue
             case "${e##*/}" in
                 # (and what file systems and file browsers leave around)
-                shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
+                shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | musicbrainz.json | musicbrainz.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
                 *)
                     echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give it a folder of its own (a new or empty one, or a volume)"
                     return
                     ;;
             esac
         done
-        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json" "$DATA_DIR/missing.json.tmp"; do
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/musicbrainz.json.tmp"; do
             if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; } || { [ -f "$f" ] && [ "$(stat -c %h "$f")" != 1 ]; }; then
                 echo "$f must be a file of its own (not a link, or a folder)"
                 return
             fi
         done
-        rm -f "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json.tmp"
+        rm -f "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json.tmp"
         d_group="$(id -gn "$d_user")"
         if ! chown -h "$d_user:$d_group" "$DATA_DIR"; then
             echo "$d_user can't own DATA_DIR ($DATA_DIR)"
             return
         fi
-        for f in "$DATA_DIR/shares.json" "$DATA_DIR/settings.json" "$DATA_DIR/missing.json"; do
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/settings.json" "$DATA_DIR/missing.json" "$DATA_DIR/musicbrainz.json"; do
             if [ -f "$f" ] && ! chown -h "$d_user:$d_group" "$f"; then
                 echo "$d_user can't own $f"
                 return
@@ -633,16 +633,20 @@ CONF
     # and no one else's. Nothing in it is ever followed through a link, or
     # changed through one (the service can write there, so anything there
     # could be one). What's wrong with it turns them off (and says why),
-    # not the app.
-    if [ "$SHARING" = true ] || [ "$SETTINGS_SYNC" = true ] || [ "$MISSING_SYNC" = true ]; then
+    # not the app; what the MusicBrainz features look up is then kept in
+    # memory only.
+    MB_KEEP=$MB_ADV
+    if [ "$SHARING" = true ] || [ "$SETTINGS_SYNC" = true ] || [ "$MISSING_SYNC" = true ] || [ "$MB_ADV" = true ]; then
         why="$(data_dir_problem)"
         if [ -n "$why" ]; then
             if [ "$SHARING" = true ]; then say "shared playlists are off: $why"; fi
             if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each account are off: $why"; fi
             if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each account are off: $why"; fi
+            if [ "$MB_ADV" = true ]; then say "what the MusicBrainz features look up is kept in memory only (until the service restarts): $why"; fi
             SHARING=false
             SETTINGS_SYNC=false
             MISSING_SYNC=false
+            MB_KEEP=false
         else
             # In a container, a folder that isn't a volume goes when the
             # container is replaced (an update, say), and what's in it.
@@ -675,6 +679,7 @@ else
     CAST=false
     MB=false
     MB_ADV=false
+    MB_KEEP=false
     SHARING=false
     SETTINGS_SYNC=false
     MISSING_SYNC=false
@@ -689,7 +694,7 @@ if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi
 if [ "$MB_ADV" = true ]; then
-    say "the MusicBrainz features are on: the library's artists and albums are looked up on MusicBrainz at $(safe_url "$MB_URL")$([ "$MB_KIND" = public ] && echo ', at most once a second'), and what it says is kept in $DATA_DIR"
+    say "the MusicBrainz features are on: the library's artists and albums are looked up on MusicBrainz at $(safe_url "$MB_URL")$([ "$MB_KIND" = public ] && echo ', at most once a second'), and what it says is kept $([ "$MB_KEEP" = true ] && echo "in $DATA_DIR" || echo 'in memory only')"
 fi
 if [ "$SPOTIFY" = true ]; then say "importing from Spotify by link is on: playlists are read from Spotify's public pages"; fi
 # (In the browser: no service needed.)
@@ -750,6 +755,7 @@ if [ "$SERVICE" = true ]; then
   "musicbrainz": $MB,
   "musicbrainzUrl": "$(json "$MB_URL")",
   "musicbrainzAdvanced": $MB_ADV,
+  "musicbrainzKeep": $MB_KEEP,
   "version": "$(json "$APP_VERSION")",
   "devices": $SERVICE,
   "sharing": $SHARING,

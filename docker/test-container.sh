@@ -346,7 +346,10 @@ contains "sign-ins: ...and only so many are checked a minute from one address" "
 contains "sign-ins: ...while one seen before still works" "known:200" "$codes"
 docker restart pw-web >/dev/null
 wait_service pw-web
+# (With /data/musicbrainz.json there too, the MusicBrainz features' own.)
 contains "shares: still there after a restart" '"version":2,"count":3' "$(cb -H 'X-Plex-Token: t' "$W/api/shares?server=mock-server-1")"
+lacks "...with what the MusicBrainz features looked up in /data too, nothing's turned off" "other files in it" "$(docker logs pw-web 2>&1)"
+contains "...and that's still kept there, the service's alone" "nginx 600" "$(docker exec pw-web stat -c '%U %a' /data/musicbrainz.json)"
 docker logs pw-web 2>&1 | grep -q "plexamp-web service: ready" && pass "the service started" || fail "the service started"
 LOG="$(docker logs pw-web 2>&1)"
 lacks "no access log by default (tokens travel in Plex addresses)" "/pms/library/sections" "$LOG"
