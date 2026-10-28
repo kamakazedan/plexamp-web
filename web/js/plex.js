@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.25.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.26.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -357,6 +357,7 @@ export function isListingPath(path) {
 
 export const TAG_FIELDS = new Set(['genre', 'style', 'mood', 'decade', 'year', 'studio', 'country']);
 const MEMO_LIMIT = 300;
+const TYPES_LIMIT = 5000; // albums' release types kept (see albumTypes)
 const WRITE_BATCH = 200; // items per request when adding to a playlist or collection
 
 const chunks = (list, size) => {
@@ -374,6 +375,8 @@ export class PlexServer {
     this.name = name || 'Plex Media Server';
     this.id = id || null;
     this.cache = new Map();
+    this.types = new Map(); // album id -> { Format, Subformat } (see albumTypes)
+    this.typing = new Map(); // album id -> its types being asked for
   }
 
   // The app's own X-Plex-* values (the token above all) come last, so no
@@ -586,6 +589,47 @@ export class PlexServer {
   // gives them.
   tracksDetail(ids) {
     return this.manyKept('track', ids, 10 * 60000);
+  }
+
+  // Albums' release types (Format: album, EP, single...; Subformat: live, a
+  // compilation...), which Plex's lists of an artist's albums leave out (an
+  // album's own details have them): read from those, 40 albums to a
+  // request, three requests at a time (those already being asked about,
+  // for another page, waited for), and kept while the app's open, in a list
+  // of their own (a big discography mustn't push what else is kept out).
+  // In the same order as `ids`: { Format, Subformat } (empty lists where
+  // Plex says none), or null where Plex couldn't be asked this time.
+  async albumTypes(ids) {
+    const asked = [...new Set(ids.map(String))].filter((id) => /^\d+$/.test(id));
+    const parts = chunks(
+      asked.filter((id) => !this.types.has(id) && !this.typing.has(id)),
+      40,
+    ).map((part) => {
+      let done;
+      const job = new Promise((resolve) => (done = resolve));
+      for (const id of part) this.typing.set(id, job);
+      return { part, done };
+    });
+    const lane = async () => {
+      for (let p = parts.shift(); p; p = parts.shift()) {
+        try {
+          const got = await this.metadataMany(p.part);
+          const byId = new Map(got.map((m) => [String(m.ratingKey), m]));
+          // (One Plex didn't give has nothing to say.)
+          for (const id of p.part) this.types.set(id, { Format: asArray(byId.get(id)?.Format), Subformat: asArray(byId.get(id)?.Subformat) });
+        } catch {
+          /* asked again next time */
+        } finally {
+          for (const id of p.part) this.typing.delete(id);
+          p.done();
+        }
+      }
+    };
+    const waiting = asked.map((id) => this.typing.get(id)).filter(Boolean);
+    await Promise.all([lane(), lane(), lane(), ...waiting]);
+    const out = ids.map((id) => this.types.get(String(id)) || null);
+    while (this.types.size > TYPES_LIMIT) this.types.delete(this.types.keys().next().value);
+    return out;
   }
 
   // Albums and artists, as albumMeta gives albums: their genres, styles,

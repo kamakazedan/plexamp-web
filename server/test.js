@@ -894,6 +894,9 @@ test('MusicBrainz features: albums not known yet are looked up in the background
   }
   // At most so many waiting.
   const full = new MusicBrainz({ base: 'https://mb.test', fetchImpl: async () => new Promise(() => {}), gapMs: 0 }).advanced(new MBKept());
+  // (Nothing's looked up here, only how many can wait: as if it were busy
+  // with one already.)
+  full.working = true;
   const limit = MB_ADVANCED_LIMITS.queued;
   MB_ADVANCED_LIMITS.queued = 2;
   try {

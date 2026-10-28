@@ -43,7 +43,10 @@ testing, these endpoints need no token:
         then nothing more for a minute (as through a proxy that's stopped
         passing it on), stall= none; nogenre=ID,... takes those albums'
         genres away (as an album Plex has none for), nogenre= puts them back
-    /__mock/add-album?title=...   adds an album and announces it
+    /__mock/add-album?title=...[&untyped=1]
+                                  adds an album and announces it (untyped:
+                                  without a Format or Subformat, as an album
+                                  Plex hasn't matched)
     /__mock/edits[?reset=1]       the album edits made (year, date, genres)
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
@@ -658,7 +661,7 @@ MB_EXTRA = {
     'songs': [('Glass Harbour', 'Lantern Song'), ('Real Missing Band', 'Somewhere Real')],
     'albums': [('Glass Harbour', 'Sea Glass')],
 }
-MB_SEEN = {'requests': 0, 'agents': [], 'last': ''}
+MB_SEEN = {'requests': 0, 'agents': [], 'last': '', 'asked': []}  # asked: each request's path and query (the latest 500)
 
 # What the mock MusicBrainz says of the library's artists, for the app's
 # MusicBrainz features: other names, genres, release groups (the library's
@@ -690,8 +693,10 @@ def mb_artists():
 
 def mb_groups(artist_name):
     out = []
+    more = {title for title, *_ in MB_MORE_GROUPS.get(artist_name, [])}
     for al in albums:
-        if al['parentTitle'] != artist_name:
+        # (One added to the library that MusicBrainz has anyway is as it has it.)
+        if al['parentTitle'] != artist_name or al['title'] in more:
             continue
         sub = [t['tag'] for t in al.get('Subformat', [])]
         fmt = (al.get('Format') or [{'tag': 'Album'}])[0]['tag']
@@ -982,8 +987,9 @@ def set_copy(on):
     MOCK['copy'] = True
 
 
-def add_album(title):
-    """Add an album to the library the way a scan would, with notifications."""
+def add_album(title, untyped=False):
+    """Add an album to the library the way a scan would, with notifications
+    (untyped: without a Format or Subformat, as one Plex hasn't matched)."""
     artist = artists[0]
     k = key()
     year = 2025
@@ -991,6 +997,9 @@ def add_album(title):
               thumb=f'/library/metadata/{k}/thumb/1', year=year, originallyAvailableAt=f'{year}-01-01',
               addedAt=int(time.time()), viewCount=0, lastViewedAt=None, leafCount=4, _palette=('402060', 'e0a0ff'))
     al.pop('lastViewedAt')
+    if untyped:
+        al['Format'] = []
+        al['Subformat'] = []
     items[k] = al
     albums.append(al)
     LIBRARY_STATE['refreshing'] = True
@@ -1430,6 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
         MB_SEEN['requests'] += 1
         MB_SEEN['agents'] = sorted(set(MB_SEEN['agents']) | {self.headers.get('User-Agent', '')})
         MB_SEEN['last'] = query or p
+        MB_SEEN['asked'] = (MB_SEEN['asked'] + [self.path])[-500:]
         artists_ = {a['title'].lower() for a in artists} | {a.lower() for a in MB_EXTRA['artists']}
         # (The MusicBrainz features: an artist by name or other name, looked
         # up by id, and their release groups, and a group's genres.)
@@ -1792,7 +1802,7 @@ class Handler(BaseHTTPRequestHandler):
                                        'requests': HLS['requests'], 'timelines': HLS['timelines'],
                                        'kill': HLS['kill'], 'short': HLS['short'], 'slow': HLS['slow']})
         if p == '/__mock/add-album':
-            al = add_album(q.get('title', ['Fresh Arrival'])[0])
+            al = add_album(q.get('title', ['Fresh Arrival'])[0], untyped=q.get('untyped', ['0'])[0] == '1')
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
         if p == '/__mock/player':
             with PLAYER['lock']:
@@ -1809,6 +1819,8 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith('/ws/2/'):
             return self.musicbrainz(p, q)
         if p == '/__mock/musicbrainz':
+            if q.get('reset', ['0'])[0] == '1':
+                MB_SEEN['asked'] = []
             return self.send_json(dict(MB_SEEN))
         if p == '/__mock/edits':
             if q.get('reset', ['0'])[0] == '1':

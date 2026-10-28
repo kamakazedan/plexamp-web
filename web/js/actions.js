@@ -65,7 +65,7 @@ export const playAlbum = (album, { shuffle = false, start = 0, tracks } = {}) =>
 export const playArtist = (artist, { shuffle = false } = {}) =>
   guard(async () => {
     let list = (await app.server.allLeaves(artist.ratingKey)).map(normTrack);
-    if (shuffle) list = await withoutLiveOrDemos(list, { keep: 10 });
+    if (shuffle) list = await withoutLiveOrDemos(list);
     playList(list, 0, ctx(artist.title, `/artist/${artist.ratingKey}`), { shuffle });
   });
 

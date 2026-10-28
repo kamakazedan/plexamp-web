@@ -6,9 +6,9 @@
 
 // A name as it's compared (as missinglist.js norm has it): case, accents,
 // "&" and "and", what's in brackets, a leading "The" and punctuation don't
-// count; and a name in another script (宇多田ヒカル, Кино), which that would
-// leave nothing of, keeps its letters and numbers.
-const plain = (v, other) =>
+// count; and a name with letters of another script in it (宇多田ヒカル,
+// Кино) keeps all its letters and numbers, as they're written (NFKC).
+const plain = (v) =>
   String(v || '')
     .toLowerCase()
     .normalize('NFKD')
@@ -16,9 +16,23 @@ const plain = (v, other) =>
     .replace(/&/g, ' and ')
     .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
     .replace(/^the\s+/, '')
-    .replace(other, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
     .trim();
-export const norm = (v) => plain(v, /[^a-z0-9]+/g) || plain(v, /[^\p{L}\p{N}]+/gu);
+const written = (v) =>
+  String(v || '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/&/g, ' and ')
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    .replace(/^the\s+/, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
+    .trim();
+const OTHER_SCRIPT = /[^\p{Script=Latin}\p{N}\p{M}\s]/u;
+export const norm = (v) => {
+  const w = written(v);
+  return OTHER_SCRIPT.test(w) ? w : plain(v) || w;
+};
 
 function editDistance(a, b) {
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
@@ -31,10 +45,13 @@ function editDistance(a, b) {
 }
 
 // Titles (as norm has them) close enough to be the same: one the other with
-// more after it, or a letter or two different.
+// more after it, or a letter or two different (not in Chinese, Japanese or
+// Korean, where one character can be another word).
+const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 export function sameTitle(a, b) {
   if (!a || !b) return false;
   if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
+  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
 }
 

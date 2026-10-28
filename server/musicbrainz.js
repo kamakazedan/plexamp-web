@@ -244,6 +244,9 @@ export class MusicBrainz {
     const key = `artist|${want}`;
     const kept = this.had(key);
     if (kept !== undefined) return kept;
+    // (Not Various Artists: on MusicBrainz, theirs are everyone's
+    // compilations, far too many to look through for one.)
+    if (want === 'various artists') return this.adv.set(key, null);
     const opts = { background };
     const found = await this.ask('/ws/2/artist', { query: `artist:${phrase(name)} OR alias:${phrase(name)}`, limit: '10' }, signal, opts);
     const hit = pickArtist(found.artists, want);

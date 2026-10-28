@@ -95,7 +95,11 @@ expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'
     '# Missing tracks, so they can see what'"'"'s missing from their server; each' \
     '# account'"'"'s follows it to every browser too (false: each browser keeps its own).' 'SYNC_MISSING_TRACKS=true' \
     '# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org' '# (the public service) or your own mirror. Empty: no checks.' \
-    'MUSICBRAINZ_URL=' '# true: Search › From Spotify makes playlists from Spotify'"'"'s download of your' \
+    'MUSICBRAINZ_URL=' '# true: the MusicBrainz features, with MUSICBRAINZ_URL (live tracks and demos' \
+    '# left out of radio and shuffles, missing albums on artist pages, original' \
+    '# release years, artists'"'"' other names: see docs/features.md). They look your' \
+    '# whole library up, so a mirror of your own is best.' 'MUSICBRAINZ_ADVANCED=' \
+    '# true: Search › From Spotify makes playlists from Spotify'"'"'s download of your' \
     '# data, read in the browser (see docs/configuration.md).' 'SPOTIFY_FILE_IMPORT=' \
     '# true: Search › From Spotify makes a playlist from a Spotify playlist'"'"'s link,' \
     '# read from Spotify'"'"'s public page for it (see docs/configuration.md).' 'SPOTIFY_LINK_IMPORT=' 'DEBUG=')"

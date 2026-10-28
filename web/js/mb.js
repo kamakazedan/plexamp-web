@@ -111,32 +111,40 @@ export async function aliasesOf(name) {
 // ---------- live tracks and demos ----------
 
 // A track's title that says it's live or a demo: "(Live)", "[Live at the
-// Fillmore]", "- Live", "Live from…", "(Demo)", "- Demo Version", "Early
-// Demo", "(Rough Mix)".
-const LIVE_TITLE = /[([]\s*live\b|\s[-–—]\s*live\b|\blive (at|from|in|on)\b/i;
+// Fillmore]", "- Live", "Live at…" and "Live from…" to begin with (not
+// "Live in the Moment"), "(Demo)", "- Demo Version", "Early Demo", "(Rough
+// Mix)".
+const LIVE_TITLE = /[([]\s*live\b|\s[-–—]\s*live\b|^live (at|from)\b/i;
 const DEMO_TITLE = /[([]\s*(early |rough |home )?demo\b|\s[-–—]\s*(early |rough |home )?demo\b|\b(demo|rough) (version|mix|take|recording)\b/i;
 export const liveOrDemoTitle = (title) => LIVE_TITLE.test(String(title || '')) || DEMO_TITLE.test(String(title || ''));
 
 const MB_WAIT = 1500; // how long picking waits on the player for albums it doesn't know yet
 
 // Of tracks picked for you, those that aren't live or demos (with Skip live
-// tracks and demos on): by their title, and their album's kind, Plex's or
-// else MusicBrainz's (those it doesn't know yet go by their title this
-// time, and are looked up for next time). If that would leave fewer than
-// `keep` (an artist with nothing but live albums), they're all kept.
-// (Tracks as the app has them, or as Plex lists them.)
+// tracks and demos on): by their title, and their album's kind, Plex's
+// (plex.js albumTypes) or else MusicBrainz's (those it doesn't know yet go
+// by their title this time, and are looked up for next time). If that
+// would leave fewer than `keep` (an artist with nothing but live albums),
+// they're all kept. (Tracks as the app has them, or as Plex lists them.)
 const albumOf = (t) => String(t?.albumId ?? t?.parentRatingKey ?? '');
 export async function withoutLiveOrDemos(tracks, { server = app.server, keep = 1 } = {}) {
   if (!mbOn('mbSkipLive') || !tracks.length || !server) return tracks;
-  const albumIds = [...new Set(tracks.map(albumOf).filter(Boolean))];
-  const metas = await server.albumsMeta(albumIds).catch(() => []);
+  const albums = new Map(); // album id -> { artist, title }, of a track of it
+  for (const t of tracks) {
+    const id = albumOf(t);
+    if (id && !albums.has(id)) albums.set(id, { artist: t.albumArtist ?? t.grandparentTitle ?? '', title: t.album ?? t.parentTitle ?? '' });
+  }
+  const ids = [...albums.keys()];
+  const types = await server.albumTypes(ids).catch(() => ids.map(() => null));
   const kinds = new Map();
   const ask = [];
-  albumIds.forEach((id, i) => {
-    const m = metas[i];
-    const k = m ? plexKind(m) : null;
+  ids.forEach((id, i) => {
+    const k = types[i] ? plexKind(types[i]) : null;
+    const { artist, title } = albums.get(id);
+    // (Not Various Artists': theirs is everyone's, and MusicBrainz has too
+    // many to look through.)
     if (k) kinds.set(id, k);
-    else if (m?.title && m?.parentTitle) ask.push({ id, artist: m.parentTitle, title: m.title });
+    else if (types[i] && artist && title && norm(artist) !== 'various artists') ask.push({ id, artist, title });
   });
   if (ask.length) {
     const groups = await albumsOnMB(ask, { wait: MB_WAIT }).catch(() => []);
