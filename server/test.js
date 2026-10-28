@@ -788,7 +788,7 @@ test('MusicBrainz features: the release rules are the same file in the app (web/
   assert.equal(here, app);
   assert.ok(!/^import /m.test(here), 'nothing imported: the same in a browser and in Node');
   // ...and names compared as the rest of the app compares them.
-  const names = ['The Beatles', 'Sigur Rós', 'AC/DC (Live)', 'Simon & Garfunkel', '  Mötley  Crüe ', '宇多田ヒカル', 'Кино (Live)', 'BTS 방탄소년단', '!!!'];
+  const names = ['The Beatles', 'Sigur Rós', 'AC/DC (Live)', 'Simon & Garfunkel', '  Mötley  Crüe ', '宇多田ヒカル', 'Кино (Live)', 'BTS 방탄소년단', '!!!', 'Israel Kamakawiwoʻole', 'مـرحبا', 'שָׁלוֹם', 'Symphony № 5'];
   for (const n of names) assert.equal(normOfReleases(n), norm(n), n);
 });
 

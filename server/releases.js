@@ -7,7 +7,8 @@
 // A name as it's compared (as missinglist.js norm has it): case, accents,
 // "&" and "and", what's in brackets, a leading "The" and punctuation don't
 // count; and a name with letters of another script in it (宇多田ヒカル,
-// Кино) keeps all its letters and numbers, as they're written (NFKC).
+// Кино) keeps all its letters and numbers, as they're written (NFKC), but
+// for Arabic's and Hebrew's vowel points and the tatweel.
 const plain = (v) =>
   String(v || '')
     .toLowerCase()
@@ -22,13 +23,14 @@ const written = (v) =>
   String(v || '')
     .toLowerCase()
     .normalize('NFKC')
+    .replace(/[\u0640\u064b-\u065f\u0670\u0591-\u05bd\u05bf\u05c1\u05c2\u05c4\u05c5\u05c7]/g, '')
     .replace(/&/g, ' and ')
     .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
     .replace(/^the\s+/, '')
     .toLowerCase()
     .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim();
-const OTHER_SCRIPT = /[^\p{Script=Latin}\p{N}\p{M}\s]/u;
+const OTHER_SCRIPT = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}\p{N}\p{M}\s]/u;
 export const norm = (v) => {
   const w = written(v);
   return OTHER_SCRIPT.test(w) ? w : plain(v) || w;
@@ -46,12 +48,13 @@ function editDistance(a, b) {
 
 // Titles (as norm has them) close enough to be the same: one the other with
 // more after it, or a letter or two different (not in Chinese, Japanese or
-// Korean, where one character can be another word).
+// Korean, where one character can be another word, nor a number).
 const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 export function sameTitle(a, b) {
   if (!a || !b) return false;
   if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
   if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
+  if (a.replace(/\D+/g, ' ').trim() !== b.replace(/\D+/g, ' ').trim()) return false;
   return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
 }
 
