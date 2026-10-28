@@ -737,11 +737,21 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
 
 // A question with a text answer, in a dialog: resolves to the trimmed text,
 // or null if it was cancelled.
-// (`type`: 'password' for a PIN, say; `inputMode`: 'numeric' for one.)
-export function askText({ title, label, value = '', confirm = 'Save', maxLength = 120, message = '', type = 'text', inputMode }) {
+// (`type`: 'password' for a PIN, say, and `inputMode` 'numeric'; `secret`:
+// one that's never offered to the browser's, or a password manager's, keeping:
+// the browser's own is told it's a code.)
+export function askText({ title, label, value = '', confirm = 'Save', maxLength = 120, message = '', type = 'text', inputMode, secret = false }) {
   return new Promise((resolve) => {
     let answer = null;
-    const input = h('input', { type, value, maxLength, autocomplete: 'off', spellcheck: 'false', inputmode: inputMode || null });
+    const input = h('input', {
+      type,
+      value,
+      maxLength,
+      autocomplete: secret ? 'one-time-code' : 'off',
+      spellcheck: 'false',
+      inputmode: inputMode || null,
+      ...(secret ? { 'data-1p-ignore': true, 'data-lpignore': 'true', 'data-bwignore': true, 'data-form-type': 'other' } : {}),
+    });
     const ok = h('button.btn.btn-primary', { type: 'submit' }, confirm);
     const form = h(
       'form.ask-form',

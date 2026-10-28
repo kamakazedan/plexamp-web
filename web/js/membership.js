@@ -43,10 +43,14 @@ let cached = 0;
 // list at a time, however many pages ask for it meanwhile (an artist's page
 // and a similar artist's, say), stopped once none of them wants it.
 let reading = new Map();
+// What a smart playlist's rules say (byRules), as last read: `${server}|${id}|${section}`
+// -> { stamp, said }, until the playlist changes.
+let ruled = new Map();
 let generation = 0; // (what's read for a server or account since let go isn't kept)
 const forget = () => {
   cache = new Map();
   cached = 0;
+  ruled = new Map();
   for (const r of reading.values()) r.ctrl.abort();
   reading = new Map();
   generation++;
@@ -234,12 +238,28 @@ export function smartRules(content) {
 // without reading the playlist (its rules are read from Plex if the listing
 // didn't have them): 'all' (every track there is in it), 'none' (it's of
 // another library) or 'unknown'.
-async function byRules(list, section) {
-  const content = list.content || (await app.server.playlist(list.ratingKey).catch(() => null))?.content;
+// Kept until the playlist changes (null: its rules couldn't be read just
+// now, so it's read as any other).
+async function byRules(list, section, signal) {
+  const s = app.server;
+  const key = `${s.uri}|${list.ratingKey}|${section}`;
+  const stamp = String(list.updatedAt || 0);
+  const hit = ruled.get(key);
+  if (hit && hit.stamp === stamp) return hit.said;
+  const was = generation;
+  let content = list.content;
+  if (!content) {
+    const got = await s.playlist(list.ratingKey, { signal }).catch(() => null);
+    if (!got) return null;
+    content = got.content;
+  }
   const rules = smartRules(content);
-  if (!rules || rules.type !== '10') return 'unknown';
-  if (rules.section !== String(section)) return 'none';
-  return rules.narrowed ? 'unknown' : 'all';
+  const said = !rules || rules.type !== '10' ? 'unknown' : rules.section !== String(section) ? 'none' : rules.narrowed ? 'unknown' : 'all';
+  if (was === generation) {
+    ruled.set(key, { stamp, said });
+    if (ruled.size > 2000) ruled.delete(ruled.keys().next().value);
+  }
+  return said;
 }
 
 // ---------- playlists and collections ----------
@@ -377,7 +397,11 @@ export async function artistAppearsIn(artist, { signal, onFound, onProgress } = 
 // Resolves to { skipped, checked }.
 async function readLists(lists, section, { signal, onProgress, smartTtl, each }) {
   const aborted = abortedError;
-  const said = await Promise.all(lists.map((x) => (x.kind === 'playlist' && isSmart(x.list) ? byRules(x.list, section) : 'unknown')));
+  const said = lists.map(() => 'unknown');
+  const smart = lists.map((x, i) => i).filter((i) => lists[i].kind === 'playlist' && isSmart(lists[i].list));
+  await eachLimited(smart, 3, async (i) => {
+    if (!signal?.aborted) said[i] = (await byRules(lists[i].list, section, signal)) || 'unknown';
+  });
   if (signal?.aborted) throw aborted();
   const skipped = [];
   const todo = lists.filter((x, i) => {

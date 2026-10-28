@@ -17,14 +17,20 @@ you're running is shown in **Settings › About**.
   so nothing of theirs carries over; the next person's settings come from
   their own account, and their playlists, ratings and plays are their own
   in Plex. They stay on the same server and library where they can use
-  them. It's part of the app: there's nothing to set.
+  them. The PIN goes to plex.tv only, and the browser isn't asked to
+  keep it. It's part of the app: there's nothing to set.
 - **Skip tracks you've rated down**, in **Settings › Playback**, on to
   begin with: a track with a thumbs down, or one star or less (in this
   app or any of Plex's), is never picked for you: not for radio, mixes or
   stations, shuffling an artist or the library, similar tracks, Sonic
   path, the Guest DJs or AI playlists. An album or playlist you play
   yourself plays as it is. Ratings are each Plex account's own, so what
-  one person rates down is left out for them alone.
+  one person rates down is left out for them alone. In thumbs, a thumbs
+  down is now exactly that: two stars, given in another app, is neither
+  thumb (it showed as down). A rating changed in another Plex app since
+  you rated the track here is the one that counts, once Plex says so.
+  Random album picks another album where every track on one is rated
+  down.
 
 ### Fixed
 
@@ -37,7 +43,12 @@ you're running is shown in **Settings › About**.
 - **Appears in leaves out playlists of the whole library**, such as
   Plex's All Music: every track is in a smart playlist whose rules are
   the whole library, so it says nothing. Other smart playlists are still
-  looked through.
+  looked through. Their rules are read once, three at a time, and kept
+  until the playlist changes.
+- **Back never shows the last person's pages**: after signing out, or
+  switching user, going back to a page from before shows Home instead.
+  And anything another open tab kept in the moment before it followed
+  (its queue, say) goes too.
 
 ## 0.28.0 - 2026-10-28
 

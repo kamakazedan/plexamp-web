@@ -249,13 +249,17 @@ export const timeTravelRadio = () =>
     playList(await pickable(items.map(normTrack), { keep: 10 }), 0, ctx(`Time travel: the ${String(d.key).slice(2)}s`, `/browse/albums?${new URLSearchParams({ decade: d.key, title: `The ${d.title || `${d.key}s`}` })}`));
   });
 
-// (A station: without the album's tracks you've rated down.)
+// (A station: without the album's tracks you've rated down, and another
+// album where those are all of them.)
 export const randomAlbum = () =>
   guard(async () => {
-    const { items } = await app.server.list(app.source.sectionKey, 9, { sort: 'random', size: 1 });
+    const { items } = await app.server.list(app.source.sectionKey, 9, { sort: 'random', size: 5 });
     if (!items.length) return toast('This library has no albums.');
-    const tracks = withoutDisliked((await app.server.children(items[0].ratingKey)).filter((m) => m.type === 'track').map(normTrack));
-    await playAlbum(items[0], { tracks });
+    for (const album of items) {
+      const tracks = withoutDisliked((await app.server.children(album.ratingKey)).filter((m) => m.type === 'track').map(normTrack));
+      if (tracks.length) return playAlbum(album, { tracks });
+    }
+    toast('Every track on the albums picked is one you’ve rated down. Try again for others.');
   });
 
 export const sonicPath = (from, to) =>

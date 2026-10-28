@@ -56,11 +56,10 @@ export const ratingOf = (t) => {
   return known.has(id) ? known.get(id) : (t?.userRating ?? null);
 };
 // Rated down: a thumbs down, or one star or less (Plex's 2 of 10, or 1).
+// Thumbs show down for that, and no more (two stars is neither).
 export const DISLIKED_AT_MOST = 2;
-export const isDisliked = (t) => {
-  const r = Number(ratingOf(t));
-  return Number.isFinite(r) && r > 0 && r <= DISLIKED_AT_MOST;
-};
+export const isDownRating = (v) => Number.isFinite(Number(v)) && Number(v) > 0 && Number(v) <= DISLIKED_AT_MOST;
+export const isDisliked = (t) => isDownRating(ratingOf(t));
 
 export async function rateTrack(track, rating) {
   const id = String(track.id);
@@ -196,8 +195,8 @@ function paintRow(el) {
     }
     up.classList.toggle('on', v >= 6);
     up.setAttribute('aria-pressed', String(v >= 6));
-    down.classList.toggle('on', v > 0 && v <= 4);
-    down.setAttribute('aria-pressed', String(v > 0 && v <= 4));
+    down.classList.toggle('on', isDownRating(v));
+    down.setAttribute('aria-pressed', String(isDownRating(v)));
     return;
   }
   if (!el.querySelector('.rr-stars')) el.replaceChildren(h('span.rr-stars', { 'aria-hidden': 'true' }));
@@ -230,7 +229,7 @@ function onRowClick(el, e) {
   } else if (mode === 'thumbs') {
     const btn = e.target.closest('.rr-thumb');
     if (!btn) return;
-    next = btn.classList.contains('rr-up') ? (v >= 6 ? 0 : 10) : v > 0 && v <= 4 ? 0 : 2;
+    next = btn.classList.contains('rr-up') ? (v >= 6 ? 0 : 10) : isDownRating(v) ? 0 : 2;
   } else {
     // Tapping the rating it has clears it.
     next = starsAt(el, e.clientX);

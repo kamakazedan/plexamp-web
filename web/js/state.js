@@ -118,6 +118,14 @@ export function migrateSettings(s) {
   return s;
 }
 
+// The first start since someone signed out or switched user here (see
+// leave): what another tab of theirs kept in the moment before it heard
+// goes too (its queue, say). Only this device's id, what this browser has
+// met, its settings where they stay, and the next person's sign-in and
+// server stay. ('syncedBefore' is SYNCED_BEFORE, below.)
+const LEFT = 'left';
+if (store.get(LEFT)) store.clear(['clientId', 'syncedBefore', 'settings', 'auth', 'source']);
+
 export const app = {
   config: window.PW_CONFIG || {},
   auth: store.get('auth'), // { token, username, thumb, manual }
@@ -226,6 +234,8 @@ function leave(next) {
     store.set('auth', next.auth);
     if (next.source) store.set('source', next.source);
   }
+  store.set(LEFT, true);
+  const kept = JSON.stringify(store.get('settings'));
   // Nothing more is kept from here on (what's playing, say, as the page goes).
   store.freeze();
   app.auth = null;
@@ -238,7 +248,26 @@ function leave(next) {
   // (Sent the way a page's own requests are: browsers ignore the request
   // for one that couldn't carry cookies, though this player sets none.)
   const forget = fetch('signed-out', { cache: 'no-store', credentials: 'same-origin' }).catch(() => {});
-  Promise.race([forget, new Promise((r) => setTimeout(r, 1500))]).then(() => reloadClean(!!next));
+  Promise.race([forget, new Promise((r) => setTimeout(r, 1500))]).then(() => {
+    settle(next, kept);
+    reloadClean(!!next);
+  });
+}
+
+// Another tab of theirs follows once it hears (see below), but what it kept
+// in the moment before (its queue, say) goes too, as does anything put in
+// place of what's kept for the next person: then they sign in, or choose a
+// server, afresh. (Clearing isn't held back by the freeze.)
+function settle(next, settings) {
+  const same = (key, value) => JSON.stringify(store.get(key)) === JSON.stringify(value ?? null);
+  const keep = ['clientId', SYNCED_BEFORE, LEFT];
+  if (next) {
+    if (same('auth', next.auth)) keep.push('auth');
+    if (same('source', next.source)) keep.push('source');
+  } else if (JSON.stringify(store.get('settings')) === settings) {
+    keep.push('settings');
+  }
+  store.clear(keep);
 }
 
 // The page afresh, without this tab's history of pages (and searches) either

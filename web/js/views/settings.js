@@ -102,9 +102,11 @@ function accountButtons() {
   if (!auth.manual && auth.token) {
     Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null)])
       .then(([users, me]) => {
-        if (app.auth?.token !== auth.token) return;
-        const mine = (u) => (me?.uuid ? u.uuid === String(me.uuid) : u.title === auth.username);
-        if (users.length < 2 || !users.some((u) => !mine(u))) return;
+        if (app.auth?.token !== auth.token || !me?.uuid) return;
+        // (Which of them is you, by plex.tv's id for you: never offered
+        // yourself, as switching to you would clear what's kept for you.)
+        const mine = (u) => u.uuid === String(me.uuid);
+        if (users.length < 2 || !users.some(mine)) return;
         switchBtn.onclick = () => chooseHomeUser(users, mine);
         switchBtn.hidden = false;
       })
@@ -223,7 +225,7 @@ async function switchToHomeUser(u) {
   if (switching) return;
   let pin = null;
   if (u.protected) {
-    pin = await askText({ title: `Switch to ${u.title}`, label: 'Their PIN', confirm: 'Switch', maxLength: 4, type: 'password', inputMode: 'numeric', message: `${u.title} has a PIN on Plex.` });
+    pin = await askText({ title: `Switch to ${u.title}`, label: 'Their PIN', confirm: 'Switch', maxLength: 4, type: 'password', inputMode: 'numeric', secret: true, message: `${u.title} has a PIN on Plex.` });
     if (pin === null) return;
     if (!/^\d{4}$/.test(pin)) return toast('A PIN is four numbers.');
   }

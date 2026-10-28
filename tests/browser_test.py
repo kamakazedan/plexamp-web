@@ -2136,9 +2136,10 @@ with sync_playwright() as pw:
         page.wait_for_timeout(500)
         check('lists: a row opens its playlist', js(page, '() => location.hash') == f"#/playlist/{fav['ratingKey']}")
 
-        # Looking again reads nothing again, until a list changes.
+        # Looking again reads nothing again, until a list changes (a smart
+        # playlist's rules neither).
         reads = []
-        page.on('request', lambda r: reads.append(r.url) if re.search(r'/(items|children)\?', r.url) else None)
+        page.on('request', lambda r: reads.append(r.url) if re.search(r'/(items|children)\?|/playlists/\d+\?', r.url) else None)
         page.goto(APP + '#/')
         page.wait_for_selector('.wide-card')
         page.goto(APP + f"#/appears/{t['ratingKey']}")
@@ -3592,8 +3593,8 @@ with sync_playwright() as pw:
             trail.append((js(page, '() => location.hash'), js(page, "() => document.querySelector('.view .search-box input')?.value ?? null"),
                           js(page, '() => JSON.stringify(history.state)')))
         reached = {t[0].split('?')[0] for t in trail}
-        check('privacy: ...so after signing out, someone signing in next on the tab finds none of it going Back (nor does the page)',
-              'glass' not in tab_after and 'harbour' not in tab_after and {'#/browse/artists', '#/search'} <= reached
+        check('privacy: ...so after signing out, someone signing in next on the tab finds none of it going Back: each of the last person\'s pages is Home',
+              'glass' not in tab_after and 'harbour' not in tab_after and len(trail) >= 3 and reached <= {'#/', '#/login'}
               and not any(t[1] for t in trail) and not any('glass' in t[2] or 'harbour' in t[2] for t in trail), f'{tab_after} {trail}')
         ctx.close()
 
@@ -4664,6 +4665,9 @@ with sync_playwright() as pw:
         shot(page, 'ratings-02-thumbs')
         third.locator('.rr-down').click()
         check('ratings: thumbs down is one star, and leaves it', wait_for(lambda: rating_of(tid3) == 2, 5) and wait_for(lambda: tid3 not in (loved_ids() or []), 6), rating_of(tid3))
+        mock(f'/:/rate?key={tid3}&rating=4&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        neither = wait_for(lambda: third.locator('.rr-thumb.rr-down.on').count() == 0 and third.locator('.rr-thumb.rr-up.on').count() == 0, 10)
+        check('ratings: ...two stars (rated in another Plex app since) is neither thumb: thumbs down is a star or less, as what\'s skipped is', neither)
         settings(page, {'ratingSystem': 'off'})
         page.wait_for_timeout(300)
         check('ratings: with ratings off, lists have none', page.locator('.view .tracks .track .row-rating:visible').count() == 0)
@@ -7028,17 +7032,23 @@ with sync_playwright() as pw:
         switch_to(page, 'Kid')
         page.wait_for_selector('.sheet.open .ask-form input')
         box = page.locator('.sheet.open .ask-form input')
-        asked = (box.get_attribute('type'), box.get_attribute('inputmode'), page.locator('.sheet.open .sheet-title').inner_text())
+        asked = (box.get_attribute('type'), box.get_attribute('inputmode'), page.locator('.sheet.open .sheet-title').inner_text(),
+                 box.get_attribute('autocomplete'), box.get_attribute('data-1p-ignore') is not None and box.get_attribute('data-lpignore') == 'true')
         page.wait_for_timeout(250)
         box.fill(WRONG_PIN)
         page.click('.sheet.open .ask-form button[type=submit]')
         page.wait_for_selector('.toast:has-text("That PIN isn’t right.")', timeout=10000)
         still = who(page)
-        check('plexhome: switching to Kid asks for Kid\'s PIN (hidden, as a number), and a wrong one switches to nobody',
-              asked == ('password', 'numeric', 'Switch to Kid') and still['token'] == 't' and page.locator('.switching-cover').count() == 0, f'{asked} {still}')
+        check('plexhome: switching to Kid asks for Kid\'s PIN (hidden, as a number, never offered to a password manager to keep), and a wrong one switches to nobody',
+              asked == ('password', 'numeric', 'Switch to Kid', 'one-time-code', True) and still['token'] == 't' and page.locator('.switching-cover').count() == 0, f'{asked} {still}')
 
         # The right one: Kid, on the same server and library (with Kid's own
-        # token for it), at Home, in this tab and the other.
+        # token for it), at Home, in this tab and the other. (The other tab
+        # keeps Dan's queue in the moment before it hears, as a tab busy
+        # just then could.)
+        other.evaluate("""() => window.addEventListener('storage', () => { if (window.__kept) return; window.__kept = true;
+            localStorage.setItem('pw.player.mock-server-1', JSON.stringify({ items: [{ id: 'dans-queued-track' }], index: 0 }));
+            localStorage.setItem('test.kept', String(Date.now())); })""")
         js(page, COVER_WATCH)
         switch_to(page, 'Kid')
         page.wait_for_selector('.sheet.open .ask-form input')
@@ -7064,6 +7074,12 @@ with sync_playwright() as pw:
               and not any(k.startswith('pw.player') or k in ('pw.libraryCounts', 'pw.syncPending', 'pw.syncRev') for k in keys)
               and 'harbour' not in tab and playing == [None, 0] and 'Dans Secret Song' not in kid_missing and 'Dans Secret Song' not in kid_stored
               and 'own prompt' not in kid_stored, f'{theirs} {keys} {tab[:200]} {playing} {kid_missing}')
+        check('plexhome: ...not even what another tab of Dan\'s kept in the moment before it heard (his queue)',
+              js(page, "() => localStorage.getItem('test.kept')") and 'dans-queued-track' not in kid_stored and 'pw.left' not in keys, kid_stored[:300])
+        page.go_back()
+        page.wait_for_timeout(1200)
+        back_to = (js(page, '() => location.hash'), page.locator('.view .wide-card').count() > 0, page.locator('.account-card').count())
+        check('plexhome: ...and Back shows Home, not the page Dan was on', back_to[0] == '#/' and back_to[1] and back_to[2] == 0, str(back_to))
         followed = eventually(lambda: other.url.endswith('#/') and who(other)['token'] == 't4' and other.locator('.wide-card:not(.skeleton)').count() > 0, 20)
         check('plexhome: ...and another tab follows, at Home (not on Dan\'s playlist)', followed, f'{other.url}')
         other.close()

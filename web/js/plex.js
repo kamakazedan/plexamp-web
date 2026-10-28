@@ -246,7 +246,7 @@ export async function homeUsers(token) {
 export async function switchHomeUser(token, uuid, pin) {
   if (!HOME_UUID.test(String(uuid ?? ''))) throw Object.assign(new Error('Not someone in your Plex Home.'), { status: 400 });
   const user = await request(withParams(`${CLIENTS}/api/v2/home/users/${uuid}/switch`, { ...plexParams(token), pin: pin || undefined }), { method: 'POST' });
-  if (typeof user?.authToken !== 'string' || !user.authToken) throw Object.assign(new Error('plex.tv didn’t switch to them.'), { status: 502 });
+  if (typeof user?.authToken !== 'string' || !/^[A-Za-z0-9_.~-]{1,200}$/.test(user.authToken)) throw Object.assign(new Error('plex.tv didn’t switch to them.'), { status: 502 });
   return user;
 }
 
@@ -605,8 +605,8 @@ export class PlexServer {
     for (const k of this.cache.keys()) if (k.startsWith('playlists:')) this.cache.delete(k);
   }
 
-  async playlist(id) {
-    return asArray((await this.get(`/playlists/${id}`)).Metadata)[0] || null;
+  async playlist(id, opts) {
+    return asArray((await this.get(`/playlists/${id}`, null, opts)).Metadata)[0] || null;
   }
 
   // (`ids`: only each entry's id, as LIGHT asks.)
