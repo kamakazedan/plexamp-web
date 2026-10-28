@@ -47,9 +47,9 @@ export function missingTracksView({ el, onDispose }) {
     lede.textContent =
       (!kept
         ? `${what}, that ${server} doesn’t have, kept on this device so you can go and find them (each server has a list of its own). `
-        : kept.owner
+        : kept.owner === true
           ? `${what}, that ${server} doesn’t have: yours and your friends’, so you can see everything that’s missing from it and go and find it. Kept for your Plex account on every device; what anyone asked an AI for, and their Spotify playlists’ names, stay on the device they asked on. `
-          : `${what}, that ${server} doesn’t have, kept for your Plex account on every device. Whoever runs ${server} sees them too, with your Plex name, so they can add them, but not what you asked for or your Spotify playlists’ names: those stay on the device you asked on. `) +
+          : `${what}, that ${server} doesn’t have, kept for your Plex account on every device. ${kept.owner === false ? `Whoever runs ${server}` : `The owner of ${server}`} sees them too, with your Plex name, so they can add them, but not what you asked for or your Spotify playlists’ names: those stay on the device you asked on. `) +
       (mbOn()
         ? 'AI playlists check what they suggest on MusicBrainz before it goes on this list, and leave out what MusicBrainz doesn’t know (most likely made up). Check on MusicBrainz does the same for those listed without being checked.'
         : 'AI models sometimes suggest songs that don’t exist, so check before you go looking.');

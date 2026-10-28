@@ -1054,10 +1054,11 @@ class Player extends EventTarget {
     let fade = set;
     // Over a quiet ending, the fade starts where it does, but no more than
     // MAX_QUIET_LEAD seconds before the music ends (and not in the first half
-    // of the track), and lasts as long as the ending takes to go nearly
+    // of the track, or so near the end there's no time for SMART_FADE_MIN
+    // seconds of it), and lasts as long as the ending takes to go nearly
     // silent (smartFade): its own length, not Crossfade length.
     if (quietFrom != null) {
-      at = Math.max(quietFrom, end - MAX_QUIET_LEAD, end / 2);
+      at = Math.min(Math.max(quietFrom, end - MAX_QUIET_LEAD, end / 2), end - Math.min(set, SMART_FADE_MIN));
       fade = Math.max(0.5, Math.min(smartFade(this.spans.get(cur.id), at, end, set), nextLen / 3));
     }
     return { ni, next, kind: 'fade', at: Math.max(0, at), fade, startAt };

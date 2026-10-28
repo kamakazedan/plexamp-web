@@ -98,11 +98,11 @@ export function migrateSettings(s) {
   }
   if (!(Number(s.version) >= 4)) {
     // 0.25.0: one setting for codec information everywhere, for the four
-    // there were (album pages, covers, search, the player): off if they all
-    // were. And live updates are the player's to choose (WEBSOCKETS on the
-    // container), not each device's.
-    const old = CODEC_SETTINGS.filter((k) => typeof s[k] === 'boolean');
-    if (old.length && old.every((k) => s[k] === false)) s.codecInfo = false;
+    // there were (album pages, covers, search, the player): off where all
+    // four were (one kept from before another was added, 0.23.0's covers,
+    // say, isn't all of them). And live updates are the player's to choose
+    // (WEBSOCKETS on the container), not each device's.
+    if (CODEC_SETTINGS.every((k) => s[k] === false)) s.codecInfo = false;
     for (const k of CODEC_SETTINGS) delete s[k];
     delete s.liveUpdates;
   }

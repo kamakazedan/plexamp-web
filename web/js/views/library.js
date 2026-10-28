@@ -243,11 +243,15 @@ export async function browseView({ el, params, query, saved, key, onDispose }) {
       ...labels.map((l) => {
         const rest = Object.fromEntries(Object.entries(filters).filter(([k]) => k !== l.key));
         return h(
-          'button.chip.filter-chip',
-          // (What's typed in the search box stays.)
-          { type: 'button', role: 'listitem', 'aria-label': `Remove ${l.label}`, onclick: () => navigate(browseHref(kind, { ...rest, within: '1' }, query.sort), { replace: true, keep: true }) },
-          h('span', null, l.label),
-          icon('close', 16),
+          'span.chip-item',
+          { role: 'listitem' },
+          h(
+            'button.chip.filter-chip',
+            // (What's typed in the search box stays.)
+            { type: 'button', 'aria-label': `Remove ${l.label}`, onclick: () => navigate(browseHref(kind, { ...rest, within: '1' }, query.sort), { replace: true, keep: true }) },
+            h('span', null, l.label),
+            icon('close', 16),
+          ),
         );
       }),
     );

@@ -151,10 +151,10 @@ class LiveUpdates extends EventTarget {
         }
         if (gen !== this.gen) return;
         failures += 1;
+        // (Said while it waits, not once it's connected again.)
         if (only) {
-          note = 'The WebSocket couldn’t connect from this network, so it’s tried again: this player uses WebSockets only (WEBSOCKETS=on).';
-          this.note = note;
-          this.emit('mode', { mode: this.mode, note });
+          this.note = 'The WebSocket couldn’t connect from this network, so it’s tried again: this player uses WebSockets only (WEBSOCKETS=on).';
+          this.emit('mode', { mode: this.mode, note: this.note });
           await this.sleep(Math.min(WS_ONLY_RETRY_MAX, 3000 * 2 ** Math.min(failures - 1, 5)), gen);
           continue;
         }

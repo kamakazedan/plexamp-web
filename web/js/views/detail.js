@@ -205,27 +205,57 @@ export function albumGroup(m) {
   return 'Albums';
 }
 
-// An artist's albums with what kind each is. Plex's listing of an artist's
-// albums leaves that out (an album's own details have it), so where none
-// say, their details are asked for too: one request for every 40, kept a
-// while (as albumMeta keeps them).
-async function withTypes(s, albums) {
-  if (!albums.length || albums.some(typed)) return albums;
-  const full = await s.albumsMeta(albums.map((m) => m.ratingKey)).catch(() => []);
-  return albums.map((m, i) => (full[i] ? { ...m, Format: full[i].Format, Subformat: full[i].Subformat } : m));
+// Albums' release types: Plex's listing of an artist's albums leaves them
+// out (an album's own details have them), so they're read from those, 40
+// albums to a request, three requests at a time, and kept while the app's
+// open, in a list of their own (a big discography mustn't push the Plex
+// client's other answers out of what it keeps).
+const TYPES_KEPT = 5000;
+const TYPES_WAIT = 700; // ms the albums wait for them, before they're shown without
+const typesKept = new Map(); // `${server}|${album id}` -> { Format, Subformat }
+const keptFor = (id) => `${app.source?.serverId || app.source?.uri || ''}|${id}`;
+async function releaseTypes(s, albums) {
+  const want = [...new Set(albums.map((m) => String(m.ratingKey)))].filter((id) => /^\d+$/.test(id) && !typesKept.has(keptFor(id)));
+  const parts = Array.from({ length: Math.ceil(want.length / 40) }, (_, i) => want.slice(i * 40, i * 40 + 40));
+  await mapLimit(parts, 3, async (part) => {
+    let got;
+    try {
+      got = await s.metadataMany(part);
+    } catch {
+      return; // (asked again next time)
+    }
+    const byId = new Map(got.map((m) => [String(m.ratingKey), m]));
+    // (One Plex didn't give has nothing to say.)
+    for (const id of part) typesKept.set(keptFor(id), { Format: byId.get(id)?.Format || [], Subformat: byId.get(id)?.Subformat || [] });
+  });
+  const out = albums.map((m) => ({ ...m, ...(typesKept.get(keptFor(m.ratingKey)) || {}) }));
+  while (typesKept.size > TYPES_KEPT) typesKept.delete(typesKept.keys().next().value);
+  return out;
 }
 
 // The library's artist of that name (as the app compares names), or null:
-// kept a while, for every artist page that names them.
+// looked for as search does (the name itself first), and kept a while for
+// every artist page that names them, in a list of their own too.
+const NAMED_KEPT = 2000;
+const NAMED_MS = 30 * 60000;
+const named = new Map(); // `${server}|${section}|${name}` -> { at, job }
 function artistNamed(s, sec, name) {
   const want = norm(name);
   if (!want) return Promise.resolve(null);
-  return s
-    .memo(`artistNamed:${sec}:${want}`, async () => {
-      const { items } = await s.list(sec, 8, { size: 10, filters: { title: name } });
-      return items.find((a) => a.type === 'artist' && norm(a.title) === want) || null;
-    }, 30 * 60000)
-    .catch(() => null);
+  const key = `${keptFor(sec)}|${want}`;
+  const hit = named.get(key);
+  if (hit && Date.now() - hit.at < NAMED_MS) return hit.job;
+  const job = s
+    .search(name, sec, { limit: 10 })
+    .then((res) => (res.artist || []).find((a) => norm(a.title) === want) || null)
+    .catch(() => {
+      named.delete(key);
+      return null;
+    });
+  named.delete(key);
+  named.set(key, { at: Date.now(), job });
+  while (named.size > NAMED_KEPT) named.delete(named.keys().next().value);
+  return job;
 }
 
 // The artists Plex says are like this one (its metadata's similar artists)
@@ -281,10 +311,10 @@ export async function artistView({ el, params }) {
   collapseWhenHidden(head, title);
 
   const popularSlot = h('div');
-  const albumsSlot = h('div');
+  const albumsBox = h('div.artist-albums');
   const similarSlot = h('div');
   const sonicSlot = h('div');
-  el.append(popularSlot, albumsSlot, similarSlot, sonicSlot);
+  el.append(popularSlot, albumsBox, similarSlot, sonicSlot);
   // Its styles, each opening the library's artists of that style.
   const styles = (artist.Style || []).filter((t) => t?.tag && tagKey(t));
   if (styles.length) {
@@ -293,7 +323,11 @@ export async function artistView({ el, params }) {
         'section.block.artist-styles',
         null,
         sectionHeader('Styles'),
-        h('div.chips.artist-style-chips', { role: 'list' }, styles.map((t) => h('a.chip', { href: `#${browseHref('artists', { style: tagKey(t), title: t.tag })}`, role: 'listitem' }, t.tag))),
+        h(
+          'div.chips.artist-style-chips',
+          { role: 'list' },
+          styles.map((t) => h('span.chip-item', { role: 'listitem' }, h('a.chip', { href: `#${browseHref('artists', { style: tagKey(t), title: t.tag })}` }, t.tag))),
+        ),
       ),
     );
   }
@@ -328,25 +362,34 @@ export async function artistView({ el, params }) {
     popularSlot.replaceWith(h('section.block', null, sectionHeader('Popular tracks'), list, more));
   });
 
-  const albumsP = s
-    .children(artist.ratingKey)
-    .then((albums) => withTypes(s, albums))
-    .then((albums) => {
-      const sorted = albums.slice().sort((a, b) => (year(b) || 0) - (year(a) || 0));
-      const groups = new Map();
-      for (const m of sorted) {
-        const g = albumGroup(m);
-        if (!groups.has(g)) groups.set(g, []);
-        groups.get(g).push(m);
-      }
-      const blocks = GROUP_ORDER.filter((g) => groups.has(g)).map((g) => {
-        const cards = groups.get(g).map((m) => albumCard(m, { subtitle: year(m) || '' }));
-        if (g === 'Albums') return h('section.block', { dataset: { group: g } }, sectionHeader(g), grid(cards, { centered: true }));
-        const strip = shelf(cards);
-        return h('section.block', { dataset: { group: g } }, sectionHeader(g, null, null, strip), strip);
-      });
-      albumsSlot.replaceWith(...(blocks.length ? blocks : [emptyState('No albums for this artist.')]));
+  // Their albums by kind: Plex's listing doesn't say which kind each is,
+  // so the kinds are looked up (see releaseTypes). For most artists that's
+  // one request, waited for; a big discography is shown as it is, and
+  // grouped again once they're in.
+  const paintAlbums = (albums) => {
+    const sorted = albums.slice().sort((a, b) => (year(b) || 0) - (year(a) || 0));
+    const groups = new Map();
+    for (const m of sorted) {
+      const g = albumGroup(m);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(m);
+    }
+    const blocks = GROUP_ORDER.filter((g) => groups.has(g)).map((g) => {
+      const cards = groups.get(g).map((m) => albumCard(m, { subtitle: year(m) || '' }));
+      if (g === 'Albums') return h('section.block', { dataset: { group: g } }, sectionHeader(g), grid(cards, { centered: true }));
+      const strip = shelf(cards);
+      return h('section.block', { dataset: { group: g } }, sectionHeader(g, null, null, strip), strip);
     });
+    albumsBox.replaceChildren(...(blocks.length ? blocks : [emptyState('No albums for this artist.')]));
+  };
+  const albumsP = s.children(artist.ratingKey).then(async (albums) => {
+    if (!albums.length || albums.some(typed)) return paintAlbums(albums);
+    const typing = releaseTypes(s, albums);
+    const soon = await Promise.race([typing, new Promise((r) => setTimeout(r, TYPES_WAIT))]);
+    if (soon) return paintAlbums(soon);
+    paintAlbums(albums);
+    paintAlbums(await typing);
+  });
 
   // Similar artists (Plex's, those in this library) and sonically similar
   // ones, each a shelf, with a page of more.

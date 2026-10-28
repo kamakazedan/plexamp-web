@@ -80,10 +80,14 @@ export async function searchView({ el, query, saved, key, onDispose }) {
     tags.replaceChildren(
       ...words.map((w, i) =>
         h(
-          'button.chip.filter-chip',
-          { type: 'button', role: 'listitem', 'aria-label': `Remove “${w}”`, onclick: () => (words.splice(i, 1), update()) },
-          h('span', null, w),
-          icon('close', 16),
+          'span.chip-item',
+          { role: 'listitem' },
+          h(
+            'button.chip.filter-chip',
+            { type: 'button', 'aria-label': `Remove “${w}”`, onclick: () => (words.splice(i, 1), update()) },
+            h('span', null, w),
+            icon('close', 16),
+          ),
         ),
       ),
     );

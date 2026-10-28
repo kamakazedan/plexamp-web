@@ -6,6 +6,8 @@
 // at a time for everyone using the player; musicbrainz.org at most once a
 // second (its rule for each address), with a User-Agent saying what's
 // asking, as it asks. What it says is kept for a week.
+import { norm } from './missinglist.js';
+
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org (your own: none)
   keepMs: 7 * 24 * 3600 * 1000,
@@ -27,18 +29,10 @@ export class MusicBrainzError extends Error {
   }
 }
 
-// As the app compares names (web/js/ai.js norm): case, accents, "the" and
-// punctuation aside.
-export const norm = (v) =>
-  String(v || '')
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
-    .replace(/^the\s+/, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
+// Names are compared as the app compares them (missinglist.js norm, a copy
+// of the app's): case, accents, "the" and punctuation aside, and a name in
+// another script by its letters (since 0.25.0: before, every one of those
+// came out the same, as nothing, so any artist in that script would do).
 
 // A phrase for MusicBrainz's search (Lucene): quoted, with what would end it
 // taken out.

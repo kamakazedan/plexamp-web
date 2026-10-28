@@ -6,12 +6,12 @@
 #   PLEX_SERVER_URL     Your Plex server's address on your network, such as
 #                       http://192.168.1.10:32400. Browsers that can't reach
 #                       Plex directly go through this container instead.
-#   WEBSOCKETS          "auto" (the default): live updates use WebSockets,
-#                       and where they don't get through (some proxies and
-#                       firewalls block them), whatever does: an event
-#                       stream, or checking every minute. "on": WebSockets
-#                       only. "off": never. (DISABLE_WEBSOCKETS: "true",
-#                       from before, still means off.)
+#   WEBSOCKETS          Empty or "auto" (the default): live updates use
+#                       WebSockets, and where they don't get through (some
+#                       proxies and firewalls block them), whatever does: an
+#                       event stream, or checking every minute. "on":
+#                       WebSockets only. "off": never. (DISABLE_WEBSOCKETS:
+#                       "true", from before, still means off.)
 #   OLLAMA_URL          An Ollama server whose model everyone using the player
 #                       shares, such as http://192.168.1.20:11434, or
 #                       http://host.docker.internal:11434 for Ollama on this
@@ -61,7 +61,7 @@ services:
       - "8080:80"
     environment:
       PLEX_SERVER_URL: ""
-      WEBSOCKETS: "auto"
+      WEBSOCKETS: ""
       OLLAMA_URL: ""
       OLLAMA_MODEL: ""
       OLLAMA_AUTH: "plex"

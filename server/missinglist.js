@@ -25,17 +25,21 @@ export const MISSING_LIMITS = { ai: 500, spotify: 1000 };
 export const MISSING_LISTS = 20;
 
 // A name as it's compared: case, accents, "&" and "and", what's in brackets,
-// a leading "The" and punctuation don't count.
-export const norm = (v) =>
+// a leading "The" and punctuation don't count. A name in another script
+// (宇多田ヒカル, Кино), which that would leave nothing of, keeps its letters
+// and numbers (as since 0.25.0: before, they all came out the same, as
+// nothing).
+const plain = (v, other) =>
   String(v || '')
     .toLowerCase()
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/&/g, ' and ')
     .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
     .replace(/^the\s+/, '')
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(other, ' ')
     .trim();
+export const norm = (v) => plain(v, /[^a-z0-9]+/g) || plain(v, /[^\p{L}\p{N}]+/gu);
 
 export const sourceOf = (m) => (m.via === 'spotify' ? 'spotify' : 'ai');
 // What it is, wherever it's missing from.
@@ -45,12 +49,21 @@ export const keyOf = (m) => `${m.kind}|${norm(m.artist)}|${norm(m.title)}`;
 export const idOf = (m) => `${keyOf(m)}|${m.section}`;
 
 // A Spotify playlist, by its name, in a few characters: a track's `lists`
-// count the playlists it was in without keeping their names.
+// count the playlists it was in without keeping their names. Twelve bits of
+// a hash of the name (since 0.25.0), so what's kept can't be used to check a
+// name guessed: one in 4,096 names has the same (and now and then, two of
+// someone's playlists count as one).
 export function listId(name) {
   let x = 0x811c9dc5;
   for (const ch of String(name || '').trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
-  return x.toString(36);
+  return (x >>> 20).toString(36);
 }
+
+// A listId as it is now: one kept before 0.25.0 (the whole hash, four
+// characters or more) is cut down as listId cuts it.
+export const shortList = (id) => (typeof id === 'string' && /^[a-z0-9]{4,8}$/.test(id) ? (parseInt(id, 36) >>> 20).toString(36) : id);
+// ...and a list of them, each once.
+export const shortLists = (lists) => [...new Set((Array.isArray(lists) ? lists : []).map(shortList))];
 
 // The most recent of each server's, of each kind (see MISSING_LIMITS): by
 // when each was last noted, and of those noted the same second, the last
@@ -97,6 +110,7 @@ const onServer = (server) => (m) => m.server === server;
 // the list, and the keys of those noted.
 export function applyNote(list, op, { server, prompt } = {}) {
   const via = op.via === 'spotify' ? 'spotify' : '';
+  op = via ? { ...op, list: shortList(op.list) } : op;
   const here = (m) => m.server === server && String(m.section) === String(op.section);
   const found = new Set(op.found || []);
   const unreal = new Set(op.unreal || []);
@@ -128,7 +142,7 @@ export function applyNote(list, op, { server, prompt } = {}) {
         // (Kept before 0.22.0: the playlist it was last in.) At most
         // MISSING_LISTS: past that, it's in "20+" playlists, and counted no
         // further (so imported again, it isn't counted again).
-        const lists = Array.isArray(have.lists) ? have.lists : [listId(have.prompt)];
+        const lists = Array.isArray(have.lists) ? shortLists(have.lists) : [listId(have.prompt)];
         if (!lists.includes(op.list) && lists.length < MISSING_LISTS) {
           lists.push(op.list);
           have.times = (have.times || 1) + 1;
@@ -188,7 +202,7 @@ export function applyMerge(list, entries = [], { server } = {}) {
     }
     const merged = { ...have };
     if (sourceOf(m) === 'spotify') {
-      const lists = [...new Set([...(Array.isArray(have.lists) ? have.lists : []), ...(Array.isArray(m.lists) ? m.lists : [])])].slice(0, MISSING_LISTS);
+      const lists = shortLists([...(Array.isArray(have.lists) ? have.lists : []), ...(Array.isArray(m.lists) ? m.lists : [])]).slice(0, MISSING_LISTS);
       merged.lists = lists;
       merged.times = Math.max(have.times || 1, m.times || 1, lists.length);
     } else {

@@ -3142,6 +3142,11 @@ a.chip:hover {
   padding-top: 0;
 }
 
+/* Each chip in a list of them, keeping its own role (a link, a button). */
+.chip-item {
+  display: inline-flex;
+}
+
 /* A library list's filters (Electronic, 2020s), each removable. */
 .filter-chips {
   flex-wrap: wrap;

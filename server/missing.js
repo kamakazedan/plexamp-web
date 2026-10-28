@@ -12,7 +12,8 @@
 //
 // Never what an AI playlist was asked for, or a Spotify playlist's name:
 // those stay on the device that asked (a Spotify one's playlists are counted
-// by listId, a short hash of each name). No sign-ins or names: the owner
+// by listId, twelve bits of a hash of each name, too few to check a name
+// guessed). No sign-ins or names: the owner
 // sees whose each is by their own Plex friends, as plex.tv has them, looked
 // up as they look (see the route in index.js).
 //
@@ -21,7 +22,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { MISSING_LIMITS, MISSING_LISTS, applyOp, applyForget, idOf, sourceOf, trimMissing } from './missinglist.js';
+import { MISSING_LIMITS, MISSING_LISTS, applyOp, applyForget, idOf, shortList, shortLists, sourceOf, trimMissing } from './missinglist.js';
 
 export const MISSING_STORE_LIMITS = {
   accounts: 500, // with a list on this player (on any server)
@@ -36,6 +37,9 @@ export const MISSING_STORE_LIMITS = {
   done: 2000,
   doneMs: 60 * 86400000,
 };
+
+// The file's: 2 since 0.25.0 (see load).
+const MISSING_FILE_VERSION = 2;
 
 export class MissingError extends Error {
   constructor(status, message) {
@@ -71,7 +75,9 @@ export function cleanEntry(raw, now) {
   const e = { kind: raw.kind, artist, title };
   if (raw.via === 'spotify') {
     e.via = 'spotify';
-    e.lists = Array.isArray(raw.lists) ? [...new Set(raw.lists.filter((x) => typeof x === 'string' && LIST.test(x)))].slice(0, MISSING_LISTS) : [];
+    // (A playlist kept before 0.25.0, by the whole hash of its name, is cut
+    // down: see listId.)
+    e.lists = Array.isArray(raw.lists) ? shortLists(raw.lists.filter((x) => typeof x === 'string' && LIST.test(x))).slice(0, MISSING_LISTS) : [];
   }
   e.times = counted(raw.times);
   e.first = Math.min(when(raw.first, now) || last, last);
@@ -113,7 +119,7 @@ export function cleanOp(raw, now) {
     if (!found || !unreal) return null;
     const via = raw.via === 'spotify' ? 'spotify' : '';
     if (via && !(typeof raw.list === 'string' && LIST.test(raw.list))) return null;
-    return { type: 'note', id, items, found, unreal, via, ...(via ? { list: raw.list } : {}), section, library: text(raw.library, 200), at: when(raw.at, now) || now };
+    return { type: 'note', id, items, found, unreal, via, ...(via ? { list: shortList(raw.list) } : {}), section, library: text(raw.library, 200), at: when(raw.at, now) || now };
   }
   if (raw.type === 'merge' || raw.type === 'restore') {
     if (!Array.isArray(raw.entries) || raw.entries.length > MISSING_STORE_LIMITS.entriesPerOp) return null;
@@ -164,6 +170,9 @@ export class MissingStore {
     try {
       const data = JSON.parse(readFileSync(this.file, 'utf8'));
       const now = this.seconds();
+      // (Written before 0.25.0: again, soon, as it's kept now, without the
+      // whole hash of a Spotify playlist's name, or 0.24.0's `shared`.)
+      if ((Number(data?.version) || 1) < MISSING_FILE_VERSION) this.changed();
       for (const [server, s] of Object.entries(data?.servers && typeof data.servers === 'object' ? data.servers : {})) {
         if (!SERVER_ID.test(server) || !s || typeof s !== 'object') continue;
         for (const [key, a] of Object.entries(s.accounts && typeof s.accounts === 'object' ? s.accounts : {})) {
@@ -383,7 +392,7 @@ export class MissingStore {
     }
     const tmp = `${this.file}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify({ version: 1, servers }), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ version: MISSING_FILE_VERSION, servers }), { mode: 0o600 });
       renameSync(tmp, this.file);
     } catch (err) {
       this.log?.error(`missing tracks: couldn't save them to ${this.file}: ${err.message}`);

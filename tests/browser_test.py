@@ -846,7 +846,12 @@ with sync_playwright() as pw:
                   modes == 'connecting' and not streams and 'WEBSOCKETS=on' in status, f'{modes} {status} {streams[:1]}')
             mock('/__mock/config?ws=1&sse=on')
             js(page, "() => import('./js/live.js').then(m => m.live.checkNow())")
-            check('wsonly: ...and keep trying a WebSocket, which works once it gets through', wait_mode(page, 'websocket', 30) == 'websocket' and not streams, live_mode(page))
+            got = wait_mode(page, 'websocket', 30) == 'websocket' and not streams
+            page.goto(APP_DEBUG + '#/settings')
+            page.goto(APP_DEBUG + '#/settings/debug')
+            after = live_status(page)
+            check('wsonly: ...and keep trying a WebSocket, which works once it gets through (and isn\'t said not to then)',
+                  got and 'WEBSOCKETS=on' in after and 'couldn’t connect' not in after, f'{live_mode(page)} {after}')
             ctx.close()
         finally:
             mock('/__mock/config?ws=1&sse=on')
@@ -1473,8 +1478,7 @@ with sync_playwright() as pw:
         # those that sound like them, each with a page of more, and their
         # styles.
         named = {a['title']: a for a in mock('/library/sections/1/all?type=8&X-Plex-Container-Size=100&X-Plex-Token=t')['MediaContainer']['Metadata']}
-        detail_asks = []
-        page.on('request', lambda r: re.search(r'/library/metadata/[0-9,]+,[0-9]+(\?|$)', r.url) and detail_asks.append(r.url))
+        untyped = not any('Format' in a or 'Subformat' in a for a in mock(f"/library/metadata/{named['Glass Harbour']['ratingKey']}/children?X-Plex-Token=t")['MediaContainer']['Metadata'])
         group = lambda g: page.locator(f'.view section[data-group="{g}"] .card-title').all_inner_texts()
         page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
         page.wait_for_selector('.view section[data-similar=sonic]', timeout=10000)
@@ -1482,9 +1486,10 @@ with sync_playwright() as pw:
         heads = [t.upper() for t in page.locator('.view .block h2').all_inner_texts()]
         order = [x for x in heads if x in ('ALBUMS', 'SINGLES & EPS', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT')]
         shot(page, 'library-02-artist')
+        # (Other sections add albums to this artist: those are albums too.)
         check('library: an artist\'s page: Albums, then Singles & EPs, though Plex\'s listing of their albums doesn\'t say which is which',
-              order[:2] == ['ALBUMS', 'SINGLES & EPS'] and sorted(group('Albums')) == ['Low Light Signals', 'Tidal Lines'] and group('Singles & EPs') == ['Buoy'] and detail_asks,
-              f'{heads} {group("Albums")} {group("Singles & EPs")} {detail_asks[:1]}')
+              untyped and order[:2] == ['ALBUMS', 'SINGLES & EPS'] and {'Low Light Signals', 'Tidal Lines'} <= set(group('Albums')) and 'Buoy' not in group('Albums')
+              and group('Singles & EPs') == ['Buoy'], f'{untyped} {heads} {group("Albums")} {group("Singles & EPs")}')
         similar = page.locator('.view section[data-similar=similar] .card-title').all_inner_texts()
         check('library: ...then the artists Plex says are like them that the library has (in Plex\'s order), those that sound like them, their styles and About',
               order == ['ALBUMS', 'SINGLES & EPS', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT'] and similar == ['Kilo Meridian', 'Marisol Vega'], f'{order} {similar}')
@@ -4514,8 +4519,9 @@ with sync_playwright() as pw:
         # ending, the fade lasts until the track is nearly silent (2 seconds
         # at least, quick where it's nearly silent already), until its music
         # ends where it never gets that quiet, and for Crossfade length where
-        # it ends cold. (No longer than a third of the next track, here 20
-        # seconds long.)
+        # it ends cold; where it only goes quiet at the very last, starting
+        # early enough for 2 seconds of it. (No longer than a third of the
+        # next track, here 20 seconds long.)
         queue([qe['ratingKey'], qn['ratingKey']], 1)
         js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
         plans = js(page, """() => Promise.all([import('./js/player.js'), import('./js/state.js')]).then(([{ player: p }, { app }]) => {
@@ -4524,6 +4530,7 @@ with sync_playwright() as pw:
                 long: { start: 0, end: 19.5, quietFrom: { soft: 8, quiet: 11, hushed: 16 } },
                 nohush: { start: 0, end: 19.5, quietFrom: { soft: 12, quiet: 13, hushed: null } },
                 cold: { start: 0, end: 19.5, quietFrom: { soft: null, quiet: null, hushed: null } },
+                late: { start: 0, end: 19.4, quietFrom: { soft: 18.9, quiet: 19.1, hushed: 19.3 } },
             };
             const cur = p.current, next = p.queue[p.index + 1], was = app.settings.quietEndings;
             const out = {};
@@ -4544,7 +4551,8 @@ with sync_playwright() as pw:
         want = {'fadeout.soft': [14, 2.8], 'fadeout.quiet': [15.4, 2], 'fadeout.hushed': [16.8, 2],
                 'long.soft': [9.75, 6.25], 'long.quiet': [11, 5], 'long.hushed': [16, 2],
                 'nohush.soft': [12, 6.67], 'nohush.quiet': [13, 6.5], 'nohush.hushed': [14.5, 5],
-                'cold.soft': [14.5, 5], 'cold.quiet': [14.5, 5], 'cold.hushed': [14.5, 5]}
+                'cold.soft': [14.5, 5], 'cold.quiet': [14.5, 5], 'cold.hushed': [14.5, 5],
+                'late.soft': [17.4, 2], 'late.quiet': [17.4, 2], 'late.hushed': [17.4, 2]}
         off = {k: (plans.get(k), v) for k, v in want.items() if not plans.get(k) or any(abs(a - b) > 0.02 for a, b in zip(plans[k], v))}
         check('fades: smart crossfade length: over a quiet ending, until the track is nearly silent (or its music ends); Crossfade length where it ends cold', not off, str(off))
         # How quiet it has to be is a setting: "nearly silent" lets this one
@@ -4996,10 +5004,11 @@ with sync_playwright() as pw:
         # 0.24.0's four codec settings are one: off where they all were. And
         # live updates are no setting of a device's now.
         mig = js(page, "() => import('./js/state.js').then(({ migrateSettings }) => [migrateSettings({ version: 3, codecBadges: false, coverBadges: false, searchCodecs: false, showCodec: false, liveUpdates: 'nows' }),"
-                       " migrateSettings({ version: 3, codecBadges: true, coverBadges: false, searchCodecs: false, showCodec: false }), migrateSettings({ version: 4, codecInfo: true })])")
-        check('settings: 0.24.0\'s four codec settings become Show codec information, off only where they all were (and Live updates goes)',
+                       " migrateSettings({ version: 3, codecBadges: true, coverBadges: false, searchCodecs: false, showCodec: false }), migrateSettings({ version: 4, codecInfo: true }),"
+                       " migrateSettings({ version: 3, codecBadges: false, searchCodecs: false, showCodec: false })])")
+        check('settings: 0.24.0\'s four codec settings become Show codec information, off only where all four were (and Live updates goes)',
               mig[0].get('codecInfo') is False and not any(k in mig[0] for k in ('codecBadges', 'coverBadges', 'searchCodecs', 'showCodec', 'liveUpdates'))
-              and 'codecInfo' not in mig[1] and mig[2].get('codecInfo') is True, str(mig))
+              and 'codecInfo' not in mig[1] and mig[2].get('codecInfo') is True and 'codecInfo' not in mig[3], str(mig))
         page.goto(APP + '#/settings/experience')
         page.wait_for_selector('label.toggle-row:has-text("Show codec information")')
         old_rows = [t for t in page.locator('.toggle-row').all_inner_texts() if any(w in t for w in ('codec badges', 'formats in search'))]
@@ -6387,6 +6396,26 @@ with sync_playwright() as pw:
         def here(pg):
             return js(pg, "() => JSON.parse(localStorage.getItem('pw.aiMissing') || '[]').map((m) => m.title || m.artist).sort()")
 
+        # A Spotify playlist's listId: twelve bits of a hash of its name
+        # (before 0.25.0, the whole hash: `whole`).
+        def list_hash(name):
+            x = 0x811c9dc5
+            for ch in name.strip().lower():
+                x = ((x ^ ord(ch)) * 0x01000193) & 0xffffffff
+            return x
+
+        def base36(n):
+            digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+            out = ''
+            while True:
+                n, r = divmod(n, 36)
+                out = digits[r] + out
+                if not n:
+                    return out
+
+        def list_id(name, whole=False):
+            return base36(list_hash(name) if whole else list_hash(name) >> 20)
+
         def rows(pg, until=None, timeout=10):
             pg.goto(APP_DEBUG + '#/settings/ai')
             pg.goto(APP_DEBUG + '#/settings/missing')
@@ -6431,7 +6460,8 @@ with sync_playwright() as pw:
         now = int(time.time())
         legacy = [
             {'kind': 'artist', 'artist': 'Legacy Band', 'title': '', 'times': 2, 'first': now - 1000, 'last': now - 500, 'prompt': 'dan old secret', 'server': SRV, 'section': sec, 'library': lib},
-            {'kind': 'track', 'artist': 'Old Spotify', 'title': 'Old Tune', 'via': 'spotify', 'times': 1, 'first': now - 900, 'last': now - 400, 'prompt': 'Dans Old List', 'server': SRV, 'section': sec, 'library': lib},
+            {'kind': 'track', 'artist': 'Old Spotify', 'title': 'Old Tune', 'via': 'spotify', 'lists': [list_id('Dans Old List', True), list_id('Dans Other List', True)],
+             'times': 1, 'first': now - 900, 'last': now - 400, 'prompt': 'Dans Old List', 'server': SRV, 'section': sec, 'library': lib},
             {'kind': 'track', 'artist': 'Elsewhere', 'title': 'Other Server Song', 'times': 1, 'first': now - 100, 'last': now - 100, 'prompt': 'x', 'server': 'another-server', 'section': '1', 'library': 'X'},
         ]
         old_ctx, old, old_sent = device('missing-old', seed={'pw.auth': was['auth'], 'pw.source': was['source'], 'pw.aiMissing': legacy})
@@ -6439,9 +6469,14 @@ with sync_playwright() as pw:
         kept = lists('t')
         tune = next((m for m in kept['entries'] if m['title'] == 'Old Tune'), {})
         check('missingsync: the owner\'s list from before goes to their account, as it is (that server\'s, put together)', up and next(m for m in kept['entries'] if m['artist'] == 'Legacy Band')['times'] == 2
-              and len(tune.get('lists', [])) == 1, json.dumps(kept)[:300])
+              and len(tune.get('lists', [])) == 2, json.dumps(kept)[:300])
         check('missingsync: ...without what was asked for, or the Spotify playlist\'s name (they stay on that device)',
               not any(w in json.dumps(kept) + ' '.join(old_sent) for w in ('secret', 'Dans Old List')), ' '.join(old_sent)[:300])
+        short = [list_id('Dans Old List'), list_id('Dans Other List')]
+        whole = [list_id('Dans Old List', True), list_id('Dans Other List', True)]
+        here_lists = js(old, "() => JSON.parse(localStorage.getItem('pw.aiMissing') || '[]').filter((m) => m.lists).map((m) => m.lists)")
+        check('missingsync: ...its playlists counted by twelve bits of a hash of each name, the whole hash from before cut down, in the browser and on the player (never sent)',
+              here_lists == [short] and tune.get('lists') == short and not any(w in json.dumps(kept) + ' '.join(old_sent) for w in whole), f'{here_lists} {tune.get("lists")} {short}')
         old_rows = rows(old, lambda r: any('Dans Old List' in x for x in r))
         check('missingsync: ...where they\'re still shown', any('Dans Old List' in r for r in old_rows), str(old_rows))
 

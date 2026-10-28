@@ -13,7 +13,7 @@ import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS,
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
-import { applyNote, applyMerge, keyOf, idOf, listId, MISSING_LIMITS } from './missinglist.js';
+import { applyNote, applyMerge, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -669,6 +669,16 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
   assert.deepEqual(await tiring.check([{ kind: 'artist', artist: 'A' }, { kind: 'artist', artist: 'B' }, { kind: 'artist', artist: 'C' }]), ['real', null, null]);
 });
 
+test('MusicBrainz: an artist in another script is the one MusicBrainz has of that name, not any in that script', async () => {
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    // Whatever's asked for, an artist in the same script.
+    return { ok: true, status: 200, json: async () => (u.pathname === '/ws/2/artist' ? { artists: [{ name: 'Кино', score: 100 }] } : { recordings: [], 'release-groups': [] }) };
+  };
+  const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 });
+  assert.deepEqual(await mb.check([{ kind: 'artist', artist: 'Аквариум' }, { kind: 'artist', artist: 'КИНО' }]), ['unknown', 'real']);
+});
+
 test('MusicBrainz: musicbrainz.org once a second, your own server as fast as it answers, saying which version asks', async () => {
   const seen = [];
   const fetchImpl = async (url, init) => {
@@ -1111,6 +1121,8 @@ test('account settings: the four codec settings kept before 0.25.0 are one, off 
           2: { settings: { ...all(false), searchCodecs: true }, rev: 3 },
           3: { settings: { gridSize: 'large' }, rev: 1 },
           4: { settings: {}, rev: 5, off: true },
+          // (Kept before 0.23.0 had covers': not all four.)
+          5: { settings: { codecBadges: false, searchCodecs: false, showCodec: false }, rev: 2 },
         },
       }),
     );
@@ -1119,6 +1131,7 @@ test('account settings: the four codec settings kept before 0.25.0 are one, off 
     assert.deepEqual(store.get(2).settings, {}, 'one of them on: codec information stays on, as it starts');
     assert.deepEqual(store.get(3).settings, { gridSize: 'large' });
     assert.deepEqual(store.get(4), { settings: {}, changed: {}, rev: 5, off: true });
+    assert.deepEqual(store.get(5).settings, {}, 'three of the four off, the fourth never kept: on, as each device has it');
     store.flush();
     const kept = readFileSync(file, 'utf8');
     assert.equal(JSON.parse(kept).version, 3);
@@ -1375,6 +1388,52 @@ test('missing tracks: a Spotify one is counted once for each playlist, by its li
   assert.equal(cleanOp({ ...sp('x'), list: 'Road trip' }, AT), null);
 });
 
+// listId before 0.25.0: the whole hash of the name.
+const longListId = (name) => {
+  let x = 0x811c9dc5;
+  for (const ch of String(name).trim().toLowerCase()) x = Math.imul(x ^ ch.codePointAt(0), 0x01000193) >>> 0;
+  return x.toString(36);
+};
+
+test('missing tracks: a playlist\'s listId is twelve bits of a hash of its name, too few to check a name guessed (and one kept before 0.25.0 is cut down)', () => {
+  const names = Array.from({ length: 5000 }, (_, i) => `Playlist ${i}`);
+  const ids = names.map(listId);
+  assert.ok(ids.every((id) => /^[a-z0-9]{1,3}$/.test(id) && parseInt(id, 36) < 4096), ids.find((id) => parseInt(id, 36) >= 4096));
+  // Many names to each: 5,000 names have at most 4,096 ids.
+  assert.ok(new Set(ids).size <= 4096);
+  assert.equal(listId('  Road Trip '), listId('road trip'));
+  // One from before is cut down as listId cuts it, wherever it's met: what a
+  // browser sends, and what the player kept.
+  for (const name of ['Road trip', 'Gym', 'Late night', '夜']) {
+    assert.ok(longListId(name).length >= 4, name);
+    assert.equal(shortList(longListId(name)), listId(name), name);
+    assert.equal(shortList(listId(name)), listId(name), name);
+  }
+  assert.equal(cleanOp(noteOp([song('S', 'Tune')], { via: 'spotify', list: longListId('Gym') }), AT).list, listId('Gym'));
+  const e = cleanEntry({ kind: 'track', artist: 'S', title: 'Tune', via: 'spotify', lists: [longListId('Gym'), listId('Gym'), longListId('Road trip')], last: AT, section: '1' }, AT);
+  assert.deepEqual(e.lists, [listId('Gym'), listId('Road trip')]);
+  // ...and by the app's rules, as a browser's own list meets the account's.
+  const st = store();
+  asOwner(st, [noteOp([song('S', 'Tune')], { via: 'spotify', list: longListId('Gym') }), noteOp([song('S', 'Tune')], { via: 'spotify', list: listId('Gym') })]);
+  assert.deepEqual(mineOf(st, dan.id)[0].lists, [listId('Gym')]);
+});
+
+test('names in other scripts are told apart (norm), as Latin ones always were', () => {
+  assert.equal(norm('The Beatles'), 'beatles');
+  assert.equal(norm('Sigur Rós & Friends (Live)'), 'sigur ros and friends');
+  assert.equal(norm('КИНО'), 'кино');
+  assert.notEqual(norm('宇多田ヒカル'), norm('椎名林檎'));
+  assert.notEqual(norm('Кино'), '');
+  // (Latin where there is some, as before.)
+  assert.equal(norm('BTS 방탄소년단'), 'bts');
+  assert.equal(norm('!!!'), '');
+  // Two songs of the same name by two artists in another script are two
+  // entries, not one.
+  const st = store();
+  asOwner(st, [noteOp([song('宇多田ヒカル', 'First Love'), song('椎名林檎', 'First Love')])]);
+  assert.equal(mineOf(st, dan.id).length, 2);
+});
+
 test('missing tracks: what the app sends that isn\'t kept (what it was asked for) never is, and what can\'t be read is left out', () => {
   const st = store();
   const r = asOwner(st, [
@@ -1512,9 +1571,19 @@ test('missing tracks: kept in a file only the service can read, and read back (w
     data.servers[SRV].accounts[8] = { rev: 1, shared: true, entries: [], done: [] };
     data.servers['../x'] = { accounts: { 1: { entries: [{ kind: 'track', artist: 'F', title: 'Five', last: AT, section: '1' }] } } };
     writeFileSync(file, JSON.stringify(data));
+    // (Before 0.25.0, a playlist's whole hash, in a file of version 1.)
+    assert.equal(data.version, 2);
+    data.version = 1;
+    data.servers[SRV].accounts[sam.id].entries[0].lists = [longListId('Gym')];
+    writeFileSync(file, JSON.stringify(data));
     const again = new MissingStore({ dir, now: () => AT * 1000 });
     assert.deepEqual(mineOf(again, dan.id).map((m) => m.title), ['One']);
     assert.deepEqual(mineOf(again, sam.id).map((m) => [m.title, m.lists]), [['Two', [listId('Gym')]]]);
+    // A file from before is written again soon, as it's kept now.
+    again.flush();
+    const now = readFileSync(file, 'utf8');
+    assert.equal(JSON.parse(now).version, 2);
+    assert.ok(!now.includes(longListId('Gym')) && !now.includes('"shared"'), now.slice(0, 300));
     assert.ok(!again.servers.get(SRV).accounts.has(8), 'nothing kept for a choice that\'s no choice now');
     assert.deepEqual(mineOf(again, 7).map((m) => m.title), ['Four']);
     assert.deepEqual(again.view(7, SRV).done, ['abcdef123456'], 'what isn\'t a change, or is too old, left out');

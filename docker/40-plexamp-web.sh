@@ -504,10 +504,12 @@ WS_MODE="$(lower "${WEBSOCKETS:-}")"
 if [ -z "$WS_MODE" ]; then
     if [ "$WS_OLD" = true ]; then WS_MODE=off; else WS_MODE=auto; fi
 fi
+# (Not true: that could be taken for auto, and on is WebSockets only, never
+# anything else, even where they don't get through.)
 case "$WS_MODE" in
-    auto) ;;
-    on | true | yes | 1) WS_MODE=on ;;
+    auto | on) ;;
     off | false | no | 0) WS_MODE=off ;;
+    true | yes | 1) fail "WEBSOCKETS must be auto, on or off (got: $WEBSOCKETS): auto, the default, uses WebSockets where they get through, and on uses nothing else" ;;
     *) fail "WEBSOCKETS must be auto, on or off (got: $WEBSOCKETS)" ;;
 esac
 if [ "$WS_OLD" = true ] && [ "$WS_MODE" != off ]; then
@@ -667,7 +669,7 @@ fi
 say "Play Together is $([ "$TOGETHER" = true ] && echo on || echo off)"
 if [ "$SHARING" = true ]; then say "shared playlists are kept in $DATA_DIR"; fi
 if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each Plex account are kept in $DATA_DIR"; fi
-if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each Plex account are kept in $DATA_DIR (a Plex server's owner's, and friends' who choose to)"; fi
+if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each Plex account are kept in $DATA_DIR (everyone's, and a Plex server's owner sees them all)"; fi
 if [ "$MB" = true ]; then
     say "AI playlists' suggestions are checked on MusicBrainz at $(safe_url "$MB_URL")"
 fi

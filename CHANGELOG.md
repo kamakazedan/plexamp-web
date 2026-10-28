@@ -3,6 +3,90 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.25.0 - 2026-10-28
+
+### New
+
+- **Your friends' missing tracks reach you, the server's owner, without
+  them turning anything on.** When a friend imports a playlist from
+  Spotify (or an AI playlist suggests music) and your Plex server doesn't
+  have some of it, what's missing is synced into your Missing tracks, with
+  their name, so you can see everything that's missing from your server
+  and add it. There's no switch for it any more (0.24.0 had friends turn
+  on Keep them for your Plex account): their Missing tracks page, Show
+  missing tracks and an import's Put what isn't here on Missing tracks say
+  that whoever runs the server sees them. What a friend's browser kept
+  before goes to their account, and so to you with their name, the first
+  time they open 0.25.0: whether they'd kept it on the device in 0.24.0
+  or turned keeping it for their account off again. What anyone asks an AI for,
+  and their Spotify playlists' names, still never leave the device they
+  asked on, and friends still see only their own.
+  `SYNC_MISSING_TRACKS=false` keeps each browser's list its own.
+- **Singles & EPs, Compilations and the rest on artist pages**, as
+  Plexamp has them: Albums, then Singles & EPs, Live albums,
+  Compilations, Soundtracks, Remixes, DJ mixes, Mixtapes and Demos, from
+  Plex's release types. Plex's listing of an artist's albums doesn't say
+  which kind each is, so they all showed as Albums before: the app now
+  asks for the albums' details (one request for every 40, kept a while).
+- **Similar artists, Sonically similar artists and Styles on artist
+  pages.** Similar artists are the ones Plex says are like them that your
+  library has; Sonically similar artists, those that sound like them
+  (Plex's sonic analysis); each a shelf, with a page of more (›). Styles
+  open your library's artists of that style.
+- **Smart crossfade length.** Over a quiet ending, a Smart crossfade
+  lasts as long as the ending takes to go nearly silent, so the next
+  track reaches full volume just as this one fades away (at least 2
+  seconds, at most 15): quick where the ending is nearly silent already,
+  until the music ends where it never gets that quiet. A track that ends
+  cold fades for Crossfade length, as before.
+- **`WEBSOCKETS`**: `auto` (the default) uses WebSockets for live updates,
+  and where they don't get through (some proxies and firewalls block
+  them), whatever does: Plex's event stream, or checking every minute.
+  `on` uses WebSockets only, `off` never. `DISABLE_WEBSOCKETS=true` still
+  means `off`. (`true` isn't taken, as it could mean `auto` or `on`: the
+  container says so, and doesn't start.)
+
+### Changed
+
+- **One setting for codec information**: Settings › Experience › Show
+  codec information turns formats and quality on or off everywhere (on
+  album pages, over covers, in search and in the player), in place of
+  Show album codec badges, Show codec badges on covers, Show formats in
+  search and the player's Show codec. Off if you'd turned all four off.
+- **Live updates are the player's choice** (`WEBSOCKETS`), not each
+  device's: Settings › Connection › Live updates shows how this device
+  gets them, and why, and Test connection there starts them again from
+  the top. Without WebSockets and Off went: a device that had one of them
+  follows the player now (`WEBSOCKETS=off` is Off for everyone).
+- **A Spotify playlist is counted by twelve bits of a hash of its name**
+  on Missing tracks (one name in 4,096 has the same), not the whole
+  hash: too few for what's kept to be used to check whether someone has
+  a playlist of a name guessed. What was kept before is cut down the
+  first time 0.25.0 reads it, on the player and in each browser. Now and
+  then, two of someone's playlists count as one.
+- New Proxmox installs write `WEBSOCKETS=auto` in their settings; existing
+  ones keep theirs (`DISABLE_WEBSOCKETS=` empty is `auto`).
+- Docs: the README, configuration.md (WEBSOCKETS, SYNC_MISSING_TRACKS and
+  live updates), ai.md, features.md, SECURITY.md, troubleshooting.md, the
+  compose file and the Proxmox defaults.
+- Tests: the missingsync section (a friend's list going to their account
+  as they use it, and from before; no switch; playlists counted from
+  before cut down), wsonly (WEBSOCKETS=on), the artist page, smart
+  crossfade length, the codec setting and its migration, unit tests for
+  the service's lists and settings file, listId and names in other
+  scripts, and the container's (WEBSOCKETS, and true refused).
+
+### Fixed
+
+- **Names in other scripts** (宇多田ヒカル, Кино, 방탄소년단) are told apart
+  where the app compares names: before, every one of them came out the
+  same, as nothing, so two songs of the same title by two such artists
+  were one on Missing tracks, an AI playlist's suggestion could be taken
+  for the wrong artist's song, a check on MusicBrainz took any artist in
+  that script it found for the one asked about, and searching a list in
+  that script didn't narrow it. Names with any Latin letters in them are compared as
+  before.
+
 ## 0.24.0 - 2026-10-28
 
 ### New

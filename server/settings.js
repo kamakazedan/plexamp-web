@@ -172,13 +172,12 @@ function upgrade(a) {
 
 // 0.25.0 has one setting for codec information everywhere (codecInfo), for
 // the four there were (album pages, covers, search, the player): off where
-// they all were, as the app has it (web/js/state.js migrateSettings). From
-// the settings as the file had them: false, or null (as it starts: on).
+// all four were kept, and off, as the app has it (web/js/state.js
+// migrateSettings). (Most accounts kept from before 0.23.0 never had
+// covers' kept: those stay on.) From the settings as the file had them:
+// false, or null (as it starts: on).
 const CODEC_SETTINGS = ['codecBadges', 'coverBadges', 'searchCodecs', 'showCodec'];
-function codecInfoOf(raw) {
-  const old = CODEC_SETTINGS.filter((k) => typeof raw?.[k] === 'boolean');
-  return old.length && old.every((k) => raw[k] === false) ? false : null;
-}
+const codecInfoOf = (raw) => (CODEC_SETTINGS.every((k) => raw?.[k] === false) ? false : null);
 
 // What's said of an account's settings: them, how many times they've
 // changed (0: none kept yet), at which of those changes each last did

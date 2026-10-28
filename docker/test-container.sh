@@ -496,6 +496,7 @@ bad() { # name expected-message docker-run-args...
 bad "rejects a server address without http://" "PLEX_SERVER_URL must start with http://" -e PLEX_SERVER_URL=192.168.1.10:32400
 bad "rejects an unclear true/false value" "expected true or false" -e DISABLE_WEBSOCKETS=maybe
 bad "rejects an unclear WEBSOCKETS" "WEBSOCKETS must be auto, on or off" -e WEBSOCKETS=sometimes
+bad "...and WEBSOCKETS=true (on is WebSockets only, auto where they get through)" "auto, the default, uses WebSockets where they get through" -e WEBSOCKETS=true
 bad "rejects an unclear PLAY_TOGETHER" "PLAY_TOGETHER: expected true or false" -e PLAY_TOGETHER=sometimes
 bad "rejects an unclear CASTING" "CASTING: expected true or false" -e CASTING=sometimes
 bad "rejects an unclear PLAYLIST_SHARING" "PLAYLIST_SHARING: expected true or false" -e PLAYLIST_SHARING=sometimes
