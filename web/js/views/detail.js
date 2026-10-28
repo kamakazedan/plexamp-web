@@ -734,7 +734,7 @@ async function appearsInShelf(box, artist, signal) {
   box.replaceChildren(h('section.block', { dataset: { group: 'Appears in' } }, sectionHeader('Appears in', null, null, strip), status, strip));
   const of = (n, one, many) => (n === 1 ? one : `${fmt.number(n)} ${many}`);
   const say = (kind, e) => {
-    if (kind === 'playlist') return e.every ? 'Every track in your library' : of(e.count, 'A track of theirs', 'of their tracks');
+    if (kind === 'playlist') return of(e.count, 'A track of theirs', 'of their tracks');
     if (e.via === 'artist') return 'Artist collection';
     return e.via === 'album' ? of(e.count, 'An album of theirs', 'of their albums') : of(e.count, 'A track of theirs', 'of their tracks');
   };

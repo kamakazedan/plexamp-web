@@ -11,11 +11,19 @@ Then open http://127.0.0.1:8080, choose "Use a server address and token
 instead", and connect to http://127.0.0.1:32400 with the token "t".
 
 It also answers the plex.tv calls the container's service makes (point the
-service at it with PLEX_TV_URL). Three made-up accounts:
+service at it with PLEX_TV_URL), and the browser's (tests send them here).
+Made-up accounts:
 
     t    Dan, who owns this server
     t2   Sam, a friend of Dan's with access to the server
     t3   Alex, a friend of Dan's without access
+    t4   Kid, in Dan's Plex Home: a managed user, with a PIN (2468), who
+         can use the server
+    t5   Gran, in Dan's Plex Home too, with no PIN, who can't use it
+
+(/api/v2/home/users lists Dan's Plex Home for those in it; switching to one
+of them, POST /api/v2/home/users/UUID/switch, takes their PIN where they
+have one.)
 
 Like a real server it refuses other tokens, unless /__mock/config?open=1
 makes it behave like a server that lets this network in without signing in.
@@ -64,6 +72,8 @@ testing, these endpoints need no token:
                                   without a Format or Subformat, as an album
                                   Plex hasn't matched)
     /__mock/edits[?reset=1]       the album edits made (year, date, genres)
+    /__mock/home[?reset=1]        the switches made in Dan's Plex Home: who
+                                  from, to whom, and the PIN given
     /__mock/age?id=...&days=...   marks an album as last played that long ago
     /__mock/tracks                every track, with whether it starts or ends
                                   in silence (for testing transitions)
@@ -1192,10 +1202,26 @@ ACCOUNTS = {
     't': {'id': 1001, 'uuid': 'a1001', 'username': 'dan', 'title': 'Dan', 'friendlyName': 'Dan', 'email': 'dan@example.com'},
     't2': {'id': 1002, 'uuid': 'a1002', 'username': 'sam', 'title': 'Sam', 'friendlyName': 'Sam', 'email': 'sam@example.com'},
     't3': {'id': 1003, 'uuid': 'a1003', 'username': 'alex', 'title': 'Alex', 'friendlyName': 'Alex', 'email': 'alex@example.com'},
+    # (A managed user has no plex.tv username or email of their own.)
+    't4': {'id': 1004, 'uuid': 'a1004', 'username': '', 'title': 'Kid', 'friendlyName': '', 'email': ''},
+    't5': {'id': 1005, 'uuid': 'a1005', 'username': 'gran', 'title': 'Gran', 'friendlyName': 'Gran', 'email': 'gran@example.com'},
 }
-# Tokens this server accepts: its owner's and a friend's it's shared with.
-SERVER_TOKENS = {'t': 'owned', 't2': 'shared'}
+# Tokens this server accepts: its owner's, a friend's it's shared with, and
+# Kid's, in its owner's Plex Home.
+SERVER_TOKENS = {'t': 'owned', 't2': 'shared', 't4': 'shared'}
 FRIENDS = {'t': ['t2', 't3'], 't2': ['t', 't3'], 't3': ['t']}
+# Dan's Plex Home: Dan (its admin), Kid (managed, with a PIN) and Gran; and
+# the switches made in it (/__mock/home).
+HOME = {'admin': 't', 'members': ['t', 't4', 't5'], 'managed': {'t4'}, 'pins': {'t4': '2468'}}
+HOME_SWITCHES = []
+
+
+def home_user(t):
+    a = ACCOUNTS[t]
+    return {'id': a['id'], 'uuid': a['uuid'], 'title': a['title'], 'friendlyName': a['friendlyName'], 'username': a['username'] or None,
+            'email': a['email'] or None, 'thumb': f'https://plex.tv/users/{a["uuid"]}/avatar?c=1', 'hasPassword': t not in HOME['managed'],
+            'restricted': t in HOME['managed'], 'restrictionProfile': 'little_kid' if t in HOME['managed'] else None,
+            'updatedAt': NOW, 'admin': t == HOME['admin'], 'guest': False, 'protected': t in HOME['pins']}
 
 
 # Temporary tokens the server handed out (/security/token), and whose.
@@ -1898,6 +1924,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(json.dumps(res), 'application/json')
         if p == '/api/users':
             return self.send_text(friends_xml(token), 'application/xml')
+        if p == '/api/v2/home/users':
+            if token not in HOME['members']:
+                return self.send_text('{"errors": [{"code": 1003, "message": "Not found"}]}', 'application/json', 404)
+            return self.send_text(json.dumps({'id': 9001, 'name': "Dan's Home", 'guestUserID': None, 'guestEnabled': False,
+                                              'subscription': True, 'users': [home_user(t) for t in HOME['members']]}), 'application/json')
+        m = re.fullmatch(r'/api/v2/home/users/([A-Za-z0-9_-]+)/switch', p)
+        if m and self.command == 'POST':
+            to = next((t for t in HOME['members'] if ACCOUNTS[t]['uuid'] == m.group(1)), None)
+            pin = parse_qs(urlparse(self.path).query).get('pin', [''])[0]
+            HOME_SWITCHES.append({'from': token, 'to': to, 'pin': pin})
+            if token not in HOME['members'] or not to:
+                return self.send_text('{"errors": [{"code": 1001, "message": "User could not be authenticated"}]}', 'application/json', 401)
+            if to in HOME['pins'] and pin != HOME['pins'][to]:
+                return self.send_text('{"errors": [{"code": 1041, "message": "Invalid PIN"}]}', 'application/json', 401)
+            return self.send_text(json.dumps(dict(home_user(to), authToken=to)), 'application/json', 201)
         return self.send_text('{}', 'application/json', 404)
 
     def do_GET(self):  # noqa: C901 - a router in one place is easier to read here
@@ -2039,6 +2080,10 @@ class Handler(BaseHTTPRequestHandler):
             if q.get('reset', ['0'])[0] == '1':
                 EDITS.clear()
             return self.send_json({'edits': EDITS})
+        if p == '/__mock/home':
+            if q.get('reset', ['0'])[0] == '1':
+                HOME_SWITCHES.clear()
+            return self.send_json({'switches': HOME_SWITCHES})
         if p == '/__mock/picture':  # what was uploaded as an item's picture, if anything
             it = items.get(q.get('id', [''])[0]) or {}
             data = PICTURES.get(it.get('_poster') or '')

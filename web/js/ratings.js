@@ -23,8 +23,24 @@ export const ratingEvents = new EventTarget();
 // ❤️ Tracks needs. And ratings being saved, shown straight away.
 const known = new Map();
 const pending = new Map();
+// (Another server's tracks have other ids.)
+on('source', ({ serverChanged } = {}) => serverChanged && known.clear());
 const knownRating = (track) => (known.has(String(track.id)) ? known.get(String(track.id)) : (track.userRating ?? null));
 const shownRating = (track) => (pending.has(String(track.id)) ? pending.get(String(track.id)) : knownRating(track));
+
+// A track's rating, as this app knows it (one rated here since the track
+// was listed goes by that), for a track as the app has them or as Plex
+// lists them. Ratings are each Plex account's own.
+export const ratingOf = (t) => {
+  const id = String(t?.id ?? t?.ratingKey ?? '');
+  return known.has(id) ? known.get(id) : (t?.userRating ?? null);
+};
+// Rated down: a thumbs down, or one star or less (Plex's 2 of 10, or 1).
+export const DISLIKED_AT_MOST = 2;
+export const isDisliked = (t) => {
+  const r = Number(ratingOf(t));
+  return Number.isFinite(r) && r > 0 && r <= DISLIKED_AT_MOST;
+};
 
 export async function rateTrack(track, rating) {
   const id = String(track.id);

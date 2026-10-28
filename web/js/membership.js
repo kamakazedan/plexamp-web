@@ -11,10 +11,11 @@
 // leave the rest out), and kept until the list changes (Plex says when it
 // last did), so looking again is quick, for any track or artist. Smart
 // lists change without saying so: they're read again after a minute (five,
-// for an artist's page). Very long smart playlists aren't read: one whose
-// rules take in a whole library (a playlist of everything) holds every
-// track there, which its rules say without reading it; any other is left
-// out, and the page says so.
+// for an artist's page). A smart playlist whose rules take in a whole
+// library (Plex's All Music, say) is left out: every track there is in it,
+// so saying so says nothing (nor is it read: its rules say so, as they do
+// of one of another library). Very long smart playlists aren't read: those
+// are left out, and the page says so.
 //
 // Plex doesn't link the same song on different albums either, so they're
 // found by the song's name and artist.
@@ -262,11 +263,10 @@ const tagged = (c, tags) => (/^\d+$/.test(String(c.index ?? '')) && tags.ids.siz
 const isSmart = (list) => list.smart === true || list.smart === 1 || list.smart === '1';
 
 // What a track (as normTrack makes them) is in. Results come as they're
-// found, through onFound('playlist', { list, times, every }) and
-// onFound('collection', { list, via }), where `every` marks a smart
-// playlist of a whole library and `via` says what's in the collection: the
-// track, its album or its artist. Resolves to { playlists, collections,
-// skipped (lists too long to read), checked }.
+// found, through onFound('playlist', { list, times }) and
+// onFound('collection', { list, via }), where `via` says what's in the
+// collection: the track, its album or its artist. Resolves to { playlists,
+// collections, skipped (lists too long to read), checked }.
 export async function appearsIn(track, { signal, onFound, onProgress } = {}) {
   const s = app.server;
   // (Its details as they are now, for the collections it's in.)
@@ -304,11 +304,6 @@ export async function appearsIn(track, { signal, onFound, onProgress } = {}) {
   const read = await readLists(lists, section, {
     signal,
     onProgress,
-    whole: (list) => {
-      const entry = { list, times: 1, every: true };
-      found.playlists.push(entry);
-      onFound?.('playlist', entry);
-    },
     each: ({ kind, list }, { counts }) => {
       if (kind === 'playlist') {
         const times = counts.get(ids.track) || 0;
@@ -334,11 +329,11 @@ export async function appearsIn(track, { signal, onFound, onProgress } = {}) {
 // collections Plex says they're in): your playlists with their tracks in
 // (by them, or credited to them), and the library's collections of them,
 // of their albums or with their tracks. Results come as they're found,
-// through onFound('playlist', { list, count, every }) and
+// through onFound('playlist', { list, count }) and
 // onFound('collection', { list, via, count }) (`count`: how many of
-// theirs; `every`, a smart playlist of a whole library; `via`, what's in
-// the collection: artists, albums or tracks). Resolves to { playlists,
-// collections, skipped, checked }, as appearsIn does.
+// theirs; `via`, what's in the collection: artists, albums or tracks).
+// Resolves to { playlists, collections, skipped, checked }, as appearsIn
+// does.
 export async function artistAppearsIn(artist, { signal, onFound, onProgress } = {}) {
   const s = app.server;
   const me = String(artist?.ratingKey ?? '');
@@ -366,7 +361,6 @@ export async function artistAppearsIn(artist, { signal, onFound, onProgress } = 
     signal,
     onProgress,
     smartTtl: ARTIST_SMART_TTL,
-    whole: (list) => hit('playlist', { list, count: null, every: true }),
     each: ({ kind, list }, { counts, owners }) => {
       const via = kind === 'playlist' ? 'track' : viaOf(list);
       const count = via === 'artist' ? (counts.has(me) ? 1 : 0) : theirs(owners, me, via === 'track' ? want : '');
@@ -377,31 +371,25 @@ export async function artistAppearsIn(artist, { signal, onFound, onProgress } = 
 }
 
 // Reads `lists` ({ kind, list }) three at a time (see contents), giving
-// each one's contents to `each`. Those too long to read: a smart playlist
-// of a whole library (its rules say so) goes to `whole`; one of another
-// library is left out; the rest are `skipped`. Resolves to { skipped,
-// checked }.
-async function readLists(lists, section, { signal, onProgress, smartTtl, whole, each }) {
+// each one's contents to `each`. Smart playlists whose rules take in all
+// of `section` (it says nothing that a track's in one) or another library
+// (it can't be) are left out; those too long to read are `skipped`.
+// Resolves to { skipped, checked }.
+async function readLists(lists, section, { signal, onProgress, smartTtl, each }) {
   const aborted = abortedError;
+  const said = await Promise.all(lists.map((x) => (x.kind === 'playlist' && isSmart(x.list) ? byRules(x.list, section) : 'unknown')));
+  if (signal?.aborted) throw aborted();
   const skipped = [];
-  const long = [];
-  const todo = lists.filter((x) => {
+  const todo = lists.filter((x, i) => {
+    if (said[i] !== 'unknown') return false; // of everything here, or of another library
     const n = sizeOf(x.list);
     if (n === 0) return false; // empty
     if (n > (isSmart(x.list) ? SMART_LIMIT : LIST_LIMIT)) {
-      long.push(x);
+      skipped.push(x.list);
       return false;
     }
     return true;
   });
-  await Promise.all(
-    long.map(async ({ kind, list }) => {
-      const said = kind === 'playlist' && isSmart(list) ? await byRules(list, section) : 'unknown';
-      if (said === 'all') whole(list);
-      else if (said === 'unknown') skipped.push(list);
-    }),
-  );
-  if (signal?.aborted) throw aborted();
   let done = 0;
   onProgress?.(0, todo.length);
   await eachLimited(todo, 3, async (x) => {

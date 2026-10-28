@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.28.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.29.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -206,6 +206,48 @@ export async function checkPin(id) {
 
 export async function getUser(token) {
   return request(withParams(`${PLEX_TV}/api/v2/user`, plexParams(token)));
+}
+
+// ---------- Plex Home ----------
+
+// The people in the Plex Home of the account a token is for (managed users
+// among them), as plex.tv lists them: [{ id, uuid, title, thumb, admin,
+// restricted (a managed user), guest, protected (with a PIN) }]; none (or
+// only them) where it isn't in a Plex Home.
+const HOME_UUID = /^[A-Za-z0-9_-]{1,64}$/;
+const yes = (v) => v === true || v === 1 || v === '1';
+export async function homeUsers(token) {
+  const url = (base) => withParams(`${base}/api/v2/home/users`, plexParams(token));
+  let home;
+  try {
+    home = await request(url(CLIENTS));
+  } catch (err) {
+    if (err.status) throw err;
+    home = await request(url(PLEX_TV));
+  }
+  return asArray(home?.users)
+    .filter((u) => u && typeof u === 'object' && HOME_UUID.test(String(u.uuid ?? '')))
+    .map((u) => ({
+      id: String(u.id ?? ''),
+      uuid: String(u.uuid),
+      title: String(u.friendlyName || u.title || u.username || 'Plex user').slice(0, 100),
+      thumb: typeof u.thumb === 'string' && /^https:\/\//.test(u.thumb) ? u.thumb : null,
+      admin: yes(u.admin),
+      restricted: yes(u.restricted),
+      guest: yes(u.guest),
+      protected: yes(u.protected),
+    }));
+}
+
+// Switches to one of them (`pin`: theirs, where they have one): plex.tv's
+// account for them, with its token (`authToken`). (The PIN goes to plex.tv
+// only, the way Plex's own apps send it; it isn't kept, and debug.js keeps
+// it out of the log.)
+export async function switchHomeUser(token, uuid, pin) {
+  if (!HOME_UUID.test(String(uuid ?? ''))) throw Object.assign(new Error('Not someone in your Plex Home.'), { status: 400 });
+  const user = await request(withParams(`${CLIENTS}/api/v2/home/users/${uuid}/switch`, { ...plexParams(token), pin: pin || undefined }), { method: 'POST' });
+  if (typeof user?.authToken !== 'string' || !user.authToken) throw Object.assign(new Error('plex.tv didn’t switch to them.'), { status: 502 });
+  return user;
 }
 
 // ---------- server discovery ----------
@@ -434,8 +476,8 @@ export class PlexServer {
     return this.get('/identity', null, opts);
   }
 
-  async musicSections() {
-    const mc = await this.get('/library/sections');
+  async musicSections(opts) {
+    const mc = await this.get('/library/sections', null, opts);
     return asArray(mc.Directory).filter((d) => d.type === 'artist');
   }
 

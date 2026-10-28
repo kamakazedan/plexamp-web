@@ -62,6 +62,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'skipBack',
   'skipForward',
   'skipLive',
+  'skipDisliked',
   'mbSkipLive',
   'mbMissingAlbums',
   'mbMissingKinds',

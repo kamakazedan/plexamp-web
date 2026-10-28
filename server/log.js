@@ -11,10 +11,10 @@ export const isDebug = () => debugOn;
 
 // In query strings (also inside another address, URL-encoded), headers and
 // JSON. Each is matched in one pass, however long the text.
-const SECRET_NAMES = 'X-Plex-Token|X-Plex-Server-Token|token|authToken|accessToken|apiKey|api_key|key';
+const SECRET_NAMES = 'X-Plex-Token|X-Plex-Server-Token|token|authToken|accessToken|apiKey|api_key|key|pin';
 const SECRET_PARAMS = new RegExp(`((?:^|[?&;]|%3F|%26|%3B)(?:${SECRET_NAMES})(?:=|%3D))(?:(?!%26|%23)[^&#\\s"'])*`, 'gi');
 const SECRET_HEADERS = /(X-Plex-(?:Server-)?Token\s*:\s*)[A-Za-z0-9._~+/=-]+/gi;
-const SECRET_JSON = /("(?:authToken|accessToken|token|apiKey|api_key|X-Plex-Token|X-Plex-Server-Token)"\s*:\s*")[^"]*/gi;
+const SECRET_JSON = /("(?:authToken|accessToken|token|apiKey|api_key|X-Plex-Token|X-Plex-Server-Token|pin)"\s*:\s*")[^"]*/gi;
 const BEARER = /(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
 const PLEX_TOKEN_LIKE = /\b(?=[A-Za-z0-9_-]{20}\b)(?=[A-Za-z0-9_-]{0,19}[0-9])(?=[A-Za-z0-9_-]{0,19}[A-Za-z])[A-Za-z0-9_-]{20}\b/g;
 

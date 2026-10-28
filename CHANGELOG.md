@@ -3,6 +3,36 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.29.0 - 2026-10-28
+
+### New
+
+- **Switch user, for a Plex Home**: where your Plex account is in a Plex
+  Home with others, **Settings › Account** has **Switch user** beside
+  **Sign out** (and so does choosing a server, for someone in the Home
+  with none of theirs). It lists everyone in the Home, and asks for the
+  PIN of anyone who has one. Each of you is your own person in the app:
+  switching clears everything the device keeps for whoever was signed in,
+  as signing out does, and every setting too, the device's own included,
+  so nothing of theirs carries over; the next person's settings come from
+  their own account, and their playlists, ratings and plays are their own
+  in Plex. They stay on the same server and library where they can use
+  them. It's part of the app: there's nothing to set.
+- **Skip tracks you've rated down**, in **Settings › Playback**, on to
+  begin with: a track with a thumbs down, or one star or less (in this
+  app or any of Plex's), is never picked for you: not for radio, mixes or
+  stations, shuffling an artist or the library, similar tracks, Sonic
+  path, the Guest DJs or AI playlists. An album or playlist you play
+  yourself plays as it is. Ratings are each Plex account's own, so what
+  one person rates down is left out for them alone.
+
+### Changed
+
+- **Appears in leaves out playlists of the whole library**, such as
+  Plex's All Music: every track is in a smart playlist whose rules are
+  the whole library, so it says nothing. Other smart playlists are still
+  looked through.
+
 ## 0.28.0 - 2026-10-28
 
 ### New

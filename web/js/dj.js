@@ -19,7 +19,7 @@ import { aiReady, djPick, describeAIError, norm } from './ai.js';
 import { coreTitle } from './membership.js';
 import { describeError } from './router.js';
 import { toast } from './ui.js';
-import { withoutLiveOrDemos } from './mb.js';
+import { pickable } from './picks.js';
 
 // Another of your devices plays, and this one follows it (devices.js).
 const followingDevice = () => player.cast?.kind === 'device';
@@ -47,8 +47,9 @@ function fresh(items, { avoid, songs }) {
     });
 }
 
-// ...and not live tracks or demos, where they're skipped (see mb.js).
-const picks = async (items, ctx) => withoutLiveOrDemos(fresh(items, ctx));
+// ...and not tracks rated down, nor live tracks and demos, where those are
+// skipped (see picks.js).
+const picks = async (items, ctx) => pickable(fresh(items, ctx));
 
 // One of the first few (the closest), not by the artists just played if
 // any of those few aren't: some variety, without straying from the sound.
