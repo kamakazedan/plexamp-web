@@ -1908,7 +1908,10 @@ with sync_playwright() as pw:
         check('edit: adding an album skips what\'s there already', made['leafCount'] == album_tracks and 'there already' in told, f'{made["leafCount"]} {told}')
 
         # A playlist is locked until it's unlocked; then rows can be dragged
-        # and removed (with undo), and it can be renamed and deleted.
+        # and removed (with undo), and it can be renamed and deleted. (Plex's
+        # word that it changed, just now, comes first: then the page isn't
+        # built again, with its hint, under what's checked.)
+        page.wait_for_timeout(2500)
         page.goto(APP + f'#/playlist/{made["ratingKey"]}')
         page.wait_for_selector('.view .tracks .track')
         hinted = page.wait_for_selector('.hint-bubble.shown', timeout=5000)
