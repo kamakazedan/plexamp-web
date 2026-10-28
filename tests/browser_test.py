@@ -3482,6 +3482,20 @@ with sync_playwright() as pw:
             '/photo/:/transcode?url=%2Fx%3FX-Plex-Token%3Dsecret1%26w%3D2&X-Plex-Token=secret2 {"accessToken":"secret3"} X-Plex-Token: secret4 /switch?pin=secret5 {"pin":"secret6"}'))""")
         check('privacy: debug mode\'s redaction finds tokens (and Plex Home PINs) wherever they are', not any(f'secret{i}' in red for i in range(1, 7)), red)
 
+        # Once someone else is signed in here from another tab (or nobody
+        # is), nothing more of this page's is kept, even before it hears.
+        fenced = js(page, """() => import('./js/plex.js').then(({ store }) => {
+            const mine = localStorage.getItem('pw.auth');
+            localStorage.setItem('pw.auth', JSON.stringify({ token: 'someone-else' }));
+            const refused = store.set('fenceTest', 1) === false && localStorage.getItem('pw.fenceTest') === null;
+            localStorage.removeItem('pw.auth');
+            const nobody = store.set('fenceTest', 1) === false;
+            localStorage.setItem('pw.auth', mine);
+            const kept = store.set('fenceTest', 1) === true && localStorage.getItem('pw.fenceTest') === '1';
+            store.set('fenceTest', null);
+            return [refused, nobody, kept]; })""")
+        check('privacy: once someone else is signed in here from another tab (or nobody is), nothing more of this page\'s is kept', fenced == [True, True, True], str(fenced))
+
         # AirPlay and Cast are given the server's temporary token, and never
         # one for another server or account, nor the account's own.
         urls = js(page, """() => import('./js/player.js').then(({ player }) => {

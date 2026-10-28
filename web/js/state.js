@@ -140,7 +140,8 @@ const LEFT = 'left';
 // since, before anything's read. (Clearing isn't held back by the freeze.)
 function settleLeft(stay = false) {
   const left = store.get(LEFT);
-  if (!left || typeof left !== 'object') return;
+  if (!left) return;
+  if (typeof left !== 'object') return void store.set(LEFT, null); // (one kept by a build of 0.29.0 before it was released)
   const same = (key, value) => JSON.stringify(store.get(key)) === JSON.stringify(value ?? null);
   const keep = ['clientId', SYNCED_BEFORE, 'pendingPin'];
   if (stay) keep.push(LEFT);
@@ -161,6 +162,7 @@ export const app = {
   server: null,
   settings: { ...DEFAULT_SETTINGS, ...storedSettings() },
 };
+store.own(app.auth?.token);
 
 function storedSettings() {
   const s = store.get('settings') || {};
@@ -212,6 +214,7 @@ export function setAuth(auth) {
   }
   app.auth = auth;
   store.set('auth', auth);
+  store.own(auth?.token);
 }
 
 // `serverChanged` tells listeners (the player, the backdrop) whether this is
@@ -253,6 +256,8 @@ function leave(next) {
   }
   store.set(SYNCED_BEFORE, true);
   store.clear(next ? ['clientId', SYNCED_BEFORE] : ['clientId', 'settings', SYNCED_BEFORE]);
+  // (This page is the next person's now, or nobody's: see the store.)
+  store.own(next?.auth?.token);
   if (next) {
     store.set('auth', next.auth);
     if (next.source) store.set('source', next.source);

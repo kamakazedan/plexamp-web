@@ -13,8 +13,20 @@ const CLIENTS = 'https://clients.plex.tv';
 // ---------- persistence ----------
 
 // Signed out (here or in another tab): nothing more is kept, while the page
-// goes (see signOut in state.js).
+// goes (see signOut in state.js). Nor once someone else is signed in here,
+// or nobody is, from another tab (`owner`: the token this page is signed in
+// with, or null, once state.js says): the page is about to follow (see its
+// storage listener), and nothing of its own goes to the next person, not
+// even in the moment before it hears.
 let frozen = false;
+let owner;
+const keptToken = () => {
+  try {
+    return JSON.parse(localStorage.getItem('pw.auth'))?.token ?? null;
+  } catch {
+    return null;
+  }
+};
 
 export const store = {
   get(key, fallback = null) {
@@ -28,6 +40,7 @@ export const store = {
   // Whether it was kept.
   set(key, value) {
     if (frozen) return false;
+    if (owner !== undefined && key !== 'auth' && keptToken() !== owner) return false;
     try {
       if (value === null || value === undefined) localStorage.removeItem(`pw.${key}`);
       else localStorage.setItem(`pw.${key}`, JSON.stringify(value));
@@ -49,6 +62,10 @@ export const store = {
   },
   freeze() {
     frozen = true;
+  },
+  // Whose this page is: the token it's signed in with (none: nobody).
+  own(token) {
+    owner = token || null;
   },
 };
 
