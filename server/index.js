@@ -1056,16 +1056,15 @@ async function settingsRoute(req, res, parts, url) {
 // ---------- Missing tracks that follow an account ----------
 
 // GET ?server=ID[&mine=REV&all=REV]: this account's Missing tracks for that
-// Plex server ({ account, owner, shared, rev, entries, done }), and for the
-// server's owner everyone else's who shares theirs (`others`, each with
-// whose: the owner's Plex friends' names, as plex.tv has them), each left
-// out if it's as the browser last had it (its revs). POST ?server=ID { ops:
-// [...] }: changes to it (see server/missing.js), and from the owner to
-// everyone's ({ everyone: true }). Only for the account behind the
-// request's sign-in, on a Plex server it can use, and with PLEX_SERVER_URL
-// set only for people who can use that one, as the rest of the service is.
-// Whether it owns the server, plex.tv says; anyone else's is kept only
-// while they share it.
+// Plex server ({ account, owner, rev, entries, done }), and for the server's
+// owner everyone else's (`others`, each with whose: the owner's Plex
+// friends' names, as plex.tv has them), each left out if it's as the
+// browser last had it (its revs). POST ?server=ID { ops: [...] }: changes to
+// it (see server/missing.js), and from the owner to everyone's ({ everyone:
+// true }). Only for the account behind the request's sign-in, on a Plex
+// server it can use, and with PLEX_SERVER_URL set only for people who can
+// use that one, as the rest of the service is. Whether it owns the server,
+// plex.tv says.
 async function missingRoute(req, res, parts, url) {
   if (!missingLists) throw new HttpError(404, 'This player doesn’t keep missing tracks for each account.');
   if (parts.length) throw new HttpError(404, 'Not found.');
@@ -1085,7 +1084,7 @@ async function missingRoute(req, res, parts, url) {
         return v && /^[a-f0-9]{8}\.\d{1,12}$/.test(v) ? v : null;
       };
       const got = missingLists.view(user.id, server, { owner, have: { mine: rev('mine'), all: rev('all') } });
-      const out = { account: user.id, owner, shared: got.shared, rev: owner ? got.rev : { mine: got.rev.mine } };
+      const out = { account: user.id, owner, rev: owner ? got.rev : { mine: got.rev.mine } };
       if (got.entries) Object.assign(out, { entries: got.entries, done: got.done });
       if (got.others) out.others = await named(token, got.others);
       return send(res, 200, out);

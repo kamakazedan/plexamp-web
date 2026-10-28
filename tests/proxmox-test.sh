@@ -85,12 +85,15 @@ case "$create" in
 esac
 calls | grep -q '^pveam download local debian-13-standard_13.1-2_amd64.tar.zst$' && pass "downloads the newest Debian template" || fail "template download: $(calls | grep pveam)"
 expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'"'"'s (see' '# docs/configuration.md). Change them with: plexamp-web-settings' \
-    'PLEX_SERVER_URL=http://192.168.1.10:32400' 'DISABLE_WEBSOCKETS=' 'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b' \
+    'PLEX_SERVER_URL=http://192.168.1.10:32400' '# Live updates: auto (WebSockets, or where they don'"'"'t get through, an event' \
+    '# stream or polling), on (WebSockets only) or off (never WebSockets).' 'WEBSOCKETS=auto' \
+    'OLLAMA_URL=http://192.168.1.20:11434' 'OLLAMA_MODEL=llama3.1:8b' \
     'OLLAMA_API_KEY=' 'OLLAMA_AUTH=plex' 'PLAY_TOGETHER=true' 'CASTING=true' 'PLAYLIST_SHARING=true' \
     '# Each Plex account'"'"'s settings kept by the player, so they follow it to every' '# browser it signs in on (false: each browser keeps its own).' 'SYNC_SETTINGS=true' \
-    '# Missing tracks kept by the player for each Plex account (your Plex server'"'"'s' \
-    '# owner'"'"'s, and friends'"'"' who choose to), so they follow it to every browser,' \
-    '# and the owner sees friends'"'"' (false: each browser keeps its own).' 'SYNC_MISSING_TRACKS=true' \
+    '# When someone imports a playlist (or an AI playlist suggests music) your Plex' \
+    '# server doesn'"'"'t have all of, what'"'"'s missing is synced into the server owner'"'"'s' \
+    '# Missing tracks, so they can see what'"'"'s missing from their server; each' \
+    '# account'"'"'s follows it to every browser too (false: each browser keeps its own).' 'SYNC_MISSING_TRACKS=true' \
     '# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org' '# (the public service) or your own mirror. Empty: no checks.' \
     'MUSICBRAINZ_URL=' '# true: Search › From Spotify makes playlists from Spotify'"'"'s download of your' \
     '# data, read in the browser (see docs/configuration.md).' 'SPOTIFY_FILE_IMPORT=' \

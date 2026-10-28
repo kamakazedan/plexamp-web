@@ -5,7 +5,7 @@ import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, error
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
-import { missingTracksView, missingShareRow } from './missingtracks.js';
+import { missingTracksView } from './missingtracks.js';
 import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
@@ -352,7 +352,7 @@ const FADES = [
   [
     'smart',
     'Smart',
-    'Fades into the next track where the music ends, so silence at the end of a track (or before the next one starts) doesn’t leave a gap, and a quiet ending doesn’t hold the next track up. Tracks that follow each other on an album play gaplessly instead. Needs Plex’s loudness analysis; without it, fades happen at the very end.',
+    'Fades into the next track where the music ends, so silence at the end of a track (or before the next one starts) doesn’t leave a gap, and a quiet ending doesn’t hold the next track up: over one, the fade lasts as long as the ending takes to go nearly silent. Tracks that follow each other on an album play gaplessly instead. Needs Plex’s loudness analysis; without it, fades happen at the very end.',
   ],
   ['always', 'Always', 'Fades between every track, albums too, at the very end of each one.'],
   ['off', 'Off', 'One track after another, as they are.'],
@@ -419,7 +419,7 @@ function playbackView({ el }) {
   });
   const length = choiceRow({
     title: 'Crossfade length',
-    subtitle: 'How long one track takes to fade into the next.',
+    subtitle: 'How long one track takes to fade into the next. With Smart, a track that ends quietly sets its own: the fade lasts until it’s nearly silent, so the next one is at full volume just as it fades away.',
     options: FADE_LENGTHS,
     value: Number(s.fadeLength) || 5,
     onChange: (v) => saveSettings({ fadeLength: v }),
@@ -427,7 +427,7 @@ function playbackView({ el }) {
   length.hidden = s.fades === 'off' || !canFade;
   const quiet = choiceRow({
     title: 'Quiet endings',
-    subtitle: 'When a track ends quietly, Smart starts the next one there instead of waiting for the music to stop (at most 15 seconds early).',
+    subtitle: 'When a track ends quietly, Smart starts the next one there instead of waiting for the music to stop (at most 15 seconds early), and fades into it until this one is nearly silent (at least 2 seconds).',
     options: QUIET_ENDINGS,
     value: s.quietEndings || 'quiet',
     onChange: (v) => saveSettings({ quietEndings: v }),
@@ -535,21 +535,6 @@ function radioRows(label, options, current, onChange) {
 }
 
 // ---------- Connection / diagnostics ----------
-
-function liveOptions() {
-  const forced = app.config.websockets === false;
-  return [
-    [
-      'auto',
-      'Automatic',
-      forced
-        ? 'WebSockets are turned off for this app, so this uses an event stream, or checks every minute.'
-        : 'Uses a WebSocket when the network allows it, otherwise an event stream, or checks every minute.',
-    ],
-    ['nows', 'Without WebSockets', 'For networks that block WebSockets, like many work proxies. Uses an event stream, or checks every minute.'],
-    ['off', 'Off', 'Don’t watch for changes. Pages show what’s new when you open them.'],
-  ];
-}
 
 // The routes to a server (see plex.js ROUTE_RANKS), as Settings › Connection
 // names them.
@@ -716,6 +701,10 @@ function debugView({ el, onDispose }) {
           type: 'button',
           onclick: async () => {
             status.textContent = 'Testing…';
+            // Live updates too, from the top: a WebSocket first, even one
+            // that failed here lately (WEBSOCKETS=auto remembers that).
+            live.forgetWebSocketFailure();
+            live.start();
             const t0 = performance.now();
             try {
               await app.server.identity({ timeout: 15000 });
@@ -734,25 +723,6 @@ function debugView({ el, onDispose }) {
     ),
     routes,
     routeChoice,
-    h('div.section-head', null, h('h2', null, 'Live updates')),
-    h('p.lede', null, 'New music, playlist changes and ratings from other Plex apps show up here without reloading.'),
-    radioRows('Live updates', liveOptions(), app.settings.liveUpdates, (v) => saveSettings({ liveUpdates: v })),
-    h(
-      'div.pad.button-row',
-      null,
-      h(
-        'button.btn.btn-secondary',
-        {
-          type: 'button',
-          onclick: () => {
-            live.forgetWebSocketFailure();
-            live.start();
-          },
-        },
-        icon('live', 20),
-        h('span', null, 'Reconnect live updates'),
-      ),
-    ),
   );
 }
 
@@ -774,8 +744,7 @@ function saveAI(patch) {
 }
 
 // Show missing tracks: on or off, and the list (shown while it's on, or
-// while there's anything on it); for a friend, where the player keeps them
-// for each account, whether theirs are kept for their account.
+// while there's anything on it).
 function missingSection(onDispose) {
   const count = h('span.row-value');
   const listRow = row({ href: '/settings/missing', title: 'Missing tracks', subtitle: 'See them, export them, or check again', right: count, chevron: true, cls: 'missing-link' });
@@ -790,14 +759,11 @@ function missingSection(onDispose) {
   });
   const showSub = h('div.row-sub');
   show.querySelector('.row-main').append(showSub);
-  const share = h('div.missing-share-slot');
   function paint() {
     const n = missingCount();
     count.textContent = n ? fmt.number(n) : '';
     listRow.hidden = !aiSettings().missing && !n;
     showSub.textContent = `List the songs and artists AI playlists suggest that aren’t in your library, so you can export the list and go looking.${missingKeptNote()}`;
-    const r = missingShareRow({ after: paint });
-    share.replaceChildren(...(r ? [r] : []));
   }
   paint();
   // An AI playlist made meanwhile can add to it (and the player says whose
@@ -811,7 +777,6 @@ function missingSection(onDispose) {
       'div.rows',
       null,
       show,
-      share,
       // AI models make songs up: MusicBrainz knows which are real.
       mbOffered()
         ? toggleRow({

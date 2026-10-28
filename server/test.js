@@ -1026,10 +1026,13 @@ test('account settings: the same ones follow an account here as in the app (web/
   assert.deepEqual([...app].sort(), Object.keys(SYNCED_SETTINGS).sort());
   const device = src.match(/export const DEVICE_SETTINGS = Object\.freeze\(\[([^\]]*)\]\)/);
   const own = [...device[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  for (const k of ['quality', 'route', 'playerName', 'ai', 'loadAhead', 'keepPlayed', 'shareDevices', 'speed', 'liveUpdates']) {
+  for (const k of ['quality', 'route', 'playerName', 'ai', 'loadAhead', 'keepPlayed', 'shareDevices', 'speed']) {
     assert.ok(own.includes(k), `${k} is a device's own`);
     assert.ok(!(k in SYNCED_SETTINGS), `${k} isn't kept for an account`);
   }
+  // (Gone in 0.25.0: live updates are the player's choice, WEBSOCKETS, and
+  // codecInfo is the four codec settings.)
+  for (const k of ['liveUpdates', 'codecBadges', 'coverBadges', 'searchCodecs', 'showCodec']) assert.ok(!own.includes(k) && !(k in SYNCED_SETTINGS), `${k} is no setting now`);
 });
 
 test('account settings: kept in a file only the service can read, and read back (what doesn\'t check out left out)', () => {
@@ -1083,12 +1086,47 @@ test('account settings: loudness levelling kept off from 0.19.0 (how it started 
     assert.equal(said.length, 1);
     assert.match(said[0], /1 account kept it off/);
     store.flush();
-    assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 2);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 3);
     // Only once: turned off from then on, it stays off.
     store.update(1, { set: { loudness: false } });
     store.flush();
     assert.deepEqual(new SettingsStore({ dir, log }).get(1).settings, { gapless: false, loudness: false });
     assert.equal(said.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('account settings: the four codec settings kept before 0.25.0 are one, off where they all were', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-settings-'));
+  try {
+    const file = join(dir, 'settings.json');
+    const all = (v) => ({ codecBadges: v, coverBadges: v, searchCodecs: v, showCodec: v });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 2,
+        accounts: {
+          1: { settings: { ...all(false), gapless: false }, changed: { codecBadges: 2, coverBadges: 2, searchCodecs: 2, showCodec: 2, gapless: 1 }, rev: 2 },
+          2: { settings: { ...all(false), searchCodecs: true }, rev: 3 },
+          3: { settings: { gridSize: 'large' }, rev: 1 },
+          4: { settings: {}, rev: 5, off: true },
+        },
+      }),
+    );
+    const store = new SettingsStore({ dir });
+    assert.deepEqual(store.get(1), { settings: { gapless: false, codecInfo: false }, changed: { gapless: 1, codecInfo: 2 }, rev: 2, off: false });
+    assert.deepEqual(store.get(2).settings, {}, 'one of them on: codec information stays on, as it starts');
+    assert.deepEqual(store.get(3).settings, { gridSize: 'large' });
+    assert.deepEqual(store.get(4), { settings: {}, changed: {}, rev: 5, off: true });
+    store.flush();
+    const kept = readFileSync(file, 'utf8');
+    assert.equal(JSON.parse(kept).version, 3);
+    assert.ok(!/codecBadges|coverBadges|searchCodecs|showCodec/.test(kept), 'the four go from the file');
+    // Only once: turned on again from then on, it stays on.
+    store.update(1, { set: { codecInfo: true } });
+    store.flush();
+    assert.equal(new SettingsStore({ dir }).get(1).settings.codecInfo, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1249,10 +1287,9 @@ const opId = () => (++opN).toString(16).padStart(12, '0');
 const AT = 1_800_000_000; // seconds
 const song = (artist, title, extra = {}) => ({ kind: 'track', artist, title, ...extra });
 const noteOp = (items, extra = {}) => ({ type: 'note', id: opId(), items, found: [], unreal: [], via: '', section: '1', library: 'Music (Test)', at: AT, ...extra });
-const share = () => ({ type: 'share', id: opId() });
 const store = (opts = {}) => new MissingStore({ now: () => AT * 1000, ...opts });
 const mineOf = (st, uid) => st.view(uid, SRV).entries;
-// Dan owns the server; Sam and Eve are friends who share theirs.
+// Dan owns the server; Sam and Eve are friends.
 const asOwner = (st, ops, server = SRV) => st.apply(dan.id, server, ops, { owner: true });
 const asFriend = (st, who, ops, server = SRV) => st.apply(who.id, server, ops);
 
@@ -1263,51 +1300,21 @@ test('missing tracks: the rules are the same file in the app (web/js/missinglist
   assert.ok(!/^import /m.test(here), 'nothing imported: the same in a browser and in Node');
 });
 
-test('missing tracks: a friend\'s list is kept only once they share it, and goes when they stop', () => {
+test('missing tracks: a friend\'s list is kept for their account as they use it, for the owner to see (0.24.0\'s share and unshare are no changes now)', () => {
   const st = store();
-  const r = asFriend(st, sam, [noteOp([song('A', 'One')])]);
-  assert.equal(r.skipped, 1);
-  assert.deepEqual(mineOf(st, sam.id), []);
-  assert.equal(st.view(sam.id, SRV).shared, false);
-  asFriend(st, sam, [share(), noteOp([song('A', 'One')])]);
+  asFriend(st, sam, [noteOp([song('A', 'One')])]);
   assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One']);
-  assert.equal(st.view(sam.id, SRV).shared, true);
-  assert.equal(asOwner(st, []).skipped, 0);
+  assert.ok(!('shared' in st.view(sam.id, SRV)));
   assert.equal(st.view(dan.id, SRV, { owner: true }).others.length, 1);
-  // Stopping takes theirs off: the owner doesn't see it, and nothing more is kept.
-  asFriend(st, sam, [{ type: 'unshare', id: opId() }]);
-  assert.deepEqual(mineOf(st, sam.id), []);
-  assert.equal(st.view(sam.id, SRV).shared, false);
-  assert.deepEqual(st.view(dan.id, SRV, { owner: true }).others, []);
-  assert.equal(asFriend(st, sam, [noteOp([song('B', 'Two')])]).skipped, 1);
-  // The server's owner's own list needs no sharing.
+  // What a 0.24.0 page may still send: left out, nothing taken off, and not remembered.
+  const r = asFriend(st, sam, [{ type: 'unshare', id: opId() }, { type: 'share', id: opId() }]);
+  assert.equal(r.skipped, 2);
+  assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One']);
+  assert.equal(st.view(sam.id, SRV).done.length, 1);
+  assert.equal(st.view(dan.id, SRV, { owner: true }).others.length, 1);
+  // The server's owner's own, as ever.
   asOwner(st, [noteOp([song('C', 'Three')])]);
   assert.deepEqual(mineOf(st, dan.id).map((m) => m.title), ['Three']);
-});
-
-test('missing tracks: choosing to share is limited as lists are, never remembered as a change, and no choice for the owner', () => {
-  const st = store();
-  asOwner(st, [noteOp([song('A', 'One')])]);
-  // The owner's own list isn't theirs to share or not: unsharing changes nothing.
-  asOwner(st, [{ type: 'unshare', id: opId() }]);
-  assert.deepEqual(mineOf(st, dan.id).map((m) => m.title), ['One']);
-  // Toggling isn't kept as changes (they'd crowd out the ones that matter).
-  for (let i = 0; i < 20; i += 1) asFriend(st, sam, [share(), { type: 'unshare', id: opId() }]);
-  assert.deepEqual(st.view(sam.id, SRV).done, []);
-  // A friend sharing with nothing on their list yet counts toward the limits.
-  const few = store();
-  const was = MISSING_STORE_LIMITS.accounts;
-  MISSING_STORE_LIMITS.accounts = 2;
-  try {
-    asFriend(few, sam, [share()]);
-    asFriend(few, eve, [share()]);
-    const op = share();
-    const r = asFriend(few, { id: 7 }, [op]);
-    assert.deepEqual(r.refused, [op.id]);
-    assert.equal(few.view(7, SRV).shared, false);
-  } finally {
-    MISSING_STORE_LIMITS.accounts = was;
-  }
 });
 
 test('missing tracks: each account its own list; AI suggestions counted again, a change sent twice made once', () => {
@@ -1417,11 +1424,11 @@ test('missing tracks: a browser\'s own list, the first time, is put together wit
   assert.equal(m.times, 4);
 });
 
-test('missing tracks: the server\'s owner sees everyone else\'s who shares put together, whose by id, and takes some off everyone\'s', () => {
+test('missing tracks: the server\'s owner sees everyone else\'s put together, whose by id, and takes some off everyone\'s', () => {
   const st = store();
   asOwner(st, [noteOp([song('A', 'One')])]);
-  asFriend(st, sam, [share(), noteOp([song('A', 'One'), song('B', 'Two')]), noteOp([song('A', 'One')])]);
-  asFriend(st, eve, [share(), noteOp([song('a', 'ONE')], { via: 'spotify', list: listId('Gym') })]);
+  asFriend(st, sam, [noteOp([song('A', 'One'), song('B', 'Two')]), noteOp([song('A', 'One')])]);
+  asFriend(st, eve, [noteOp([song('a', 'ONE')], { via: 'spotify', list: listId('Gym') })]);
   // Only for its owner (the service asks plex.tv).
   assert.equal(st.view(sam.id, SRV).others, undefined);
   const others = st.view(dan.id, SRV, { owner: true }).others;
@@ -1440,7 +1447,7 @@ test('missing tracks: the server\'s owner sees everyone else\'s who shares put t
   assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['Two']);
   // Cleared: everyone's on this server.
   asFriend(st, sam, [noteOp([song('C', 'Three')])]);
-  asFriend(st, sam, [share(), noteOp([song('C', 'Three')])], 'other-server');
+  asFriend(st, sam, [noteOp([song('C', 'Three')])], 'other-server');
   asOwner(st, [{ type: 'clear', id: opId(), everyone: true }]);
   assert.deepEqual(mineOf(st, sam.id), []);
   assert.equal(st.view(sam.id, 'other-server').entries.length, 1);
@@ -1453,7 +1460,7 @@ test('missing tracks: revs say what changed since, and a fresh start never passe
   const same = st.view(dan.id, SRV, { owner: true, have: first.rev });
   assert.equal(same.entries, undefined);
   assert.equal(same.others, undefined);
-  asFriend(st, sam, [share(), noteOp([song('A', 'One')])]);
+  asFriend(st, sam, [noteOp([song('A', 'One')])]);
   const after = st.view(dan.id, SRV, { owner: true, have: first.rev });
   assert.equal(after.entries, undefined, 'their own: as it was');
   assert.equal(after.others.length, 1, 'everyone else\'s: changed');
@@ -1478,7 +1485,7 @@ test('missing tracks: limits, and what there\'s no room for is refused by id (no
   try {
     asOwner(few, [noteOp(many(2))]);
     const big = noteOp(many(2, 'U'));
-    const r2 = asFriend(few, sam, [share(), big]);
+    const r2 = asFriend(few, sam, [big]);
     assert.deepEqual(r2.refused, [big.id]);
     assert.deepEqual(mineOf(few, sam.id), []);
     // Taking some off is never refused.
@@ -1493,8 +1500,7 @@ test('missing tracks: kept in a file only the service can read, and read back (w
   try {
     const st = new MissingStore({ dir, now: () => AT * 1000 });
     asOwner(st, [noteOp([song('A', 'One')])]);
-    asFriend(st, sam, [share(), noteOp([song('B', 'Two')], { via: 'spotify', list: listId('Gym') })]);
-    asFriend(st, eve, [share()]);
+    asFriend(st, sam, [noteOp([song('B', 'Two')], { via: 'spotify', list: listId('Gym') })]);
     st.flush();
     const file = join(dir, 'missing.json');
     assert.equal(statSync(file).mode & 0o777, 0o600);
@@ -1502,13 +1508,14 @@ test('missing tracks: kept in a file only the service can read, and read back (w
     assert.ok(!readFileSync(file, 'utf8').includes('Gym'));
     data.servers[SRV].accounts.abc = { entries: [song('C', 'x')] };
     data.servers[SRV].accounts[7] = { rev: 2, shared: true, entries: [{ kind: 'track', artist: 'D', title: 'Four', last: AT, section: '1' }, { kind: 'album', artist: 'E', last: AT, section: '1' }, 'nonsense'], done: [['zz', AT * 1000], ['abcdef123456', AT * 1000], ['abcdef654321', 1000]] };
+    // (0.24.0's: a friend's choice to share, with nothing on their list yet.)
+    data.servers[SRV].accounts[8] = { rev: 1, shared: true, entries: [], done: [] };
     data.servers['../x'] = { accounts: { 1: { entries: [{ kind: 'track', artist: 'F', title: 'Five', last: AT, section: '1' }] } } };
     writeFileSync(file, JSON.stringify(data));
     const again = new MissingStore({ dir, now: () => AT * 1000 });
     assert.deepEqual(mineOf(again, dan.id).map((m) => m.title), ['One']);
     assert.deepEqual(mineOf(again, sam.id).map((m) => [m.title, m.lists]), [['Two', [listId('Gym')]]]);
-    assert.equal(again.view(sam.id, SRV).shared, true);
-    assert.equal(again.view(eve.id, SRV).shared, true, 'sharing kept, with nothing on the list yet');
+    assert.ok(!again.servers.get(SRV).accounts.has(8), 'nothing kept for a choice that\'s no choice now');
     assert.deepEqual(mineOf(again, 7).map((m) => m.title), ['Four']);
     assert.deepEqual(again.view(7, SRV).done, ['abcdef123456'], 'what isn\'t a change, or is too old, left out');
     assert.deepEqual([...again.servers.keys()], [SRV]);

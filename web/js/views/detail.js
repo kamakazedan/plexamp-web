@@ -43,6 +43,9 @@ import {
 } from '../actions.js';
 import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
+import { mapLimit } from '../ai.js';
+import { norm } from '../missinglist.js';
+import { browseHref } from './library.js';
 import { clearSelection } from '../selection.js';
 import { sortChoices, sortedOrder, restoreOrder, saveOrder } from '../sorting.js';
 
@@ -76,7 +79,7 @@ function popularIds(tracks) {
 // "FLAC 24/96" style badge (formats.js); bit depth and sample rate come
 // from the first track's stream details.
 function codecBadge(tracks) {
-  if (app.settings.codecBadges === false) return null;
+  if (app.settings.codecInfo === false) return null;
   const codecs = codecsOf(tracks);
   const f = albumFormatOf(codecs);
   if (!f) return null;
@@ -178,19 +181,73 @@ export async function albumView({ el, params }) {
 
 // ---------- Artist ----------
 
-const GROUP_ORDER = ['Albums', 'Singles & EPs', 'Live albums', 'Compilations', 'Soundtracks', 'Remixes'];
+// The kinds of release on an artist's page, in this order: Plex's release
+// types (from MusicBrainz, as Plexamp shows them), its Format the main one
+// (album, EP, single) and its Subformat what else it is (live, a
+// compilation...). Albums are a grid, the rest shelves.
+const GROUP_ORDER = ['Albums', 'Singles & EPs', 'Live albums', 'Compilations', 'Soundtracks', 'Remixes', 'DJ mixes', 'Mixtapes', 'Demos'];
 
-function albumGroup(m) {
-  const tag = (v) => (Array.isArray(v) ? v[0]?.tag : v) || '';
-  const sub = String(tag(m.Subformat) || tag(m.subformat)).toLowerCase();
-  const format = String(tag(m.Format) || tag(m.format)).toLowerCase();
+const tagsOf = (v) => (Array.isArray(v) ? v.map((t) => t?.tag) : [v]).filter((t) => typeof t === 'string' && t).join(' ').toLowerCase();
+// Whether Plex said what kind of release it is.
+const typed = (m) => !!(tagsOf(m.Format) || tagsOf(m.Subformat) || tagsOf(m.format) || tagsOf(m.subformat));
+
+export function albumGroup(m) {
+  const sub = tagsOf(m.Subformat) || tagsOf(m.subformat);
+  const format = tagsOf(m.Format) || tagsOf(m.format);
   if (sub.includes('compilation')) return 'Compilations';
   if (sub.includes('live')) return 'Live albums';
   if (sub.includes('soundtrack')) return 'Soundtracks';
   if (sub.includes('remix')) return 'Remixes';
-  if (format === 'ep' || format === 'single') return 'Singles & EPs';
+  if (sub.includes('dj')) return 'DJ mixes';
+  if (sub.includes('mixtape')) return 'Mixtapes';
+  if (sub.includes('demo')) return 'Demos';
+  if (/\b(ep|single)\b/.test(format)) return 'Singles & EPs';
   return 'Albums';
 }
+
+// An artist's albums with what kind each is. Plex's listing of an artist's
+// albums leaves that out (an album's own details have it), so where none
+// say, their details are asked for too: one request for every 40, kept a
+// while (as albumMeta keeps them).
+async function withTypes(s, albums) {
+  if (!albums.length || albums.some(typed)) return albums;
+  const full = await s.albumsMeta(albums.map((m) => m.ratingKey)).catch(() => []);
+  return albums.map((m, i) => (full[i] ? { ...m, Format: full[i].Format, Subformat: full[i].Subformat } : m));
+}
+
+// The library's artist of that name (as the app compares names), or null:
+// kept a while, for every artist page that names them.
+function artistNamed(s, sec, name) {
+  const want = norm(name);
+  if (!want) return Promise.resolve(null);
+  return s
+    .memo(`artistNamed:${sec}:${want}`, async () => {
+      const { items } = await s.list(sec, 8, { size: 10, filters: { title: name } });
+      return items.find((a) => a.type === 'artist' && norm(a.title) === want) || null;
+    }, 30 * 60000)
+    .catch(() => null);
+}
+
+// The artists Plex says are like this one (its metadata's similar artists)
+// that this library has, in Plex's order.
+async function similarInLibrary(s, sec, artist, limit) {
+  const names = [...new Set((artist.Similar || []).map((t) => t?.tag).filter((t) => typeof t === 'string' && t.trim()))].slice(0, 40);
+  const found = await mapLimit(names, 4, (name) => artistNamed(s, sec, name));
+  const seen = new Set([String(artist.ratingKey)]);
+  return found.filter((a) => a && !seen.has(String(a.ratingKey)) && seen.add(String(a.ratingKey))).slice(0, limit);
+}
+
+// Those that sound like it (Plex's sonic analysis): its nearest artists.
+async function sonicallySimilar(s, artist, { limit, maxDistance }) {
+  const items = await s.nearest(artist.ratingKey, { limit, maxDistance }).catch(() => []);
+  return items.filter((m) => m.type === 'artist' && String(m.ratingKey) !== String(artist.ratingKey));
+}
+
+// A tag's key, for a library list filtered by it ("style=123").
+const tagKey = (t) => (t?.id != null ? String(t.id) : t?.filter ? String(t.filter).split('=').pop() : '');
+
+const SHELF_ARTISTS = 20;
+const ALL_ARTISTS = 60;
 
 export async function artistView({ el, params }) {
   const s = app.server;
@@ -226,7 +283,20 @@ export async function artistView({ el, params }) {
   const popularSlot = h('div');
   const albumsSlot = h('div');
   const similarSlot = h('div');
-  el.append(popularSlot, albumsSlot, similarSlot);
+  const sonicSlot = h('div');
+  el.append(popularSlot, albumsSlot, similarSlot, sonicSlot);
+  // Its styles, each opening the library's artists of that style.
+  const styles = (artist.Style || []).filter((t) => t?.tag && tagKey(t));
+  if (styles.length) {
+    el.append(
+      h(
+        'section.block.artist-styles',
+        null,
+        sectionHeader('Styles'),
+        h('div.chips.artist-style-chips', { role: 'list' }, styles.map((t) => h('a.chip', { href: `#${browseHref('artists', { style: tagKey(t), title: t.tag })}`, role: 'listitem' }, t.tag))),
+      ),
+    );
+  }
   if (artist.summary) el.append(h('section.block.about', null, sectionHeader('About'), h('div.pad', null, clampText(artist.summary, 4))));
 
   const popularP = s.popularTracks(sec, artist.ratingKey, 20).then((items) => {
@@ -258,32 +328,56 @@ export async function artistView({ el, params }) {
     popularSlot.replaceWith(h('section.block', null, sectionHeader('Popular tracks'), list, more));
   });
 
-  const albumsP = s.children(artist.ratingKey).then((albums) => {
-    const sorted = albums.slice().sort((a, b) => (year(b) || 0) - (year(a) || 0));
-    const groups = new Map();
-    for (const m of sorted) {
-      const g = albumGroup(m);
-      if (!groups.has(g)) groups.set(g, []);
-      groups.get(g).push(m);
-    }
-    const blocks = GROUP_ORDER.filter((g) => groups.has(g)).map((g) =>
-      h('section.block', null, sectionHeader(g), grid(groups.get(g).map((m) => albumCard(m, { subtitle: year(m) || '' })), { centered: true })),
-    );
-    albumsSlot.replaceWith(...(blocks.length ? blocks : [emptyState('No albums for this artist.')]));
-  });
-
-  const similarP = s
-    .nearest(artist.ratingKey, { limit: 20 })
-    .then((items) => {
-      const artists = items.filter((m) => m.type === 'artist');
-      if (artists.length) {
-        const row = shelf(artists.map(artistCard));
-        similarSlot.replaceWith(h('section.block', null, sectionHeader('Sonically similar', null, null, row), row));
+  const albumsP = s
+    .children(artist.ratingKey)
+    .then((albums) => withTypes(s, albums))
+    .then((albums) => {
+      const sorted = albums.slice().sort((a, b) => (year(b) || 0) - (year(a) || 0));
+      const groups = new Map();
+      for (const m of sorted) {
+        const g = albumGroup(m);
+        if (!groups.has(g)) groups.set(g, []);
+        groups.get(g).push(m);
       }
-    })
-    .catch(() => {});
+      const blocks = GROUP_ORDER.filter((g) => groups.has(g)).map((g) => {
+        const cards = groups.get(g).map((m) => albumCard(m, { subtitle: year(m) || '' }));
+        if (g === 'Albums') return h('section.block', { dataset: { group: g } }, sectionHeader(g), grid(cards, { centered: true }));
+        const strip = shelf(cards);
+        return h('section.block', { dataset: { group: g } }, sectionHeader(g, null, null, strip), strip);
+      });
+      albumsSlot.replaceWith(...(blocks.length ? blocks : [emptyState('No albums for this artist.')]));
+    });
 
-  await Promise.allSettled([popularP, albumsP, similarP]);
+  // Similar artists (Plex's, those in this library) and sonically similar
+  // ones, each a shelf, with a page of more.
+  const artistShelf = (slot, heading, href, artists) => {
+    if (!artists.length) return;
+    const strip = shelf(artists.map(artistCard));
+    slot.replaceWith(h('section.block', { dataset: { similar: href.split('/').pop() } }, sectionHeader(heading, href, null, strip), strip));
+  };
+  const similarP = similarInLibrary(s, sec, artist, SHELF_ARTISTS).then((artists) => artistShelf(similarSlot, 'Similar artists', `/artist/${artist.ratingKey}/similar`, artists));
+  const sonicP = sonicallySimilar(s, artist, { limit: SHELF_ARTISTS }).then((artists) => artistShelf(sonicSlot, 'Sonically similar artists', `/artist/${artist.ratingKey}/sonic`, artists));
+
+  await Promise.allSettled([popularP, albumsP, similarP, sonicP]);
+}
+
+// All of an artist's similar artists in the library (`kind`: 'similar',
+// Plex's; 'sonic', those that sound like it, further than the shelf goes).
+export async function similarArtistsView({ el, params, kind }) {
+  const s = app.server;
+  const sec = app.source.sectionKey;
+  if (!/^\d+$/.test(String(params.id))) throw Object.assign(new Error('Not found'), { status: 404 });
+  const artist = await s.metadata(params.id);
+  if (!artist || artist.type !== 'artist') throw Object.assign(new Error('Not found'), { status: 404 });
+  const sonic = kind === 'sonic';
+  el.append(backHeader(sonic ? `Sounds like ${artist.title}` : `Similar to ${artist.title}`, { fallback: `/artist/${artist.ratingKey}` }));
+  const artists = sonic ? await sonicallySimilar(s, artist, { limit: ALL_ARTISTS, maxDistance: 0.4 }) : await similarInLibrary(s, sec, artist, ALL_ARTISTS);
+  el.append(
+    h('p.lede', null, sonic ? `Artists in your library who sound like ${artist.title}, nearest first, by your server’s sonic analysis.` : `Artists in your library that Plex says are like ${artist.title}.`),
+    artists.length
+      ? grid(artists.map(artistCard), { centered: true })
+      : emptyState(sonic ? 'Your server hasn’t found any that sound like them (it needs sonic analysis for that).' : `None of the artists Plex says are like ${artist.title} are in your library.`),
+  );
 }
 
 // ---------- editing (playlists and collections) ----------

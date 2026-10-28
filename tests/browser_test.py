@@ -7,9 +7,10 @@ They can also run against any server that serves web/ with a matching
 config.js. Settings come from the environment:
 
     APP_URL          app with a shared AI model and WebSockets allowed
-    APP_URL_NOWS     app with DISABLE_WEBSOCKETS=true and no shared model
-    APP_URL_DEBUG    app with DEBUG=true (the debug section is skipped
-                     without it)
+    APP_URL_NOWS     app with DISABLE_WEBSOCKETS=true (from before 0.25.0:
+                     WEBSOCKETS=off) and no shared model
+    APP_URL_DEBUG    app with DEBUG=true and WEBSOCKETS=on (the debug and
+                     wsonly sections are skipped without it)
     APP_URL_BIG      app on a mock Plex server started with --big 3000, and
     MOCK_PLEX_BIG    that server (the memory section is skipped without them)
     MOCK_PLEX        mock Plex server, e.g. http://127.0.0.1:32400
@@ -24,7 +25,7 @@ and t3 (Alex, a friend without access).
 
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
-Sections: core ws ai dj djs nows blocked poll custom desktop nav library edit
+Sections: core ws ai dj djs nows blocked poll wsonly custom desktop nav library edit
 lists pictures missing files sharing routes privacy np stream cast ratings
 devices fades together settings home formats select spotify debug sync
 missingsync memory (default: all).
@@ -773,7 +774,7 @@ with sync_playwright() as pw:
         player(page, 'p.pause()')
         ctx.close()
 
-    # ---------- nows: DISABLE_WEBSOCKETS ----------
+    # ---------- nows: DISABLE_WEBSOCKETS=true (WEBSOCKETS=off) ----------
     if run('nows'):
         ctx = browser.new_context(**MOBILE)
         page = ctx.new_page()
@@ -786,10 +787,12 @@ with sync_playwright() as pw:
         check('nows: new album appears on Home', wait_for(lambda: has_card(page, 'Second Arrival'), 20))
         page.goto(APP_NOWS + '#/settings/debug')
         status = live_status(page)
-        check('nows: Connection page explains WebSockets are off', 'DISABLE_WEBSOCKETS' in status, status)
+        check('nows: Connection page explains WebSockets are off', 'WEBSOCKETS=off' in status, status)
         shot(page, 'nows-01-connection')
-        page.click('button:has-text("Reconnect live updates")')
-        check('nows: reconnecting still avoids WebSockets', wait_mode(page, 'eventsource', 30) == 'eventsource')
+        check('nows: ...with no setting of this device\'s for them', page.locator('.radio-row', has_text='Without WebSockets').count() == 0
+              and page.locator('button', has_text='Reconnect live updates').count() == 0)
+        page.click('button:has-text("Test connection")')
+        check('nows: testing the connection starts live updates again, still without WebSockets', wait_mode(page, 'eventsource', 30) == 'eventsource')
         page.wait_for_timeout(1000)
         check('nows: no WebSocket was ever opened', not sockets, str(sockets))
         ctx.close()
@@ -823,6 +826,30 @@ with sync_playwright() as pw:
         check('poll: new album found by checking', wait_for(lambda: has_card(page, 'Fourth Arrival'), 20))
         ctx.close()
         mock('/__mock/config?ws=1&sse=on')
+
+    # ---------- wsonly: WEBSOCKETS=on ----------
+    if run('wsonly') and APP_DEBUG:
+        mock('/__mock/config?ws=0&sse=on')
+        try:
+            ctx = browser.new_context(**MOBILE)
+            page = ctx.new_page()
+            attach(page, 'wsonly')
+            streams = []
+            page.on('request', lambda r: '/:/eventsource/' in r.url and streams.append(r.url))
+            login(page, APP_DEBUG)
+            page.wait_for_timeout(12000)
+            modes = live_mode(page)
+            page.goto(APP_DEBUG + '#/settings/debug')
+            status = live_status(page)
+            shot(page, 'wsonly-01-connection')
+            check('wsonly: with WEBSOCKETS=on and WebSockets refused, live updates never fall back to anything else',
+                  modes == 'connecting' and not streams and 'WEBSOCKETS=on' in status, f'{modes} {status} {streams[:1]}')
+            mock('/__mock/config?ws=1&sse=on')
+            js(page, "() => import('./js/live.js').then(m => m.live.checkNow())")
+            check('wsonly: ...and keep trying a WebSocket, which works once it gets through', wait_mode(page, 'websocket', 30) == 'websocket' and not streams, live_mode(page))
+            ctx.close()
+        finally:
+            mock('/__mock/config?ws=1&sse=on')
 
     # ---------- custom: this device's own Ollama ----------
     if run('custom'):
@@ -1281,12 +1308,12 @@ with sync_playwright() as pw:
             albums = page.locator('.block .rows .album-row').evaluate_all('rs => rs.map((r) => [r.querySelector("a").getAttribute("href"), r.querySelector(".row-title").textContent])')
             crates = [a for a in albums if a[1] == 'Crate Digger']
             check('library: ...and one of each album, the best-sounding edition', len(crates) == 1 and crates[0][0].endswith(f'/album/{hires_album}'), str(albums))
-            settings(page, {'searchCodecs': False})
+            settings(page, {'codecInfo': False})
             page.fill('.search-box input', 'kilo meridian')
             wait_for(lambda: page.locator('.search-tracks .track').count() > 0, 8)
             page.wait_for_timeout(500)
-            check('library: formats in search can be turned off (Settings › Experience)', page.locator('.search-tracks .track-codec').count() == 0)
-            settings(page, {'searchCodecs': True})
+            check('library: with Show codec information off (Settings › Experience), no formats in search', page.locator('.search-tracks .track-codec').count() == 0)
+            settings(page, {'codecInfo': True})
             page.press('.search-box input', 'Escape')
             page.wait_for_timeout(300)
         finally:
@@ -1438,6 +1465,50 @@ with sync_playwright() as pw:
         check('library: mixes (artists) and collections can be added to the queue too',
               all(any(a in x for x in m) for m in (artist_menu, col_menu) for a in ('Play next', 'Add to queue')), f'{artist_menu} {col_menu}')
         player(page, 'p.pause()')
+
+        # An artist's page: their releases by kind, as Plexamp has them,
+        # Singles & EPs below Albums (Plex's listing of an artist's albums
+        # doesn't say which kind each is: the app asks for their details),
+        # then the artists Plex says are like them that the library has, and
+        # those that sound like them, each with a page of more, and their
+        # styles.
+        named = {a['title']: a for a in mock('/library/sections/1/all?type=8&X-Plex-Container-Size=100&X-Plex-Token=t')['MediaContainer']['Metadata']}
+        detail_asks = []
+        page.on('request', lambda r: re.search(r'/library/metadata/[0-9,]+,[0-9]+(\?|$)', r.url) and detail_asks.append(r.url))
+        group = lambda g: page.locator(f'.view section[data-group="{g}"] .card-title').all_inner_texts()
+        page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
+        page.wait_for_selector('.view section[data-similar=sonic]', timeout=10000)
+        page.wait_for_selector('.view section[data-group="Singles & EPs"]', timeout=10000)
+        heads = [t.upper() for t in page.locator('.view .block h2').all_inner_texts()]
+        order = [x for x in heads if x in ('ALBUMS', 'SINGLES & EPS', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT')]
+        shot(page, 'library-02-artist')
+        check('library: an artist\'s page: Albums, then Singles & EPs, though Plex\'s listing of their albums doesn\'t say which is which',
+              order[:2] == ['ALBUMS', 'SINGLES & EPS'] and sorted(group('Albums')) == ['Low Light Signals', 'Tidal Lines'] and group('Singles & EPs') == ['Buoy'] and detail_asks,
+              f'{heads} {group("Albums")} {group("Singles & EPs")} {detail_asks[:1]}')
+        similar = page.locator('.view section[data-similar=similar] .card-title').all_inner_texts()
+        check('library: ...then the artists Plex says are like them that the library has (in Plex\'s order), those that sound like them, their styles and About',
+              order == ['ALBUMS', 'SINGLES & EPS', 'SIMILAR ARTISTS', 'SONICALLY SIMILAR ARTISTS', 'STYLES', 'ABOUT'] and similar == ['Kilo Meridian', 'Marisol Vega'], f'{order} {similar}')
+        styles = page.locator('.view .artist-style-chips a.chip').all_inner_texts()
+        page.locator('.view .artist-style-chips a.chip', has_text='Ambient').click()
+        page.wait_for_selector('.view a.row[href^="#/artist/"]', timeout=10000)
+        of_style = page.locator('.view a.row[href^="#/artist/"] .row-title').all_inner_texts()
+        check('library: ...each style opening the library\'s artists of that style', styles == ['Ambient', 'Downtempo'] and of_style == ['Glass Harbour'] and 'style=' in page.url, f'{styles} {of_style} {page.url}')
+        page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
+        page.wait_for_selector('.view section[data-similar=sonic]', timeout=10000)
+        page.locator('.view section[data-similar=sonic] a.section-head, .view section[data-similar=sonic] a.section-link').first.click()
+        page.wait_for_selector('.view .grid .card, .view .empty-state', timeout=10000)
+        sonic = page.locator('.view .grid .card-title').all_inner_texts()
+        check('library: ...Sonically similar artists with a page of more', page.url.endswith('/sonic') and sonic and 'Glass Harbour' not in sonic, f'{page.url} {sonic}')
+        page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}/similar")
+        page.wait_for_selector('.view .grid .card, .view .empty-state', timeout=10000)
+        check('library: ...as Similar artists has', page.locator('.view .grid .card-title').all_inner_texts() == ['Kilo Meridian', 'Marisol Vega'])
+        page.goto(APP + f"#/artist/{named['Marisol Vega']['ratingKey']}")
+        page.wait_for_selector('.view section[data-group="Live albums"]', timeout=10000)
+        live_albums = group('Live albums')
+        page.goto(APP + f"#/artist/{named['Various Artists']['ratingKey']}")
+        page.wait_for_selector('.view section[data-group="Compilations"]', timeout=10000)
+        check('library: ...and live albums, Compilations and Soundtracks, each of their own', live_albums == ['Live at the Lantern'] and group('Compilations') == ['Night Drive Vol. 1']
+              and group('Soundtracks') == ['The Lighthouse (Original Score)'] and not group('Albums'), f'{live_albums} {group("Compilations")} {group("Soundtracks")} {group("Albums")}')
         ctx.close()
 
     # ---------- edit: the queue, playlists and collections ----------
@@ -4312,7 +4383,7 @@ with sync_playwright() as pw:
             out = []
             end = time.time() + seconds
             while time.time() < end:
-                out.append(player(page, "({ cur: p.current?.id, t: p.time, kind: p.transition?.plan.kind || null, state: p.state,"
+                out.append(player(page, "({ cur: p.current?.id, t: p.time, kind: p.transition?.plan.kind || null, fade: p.transition?.plan.fade ?? null, state: p.state,"
                                         " vols: p.decks.map((d) => d.el.volume / Math.max(1e-9, p.volume * d.level)), levels: p.decks.map((d) => d.level),"
                                         " times: p.decks.map((d) => d.el.currentTime),"
                                         " playing: p.decks.filter((d) => !d.el.paused).length, active: p.active })"))
@@ -4429,14 +4500,53 @@ with sync_playwright() as pw:
 
         # A quiet ending (its last 8 seconds about 23 dB down, a beat still
         # ticking): Smart starts the fade where it begins, not 5 seconds
-        # before the end.
+        # before the end, and it lasts as long as the ending (this one never
+        # gets nearly silent before its music ends), not Crossfade length.
         queue([qe['ratingKey'], qn['ratingKey']], 9)
-        got = watch(12, qn['ratingKey'])
+        got = watch(13, qn['ratingKey'])
         fading = [x for x in got if x['kind'] == 'fade']
         last, first = switch_point(got, qe['ratingKey'], qn['ratingKey'])
-        check('fades: the next track starts over a quiet ending, where it begins',
-              fading and 11.6 <= fading[0]['t'] <= 13.2 and last is not None and last < 18.5,
-              f'{fading[0]["t"] if fading else None}, {last} -> {first}')
+        check('fades: the next track starts over a quiet ending, where it begins, and fades in until the ending\'s done',
+              fading and 11.6 <= fading[0]['t'] <= 13.2 and 6 <= (fading[0]['fade'] or 0) <= 8.5 and last is not None and last >= 18.6,
+              f'{fading[0]["t"] if fading else None} {fading[0]["fade"] if fading else None}, {last} -> {first}')
+        # Smart crossfade length, from what the loudness analysis says of an
+        # ending (here put in place for the track playing): over a quiet
+        # ending, the fade lasts until the track is nearly silent (2 seconds
+        # at least, quick where it's nearly silent already), until its music
+        # ends where it never gets that quiet, and for Crossfade length where
+        # it ends cold. (No longer than a third of the next track, here 20
+        # seconds long.)
+        queue([qe['ratingKey'], qn['ratingKey']], 1)
+        js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
+        plans = js(page, """() => Promise.all([import('./js/player.js'), import('./js/state.js')]).then(([{ player: p }, { app }]) => {
+            const spans = {
+                fadeout: { start: 0, end: 19.4, quietFrom: { soft: 14, quiet: 15.4, hushed: 16.8 } },
+                long: { start: 0, end: 19.5, quietFrom: { soft: 8, quiet: 11, hushed: 16 } },
+                nohush: { start: 0, end: 19.5, quietFrom: { soft: 12, quiet: 13, hushed: null } },
+                cold: { start: 0, end: 19.5, quietFrom: { soft: null, quiet: null, hushed: null } },
+            };
+            const cur = p.current, next = p.queue[p.index + 1], was = app.settings.quietEndings;
+            const out = {};
+            for (const [name, span] of Object.entries(spans)) {
+                for (const kind of ['soft', 'quiet', 'hushed']) {
+                    app.settings.quietEndings = kind;
+                    p.spans.set(cur.id, span);
+                    p.spans.set(next.id, { start: 0, end: next.duration / 1000, quietFrom: {} });
+                    const plan = p.nextPlan();
+                    out[`${name}.${kind}`] = plan && [Math.round(plan.at * 100) / 100, Math.round(plan.fade * 100) / 100];
+                }
+            }
+            app.settings.quietEndings = was;
+            p.spans.delete(cur.id);
+            p.spans.delete(next.id);
+            return out;
+        })""")
+        want = {'fadeout.soft': [14, 2.8], 'fadeout.quiet': [15.4, 2], 'fadeout.hushed': [16.8, 2],
+                'long.soft': [9.75, 6.25], 'long.quiet': [11, 5], 'long.hushed': [16, 2],
+                'nohush.soft': [12, 6.67], 'nohush.quiet': [13, 6.5], 'nohush.hushed': [14.5, 5],
+                'cold.soft': [14.5, 5], 'cold.quiet': [14.5, 5], 'cold.hushed': [14.5, 5]}
+        off = {k: (plans.get(k), v) for k, v in want.items() if not plans.get(k) or any(abs(a - b) > 0.02 for a, b in zip(plans[k], v))}
+        check('fades: smart crossfade length: over a quiet ending, until the track is nearly silent (or its music ends); Crossfade length where it ends cold', not off, str(off))
         # How quiet it has to be is a setting: "nearly silent" lets this one
         # play out, and the fade comes at the end.
         settings(page, {'quietEndings': 'hushed'})
@@ -4877,10 +4987,25 @@ with sync_playwright() as pw:
         check('settings: 1-tap playback off asks first', page.wait_for_selector('.sheet.open .sheet-action:has-text("Play next")', timeout=3000) is not None)
         page.keyboard.press('Escape')
         page.wait_for_timeout(300)
-        settings(page, {'codecBadges': False, 'previewButtons': True, 'oneTapPlayback': True})
+        settings(page, {'codecInfo': False, 'previewButtons': True, 'oneTapPlayback': True})
         page.reload()
         page.wait_for_selector('.hero-album')
-        check('settings: codec badge can be turned off', page.locator('.codec-badge').count() == 0)
+        check('settings: with Show codec information off, no codec badge on the album page', page.locator('.codec-badge').count() == 0)
+        album_url = page.url
+        settings(page, {'codecInfo': True})
+        # 0.24.0's four codec settings are one: off where they all were. And
+        # live updates are no setting of a device's now.
+        mig = js(page, "() => import('./js/state.js').then(({ migrateSettings }) => [migrateSettings({ version: 3, codecBadges: false, coverBadges: false, searchCodecs: false, showCodec: false, liveUpdates: 'nows' }),"
+                       " migrateSettings({ version: 3, codecBadges: true, coverBadges: false, searchCodecs: false, showCodec: false }), migrateSettings({ version: 4, codecInfo: true })])")
+        check('settings: 0.24.0\'s four codec settings become Show codec information, off only where they all were (and Live updates goes)',
+              mig[0].get('codecInfo') is False and not any(k in mig[0] for k in ('codecBadges', 'coverBadges', 'searchCodecs', 'showCodec', 'liveUpdates'))
+              and 'codecInfo' not in mig[1] and mig[2].get('codecInfo') is True, str(mig))
+        page.goto(APP + '#/settings/experience')
+        page.wait_for_selector('label.toggle-row:has-text("Show codec information")')
+        old_rows = [t for t in page.locator('.toggle-row').all_inner_texts() if any(w in t for w in ('codec badges', 'formats in search'))]
+        check('settings: one switch for codec information (Settings › Experience), none of the four there were', not old_rows, str(old_rows))
+        page.goto(album_url)
+        page.wait_for_selector('.hero-album')
         page.locator('.album-tracks .track-main').first.click()  # the reload stopped playback
         playing = wait_for(lambda: player(page, "p.state === 'playing' && p.time > 0.3"), 20)
         how = lambda: player(page, '({ state: p.state, t: p.time, index: p.index, id: p.current?.id })')
@@ -4919,19 +5044,23 @@ with sync_playwright() as pw:
         libs = page.locator('.rows-group .toggle-row').all_inner_texts()
         check('settings: with two music libraries, the library settings say which', len(libs) == 2 and all('Audiobooks' in t for t in libs), str(libs))
 
-        # The codec and the rating are separate settings.
+        # The codec (Show codec information, for the whole app) and the
+        # rating are separate settings.
         if not player(page, '!!p.current'):
             play_first_album_track(page, APP)
-        page.goto(APP + '#/settings/player')
-        page.wait_for_selector('label.toggle-row:has-text("Show codec")')
-        toggle(page, 'Show codec', False)
+        page.goto(APP + '#/settings/experience')
+        page.wait_for_selector('label.toggle-row:has-text("Show codec information")')
+        toggle(page, 'Show codec information', False)
         page.click('.pb-main')
         page.wait_for_selector('.np.open')
         page.wait_for_timeout(400)
-        check('settings: the codec can be hidden, keeping the rating', not page.locator('.np-codec').is_visible() and page.locator('.np-stars').is_visible())
+        check('settings: the codec can be hidden in the player too, keeping the rating', not page.locator('.np-codec').is_visible() and page.locator('.np-stars').is_visible())
         page.keyboard.press('Escape')
         page.wait_for_selector('.np.open', state='detached')
-        toggle(page, 'Show codec', True)
+        toggle(page, 'Show codec information', True)
+        page.goto(APP + '#/settings/player')
+        page.wait_for_selector('label.toggle-row:has-text("Show rating")')
+        check('settings: ...with no switch of its own for the codec in Settings › Player', page.locator('label.toggle-row', has_text='Show codec').count() == 0)
         toggle(page, 'Show rating', False)
         page.click('.pb-main')
         page.wait_for_selector('.np.open')
@@ -5168,17 +5297,18 @@ with sync_playwright() as pw:
             page.keyboard.press('Escape')
             page.wait_for_selector('.np.open', state='detached')
             player(page, 'p.pause()')
-            # Turned off (Settings › Experience): none, and nothing's asked.
-            settings(page, {'coverBadges': False})
+            # Turned off (Settings › Experience › Show codec information):
+            # none, and nothing's asked.
+            settings(page, {'codecInfo': False})
             page.goto(APP + '#/browse/albums')
             page.reload()
             page.wait_for_selector('.grid .card')
             del asked[:]
             page.wait_for_timeout(1500)
-            check('formats: covers\' badges can be turned off', page.locator('.cover-badge').count() == 0 and not looked_up(ids), len(looked_up(ids)))
+            check('formats: covers\' badges go with Show codec information', page.locator('.cover-badge').count() == 0 and not looked_up(ids), len(looked_up(ids)))
         finally:
             mock('/__mock/config?codec=reset')
-            settings(page, {'coverBadges': True})
+            settings(page, {'codecInfo': True})
         ctx.close()
 
     # ---------- select: albums' menus, and choosing several ----------
@@ -6272,25 +6402,24 @@ with sync_playwright() as pw:
         def device(name, token='t', seed=None):
             c = browser.new_context(**MOBILE)
             if seed is not None:
-                # A browser that had the app before, signed in, with a list
-                # of its own (as 0.23.0 kept it).
+                # A browser that had the app before, with a list of its own
+                # (as 0.23.0 kept it, or 0.24.0 for a friend): signed in
+                # already, or not (then it signs in now).
                 c.add_init_script("if (!sessionStorage.getItem('pw-test-seeded')) { sessionStorage.setItem('pw-test-seeded', '1');"
                                   f" for (const [k, v] of Object.entries({json.dumps(seed)})) localStorage.setItem(k, JSON.stringify(v)); }}")
             pg = c.new_page()
             attach(pg, name)
             bodies = []
             pg.on('request', lambda r: 'api/missing' in r.url and bodies.append(r.post_data or ''))
-            if seed is not None:
+            if seed is not None and 'pw.auth' in seed:
                 pg.goto(APP_DEBUG)
                 pg.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
             else:
                 login(pg, APP_DEBUG, token, app_defaults=True)
             return c, pg, bodies
 
-        # (Everyone's on the server, cleared by its owner, and Sam's not
-        # shared: as if new.)
+        # (Everyone's on the server, cleared by its owner: as if new.)
         lists('t', 'POST', {'ops': [{'type': 'clear', 'id': op_id(), 'everyone': True}]})
-        lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
 
         # The server's owner's browser with a list from before (0.23.0): it
         # goes to the account, put together, without what was asked for or
@@ -6323,8 +6452,8 @@ with sync_playwright() as pw:
         shot(desk, 'missingsync-01-another-device')
         check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
         check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
-        check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (and there\'s no switch to share theirs)',
-              'yours, and those of your friends' in lede and 'Kept for your Plex account' in lede and desk.locator('.missing-share label').count() == 0, lede)
+        check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (with no switch of any kind)',
+              'yours and your friends' in lede and 'Kept for your Plex account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
 
         # Noted on one device, on the other once it's read again; counted again.
         note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')
@@ -6334,61 +6463,47 @@ with sync_playwright() as pw:
         again = rows(desk, lambda r: any(x.startswith('Shared Song') and 'suggested 2 times' in x for x in r))
         check('missingsync: noted on one device, counted on the other', any(r.startswith('Shared Song') and 'suggested 2 times' in r for r in again), str(again))
 
-        # A friend: their list stays on their device until they choose to
-        # keep it for their account, told that whoever runs the server sees
-        # it; nothing goes before that.
-        sam_ctx, sam, sam_sent = device('missing-sam', 't2')
-        js(sam, f"""() => {{ const l = JSON.parse(localStorage.getItem('pw.aiMissing') || '[]');
-            l.push({json.dumps({'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend Before', 'times': 1, 'first': now - 50, 'last': now - 50, 'prompt': 'friend old secret', 'server': SRV, 'section': sec, 'library': lib})});
-            localStorage.setItem('pw.aiMissing', JSON.stringify(l)); }}""")
+        # A friend: theirs is kept for their account as they use it, with
+        # the list their browser had from before (put together with it the
+        # first time), so the server's owner sees what's missing; they're
+        # told so, and there's no switch.
+        before = {'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend Before', 'times': 1, 'first': now - 50, 'last': now - 50, 'prompt': 'friend old secret', 'server': SRV, 'section': sec, 'library': lib}
+        sam_ctx, sam, sam_sent = device('missing-sam', 't2', seed={'pw.aiMissing': [before]})
+        went = wait_for(lambda: titles('t2') == ['Friend Before'], 10, 0.3)
+        check('missingsync: a friend\'s list from before goes to their account the first time, without what was asked for', went and 'friend old secret' not in ' '.join(sam_sent),
+              f'{titles("t2")} {" ".join(sam_sent)[:300]}')
         note(sam, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}, {'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend Only'}], 'friend secret request')
         note(sam, [{'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend Spotify'}], 'Friends Gym', via='spotify')
-        sam.wait_for_timeout(1500)
-        posts = [b for b in sam_sent if b]
-        check('missingsync: a friend\'s list stays on their device to begin with: nothing goes to the player', posts == [] and lists('t2')['entries'] == [] and not lists('t2')['shared'],
-              f'{posts[:2]} {lists("t2")}')
-        sam_rows = rows(sam, lambda r: len(r) == 4)
-        sam_lede = sam.locator('.missing-lede').inner_text()
-        switch = sam.locator('.missing-share label.toggle-row')
-        offered = switch.count() == 1 and not switch.locator('input').is_checked() and 'whoever runs ' in switch.inner_text()
-        shot(sam, 'missingsync-02-friend-before')
-        check('missingsync: ...says so, and offers to keep it for their account, saying whoever runs the server sees it then',
-              'kept on this device' in sam_lede and offered and len(sam_rows) == 4, f'{sam_rows} {sam_lede} {switch.all_inner_texts()}')
-        check('missingsync: ...and the server\'s owner doesn\'t see it', not any('Friend' in r for r in rows(desk)), str(rows(desk)))
-        sam.goto(APP_DEBUG + '#/settings/ai')
-        sam.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
-        check('missingsync: ...as Settings › AI does, under Show missing tracks', sam.locator('.ai-missing-settings label.toggle-row', has_text='Keep them for your Plex account').count() == 1)
-        # Kept for their account: this device's list goes with it (without
-        # what was asked for, or the playlist's name).
-        rows(sam)
-        sam.locator('.missing-share label.toggle-row').click()
-        went = wait_for(lambda: titles('t2') == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'], 10, 0.3)
+        went = sent(sam) and wait_for(lambda: titles('t2') == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'], 10, 0.3)
         theirs = lists('t2')
-        check('missingsync: kept for their account, their list goes to it, as it is', went and theirs['shared'] and 'others' not in theirs and set(theirs['rev']) == {'mine'},
+        check('missingsync: what a friend notes goes to their account as they use it', went and 'shared' not in theirs and 'others' not in theirs and set(theirs['rev']) == {'mine'},
               json.dumps(theirs)[:300])
         check('missingsync: ...never with what they asked for, or their playlist\'s name (in what\'s sent, or kept)',
               not any(w in json.dumps(theirs) + ' '.join(sam_sent) for w in ('friend secret', 'friend old secret', 'Friends Gym')), ' '.join(sam_sent)[:300])
         sam_rows = rows(sam, lambda r: len(r) == 4)
         sam_lede = sam.locator('.missing-lede').inner_text()
-        shot(sam, 'missingsync-03-friend-shared')
-        check('missingsync: ...their page has theirs only, and says whoever runs the server sees them',
-              sorted(r.split('\n')[0] for r in sam_rows) == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'] and 'Whoever runs ' in sam_lede and 'sees them too' in sam_lede,
-              f'{sam_rows} {sam_lede}')
+        shot(sam, 'missingsync-02-friend')
+        check('missingsync: ...their page has theirs only, says whoever runs the server sees them, and has no switch',
+              sorted(r.split('\n')[0] for r in sam_rows) == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'] and 'Whoever runs ' in sam_lede and 'sees them too' in sam_lede
+              and sam.locator('.missing-lede ~ .rows label').count() == 0, f'{sam_rows} {sam_lede}')
         sam.goto(APP_DEBUG + '#/settings/ai')
         sam.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
         told = sam.locator('label.toggle-row', has_text='Show missing tracks').inner_text()
-        check('missingsync: ...as Settings › AI › Show missing tracks does', 'sees them too' in told, told)
+        check('missingsync: ...as Settings › AI › Show missing tracks does, with no switch to keep them on the device',
+              'sees them too' in told and sam.locator('.ai-missing-settings label.toggle-row', has_text='Keep them for your Plex account').count() == 0, told)
         check('missingsync: someone who can\'t use the server can\'t have a list for it', status_of('t3') == 403)
         refused = lists('t2', 'POST', {'ops': [{'type': 'clear', 'id': op_id(), 'everyone': True}]})
         check('missingsync: ...and a friend can\'t change everyone\'s', refused.get('skipped') == 1 and len(titles('t2')) == 4, json.dumps(refused))
+        stale = lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
+        check('missingsync: ...nor take theirs off the player as 0.24.0 could (a page of it still open)', stale.get('skipped') == 1 and len(titles('t2')) == 4, json.dumps(stale))
 
         # The server's owner sees everyone's: whose, and how often in all.
         owner_rows = rows(desk, lambda r: any(x.startswith('Friend Only') for x in r))
-        shot(desk, 'missingsync-04-owner')
+        shot(desk, 'missingsync-03-owner')
         shared = next((r for r in owner_rows if r.startswith('Shared Song')), '')
         friend = next((r for r in owner_rows if r.startswith('Friend Only')), '')
         spot = next((r for r in owner_rows if r.startswith('Friend Spotify')), '')
-        check('missingsync: the server\'s owner sees friends\' who share, whose, and how often in all',
+        check('missingsync: the server\'s owner sees friends\', whose, and how often in all',
               'suggested 3 times' in shared and 'you and Sam' in shared and friend.endswith('· Sam') and 'in a playlist from Spotify' in spot, str(owner_rows))
         check('missingsync: ...never what they asked for, or their playlist\'s name', not any(w in ' '.join(owner_rows) for w in ('friend secret', 'Friends Gym')), str(owner_rows))
         with desk.expect_download() as dl:
@@ -6425,18 +6540,6 @@ with sync_playwright() as pw:
         sent(desk)
         check('missingsync: Check again, for the owner, takes what\'s in the library now off the friend\'s list too', real['title'] not in titles('t2'), str(titles('t2')))
 
-        # The friend stops keeping theirs for their account: it's off the
-        # player (the owner doesn't see it), and stays on their device.
-        rows(sam, lambda r: sorted(x.split('\n')[0] for x in r) == ['Friend Before', 'Friend Spotify'])
-        before_here = here(sam)
-        sam.locator('.missing-share label.toggle-row').click()
-        gone = wait_for(lambda: not lists('t2')['shared'] and lists('t2')['entries'] == [], 10, 0.3)
-        check('missingsync: a friend who stops keeping theirs for their account takes it off the player, and keeps it on their device',
-              gone and here(sam) == before_here and not any('Friend' in r for r in rows(desk, lambda r: not any('Friend' in x for x in r))), f'{lists("t2")} {here(sam)}')
-        note(sam, [{'kind': 'track', 'artist': 'Friend Artist', 'title': 'Friend After'}], 'friend secret 3')
-        sam.wait_for_timeout(1500)
-        check('missingsync: ...and nothing more goes', 'Friend After' not in titles('t2') and queued(sam) == 0, str(titles('t2')))
-
         # Signing out leaves the account's; the next account on that browser
         # gets none of it.
         before = titles('t')
@@ -6444,30 +6547,28 @@ with sync_playwright() as pw:
         desk.click('.account-card button:has-text("Sign out")')
         desk.click('.sheet.open .sheet-action:has-text("Sign out")')
         desk.wait_for_url('**#/login')
+        sam_before = titles('t2')
         login(desk, APP_DEBUG, 't2', app_defaults=True)
         desk.wait_for_timeout(2000)
-        check('missingsync: signing out leaves the account\'s list, and the next account on that browser gets none of it', titles('t') == before and titles('t2') == [] and here(desk) == [],
-              f'{titles("t")} {titles("t2")} {here(desk)}')
+        check('missingsync: signing out leaves the account\'s list, and the next account on that browser gets none of it', titles('t') == before and titles('t2') == sam_before
+              and not any(t in here(desk) for t in before), f'{titles("t")} {titles("t2")} {here(desk)}')
         # Signed in over someone (without signing out): theirs isn't the new
-        # account's, even once it shares.
-        lists('t2', 'POST', {'ops': [{'type': 'share', 'id': op_id()}]})
+        # account's.
         js(old, "() => import('./js/state.js').then(({ setAuth, app }) => setAuth({ ...app.auth, token: 't2', username: 'sam' }))")
         old.evaluate("() => { location.hash = '#/'; }")
         old.reload()
         old.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
         old.wait_for_timeout(2000)
-        check('missingsync: signed in over someone, what that browser had isn\'t the new account\'s', titles('t2') == [] and 'Legacy Band' not in here(old), f'{titles("t2")} {here(old)}')
-        lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
+        check('missingsync: signed in over someone, what that browser had isn\'t the new account\'s', titles('t2') == sam_before and 'Legacy Band' not in here(old), f'{titles("t2")} {here(old)}')
 
         # Clear the list, for the owner: everyone's.
-        lists('t2', 'POST', {'ops': [{'type': 'share', 'id': op_id()}, {'type': 'note', 'id': op_id(), 'items': [{'kind': 'artist', 'artist': 'Sams Band'}], 'section': sec, 'library': lib}]})
+        lists('t2', 'POST', {'ops': [{'type': 'note', 'id': op_id(), 'items': [{'kind': 'artist', 'artist': 'Sams Band'}], 'section': sec, 'library': lib}]})
         own_ctx, own, _ = device('missing-owner')
         rows(own, lambda r: any(x.startswith('Sams Band') for x in r))
         own.click('.missing-clear button')
         own.click('.ask-form .btn-danger')
         sent(own)
         check('missingsync: the owner\'s Clear the list clears friends\' too', lists('t')['entries'] == [] and lists('t2')['entries'] == [], f'{titles("t")} {titles("t2")}')
-        lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
         for c in (desk_ctx, old_ctx, sam_ctx, own_ctx):
             c.close()
 
@@ -6484,7 +6585,7 @@ with sync_playwright() as pw:
         local.wait_for_selector('.missing-row')
         local_lede = local.locator('.missing-lede').inner_text()
         check('missingsync: with SYNC_MISSING_TRACKS=false, nothing goes to the player, and the list says it\'s this device\'s',
-              not asked and 'kept on this device' in local_lede and local.locator('.missing-share label').count() == 0, f'{asked} {local_lede}')
+              not asked and 'kept on this device' in local_lede and local.locator('.missing-lede ~ .rows label').count() == 0, f'{asked} {local_lede}')
         local_ctx.close()
 
     # ---------- memory: a big library ----------

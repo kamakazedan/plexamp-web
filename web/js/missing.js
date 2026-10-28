@@ -6,9 +6,9 @@
 // servers have different music). Kept on this device (until it's cleared,
 // or you sign out), and where this player keeps them for each Plex account
 // (missingsync.js), for yours: then every browser you sign in on has them,
-// and the server's owner sees everyone's who shares theirs, one list
-// (`others`: whose, and how often for them). It's exported as a spreadsheet
-// (CSV) or plain text.
+// and the server's owner sees everyone's, one list (`others`: whose, and how
+// often for them), so they can add what's missing. It's exported as a
+// spreadsheet (CSV) or plain text.
 //
 // How each change goes is the same here and in the player's service
 // (missinglist.js): it's made here, and sent as that change.
@@ -45,8 +45,8 @@ export const everyoneShown = (src = app.source) => !!src && syncs(serverOf(src))
 
 // How they're kept, for saying so where they're turned on: on this device
 // only (null: until the player has said whose the server is, too), for your
-// account where the server's owner sees them too ({ owner: false }: a friend
-// who shares theirs), or for yours as that owner ({ owner: true }).
+// account where the server's owner sees them too ({ owner: false }: a
+// friend's), or for yours as that owner ({ owner: true }).
 export function missingKept() {
   const server = serverOf();
   if (ownsServer(server) === undefined || !syncs(server)) return null;
@@ -60,8 +60,8 @@ export function missingKeptNote() {
   if (!kept) return '';
   const server = app.source?.serverName || 'the server';
   return kept.owner
-    ? ' Kept for your Plex account, on every device, with what friends who keep theirs for their account are missing too.'
-    : ` Kept for your Plex account, on every device, and whoever runs ${server} sees them too.`;
+    ? ` Kept for your Plex account, on every device, with your friends’ too, so you see everything that’s missing from ${server}.`
+    : ` Kept for your Plex account, on every device, and whoever runs ${server} sees them too, so they can add them.`;
 }
 
 // What's kept for the server in use, artists first, then by artist and

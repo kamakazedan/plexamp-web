@@ -25,7 +25,7 @@ export function albumCard(m, { subtitle } = {}) {
     onMenu: () => albumMenu(m, { select: () => startSelect(c), open: true }),
   });
   selectable(c, 'album', m);
-  if (app.settings.coverBadges !== false) {
+  if (app.settings.codecInfo !== false) {
     watchFormat(c, m.ratingKey, (f) => c.querySelector('.card-art')?.append(coverBadge(f)));
   }
   return c;
@@ -35,10 +35,9 @@ function coverBadge(f) {
   return h(`span.cover-badge${f.hires ? '.hires' : ''}`, { title: f.hires ? `${f.text}: high resolution` : f.text }, f.short || f.text);
 }
 
-// The same, in a list of rows (search, where formats in search are on
-// too): before the artist, as tracks' are.
+// The same, in a list of rows (search): before the artist, as tracks' are.
 function rowBadge(r, m) {
-  if (app.settings.coverBadges === false || app.settings.searchCodecs === false) return;
+  if (app.settings.codecInfo === false) return;
   watchFormat(r, m.ratingKey, (f) => {
     const sub = r.querySelector('.row-sub') || r.querySelector('.row-main')?.appendChild(h('div.row-sub'));
     sub?.prepend(h(`span.track-codec${f.hires ? '.hires' : ''}`, { title: f.hires ? `${f.text}: high resolution` : f.text }, f.short || f.text));

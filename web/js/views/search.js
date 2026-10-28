@@ -278,7 +278,7 @@ async function oneOfEach(res, popular = []) {
 // been asked about: one request for them all), "MP3 320".
 const kHz = (hz) => (hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 function formatBadge(t) {
-  if (app.settings.searchCodecs === false || !t.codec) return null;
+  if (app.settings.codecInfo === false || !t.codec) return null;
   return h('span.track-codec', null, !isLossless(t.codec) && t.bitrate ? `${fmt.codec(t.codec)} ${Math.round(t.bitrate)}` : fmt.codec(t.codec));
 }
 

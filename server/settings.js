@@ -34,9 +34,7 @@ export const SYNCED_SETTINGS = Object.freeze({
   ratingSystem: 'choice',
   listRatings: 'boolean',
   lovedPlaylist: 'boolean',
-  codecBadges: 'boolean',
-  coverBadges: 'boolean',
-  searchCodecs: 'boolean',
+  codecInfo: 'boolean',
   popularTracks: 'boolean',
   topListSize: 'number',
   previewButtons: 'boolean',
@@ -48,7 +46,6 @@ export const SYNCED_SETTINGS = Object.freeze({
   keyboardShortcuts: 'boolean',
   tintBackground: 'boolean',
   backgroundStyle: 'choice',
-  showCodec: 'boolean',
   showRating: 'boolean',
   showVolume: 'boolean',
   seekbarStyle: 'choice',
@@ -157,9 +154,10 @@ function checked(raw) {
   }
 }
 
-// The file's version: 2 from 0.20.0. Settings kept by 0.19.0 (version 1)
-// are brought up to date once, as they're read (see upgrade).
-const FILE_VERSION = 2;
+// The file's version: 3 from 0.25.0 (2 from 0.20.0). Settings kept by an
+// earlier one are brought up to date once, as they're read (see upgrade
+// and codecInfoOf).
+const FILE_VERSION = 3;
 
 // 0.20.0 starts loudness levelling on (0.19.0 started it off). An account
 // that kept it off from then most likely kept 0.19.0's start (turning
@@ -170,6 +168,16 @@ function upgrade(a) {
   delete a.settings.loudness;
   delete a.changed.loudness;
   return true;
+}
+
+// 0.25.0 has one setting for codec information everywhere (codecInfo), for
+// the four there were (album pages, covers, search, the player): off where
+// they all were, as the app has it (web/js/state.js migrateSettings). From
+// the settings as the file had them: false, or null (as it starts: on).
+const CODEC_SETTINGS = ['codecBadges', 'coverBadges', 'searchCodecs', 'showCodec'];
+function codecInfoOf(raw) {
+  const old = CODEC_SETTINGS.filter((k) => typeof raw?.[k] === 'boolean');
+  return old.length && old.every((k) => raw[k] === false) ? false : null;
 }
 
 // What's said of an account's settings: them, how many times they've
@@ -192,19 +200,29 @@ export class SettingsStore {
     if (!this.file || !existsSync(this.file)) return;
     try {
       const data = JSON.parse(readFileSync(this.file, 'utf8'));
-      const before = !(Number(data?.version) >= FILE_VERSION);
+      const version = Number(data?.version) || 1;
       let moved = 0;
+      let older = false;
       for (const [id, raw] of Object.entries(data?.accounts && typeof data.accounts === 'object' ? data.accounts : {})) {
         const uid = userId(id);
         const a = uid && checked(raw);
         if (!a || this.accounts.size >= SETTINGS_LIMITS.accounts) continue;
-        if (before && upgrade(a)) moved += 1;
+        if (version < 2 && upgrade(a)) moved += 1;
+        if (version < 3) {
+          older = true;
+          if (!a.off && !('codecInfo' in a.settings) && codecInfoOf(raw?.settings) === false) {
+            a.settings.codecInfo = false;
+            a.changed.codecInfo = a.rev;
+          }
+        }
         this.accounts.set(uid, a);
       }
       if (moved) {
         this.log?.info(`account settings: loudness levelling is on to start with from 0.20.0; ${moved} account${moved === 1 ? '' : 's'} kept it off from 0.19.0, where off was how it started, and now ${moved === 1 ? 'has' : 'have'} it on`);
-        this.changed();
       }
+      // (Written as this version keeps them: from 0.25.0, without the four
+      // codec settings.)
+      if (older) this.changed();
     } catch (err) {
       this.log?.warn(`account settings: couldn't read ${this.file} (${err.message}); starting without them`);
     }

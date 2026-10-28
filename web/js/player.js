@@ -33,6 +33,21 @@ const PRELOAD_BUFFER = 10;
 const GAPLESS_LEAD = 0.06;
 const MAX_SKIP_IN = 20; // at most this much silence is skipped at the start of a track
 const MAX_QUIET_LEAD = 15; // a fade starts at most this long before the music ends, over a quiet ending
+const SMART_FADE_MIN = 2; // a fade over a quiet ending takes at least this long (or Crossfade length, if that's shorter)
+
+// Smart crossfade length: a fade that starts over a quiet ending (at
+// `from`, in `span`: see transitions.js audibleSpan) lasts until the track
+// is nearly silent, so the next one reaches full volume just as this one
+// fades away. Where it's nearly silent already, it's quick; where it never
+// gets that quiet before its music ends (at `end`), it lasts until then.
+// At least SMART_FADE_MIN seconds (or `set`, Crossfade length, if that's
+// shorter), and never past the end of the music.
+export function smartFade(span, from, end, set) {
+  const hushed = span?.quietFrom?.hushed;
+  const until = hushed == null ? end : Math.max(from, Math.min(end, hushed));
+  const least = Math.min(set, SMART_FADE_MIN);
+  return Math.min(end - from, MAX_QUIET_LEAD, Math.max(least, until - from));
+}
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
 // Apple's browsers (Safari, and every browser on an iPhone or iPad) let an
 // audio element start playback on its own only once it's played after a
@@ -1034,12 +1049,17 @@ class Player extends EventTarget {
     // would be heard.
     if (!canFade) return end < d - 1 || startAt ? { ni, next, kind: 'cut', at: end, startAt } : gapless;
     const nextLen = (next.duration || 0) / 1000 || Infinity;
-    const fade = Math.max(0.5, Math.min(Number(app.settings.fadeLength) || 5, end / 3, nextLen / 3));
-    // A quiet ending longer than the fade: the fade starts where it does, but
-    // no more than MAX_QUIET_LEAD seconds before the music ends (and not in
-    // the first half of the track).
-    let at = end - fade;
-    if (quietFrom != null) at = Math.min(at, Math.max(quietFrom, end - MAX_QUIET_LEAD, end / 2));
+    const set = Math.max(0.5, Math.min(Number(app.settings.fadeLength) || 5, end / 3, nextLen / 3));
+    let at = end - set;
+    let fade = set;
+    // Over a quiet ending, the fade starts where it does, but no more than
+    // MAX_QUIET_LEAD seconds before the music ends (and not in the first half
+    // of the track), and lasts as long as the ending takes to go nearly
+    // silent (smartFade): its own length, not Crossfade length.
+    if (quietFrom != null) {
+      at = Math.max(quietFrom, end - MAX_QUIET_LEAD, end / 2);
+      fade = Math.max(0.5, Math.min(smartFade(this.spans.get(cur.id), at, end, set), nextLen / 3));
+    }
     return { ni, next, kind: 'fade', at: Math.max(0, at), fade, startAt };
   }
 
