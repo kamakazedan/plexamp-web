@@ -26,7 +26,11 @@ of them, POST /api/v2/home/users/UUID/switch, takes their PIN where they
 have one.)
 
 Like a real server it refuses other tokens, unless /__mock/config?open=1
-makes it behave like a server that lets this network in without signing in.
+(or --open) makes it behave like a server that lets this network in without
+signing in: one that takes every request for its owner's (honour=0, the
+default), or only those with a token it doesn't know (honour=1, or
+--honour: its accounts' tokens are theirs). tv=down (or --tv-down) has its
+plex.tv stop answering (503), as when the internet's down.
 
 Live notifications are sent over a WebSocket (/:/websockets/notifications)
 and an event stream (/:/eventsource/notifications), like a real server. For
@@ -466,10 +470,10 @@ def playlist_changed(pl):
 
 
 def owner_of(token):
-    """Whose playlists a token sees and makes: its account's (a server open
-    to this network takes everyone for its owner)."""
+    """Whose playlists a token sees and makes: its account's, or its owner's
+    for those it takes for its owner's (see as_owner)."""
     t = TRANSIENT.get(token, token)
-    return t if t in SERVER_TOKENS else 't'
+    return 't' if as_owner(token) or t not in SERVER_TOKENS else t
 
 
 def can_have(rk, token):
@@ -850,6 +854,23 @@ MB_FIRST_DATES = {'Hearthstone': '1998-03-01'}  # (the library's is a reissue)
 # self-titled album can have: Weezer has six): the library's isn't that one.
 MB_SAME_TITLE = {'Northbound Static': [('Interference', 'Album', [], '2009-06-01')]}
 MB_GROUP_GENRES = {'Tidal Lines': [('ambient', 3), ('downtempo', 1)], 'Hearthstone': [('folk', 2), ('singer-songwriter', 1)]}
+# Other artists of the same name as one of the library's, as MusicBrainz has
+# them, whose albums Plex has under the library's artist (as it does when
+# two artists share a name): Long Way North is the other Northbound
+# Static's.
+MB_NAMESAKES = {'Northbound Static': [{'note': 'Norwegian black metal band',
+                                       'groups': [('Long Way North', 'Album', [], '2024-02-02'), ('Frost Engine', 'Album', [], '2019-10-10')]}]}
+
+
+def mb_namesakes():
+    """The other artists of the library's artists' names: (artist, groups)."""
+    out = []
+    for name, others in MB_NAMESAKES.items():
+        for i, o in enumerate(others):
+            gid = lambda t, d: mb_id(f'group|{name}|{i + 2}|{t}|{d}')
+            out.append(({'id': mb_id(f'artist|{name}|{i + 2}'), 'name': name, 'sort-name': name, 'disambiguation': o['note'], 'aliases': [], 'genres': []},
+                        [{'id': gid(t, d), 'title': t, 'primary-type': p, 'secondary-types': s, 'first-release-date': d} for t, p, s, d in o['groups']]))
+    return out
 
 
 def mb_artists():
@@ -864,9 +885,11 @@ def mb_artists():
 def mb_groups(artist_name):
     out = []
     more = {title for title, *_ in MB_MORE_GROUPS.get(artist_name, [])}
+    # (Not those of another artist of the name: see MB_NAMESAKES.)
+    others = {t for o in MB_NAMESAKES.get(artist_name, []) for t, *_ in o['groups']}
     for al in albums:
         # (One added to the library that MusicBrainz has anyway is as it has it.)
-        if al['parentTitle'] != artist_name or al['title'] in more:
+        if al['parentTitle'] != artist_name or al['title'] in more or al['title'] in others:
             continue
         sub = [t['tag'] for t in al.get('Subformat', [])]
         fmt = (al.get('Format') or [{'tag': 'Album'}])[0]['tag']
@@ -1072,8 +1095,8 @@ def hls_playlist(seconds):
 
 # ---------------------------------------------------------------- notifications
 
-MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': False, 'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None,
-        'hubs': 'on', 'types': 'on', 'children': 'albums'}
+MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'honour': '--honour' in sys.argv, 'tv': 'down' if '--tv-down' in sys.argv else 'up',
+        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums'}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 NO_GENRE = {}  # album id -> its genres, taken away (/__mock/config?nogenre=)
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
@@ -1229,8 +1252,10 @@ TRANSIENT = {}
 
 
 def pms_token_ok(token):
+    # (Open to this network: every request gets in, without a token too: see
+    # as_owner for whose it's taken for.)
     if MOCK['open']:
-        return bool(token) and token != 'bad'
+        return True
     return token in SERVER_TOKENS or token in TRANSIENT
 
 
@@ -1242,9 +1267,17 @@ def parts_of(path):
     return [x for x in path.split('/') if x]
 
 
+def as_owner(token):
+    """Whether the server takes a request with this token for its owner's:
+    the owner's own, or, open to this network, everyone's (honour=0) or
+    those with a token it doesn't know (honour=1)."""
+    if role(token) == 'owned':
+        return True
+    return MOCK['open'] and not (MOCK['honour'] and role(token))
+
+
 def is_admin(token):
-    # A server open to this network treats every request as its owner's.
-    return MOCK['open'] or role(token) == 'owned'
+    return as_owner(token)
 
 
 # ---------------------------------------------------------------- play queues and a player
@@ -1636,12 +1669,18 @@ class Handler(BaseHTTPRequestHandler):
             names = {m.lower() for m in re.findall(r':"([^"]*)"', query)}
             hits = [a for a in mb_artists() if a['name'].lower() in names or any(x['name'].lower() in names for x in a['aliases'])]
             return self.send_json_plain({'artists': [dict(a, score=100) for a in hits]})
+        # (Everyone of a name: the library's artist, and others of it.)
+        if p == '/ws/2/artist' and ' OR sortname:' in query:
+            name = field('artist')
+            hits = [a for a in mb_artists() if a['name'].lower() == name] + [a for a, _ in mb_namesakes() if a['name'].lower() == name]
+            return self.send_json_plain({'artists': [dict(a, score=100) for a in hits]})
         if p.startswith('/ws/2/artist/'):
-            hit = next((a for a in mb_artists() if a['id'] == parts_of(p)[-1]), None)
+            hit = next((a for a in mb_artists() + [a for a, _ in mb_namesakes()] if a['id'] == parts_of(p)[-1]), None)
             return self.send_json_plain(hit) if hit else self.not_found()
         if p == '/ws/2/release-group' and 'artist' in q and not query:
+            other = next((gs for a, gs in mb_namesakes() if a['id'] == q['artist'][0]), None)
             who = next((a['name'] for a in mb_artists() if a['id'] == q['artist'][0]), None)
-            groups = mb_groups(who) if who else []
+            groups = other if other is not None else mb_groups(who) if who else []
             start = int(q.get('offset', ['0'])[0])
             size = int(q.get('limit', ['25'])[0])
             return self.send_json_plain({'release-group-count': len(groups), 'release-groups': groups[start:start + size]})
@@ -1902,6 +1941,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def plex_tv(self, p, token):
         account = ACCOUNTS.get(token)
+        if MOCK['tv'] == 'down':  # (tv=down: as when the internet's down)
+            return self.send_text('{"errors": [{"code": 503, "message": "Service Unavailable"}]}', 'application/json', 503)
         if p == '/api/v2/ping':
             return self.send_text('{"pong": true}', 'application/json')
         if not account:
@@ -1958,6 +1999,10 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['ping'] = float(q['ping'][0])
             if 'open' in q:
                 MOCK['open'] = q['open'][0] in ('1', 'on', 'true')
+            if 'honour' in q:
+                MOCK['honour'] = q['honour'][0] in ('1', 'on', 'true')
+            if 'tv' in q:
+                MOCK['tv'] = 'down' if q['tv'][0] == 'down' else 'up'
             if 'delay' in q:
                 MOCK['delay'] = max(0, int(q['delay'][0]))
             if 'loved' in q:
@@ -2147,6 +2192,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'friendlyName': "Dan's Test Server", 'machineIdentifier': 'mock-server-1', 'version': '1.41.0'})
         if p == '/:/prefs':  # server settings: the admin only
             return self.send_json({'size': 0, 'Setting': []}) if is_admin(token) else self.send_json({'error': 'Unauthorized'}, 401)
+        if p == '/status/sessions':  # who's playing what: the admin only
+            return self.send_json({'size': 0, 'Metadata': []}) if is_admin(token) else self.send_json({'error': 'Unauthorized'}, 401)
         if p == '/security/token':
             t = 'transient-' + hashlib.sha1(f'{token}{time.time()}{random.random()}'.encode()).hexdigest()[:24]
             TRANSIENT[t] = token

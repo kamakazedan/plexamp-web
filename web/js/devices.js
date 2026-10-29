@@ -11,7 +11,7 @@
 //
 // While another device plays, the player is in the same remote mode as when
 // casting to a Plex player (player.cast is this module's `remote`).
-import { app, on } from './state.js';
+import { app, on, plexAccount } from './state.js';
 import { clientId, deviceLabel } from './plex.js';
 import { player } from './player.js';
 import { together } from './together.js';
@@ -167,7 +167,7 @@ class Devices extends EventTarget {
   }
 
   get wanted() {
-    return !!app.config.devices && app.settings.shareDevices !== false && !!app.auth?.token && !!app.source?.serverId && !together.active;
+    return !!app.config.devices && app.settings.shareDevices !== false && plexAccount() && !!app.source?.serverId && !together.active;
   }
 
   get isRemote() {

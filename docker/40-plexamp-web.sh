@@ -47,9 +47,20 @@
 #                       playlist's link, read from Spotify's public page for
 #                       it (off by default: see server/spotify.js).
 #                       (SPOTIFY_IMPORT, its name before 0.22.0, still works.)
+#   OFFLINE_KEY         offline mode, with PLEX_SERVER_URL: while plex.tv isn't
+#                       answering, this player can be signed in to with this
+#                       key (12 to 200 characters, no spaces), as the Plex
+#                       server lets this container in without signing in:
+#                       as its owner (see server/offline.js). Not set: no
+#                       offline mode
+#   OFFLINE_FROM        where the offline key can be used from: "private"
+#                       (default: private networks), "any", or addresses and
+#                       networks (192.168.1.0/24, say), separated by commas
 #   DATA_DIR            where shared playlists, each account's settings and
-#                       Missing tracks, and what the MusicBrainz features look
-#                       up, are kept (default /data: give the container a
+#                       Missing tracks, what the MusicBrainz features look
+#                       up, and the fingerprints of the Plex server owner's
+#                       sign-ins (for /pms/ while plex.tv isn't answering),
+#                       are kept (default /data: give the container a
 #                       volume there). A folder of its own: it's made the
 #                       service's alone.
 #   DEBUG               "true" writes extra detail to the container log, with
@@ -124,26 +135,26 @@ data_dir_problem() {
             [ -e "$e" ] || [ -L "$e" ] || continue
             case "${e##*/}" in
                 # (and what file systems and file browsers leave around)
-                shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | musicbrainz.json | musicbrainz.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
+                shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | musicbrainz.json | musicbrainz.json.tmp | owners.json | owners.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
                 *)
                     echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give it a folder of its own (a new or empty one, or a volume)"
                     return
                     ;;
             esac
         done
-        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/musicbrainz.json.tmp"; do
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/musicbrainz.json.tmp" "$DATA_DIR/owners.json" "$DATA_DIR/owners.json.tmp"; do
             if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; } || { [ -f "$f" ] && [ "$(stat -c %h "$f")" != 1 ]; }; then
                 echo "$f must be a file of its own (not a link, or a folder)"
                 return
             fi
         done
-        rm -f "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json.tmp"
+        rm -f "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json.tmp" "$DATA_DIR/owners.json.tmp"
         d_group="$(id -gn "$d_user")"
         if ! chown -h "$d_user:$d_group" "$DATA_DIR"; then
             echo "$d_user can't own DATA_DIR ($DATA_DIR)"
             return
         fi
-        for f in "$DATA_DIR/shares.json" "$DATA_DIR/settings.json" "$DATA_DIR/missing.json" "$DATA_DIR/musicbrainz.json"; do
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/settings.json" "$DATA_DIR/missing.json" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/owners.json"; do
             if [ -f "$f" ] && ! chown -h "$d_user:$d_group" "$f"; then
                 echo "$d_user can't own $f"
                 return
@@ -403,10 +414,14 @@ if [ -n "${PLEX_SERVER_URL:-}" ]; then
     PMS_NAME="$UP_NAME"
     PMS_RESOLVER="$UP_RESOLVER"
     PMS_AUTH=""
+    PMS_AUTH_STREAM=""
     if [ "$SERVICE" = true ]; then
-        # The service checks requests only when the Plex server lets this
-        # container in without signing in (see server/index.js).
+        # The service checks each request: nothing goes through that the
+        # Plex server would take for its owner's, unless it's theirs (see
+        # pmsAuth in server/index.js). The server's notification streams are
+        # checked as such: they stay open for hours.
         PMS_AUTH="auth_request /_pms_auth;"
+        PMS_AUTH_STREAM="auth_request /_pms_auth_stream;"
     fi
     # At an https:// name, Plex's certificate is checked as browsers would
     # (it has to be for that name, from an authority the container trusts).
@@ -467,6 +482,14 @@ location /pms/ {
     proxy_pass ${PMS_URL}\$pms_path;
     ${PMS_PROXY}
 }
+# The server's notification streams (a WebSocket, or an event stream), by
+# the path as nginx reads it (however it's written).
+location ~* ^/pms/:/(websockets|eventsource)/ {
+    if (\$pms_has_token = 0) { return 401; }
+    ${PMS_AUTH_STREAM}
+    proxy_pass ${PMS_URL}\$pms_path;
+    ${PMS_PROXY}
+}
 # The playlists and segments of a stream Plex converts are fetched from
 # addresses inside the stream's session, without a token (the session's
 # own id is the key), so these pass without one. They go on as nginx
@@ -478,11 +501,12 @@ location ~ ^/pms/(audio|music)/:/transcode/universal/session/[A-Za-z0-9_-]+/[A-Z
 }
 CONF
     if [ "$SERVICE" = true ]; then
-        cat >>"$PMS_CONF" <<CONF
-location = /_pms_auth {
+        pms_auth_location() { # name path
+            cat <<CONF
+location = /$1 {
     internal;
     ${PMS_ERROR_LOG}
-    proxy_pass http://unix:${SERVICE_SOCKET}:/api/internal/pms-auth;
+    proxy_pass http://unix:${SERVICE_SOCKET}:/api/internal/$2;
     proxy_method GET;
     proxy_pass_request_body off;
     proxy_set_header Content-Length "";
@@ -500,11 +524,51 @@ location = /_pms_auth {
     proxy_read_timeout 20s;
 }
 CONF
+        }
+        {
+            pms_auth_location _pms_auth pms-auth
+            pms_auth_location _pms_auth_stream pms-auth/stream
+        } >>"$PMS_CONF"
     fi
     add_config 'serverProxy: "pms/"'
     say "proxying /pms/ to $(safe_url "$PLEX_SERVER_URL")"
 else
     : >"$PMS_CONF"
+fi
+
+# ---------- offline mode ----------
+
+# OFFLINE_KEY: while plex.tv isn't answering this container, this player can
+# be signed in to with the key, and plays the Plex server at PLEX_SERVER_URL
+# as that server lets this container in without signing in (as its owner:
+# see server/offline.js). Checked here, so a mistake stops the container
+# rather than turning it off unseen.
+OFFLINE=false
+OFFLINE_KEY_SET="${OFFLINE_KEY:-}"
+OFFLINE_FROM_SET="$(lower "${OFFLINE_FROM:-private}")"
+if [ -n "$OFFLINE_KEY_SET" ]; then
+    # (Its length isn't said either: nothing of the key goes in the log.)
+    whole "$OFFLINE_KEY_SET" '^[[:graph:]]{12,200}$' || fail "OFFLINE_KEY must be 12 to 200 characters long, with no spaces in it"
+    if [ -z "$PMS_URL" ]; then
+        say "offline mode needs PLEX_SERVER_URL (it's the Plex server there that's played offline), so it's off"
+    elif [ "$SERVICE" != true ]; then
+        say "offline mode needs Node.js, which isn't installed here, so it's off"
+    else
+        why="$("$NODE_BIN" --input-type=module -e 'const { parseFrom } = await import(process.argv[1]); try { parseFrom(process.argv[2]); } catch (e) { console.log(e.message); }' "$SERVICE_DIR/offline.js" "$OFFLINE_FROM_SET" 2>&1)" ||
+            fail "OFFLINE_FROM couldn't be checked: $why"
+        [ -z "$why" ] || fail "$why"
+        OFFLINE=true
+        add_config 'offline: true'
+        case "$OFFLINE_FROM_SET" in
+            private) where="private networks" ;;
+            any) where="anywhere" ;;
+            *) where="$OFFLINE_FROM_SET" ;;
+        esac
+        say "offline mode is on: while plex.tv isn't answering, this player can be signed in to with OFFLINE_KEY, from $where, as your Plex server lets this container in without signing in (only if it does: see docs/configuration.md)"
+    fi
+elif [ -n "${OFFLINE_FROM:-}" ] && [ "$OFFLINE_FROM_SET" != private ]; then
+    # (Not for the default, as Proxmox VE's settings have it.)
+    say "OFFLINE_FROM is set but OFFLINE_KEY isn't, so there's no offline mode"
 fi
 
 # ---------- WebSockets ----------
@@ -640,17 +704,23 @@ CONF
     # not the app; what the MusicBrainz features look up is then kept in
     # memory only.
     MB_KEEP=$MB_ADV
-    if [ "$SHARING" = true ] || [ "$SETTINGS_SYNC" = true ] || [ "$MISSING_SYNC" = true ] || [ "$MB_ADV" = true ]; then
+    # (The fingerprints of the Plex server owner's sign-ins: see
+    # server/owners.js.)
+    OWNERS_KEEP=false
+    if [ -n "$PMS_URL" ]; then OWNERS_KEEP=true; fi
+    if [ "$SHARING" = true ] || [ "$SETTINGS_SYNC" = true ] || [ "$MISSING_SYNC" = true ] || [ "$MB_ADV" = true ] || [ "$OWNERS_KEEP" = true ]; then
         why="$(data_dir_problem)"
         if [ -n "$why" ]; then
             if [ "$SHARING" = true ]; then say "shared playlists are off: $why"; fi
             if [ "$SETTINGS_SYNC" = true ]; then say "settings that follow each account are off: $why"; fi
             if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each account are off: $why"; fi
             if [ "$MB_ADV" = true ]; then say "what the MusicBrainz features look up is kept in memory only (until the service restarts): $why"; fi
+            if [ "$OWNERS_KEEP" = true ]; then say "your own Plex sign-ins, for /pms/ while plex.tv isn't answering, are known in memory only (until the service restarts): $why"; fi
             SHARING=false
             SETTINGS_SYNC=false
             MISSING_SYNC=false
             MB_KEEP=false
+            OWNERS_KEEP=false
         else
             # In a container, a folder that isn't a volume goes when the
             # container is replaced (an update, say), and what's in it.
@@ -689,6 +759,7 @@ else
     MB=false
     MB_ADV=false
     MB_KEEP=false
+    OWNERS_KEEP=false
     SHARING=false
     SETTINGS_SYNC=false
     MISSING_SYNC=false
@@ -780,6 +851,9 @@ if [ "$SERVICE" = true ]; then
   "ollamaKey": "$([ "$AI_ON" = true ] && json "${OLLAMA_API_KEY:-}")",
   "plexServerUrl": "$(json "${PLEX_SERVER_URL:-}")",
   "plexTvUrl": "$(json "$PLEX_TV")",
+  "ownersKeep": $OWNERS_KEEP,
+  "offlineKey": "$([ "$OFFLINE" = true ] && json "$OFFLINE_KEY_SET")",
+  "offlineFrom": "$(json "$OFFLINE_FROM_SET")",
   "nginxLogPort": $NGINX_LOG_PORT,
   "user": "$(json "${SERVICE_USER:-nginx}")"
 }

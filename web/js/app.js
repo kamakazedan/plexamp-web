@@ -30,12 +30,14 @@ import { refreshRows } from './ratings.js';
 import { initSharing, invitations } from './sharing.js';
 import { startSync } from './sync.js';
 import { startMissingSync } from './missingsync.js';
+import { watchOffline } from './offline.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
   { id: 'playlists', label: 'Playlists', icon: 'list' },
   { id: 'search', label: 'Search', icon: 'search' },
-  app.config.together && { id: 'together', label: 'Together', icon: 'together' },
+  // (Not with the offline key: Play Together is for Plex accounts.)
+  app.config.together && !app.auth?.offline && { id: 'together', label: 'Together', icon: 'together' },
   { id: 'settings', label: 'Settings', icon: 'settings' },
 ].filter(Boolean);
 
@@ -308,6 +310,8 @@ function boot() {
   startRouter({ mainEl: document.getElementById('main'), changed: onRouteChange });
 
   if (app.server) {
+    // Signed in with the offline key: till plex.tv answers again (offline.js).
+    watchOffline();
     // Settings that follow your account (sync.js), as early as can be, and
     // Missing tracks (missingsync.js).
     startSync();
@@ -334,6 +338,7 @@ function boot() {
   on('source', () => app.server && startMissingSync());
   // Whether menus offer collection changes (only the server's admin can).
   on('source', () => app.server && isAdmin().catch(() => {}));
+  on('source', () => app.server && watchOffline());
 
   window.addEventListener('online', () => app.server && ensureConnection());
   window.addEventListener('unhandledrejection', (e) => {

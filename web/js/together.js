@@ -5,7 +5,7 @@
 // waits for changes with long-polling (plain HTTP, so it works where
 // WebSockets are blocked), sends commands from the player's controls, and
 // keeps local playback on the session's clock.
-import { app, on, setSource, proxyUri } from './state.js';
+import { app, on, setSource, proxyUri, plexAccount } from './state.js';
 import { store, listServers, pickConnection } from './plex.js';
 import { player } from './player.js';
 import { guestDJ } from './dj.js';
@@ -110,7 +110,7 @@ class Together extends EventTarget {
   }
 
   get enabled() {
-    return !!app.config.together && !!app.auth?.token;
+    return !!app.config.together && plexAccount();
   }
 
   get active() {

@@ -20,6 +20,18 @@ export class AuthError extends Error {
 
 export const validToken = (t) => typeof t === 'string' && TOKEN_SHAPE.test(t);
 const hash = (t) => createHash('sha256').update(t).digest('hex');
+// (The same, for owners.js: what's kept of the owner's sign-ins.)
+export const fingerprintOf = hash;
+
+// plex.tv, as last heard (see PlexAuth.tvAnswered): while it isn't answering,
+// it's asked again at most every retryMs (and pinged at most every pingMs),
+// so nothing waits on it. (Shorter in tests.)
+export const PLEX_TV_TIMING = { retryMs: 15000, pingMs: 20000 };
+
+// What only a Plex server's owner may see: its settings, and who's playing
+// what. Asked with a sign-in, a server that shows it either takes the
+// sign-in for its owner's (see showsOwnersOnly).
+const OWNERS_ONLY = ['/:/prefs', '/status/sessions?X-Plex-Container-Size=0'];
 
 // ---------- the Plex server at PLEX_SERVER_URL ----------
 
@@ -60,7 +72,9 @@ const MAX_PLEX_TV_ANSWER = 8 * 1024 * 1024; // a big account's friends, say
 const PLEX_TV_AT_ONCE = 16; // questions for plex.tv under way at once (the rest wait)
 const PLEX_TV_WAITING = 200; // waiting at most (any more are told plex.tv is busy)
 const PLEX_TV_WAIT_MS = 15000; // and each for this long at most
-const pmsAgents = { 'http:': new HttpAgent({ keepAlive: true, maxSockets: 8 }), 'https:': new HttpsAgent({ keepAlive: true, maxSockets: 8 }) };
+// (Requests to /pms/ from anyone but the owner ask the server something
+// first: see openNow and showsOwnersOnly.)
+const pmsAgents = { 'http:': new HttpAgent({ keepAlive: true, maxSockets: 24 }), 'https:': new HttpsAgent({ keepAlive: true, maxSockets: 24 }) };
 
 // GET from the Plex server, with its certificate checked as above.
 function pmsGet(url, headers, timeout) {
@@ -154,6 +168,68 @@ export class PlexAuth {
     this.identifying = new Map(); // token hash -> its check under way (asked once, however many requests wait)
     this.asking = 0; // questions for plex.tv under way
     this.queue = []; // and those waiting for one to finish
+    // plex.tv: whether it's answering, since when, and when it was last
+    // asked anything.
+    this.tv = { down: false, since: Date.now(), tried: 0, pinged: 0 };
+    this.tvListeners = [];
+    this.askingOwnersOnly = new Map(); // token hash -> the server being asked (see showsOwnersOnly)
+  }
+
+  // ---------- plex.tv, as last heard ----------
+
+  // Any answer from plex.tv but a server error says it's answering; no
+  // answer at all (or a server error) says it isn't.
+  tvAnswered(ok) {
+    if (ok === !this.tv.down) return;
+    this.tv = { ...this.tv, down: !ok, since: Date.now() };
+    if (!ok) {
+      log.warn('plex.tv isn’t answering this container: signing in with Plex, and what needs it, wait till it does');
+    } else {
+      log.info('plex.tv is answering this container again');
+    }
+    for (const fn of this.tvListeners) {
+      try {
+        fn(this.tv);
+      } catch (err) {
+        log.error(`plex.tv state: ${err.message}`);
+      }
+    }
+  }
+
+  onPlexTv(fn) {
+    this.tvListeners.push(fn);
+  }
+
+  // Whether plex.tv isn't answering (`forMs`: and hasn't for that long),
+  // asked afresh first where it was last heard from a while ago (`fresh`).
+  async plexTvDown({ forMs = 0, fresh = false } = {}) {
+    if (fresh && Date.now() - Math.max(this.tv.tried, this.tv.pinged) > PLEX_TV_TIMING.pingMs) await this.pingPlexTv();
+    return this.tv.down && Date.now() - this.tv.since >= forMs;
+  }
+
+  // Whether plex.tv has been answering for at least `forMs`.
+  plexTvUpFor(forMs) {
+    return !this.tv.down && Date.now() - this.tv.since >= forMs;
+  }
+
+  // (Asked once however many wait for it.)
+  async pingPlexTv() {
+    this.tv.pinged = Date.now();
+    this.pinging ||= this.fetchJSON(`${this.plexTv}/api/v2/ping`, null, { timeout: 8000, ping: true })
+      .catch(() => {
+        /* said by fetchJSON */
+      })
+      .finally(() => {
+        this.pinging = null;
+      });
+    await this.pinging;
+    return !this.tv.down;
+  }
+
+  // While plex.tv isn't answering: asked again in the background, every so
+  // often, so it's heard as soon as it's back.
+  nudgePlexTv() {
+    if (this.tv.down && Date.now() - Math.max(this.tv.tried, this.tv.pinged) > PLEX_TV_TIMING.pingMs) this.pingPlexTv();
   }
 
   // Whether this token has been checked lately (or is being checked now):
@@ -192,7 +268,9 @@ export class PlexAuth {
     }
   }
 
-  async fetchJSON(url, token, { timeout = 10000, accept = 'application/json' } = {}) {
+  // From plex.tv, or (`pms`) the Plex server at PLEX_SERVER_URL. (`ping`:
+  // plex.tv's ping, asked even while it isn't answering.)
+  async fetchJSON(url, token, { timeout = 10000, accept = 'application/json', ping = false, pms = false } = {}) {
     const headers = {
       Accept: accept,
       'X-Plex-Product': 'plexamp-web',
@@ -200,23 +278,39 @@ export class PlexAuth {
     };
     if (token) headers['X-Plex-Token'] = token;
     const host = new URL(url).host;
+    const toPms = pms;
     let status;
     let text;
     try {
-      if (this.pms && url.startsWith(`${this.pms}/`)) {
+      if (toPms) {
         ({ status, text } = await pmsGet(url, headers, timeout));
       } else {
+        // While plex.tv isn't answering, nothing waits on it: asked again
+        // every few seconds, and pinged.
+        if (this.tv.down && !ping && Date.now() - this.tv.tried < PLEX_TV_TIMING.retryMs) throw Object.assign(new Error('not answering lately'), { code: 'PLEX_TV_DOWN' });
         // Never followed elsewhere: the token goes to plex.tv and nowhere else.
         ({ status, text } = await this.plexTvTurn(async () => {
+          this.tv.tried = Date.now();
           const res = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(timeout) });
           return { status: res.status, text: await readCapped(res, MAX_PLEX_TV_ANSWER) };
         }));
+        this.tvAnswered(status < 500);
       }
     } catch (err) {
       const code = err.cause?.code || err.code || err.name || 'network error';
+      // (Not when it was this container that was too busy to ask.)
+      if (!toPms && code !== 'BUSY' && code !== 'PLEX_TV_DOWN') this.tvAnswered(false);
       const problem = certProblem(code);
-      throw Object.assign(new Error(`couldn't reach ${host}: ${problem ? `${problem} (${code})` : code}`), { network: true, cert: !!problem });
+      // `busy`: this container had too many questions for plex.tv to ask
+      // another; `down`: plex.tv isn't answering it.
+      throw Object.assign(new Error(`couldn't reach ${host}: ${problem ? `${problem} (${code})` : code}`), {
+        network: true,
+        cert: !!problem,
+        busy: code === 'BUSY',
+        down: !toPms && code !== 'BUSY',
+      });
     }
+    if (!toPms && status >= 500) throw Object.assign(new Error(`${host} answered ${status}`), { upstream: status, down: true });
     if (status === 401 || status === 403 || status === 422) throw new AuthError(401, 'Plex didn’t accept this sign-in.');
     if (status < 200 || status > 299) throw Object.assign(new Error(`${host} answered ${status}`), { upstream: status });
     if (accept !== 'application/json') return text;
@@ -234,7 +328,7 @@ export class PlexAuth {
     if (Date.now() < (this.identityRetryAt || 0)) return null;
     this.identityProbe ||= (async () => {
       try {
-        const data = await this.fetchJSON(`${this.pms}/identity`, null, { timeout: 5000 });
+        const data = await this.fetchJSON(`${this.pms}/identity`, null, { timeout: 5000, pms: true });
         this.serverId = data?.MediaContainer?.machineIdentifier || null;
         if (this.serverId) log.debug(`Plex server at PLEX_SERVER_URL is ${this.serverId}`);
       } catch (err) {
@@ -319,65 +413,138 @@ export class PlexAuth {
     return (await this.serverAccess(token, serverId)).ok;
   }
 
+  // Whether plex.tv said lately that this sign-in is the owner's of the Plex
+  // server at PLEX_SERVER_URL: from what's kept of its answers (nothing is
+  // asked, and nothing waits).
+  ownerLately(token) {
+    if (!this.serverId || !validToken(token)) return false;
+    const key = hash(token);
+    return this.users.get(key) !== undefined && this.access.get(`${key}|${this.serverId}`)?.owned === true;
+  }
+
+  // Does the Plex server show what's at `path` to this sign-in (null: to a
+  // request without one)? true (it answers), false (it refuses), or an
+  // error (it said neither).
+  async pmsShows(path, token) {
+    try {
+      await this.fetchJSON(`${this.pms}${path}`, token, { timeout: 8000, pms: true });
+      return true;
+    } catch (err) {
+      if (err instanceof AuthError) return false;
+      throw err;
+    }
+  }
+
   // A Plex server can be set to let some networks in without signing in
   // ("List of IP addresses and networks that are allowed without auth").
-  // If this container is on such a network, the server accepts any token, so
-  // asking it whether a token is good proves nothing. Checked with a random
-  // token, and remembered for ten minutes.
-  async serverIsOpen() {
+  // If this container is on such a network, the server takes its requests
+  // without a sign-in for its owner's, and may take those with one it
+  // doesn't know (or anyone's) for its owner's too. Does it, right now?
+  // Asked without a sign-in, so there's nothing for the server to check with
+  // plex.tv, for each request that needs to know (those that come while
+  // it's being asked share the answer): never taken from before, as the
+  // owner can add this container to that list at any moment. Throws when the
+  // server didn't say.
+  async openNow() {
     if (!this.pms) return false;
-    const hit = this.access.get('pms-open');
+    this.openAsking ||= this.pmsShows('/library/sections?X-Plex-Container-Size=0', null).finally(() => {
+      this.openAsking = null;
+    });
+    return this.openAsking;
+  }
+
+  async serverIsOpen() {
+    return this.openNow();
+  }
+
+  // The same, as found in the last ten minutes (`fresh`: found again now),
+  // with whether the server can be asked about a sign-in: { open, tells }.
+  // tells: it shows a request it takes for its owner's what only its owner
+  // may see (see OWNERS_ONLY), so a sign-in it refuses those is one it
+  // doesn't take for theirs (see showsOwnersOnly); an open server that
+  // doesn't (one of those isn't there, say) can't be asked, and only its
+  // owner gets through /pms/. Throws, for 15 seconds, while it can't be
+  // found (the server doesn't answer).
+  async serverState({ fresh = false } = {}) {
+    if (!this.pms) return { open: false, tells: false };
+    const hit = fresh ? undefined : this.access.get('pms-state');
+    if (hit === null) throw Object.assign(new Error('the Plex server didn’t answer lately'), { network: true });
     if (hit !== undefined) return hit;
-    this.openProbe ||= (async () => {
-      let open;
+    this.stateProbe ||= (async () => {
+      let state;
       try {
-        await this.fetchJSON(`${this.pms}/library/sections?X-Plex-Container-Size=0`, `pw-probe-${randomBytes(12).toString('hex')}`, { timeout: 8000 });
-        open = true;
+        const open = await this.openNow();
+        // (Not there, or any other answer but one: it doesn't tell.)
+        const tells = open && (await Promise.all(OWNERS_ONLY.map((p) => this.pmsShows(p, null).catch((err) => (err.upstream ? false : Promise.reject(err)))))).every(Boolean);
+        state = { open, tells };
       } catch (err) {
-        if (!(err instanceof AuthError)) {
-          // Couldn't tell (the server is down or slow). Remembered briefly,
-          // so requests don't each wait for another try.
-          this.access.set('pms-open', null, 15000);
-          throw err;
-        }
-        open = false;
+        this.access.set('pms-state', null, 15000);
+        throw err;
       }
-      if (open && this.access.get('pms-open-warned') === undefined) {
+      if (state.open && this.access.get('pms-open-warned') === undefined) {
         this.access.set('pms-open-warned', true, 6 * 3600000);
         log.warn(
-          'the Plex server at PLEX_SERVER_URL lets this container in without signing in (its "List of IP addresses and networks that are allowed without auth" includes this container). ' +
-            'Plex can treat requests from such a network as yours, whoever sends them, so requests to /pms/ are now checked with plex.tv and only your own Plex sign-in gets through; friends are refused there until this is fixed. ' +
-            'To fix it, remove this container\'s address from that list in Plex (Settings > Network).',
+          'the Plex server at PLEX_SERVER_URL lets this container in without signing in (its "List of IP addresses and networks that are allowed without auth" includes this container\'s address), ' +
+            'so it can take requests from here for yours, whoever sends them. ' +
+            (state.tells
+              ? 'Each request to /pms/ from anyone but you is checked with the server first, with their own sign-in: it goes through only if the server refuses them what only you may see (it knows them as themselves), and never otherwise. '
+              : 'This server can\'t be asked whether it knows someone else\'s sign-in as theirs, so only your own Plex sign-in gets through /pms/, and everyone else is refused. ') +
+            'See "Offline mode" in docs/configuration.md.',
         );
       }
-      this.access.set('pms-open', open, 10 * 60000);
-      return open;
+      this.access.set('pms-state', state, 10 * 60000);
+      return state;
     })().finally(() => {
-      this.openProbe = null;
+      this.stateProbe = null;
     });
-    return this.openProbe;
+    return this.stateProbe;
+  }
+
+  // Whether the server's being asked about this sign-in now (see below).
+  askingAbout(token) {
+    return validToken(token) && this.askingOwnersOnly.has(hash(token));
+  }
+
+  // Where the server lets this container in without signing in: does it,
+  // asked with this sign-in, show it what only its owner may see? true: it
+  // takes the sign-in for its owner's (it is, or the server doesn't know the
+  // sign-in from here, or doesn't tell sign-ins apart from here at all).
+  // false: it refused both, so it knows the sign-in as someone else's, and
+  // treats them as themselves. Asked afresh for each request to /pms/
+  // (requests that come while it's being asked share its answer), never
+  // taken on trust from before: a sign-in the server stops knowing (its share
+  // taken away, or the server can't ask plex.tv any more) is refused from
+  // then on. Throws when the server said neither.
+  async showsOwnersOnly(token) {
+    if (!this.pms || !validToken(token)) return true;
+    const key = hash(token);
+    const asking = this.askingOwnersOnly.get(key);
+    if (asking) return asking;
+    const job = Promise.allSettled(OWNERS_ONLY.map((p) => this.pmsShows(p, token)))
+      .then((answers) => {
+        if (answers.some((a) => a.status === 'fulfilled' && a.value === true)) return true;
+        const failed = answers.find((a) => a.status === 'rejected');
+        if (failed) throw failed.reason;
+        return false;
+      })
+      .finally(() => this.askingOwnersOnly.delete(key));
+    this.askingOwnersOnly.set(key, job);
+    return job;
   }
 
   // Does the Plex server at PLEX_SERVER_URL accept this token? Used when
   // plex.tv can't vouch for it (a server token rather than an account token,
-  // or plex.tv unreachable), and never when the server accepts anything.
+  // or plex.tv unreachable), and never when the server lets this container
+  // in without signing in (it accepts anything then).
   async serverAccepts(token) {
     if (!this.pms || !validToken(token)) return false;
-    if (await this.serverIsOpen()) return false;
+    if (await this.openNow()) return false;
     const key = `pms|${hash(token)}`;
     const hit = this.access.get(key);
     if (hit !== undefined) return hit;
-    try {
-      await this.fetchJSON(`${this.pms}/library/sections?X-Plex-Container-Size=0`, token, { timeout: 8000 });
-      this.access.set(key, true, 2 * 60000);
-      return true;
-    } catch (err) {
-      if (err instanceof AuthError) {
-        this.access.set(key, false, 60000);
-        return false;
-      }
-      throw err;
-    }
+    const yes = await this.pmsShows('/library/sections?X-Plex-Container-Size=0', token);
+    this.access.set(key, yes, yes ? 2 * 60000 : 60000);
+    return yes;
   }
 
   // Friends and Plex Home users, with the servers each can use.

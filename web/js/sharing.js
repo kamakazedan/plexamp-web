@@ -7,7 +7,7 @@
 // while the app is open; changes made to it in other apps (Plexamp, Plex
 // Web) go to everyone then too. Your Plex sign-in is only ever sent to the
 // player's own service, which asks plex.tv who you are, and isn't kept.
-import { app, on, emit } from './state.js';
+import { app, on, emit, plexAccount } from './state.js';
 import { store } from './plex.js';
 import { live } from './live.js';
 import { parseHash, refresh, dropCached } from './router.js';
@@ -22,7 +22,7 @@ const EVERY = 60000;
 const ALL_EVERY = 5;
 const KEY = 'shares'; // what each copy held when last brought up to date, on this device
 
-export const sharingOn = () => !!app.config.sharing && !!app.auth?.token && !!app.source?.serverId;
+export const sharingOn = () => !!app.config.sharing && plexAccount() && !!app.source?.serverId;
 
 let list = []; // the shares for the account and server in use (views, see server/shares.js)
 let listKey = null;

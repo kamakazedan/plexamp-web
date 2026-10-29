@@ -322,6 +322,29 @@ export class MusicBrainz {
     return this.adv.set(key, out);
   }
 
+  // Other artists MusicBrainz has of this very name (`but`: not this one,
+  // by id): [{ id, name, note, groups }], MB_ADVANCED_LIMITS.namesakes at
+  // most, the likeliest first, each with their release groups (`note`:
+  // MusicBrainz's word for telling them apart, "Dutch drum & bass producer",
+  // say). For telling an artist's albums from those of another of the same
+  // name, which Plex can have as one artist (see the app's mb.js).
+  async namesakes(name, { but = null, signal, background = false } = {}) {
+    const want = norm(name);
+    if (!this.adv || !want || VARIOUS.has(want)) return [];
+    const key = `namesakes|${want}`;
+    let list = this.had(key);
+    if (list === undefined) {
+      this.resting();
+      const found = await this.ask('/ws/2/artist', { query: `artist:${phrase(name)} OR sortname:${phrase(name)}`, limit: '25' }, signal, { background });
+      list = this.adv.set(key, sameNamed(found.artists, want));
+    }
+    const out = [];
+    for (const a of (list || []).filter((x) => x.id !== but).slice(0, MB_ADVANCED_LIMITS.namesakes)) {
+      out.push({ ...a, groups: await this.releaseGroups(a.id, { signal, background }) });
+    }
+    return out;
+  }
+
   // A release group's genres (MusicBrainz's, the most voted first).
   async groupGenres(id, { signal, background = false } = {}) {
     if (!this.adv || !MBID.test(String(id))) return [];
@@ -450,6 +473,7 @@ export const MB_ADVANCED_LIMITS = {
   perRequest: 200, // albums asked about in one request from the app
   waitMs: 10000, // how long a request from the app may wait for answers
   groupPages: 5, // of an artist's release groups, 100 to a page
+  namesakes: 3, // other artists of an artist's name, looked at for their page
   artistMs: 30000, // how long one artist's lookups may take for the app
   restMs: 30000, // after MusicBrainz doesn't answer, in the background
 };
@@ -509,6 +533,22 @@ function pickArtist(list, want) {
   return ok.find((a) => norm(a.name) === want) || ok.find(aliased) || null;
 }
 
+// The artists among MusicBrainz's search results with this very name (as
+// norm has it: not those with it among their other names), the likeliest
+// first: { id, name, note }, ten at most (never a special-purpose one).
+function sameNamed(list, want) {
+  return (Array.isArray(list) ? list : [])
+    .filter((a) => a && MBID.test(String(a.id)) && !SPECIAL_ARTISTS.has(String(a.id)) && norm(a.name) === want)
+    .map(cleanNamesake)
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+function cleanNamesake(a) {
+  if (!a || !MBID.test(String(a.id))) return null;
+  return { id: a.id, name: text(a.name, 200), note: text(a.disambiguation ?? a.note, 120) };
+}
+
 // A release group as it's kept, or null.
 function cleanGroup(g) {
   if (!g || !MBID.test(String(g.id))) return null;
@@ -547,6 +587,7 @@ function cleanKept(key, v) {
   if (key.startsWith('artist|') || key.startsWith('artistid|')) return v === null ? null : cleanArtist(v) || undefined;
   if (key.startsWith('groups|')) return Array.isArray(v) ? v.map(cleanGroup).filter(Boolean) : undefined;
   if (key.startsWith('genres|')) return Array.isArray(v) ? v.map((x) => text(x, 60)).filter(Boolean).slice(0, 5) : undefined;
+  if (key.startsWith('namesakes|')) return Array.isArray(v) ? v.map(cleanNamesake).filter(Boolean).slice(0, 10) : undefined;
   return undefined;
 }
 

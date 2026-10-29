@@ -5,20 +5,25 @@ import { Together, cleanTrack, TogetherError } from './together.js';
 import { redact, oneLine } from './log.js';
 import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
-import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped } from './plex.js';
+import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped, PLEX_TV_TIMING } from './plex.js';
+import { OwnerSignIns, OWNER_LIMITS } from './owners.js';
+import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
-import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases } from './releases.js';
+import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
 import { applyNote, applyMerge, applyRestore, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync, chownSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const dan = { id: 1, title: 'Dan', thumb: null };
 const sam = { id: 2, title: 'Sam', thumb: null };
@@ -1972,4 +1977,451 @@ test('missing tracks: the app\'s rules note a playlist as before (applyNote)', (
   // Another library on the same server is another list.
   const other = applyNote(two.list, noteOp([song('A', 'One')], { section: '2' }), { server: SRV });
   assert.equal(other.list.length, 2);
+});
+
+// ---------- /pms/: the Plex server's owner, and everyone else ----------
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// A Plex server and plex.tv, as the service sees them. Dan (owner-token)
+// owns the server, which Sam (sam-token) can use. state.open: the server
+// lets the service in without signing in, taking its requests for its
+// owner's: every one (honour false), or those without a sign-in it knows
+// (honour true: its people's are theirs). state.down: plex.tv answers 503.
+async function fakePlex() {
+  const state = { open: false, honour: false, down: false, noSessions: false, broken: false };
+  const accounts = { 'owner-token': { id: 1, uuid: 'u1', username: 'dan', friendlyName: 'Dan' }, 'sam-token': { id: 2, uuid: 'u2', username: 'sam', friendlyName: 'Sam' } };
+  const known = new Set(['owner-token', 'sam-token']); // the server's people's sign-ins
+  const asked = []; // { path, token } the server was asked
+  const tvTokens = [];
+  const asOwner = (t) => t === 'owner-token' || (state.open && !(state.honour && known.has(t)));
+  const json = (res, status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(body === undefined ? '' : JSON.stringify(body));
+  };
+  const pms = createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const t = req.headers['x-plex-token'] || u.searchParams.get('X-Plex-Token') || '';
+    asked.push({ path: u.pathname, token: t });
+    if (state.broken) return json(res, 503, {});
+    if (u.pathname === '/identity') return json(res, 200, { MediaContainer: { machineIdentifier: 'srv-1' } });
+    if (u.pathname === '/library/sections') return json(res, known.has(t) || asOwner(t) ? 200 : 401, { MediaContainer: { size: 1 } });
+    if (u.pathname === '/:/prefs' || (u.pathname === '/status/sessions' && !state.noSessions)) return json(res, asOwner(t) ? 200 : 401, { MediaContainer: {} });
+    return json(res, 404, {});
+  });
+  const tv = createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const t = req.headers['x-plex-token'] || '';
+    if (t) tvTokens.push(t);
+    if (state.down) return json(res, 503, {});
+    if (u.pathname === '/api/v2/ping') return json(res, 200, { pong: true });
+    const a = accounts[t];
+    if (!a) return json(res, 401, {});
+    if (u.pathname === '/api/v2/user') return json(res, 200, a);
+    if (u.pathname === '/api/v2/resources') return json(res, 200, [{ clientIdentifier: 'srv-1', provides: 'server', owned: t === 'owner-token' }]);
+    return json(res, 404, {});
+  });
+  await Promise.all([pms, tv].map((x) => new Promise((r) => x.listen(0, '127.0.0.1', r))));
+  return {
+    state,
+    known,
+    asked,
+    tvTokens,
+    pms: `http://127.0.0.1:${pms.address().port}`,
+    tv: `http://127.0.0.1:${tv.address().port}`,
+    close: () => {
+      pms.close();
+      tv.close();
+      pms.closeAllConnections?.();
+      tv.closeAllConnections?.();
+    },
+  };
+}
+
+test('the owner\'s sign-ins: fingerprints only, for 30 days since last used, the latest 50, kept in a file only the service can read', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-owners-'));
+  try {
+    let now = 1_000_000_000_000;
+    const fp = (n) => createHash('sha256').update(`token-${n}`).digest('hex');
+    const o = new OwnerSignIns({ dir, now: () => now });
+    o.add(fp(1));
+    o.add('not-a-fingerprint');
+    assert.equal(o.has(fp(1)), true);
+    assert.equal(o.has(fp(2)), false);
+    assert.equal(o.has('not-a-fingerprint'), false);
+    o.flush();
+    const file = join(dir, 'owners.json');
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { version: 1, owners: { [fp(1)]: now } });
+    const again = new OwnerSignIns({ dir, now: () => now });
+    assert.equal(again.has(fp(1)), true);
+    now += OWNER_LIMITS.keepMs + 1;
+    assert.equal(again.has(fp(1)), false);
+    for (let i = 0; i < OWNER_LIMITS.kept + 10; i++) {
+      now += 1000;
+      o.add(fp(100 + i));
+    }
+    assert.equal(o.has(fp(100)), false);
+    assert.equal(o.has(fp(100 + OWNER_LIMITS.kept + 9)), true);
+    o.drop(fp(100 + OWNER_LIMITS.kept + 9));
+    assert.equal(o.has(fp(100 + OWNER_LIMITS.kept + 9)), false);
+    // (What doesn't check out is left out; a file that can't be read, all.)
+    writeFileSync(file, JSON.stringify({ version: 1, owners: { x: now, [fp(7)]: now, [fp(8)]: 'soon' } }));
+    assert.deepEqual([...new OwnerSignIns({ dir, now: () => now }).map.keys()], [fp(7)]);
+    writeFileSync(file, '{');
+    assert.equal(new OwnerSignIns({ dir, now: () => now }).map.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('offline mode: where the key can be used from (OFFLINE_FROM)', () => {
+  assert.equal(parseFrom('any'), null);
+  assert.equal(parseFrom('ANY'), null);
+  const at = (from) => new Offline({ key: 'twelve chars!', from, auth: {} });
+  const home = at('private');
+  for (const ip of ['10.1.2.3', '192.168.0.9', '172.20.0.1', '127.0.0.1', '169.254.3.4', '100.100.1.1', '::1', 'fd00::5', 'fe80::1', '::ffff:192.168.1.2']) assert.equal(home.allowedFrom(ip), true, ip);
+  for (const ip of ['8.8.8.8', '172.32.0.1', '2001:db8::1', '::ffff:8.8.8.8', '', 'local', 'not an address']) assert.equal(home.allowedFrom(ip), false, ip);
+  assert.equal(at('').allowedFrom('10.0.0.1'), true); // (private, unless it's said)
+  const list = at('192.168.1.0/24, 2001:db8::/32,10.9.9.9');
+  for (const ip of ['192.168.1.200', '2001:db8:5::1', '10.9.9.9']) assert.equal(list.allowedFrom(ip), true, ip);
+  for (const ip of ['192.168.2.1', '10.9.9.8', '127.0.0.1']) assert.equal(list.allowedFrom(ip), false, ip);
+  assert.equal(at('any').allowedFrom('203.0.113.9'), true);
+  for (const bad of ['192.168.1.0/33', 'example.com', '10.0.0.1/', '1.2.3.4/8/9', 'privat', '10.0.0.0/0x8', '::/129']) assert.throws(() => parseFrom(bad), /OFFLINE_FROM/, bad);
+});
+
+// Offline mode with plex.tv as `tv` says, and a server that lets this
+// container in.
+function offlineSetup({ key = 'correct horse battery', open = true } = {}) {
+  let now = 1_000_000;
+  const tv = { down: true, since: now - OFFLINE_LIMITS.downForMs };
+  const auth = {
+    tv,
+    nudgePlexTv() {},
+    plexTvDown: async ({ forMs = 0 } = {}) => tv.down && now - tv.since >= forMs,
+    plexTvUpFor: (ms) => !tv.down && now - tv.since >= ms,
+    serverState: async () => ({ open, tells: true }),
+  };
+  const off = new Offline({ key, auth, now: () => now });
+  return { off, tv, key, tick: (ms) => (now += ms), at: () => now };
+}
+
+test('offline mode: the key only once plex.tv hasn\'t answered for a while, where the server lets this player in, from where it may be used', async () => {
+  const { off, tv, key, tick, at } = offlineSetup();
+  tv.down = false;
+  await assert.rejects(off.signIn(key, '192.168.1.5'), (e) => e.status === 409 && e.reason === 'plex-tv');
+  tv.down = true;
+  tv.since = at();
+  await assert.rejects(off.signIn(key, '192.168.1.5'), (e) => e.status === 409 && e.reason === 'plex-tv'); // (not for long yet)
+  tick(OFFLINE_LIMITS.downForMs);
+  await assert.rejects(off.signIn(key, '203.0.113.9'), (e) => e.status === 403 && e.reason === 'network');
+  await assert.rejects(off.signIn('correct horse batter', '192.168.1.5'), (e) => e.status === 401);
+  await assert.rejects(off.signIn({ key }, '192.168.1.5'), (e) => e.status === 401);
+  const { token } = await off.signIn(key, '192.168.1.5');
+  assert.equal(isOfflineToken(token), true);
+  assert.equal(off.valid(token), true);
+  assert.equal(off.valid(`pwoff-${'0'.repeat(48)}`), false);
+  assert.equal(off.valid('owner-token'), false);
+  assert.deepEqual(await off.state('192.168.1.5'), { on: true, plexTv: 'down', why: '' });
+  // plex.tv answering again: every session ends, once it has for a while
+  tv.down = false;
+  tv.since = at();
+  assert.equal(off.valid(token), true);
+  tick(OFFLINE_LIMITS.endsUpForMs);
+  assert.equal(off.valid(token), false);
+  assert.equal(off.sessions.size, 0);
+  // ...and after 14 days, whatever plex.tv does
+  tv.down = true;
+  tv.since = at() - OFFLINE_LIMITS.downForMs;
+  const later = await off.signIn(key, '192.168.1.6');
+  tick(OFFLINE_LIMITS.sessionMs + 1);
+  assert.equal(off.valid(later.token), false);
+  off.end(later.token);
+  // Nothing to play: the key isn't taken
+  const shut = offlineSetup({ open: false });
+  await assert.rejects(shut.off.signIn(shut.key, '10.0.0.2'), (e) => e.status === 409 && e.reason === 'server');
+  // No key: no offline mode
+  const none = offlineSetup({ key: '' });
+  await assert.rejects(none.off.signIn('', '10.0.0.2'), (e) => e.status === 404);
+  assert.equal((await none.off.state('10.0.0.2')).on, false);
+});
+
+test('offline mode: a few tries a minute from an address, and none for the rest of the hour once too many wrong keys have come from anywhere', async () => {
+  const { off, key, tick } = offlineSetup();
+  for (let i = 0; i < OFFLINE_LIMITS.triesPerMinute; i++) await assert.rejects(off.signIn('wrong', '10.0.0.1'), (e) => e.status === 401);
+  await assert.rejects(off.signIn(key, '10.0.0.1'), (e) => e.status === 429); // (the right one too)
+  assert.ok((await off.signIn(key, '10.0.0.2')).token);
+  tick(60001);
+  assert.ok((await off.signIn(key, '10.0.0.1')).token);
+  for (let i = OFFLINE_LIMITS.triesPerMinute; i < OFFLINE_LIMITS.wrongPerHour; i++) await assert.rejects(off.signIn('wrong', `10.0.1.${i}`), (e) => e.status === 401);
+  await assert.rejects(off.signIn(key, '10.0.2.1'), (e) => e.status === 429 && /hour/.test(e.message));
+  tick(3600001);
+  assert.ok((await off.signIn(key, '10.0.2.1')).token);
+});
+
+test('/pms/: where the Plex server lets this container in, it\'s asked about each request with that sign-in, never from what it said before', async () => {
+  const p = await fakePlex();
+  try {
+    const auth = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms });
+    assert.equal(await auth.openNow(), false);
+    assert.deepEqual(await auth.serverState(), { open: false, tells: false });
+    p.state.open = true;
+    p.state.honour = true;
+    assert.equal(await auth.openNow(), true);
+    assert.deepEqual(await auth.serverState({ fresh: true }), { open: true, tells: true });
+    // (Asked without a sign-in, for the server to check nothing with plex.tv.)
+    assert.ok(p.asked.filter((a) => a.path === '/library/sections').every((a) => a.token === ''));
+    const asks = (t) => p.asked.filter((a) => a.token === t).length;
+    assert.equal(await auth.showsOwnersOnly('sam-token'), false); // refused both: Sam, as himself
+    assert.equal(await auth.showsOwnersOnly('sam-token'), false);
+    assert.equal(asks('sam-token'), 4); // (each time)
+    await Promise.all([1, 2, 3].map(() => auth.showsOwnersOnly('sam-token')));
+    assert.equal(asks('sam-token'), 6); // (those at once share an answer)
+    assert.equal(await auth.showsOwnersOnly('owner-token'), true);
+    assert.equal(await auth.showsOwnersOnly('made-up-token'), true); // (a sign-in it doesn't know: taken for its owner's)
+    p.known.delete('sam-token'); // his share taken away
+    assert.equal(await auth.showsOwnersOnly('sam-token'), true);
+    p.known.add('sam-token');
+    p.state.honour = false; // a server that takes everyone here for its owner
+    assert.equal(await auth.showsOwnersOnly('sam-token'), true);
+    // One that can't be asked (what only its owner may see isn't all there)
+    p.state.noSessions = true;
+    assert.deepEqual(await auth.serverState({ fresh: true }), { open: true, tells: false });
+    // ...and one that doesn't answer: never a yes
+    p.state.broken = true;
+    await assert.rejects(auth.showsOwnersOnly('sam-token'));
+    await assert.rejects(auth.openNow());
+    await assert.rejects(auth.serverState({ fresh: true }));
+    await assert.rejects(auth.serverState()); // (for a while)
+  } finally {
+    p.close();
+  }
+});
+
+test('plex.tv: heard to stop answering and to answer again, not waited on meanwhile, and what it said of the owner kept', async () => {
+  const p = await fakePlex();
+  const timing = { ...PLEX_TV_TIMING };
+  try {
+    const auth = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms });
+    assert.equal(await auth.loadServerId(), 'srv-1');
+    assert.equal(auth.ownerLately('owner-token'), false);
+    await auth.identify('owner-token');
+    await auth.serverAccess('owner-token', 'srv-1');
+    await auth.identify('sam-token');
+    await auth.serverAccess('sam-token', 'srv-1');
+    assert.equal(auth.ownerLately('owner-token'), true);
+    assert.equal(auth.ownerLately('sam-token'), false);
+    assert.equal(auth.tv.down, false);
+    p.state.down = true;
+    await assert.rejects(auth.identify('another-token'), (e) => e.down === true);
+    assert.equal(auth.tv.down, true);
+    assert.equal(await auth.plexTvDown(), true);
+    const n = p.tvTokens.length;
+    await assert.rejects(auth.identify('yet-another-token'), (e) => e.down === true);
+    assert.equal(p.tvTokens.length, n); // (not asked: it isn't answering)
+    assert.equal(auth.ownerLately('owner-token'), true); // (what it said is kept as long as ever)
+    p.state.down = false;
+    assert.equal(await auth.pingPlexTv(), true); // (its ping is asked all the same)
+    assert.equal(auth.plexTvUpFor(0), true);
+    PLEX_TV_TIMING.retryMs = 0;
+    p.close();
+    await assert.rejects(auth.identify('one-more-token'), (e) => e.down === true); // (no answer at all)
+    assert.equal(auth.tv.down, true);
+  } finally {
+    Object.assign(PLEX_TV_TIMING, timing);
+    p.close();
+  }
+});
+
+// The service itself (server/index.js), on a port of its own, with these
+// settings (PW_SERVICE_*). Run as root, it becomes nginx, as in the
+// container: its data folder is made that user's.
+async function startService(env, dir) {
+  const port = await new Promise((r) => {
+    const probe = createServer().listen(0, '127.0.0.1', () => {
+      const { port: p } = probe.address();
+      probe.close(() => r(p));
+    });
+  });
+  if (process.getuid?.() === 0) {
+    const line = readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('nginx:'));
+    if (line) chownSync(dir, Number(line.split(':')[2]), Number(line.split(':')[3]));
+  }
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./index.js', import.meta.url)), join(dir, 'no-config.json')], {
+    env: { ...process.env, PW_SERVICE_PORT: String(port), PW_SERVICE_DATA_DIR: dir, PW_SERVICE_TOGETHER: 'false', PW_SERVICE_SHARING: 'false', PW_SERVICE_SETTINGS_SYNC: 'false', PW_SERVICE_MISSING_SYNC: 'false', ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  const url = `http://127.0.0.1:${port}`;
+  for (let i = 0; i < 200; i++) {
+    if (child.exitCode !== null) throw new Error(`the service stopped: ${out}`);
+    if (await fetch(`${url}/api/health`).then((r) => r.ok, () => false)) break;
+    await sleep(25);
+  }
+  return {
+    url,
+    out: () => out,
+    stop: () =>
+      new Promise((r) => {
+        if (child.exitCode !== null) return r();
+        child.once('exit', r);
+        child.kill('SIGTERM');
+      }),
+  };
+}
+
+test('/pms/, end to end: the owner, friends the server knows as themselves, made-up sign-ins, the notification stream, plex.tv not answering, and the offline key', async () => {
+  const p = await fakePlex();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_OFFLINE_KEY: 'the offline key', PW_SERVICE_OFFLINE_TIMING: '400,1500,100,100' };
+  let svc = await startService(env, dir);
+  // nginx's check of a request to /pms/: its token (from the query string, or the header), and where it came from.
+  const check = (token, { stream = false, header = false } = {}) =>
+    fetch(`${svc.url}/api/internal/pms-auth${stream ? '/stream' : ''}`, {
+      headers: { 'X-PW-Route': 'internal', 'X-Real-IP': '192.168.1.20', ...(header ? { 'X-Plex-Token': token } : { 'X-PW-Plex-Token': token }) },
+    }).then((r) => r.status);
+  try {
+    // A server that doesn't let this container in: everything goes through, as Plex checks it.
+    assert.equal(await check('owner-token'), 204);
+    assert.equal(await check('sam-token'), 204);
+    assert.equal(await check('made-up-token'), 204);
+    assert.equal(await check('sam-token', { stream: true }), 204);
+    assert.equal(await check(''), 401);
+    // Then it does (asked each time): only the owner, where it takes everyone here for its owner...
+    p.state.open = true;
+    assert.equal(await check('owner-token'), 204);
+    assert.equal(await check('owner-token', { header: true }), 204);
+    assert.equal(await check('sam-token'), 403);
+    assert.equal(await check('sam-token', { header: true }), 403);
+    assert.equal(await check('made-up-token'), 401);
+    // ...and Sam, as himself, where it knows its people's sign-ins: asked each time, so not once his share's taken away
+    p.state.honour = true;
+    assert.equal(await check('sam-token'), 204);
+    assert.equal(await check('made-up-token'), 401);
+    assert.equal(await check('sam-token', { stream: true }), 403);
+    assert.equal(await check('owner-token', { stream: true }), 204);
+    p.known.delete('sam-token');
+    assert.equal(await check('sam-token'), 403);
+    p.known.add('sam-token');
+    assert.equal(await check('sam-token'), 204);
+    // The offline key, while plex.tv is answering: no
+    const signIn = (key, ip = '192.168.1.20') =>
+      fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': ip, 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+    let r = await signIn('the offline key');
+    assert.equal(r.status, 409);
+    assert.equal((await r.json()).reason, 'plex-tv');
+    // (Only as JSON: another site's page can't have a browser send that without asking first.)
+    r = await fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': '192.168.1.20', 'Content-Type': 'text/plain' }, body: JSON.stringify({ key: 'the offline key' }) });
+    assert.equal(r.status, 415);
+    // plex.tv stops answering, and the service restarts meanwhile (nothing in memory): the owner's sign-in is known, as a fingerprint
+    await svc.stop();
+    assert.ok(!readFileSync(join(dir, 'owners.json'), 'utf8').includes('owner-token'));
+    p.state.down = true;
+    svc = await startService(env, dir);
+    assert.equal(await check('owner-token'), 204);
+    assert.equal(await check('sam-token'), 204); // (the server knows him)
+    assert.equal(await check('made-up-token'), 503); // (can't be told: refused)
+    p.state.honour = false;
+    assert.equal(await check('sam-token'), 503);
+    p.state.honour = true;
+    // The offline key: once plex.tv hasn't answered for a while, from where it may be used
+    await sleep(450);
+    r = await signIn('not the offline key');
+    assert.equal(r.status, 401);
+    r = await signIn('the offline key', '203.0.113.7');
+    assert.equal(r.status, 403);
+    r = await signIn('the offline key');
+    assert.equal(r.status, 200);
+    const { token } = await r.json();
+    assert.equal(await check(token), 204);
+    const state = (t) => fetch(`${svc.url}/api/offline`, { headers: { 'X-Real-IP': '192.168.1.20', ...(t ? { 'X-Plex-Token': t } : {}) } }).then((x) => x.json());
+    assert.deepEqual(await state(token), { configured: true, on: true, plexTv: 'down', why: '', session: 'on' });
+    // ...never a Plex sign-in anywhere else, nor sent to plex.tv
+    assert.equal((await fetch(`${svc.url}/api/devices`, { headers: { 'X-Plex-Token': token } })).status, 403);
+    assert.equal(p.tvTokens.includes(token), false);
+    // plex.tv answering again: the session ends once it has for a while
+    p.state.down = false;
+    await sleep(150);
+    assert.equal((await state(token)).plexTv, 'up');
+    assert.equal(await check(token), 204);
+    await sleep(1600);
+    assert.equal(await check(token), 401);
+    assert.deepEqual(await state(token), { configured: true, on: false, plexTv: 'up', why: 'plex-tv', session: 'ended' });
+    // Signed out: gone
+    r = await fetch(`${svc.url}/api/offline/session`, { method: 'DELETE', headers: { 'X-Plex-Token': token } });
+    assert.equal(r.status, 204);
+  } finally {
+    await svc.stop();
+    p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- MusicBrainz features: artists of the same name ----------
+
+test('MusicBrainz features: an artist\'s albums told from those of another artist of their name, only on plain evidence', () => {
+  let n = 0;
+  const g = (title, date, primary = 'Album') => ({ id: `00000000-0000-4000-8000-${String((n += 1)).padStart(12, '0')}`, title, primary, secondary: [], date });
+  const producer = [g('Bloom', '2015-01-01'), g('Fierce', '2017-02-02'), g('Never Give Up', '2019-03-03')];
+  const rapper = { id: 'r', name: 'Maduk', groups: [g('Cocaine', '2026-01-01'), g('Evolution', '2025-05-05'), g('Vício', '2025-06-06'), g('Madrugz', '2023-01-01'), g('Fierce', '2017-01-01')] };
+  const page = [
+    { id: 1, title: 'Bloom', year: 2015 },
+    { id: 2, title: 'Fierce', year: 2017 }, // (the rapper has one of that title too: stays)
+    { id: 3, title: 'Never Give Up (Remastered)', year: 2020 },
+    { id: 4, title: 'Cocaine', year: 2026 },
+    { id: 5, title: 'Evolution', year: 2024 }, // (within a year)
+    { id: 6, title: 'Vicio', year: 2025 },
+    { id: 7, title: 'Madrugz', year: 2020 }, // (another year: which it is can't be told)
+    { id: 8, title: 'Unreleased Demos', year: 2021 }, // (no one's on MusicBrainz)
+    { id: 9, title: 'Evolution Part 2', year: 2025 }, // (only near the rapper's: not enough)
+    { id: 10, title: 'Cocaine', year: null }, // (no year: not enough)
+  ];
+  const ids = (m) => [...m.keys()].sort((a, b) => a - b);
+  // Plex says who the page's artist is: the rapper's three, apart
+  const apart = apartFromNamesakes(page, { groups: producer, byId: true, namesakes: [rapper] });
+  assert.deepEqual(ids(apart), ['4', '5', '6']);
+  assert.equal(apart.get('4'), rapper);
+  // ...and nothing where MusicBrainz has nothing of the page for them
+  assert.equal(apartFromNamesakes(page, { groups: [], byId: true, namesakes: [rapper] }).size, 0);
+  assert.equal(apartFromNamesakes(page, { groups: producer, byId: true, namesakes: [] }).size, 0);
+  // Without Plex's word: only where more of the page is theirs than the other's (three each here: nothing)
+  assert.equal(apartFromNamesakes(page, { groups: producer, namesakes: [rapper] }).size, 0);
+  assert.deepEqual(ids(apartFromNamesakes(page.filter((it) => it.id !== 6), { groups: producer, namesakes: [rapper] })), ['4', '5']);
+  // ...and two of theirs at least
+  assert.equal(apartFromNamesakes([page[0], page[3]], { groups: producer, namesakes: [rapper] }).size, 0);
+  assert.deepEqual(ids(apartFromNamesakes([page[0], page[3]], { groups: producer, byId: true, namesakes: [rapper] })), ['4']);
+  // Two other artists of the name with the album: which it is can't be told
+  const another = { id: 'x', name: 'Maduk', groups: [g('Cocaine', '2026-03-03')] };
+  assert.deepEqual(ids(apartFromNamesakes(page, { groups: producer, byId: true, namesakes: [rapper, another] })), ['5', '6']);
+});
+
+test('MusicBrainz features: other artists of a name, and their release groups, looked up once and kept', async () => {
+  const asked = [];
+  const ids = { a: '11111111-1111-4111-8111-111111111111', b: '22222222-2222-4222-8222-222222222222', c: '33333333-3333-4333-8333-333333333333' };
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    asked.push(`${u.pathname}?${u.searchParams.get('query') || u.searchParams.get('artist') || ''}`);
+    let body = {};
+    if (u.pathname === '/ws/2/artist') {
+      body = { artists: [
+        { id: ids.a, name: 'Maduk', disambiguation: 'Dutch drum & bass producer', score: 100 },
+        { id: ids.b, name: 'Maduk', disambiguation: 'Brazilian rapper', score: 100 },
+        { id: ids.c, name: 'Maduk Collective', score: 90 },
+        { id: '89ad4ac3-39f7-470e-963a-56509c546377', name: 'Maduk', score: 80 },
+      ] };
+    } else if (u.pathname === '/ws/2/release-group') {
+      body = { 'release-group-count': 1, 'release-groups': [{ id: '44444444-4444-4444-8444-444444444444', title: u.searchParams.get('artist') === ids.b ? 'Cocaine' : 'Bloom', 'primary-type': 'Album', 'first-release-date': '2026-01-01' }] };
+    }
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  };
+  const mb = new MusicBrainz({ base: 'http://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+  const others = await mb.namesakes('Maduk', { but: ids.a });
+  assert.deepEqual(others.map((a) => [a.id, a.name, a.note, a.groups.map((x) => x.title)]), [[ids.b, 'Maduk', 'Brazilian rapper', ['Cocaine']]]);
+  assert.match(asked[0], /^\/ws\/2\/artist\?artist:"Maduk" OR sortname:"Maduk"$/);
+  const n = asked.length;
+  await mb.namesakes('Maduk', { but: ids.b });
+  assert.equal(asked.length, n + 1); // (the search kept: only the other's release groups asked for)
+  assert.deepEqual(await mb.namesakes('Various Artists'), []);
 });
