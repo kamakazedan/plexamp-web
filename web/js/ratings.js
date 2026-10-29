@@ -9,6 +9,7 @@ import { app, on } from './state.js';
 import { describeError } from './router.js';
 import { h, toast } from './ui.js';
 import { refreshLists } from './editing.js';
+import { live } from './live.js';
 
 export const LOVED = 10;
 export const LOVED_TITLE = '❤️ Tracks';
@@ -23,8 +24,42 @@ export const ratingEvents = new EventTarget();
 // ❤️ Tracks needs. And ratings being saved, shown straight away.
 const known = new Map();
 const pending = new Map();
+// (Another server's tracks have other ids.)
+on('source', ({ serverChanged } = {}) => serverChanged && known.clear());
+// A track rated here that Plex says has changed since (rated again in
+// another Plex app, say): what Plex has for it now, so what's picked for
+// you (picks.js) and what's shown go by that.
+live.addEventListener('items', (e) => {
+  const ids = (e.detail?.ids || []).map(String).filter((id) => known.has(id) && !pending.has(id));
+  for (const id of ids.slice(0, 50)) {
+    app.server
+      ?.metadata(id)
+      .then((m) => {
+        if (!m || !known.has(id) || pending.has(id)) return;
+        const value = m.userRating ?? null;
+        if (known.get(id) === value) return;
+        known.set(id, value);
+        ratingEvents.dispatchEvent(new CustomEvent('rated', { detail: { id, rating: value } }));
+        paintRows(id, value);
+      })
+      .catch(() => {});
+  }
+});
 const knownRating = (track) => (known.has(String(track.id)) ? known.get(String(track.id)) : (track.userRating ?? null));
 const shownRating = (track) => (pending.has(String(track.id)) ? pending.get(String(track.id)) : knownRating(track));
+
+// A track's rating, as this app knows it (one rated here since the track
+// was listed goes by that), for a track as the app has them or as Plex
+// lists them. Ratings are each Plex account's own.
+export const ratingOf = (t) => {
+  const id = String(t?.id ?? t?.ratingKey ?? '');
+  return known.has(id) ? known.get(id) : (t?.userRating ?? null);
+};
+// Rated down: a thumbs down, or one star or less (Plex's 2 of 10, or 1).
+// Thumbs show down for that, and no more (two stars is neither).
+export const DISLIKED_AT_MOST = 2;
+export const isDownRating = (v) => Number.isFinite(Number(v)) && Number(v) > 0 && Number(v) <= DISLIKED_AT_MOST;
+export const isDisliked = (t) => isDownRating(ratingOf(t));
 
 export async function rateTrack(track, rating) {
   const id = String(track.id);
@@ -160,8 +195,8 @@ function paintRow(el) {
     }
     up.classList.toggle('on', v >= 6);
     up.setAttribute('aria-pressed', String(v >= 6));
-    down.classList.toggle('on', v > 0 && v <= 4);
-    down.setAttribute('aria-pressed', String(v > 0 && v <= 4));
+    down.classList.toggle('on', isDownRating(v));
+    down.setAttribute('aria-pressed', String(isDownRating(v)));
     return;
   }
   if (!el.querySelector('.rr-stars')) el.replaceChildren(h('span.rr-stars', { 'aria-hidden': 'true' }));
@@ -194,7 +229,7 @@ function onRowClick(el, e) {
   } else if (mode === 'thumbs') {
     const btn = e.target.closest('.rr-thumb');
     if (!btn) return;
-    next = btn.classList.contains('rr-up') ? (v >= 6 ? 0 : 10) : v > 0 && v <= 4 ? 0 : 2;
+    next = btn.classList.contains('rr-up') ? (v >= 6 ? 0 : 10) : isDownRating(v) ? 0 : 2;
   } else {
     // Tapping the rating it has clears it.
     next = starsAt(el, e.clientX);

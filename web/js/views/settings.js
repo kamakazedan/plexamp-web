@@ -1,7 +1,7 @@
-import { app, on, saveSettings, setSource, signOut, proxyUri } from '../state.js';
-import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively } from '../plex.js';
+import { app, on, saveSettings, setSource, signOut, switchAccount, proxyUri } from '../state.js';
+import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, switchHomeUser, getUser } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
-import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, avatar as personAvatar } from '../ui.js';
+import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, askText, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, sharedModelName, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
@@ -87,42 +87,60 @@ function accountView({ el }) {
       h('div.account-avatar', null, avatar(auth.thumb, auth.username)),
       h('div.account-name', null, auth.username || 'Plex user'),
       h('div.account-sub', null, auth.manual ? 'Connected with a server token' : 'Signed in with your Plex account'),
-      h(
-        'button.btn.btn-secondary',
-        {
-          type: 'button',
-          onclick: () =>
-            sheet({
-              title: 'Sign out?',
-              subtitle: `Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays.${
-                app.config.settingsSync && app.config.missingSync
-                  ? ' Settings and missing tracks kept for your account stay with it, for when you sign in again.'
-                  : app.config.settingsSync
-                    ? ' Settings kept for your account stay with it, for when you sign in again.'
-                    : app.config.missingSync
-                      ? ' Missing tracks kept for your account stay with it, for when you sign in again.'
-                      : ''
-              }`,
-              actions: [
-                {
-                  icon: 'signOut',
-                  label: 'Sign out',
-                  danger: true,
-                  onSelect: () => {
-                    signOut();
-                    clearViewCache();
-                    navigate('/login', { replace: true });
-                  },
-                },
-              ],
-            }),
-        },
-        icon('signOut', 20),
-        h('span', null, 'Sign out'),
-      ),
+      accountButtons(),
     ),
   );
   el.append(h('div.section-head', null, h('h2', null, 'Your settings')), accountSyncRows());
+}
+
+// Switch user, where you're in a Plex Home with someone else (see
+// chooseHomeUser), and Sign out: in Settings › Account, and while choosing
+// a server (someone in your Plex Home may have none of theirs to choose).
+function accountButtons() {
+  const auth = app.auth || {};
+  const switchBtn = h('button.btn.btn-secondary.account-switch', { type: 'button', hidden: true }, icon('switchUser', 20), h('span', null, 'Switch user'));
+  if (!auth.manual && auth.token) {
+    Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null)])
+      .then(([users, me]) => {
+        if (app.auth?.token !== auth.token || !me?.uuid) return;
+        // (Which of them is you, by plex.tv's id for you: never offered
+        // yourself, as switching to you would clear what's kept for you.)
+        const mine = (u) => u.uuid === String(me.uuid);
+        if (users.length < 2 || !users.some(mine)) return;
+        switchBtn.onclick = () => chooseHomeUser(users, mine);
+        switchBtn.hidden = false;
+      })
+      .catch(() => {});
+  }
+  const signOutBtn = h('button.btn.btn-secondary', { type: 'button', onclick: confirmSignOut }, icon('signOut', 20), h('span', null, 'Sign out'));
+  return h('div.account-actions', null, switchBtn, signOutBtn);
+}
+
+function confirmSignOut() {
+  sheet({
+    title: 'Sign out?',
+    subtitle: `Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays.${
+      app.config.settingsSync && app.config.missingSync
+        ? ' Settings and missing tracks kept for your account stay with it, for when you sign in again.'
+        : app.config.settingsSync
+          ? ' Settings kept for your account stay with it, for when you sign in again.'
+          : app.config.missingSync
+            ? ' Missing tracks kept for your account stay with it, for when you sign in again.'
+            : ''
+    }`,
+    actions: [
+      {
+        icon: 'signOut',
+        label: 'Sign out',
+        danger: true,
+        onSelect: () => {
+          signOut();
+          clearViewCache();
+          navigate('/login', { replace: true });
+        },
+      },
+    ],
+  });
 }
 
 // Whether settings follow the account (sync.js), with a switch for it.
@@ -155,6 +173,106 @@ function accountSyncRows() {
   return rows;
 }
 
+// ---------- Plex Home: switching to someone else in it ----------
+
+// The people in your Plex Home (`mine`: which is you), to switch to.
+function chooseHomeUser(users, mine) {
+  const list = h('div.rows.home-users');
+  let panel = null;
+  for (const u of users) {
+    const you = mine(u);
+    const what = [you ? 'You' : null, u.admin ? 'Admin' : u.guest ? 'Guest' : u.restricted ? 'Managed user' : null, u.protected && !you ? 'Has a PIN' : null]
+      .filter(Boolean)
+      .join(' · ');
+    list.append(
+      row({
+        onClick: you
+          ? null
+          : async () => {
+              await panel?.close();
+              switchToHomeUser(u);
+            },
+        lead: avatar(u.thumb, u.title),
+        title: u.title,
+        subtitle: what,
+        right: you ? icon('check', 22, 'home-user-you') : null,
+        chevron: !you,
+        cls: 'home-user',
+      }),
+    );
+  }
+  panel = sheet({
+    title: 'Switch user',
+    subtitle: 'Someone else in your Plex Home',
+    content: h(
+      'div',
+      null,
+      list,
+      h(
+        'p.home-users-note',
+        null,
+        'Each of you has your own playlists, ratings, plays and settings here. Switching clears everything this device keeps for you, as signing out does: none of it goes with them.',
+      ),
+    ),
+  });
+}
+
+// To them: their PIN first, where they have one. Then plex.tv's token for
+// them, the server and library this is on (where they can use those), and
+// the page afresh as them (state.js switchAccount).
+let switching = false;
+async function switchToHomeUser(u) {
+  if (switching) return;
+  let pin = null;
+  if (u.protected) {
+    pin = await askText({ title: `Switch to ${u.title}`, label: 'Their PIN', confirm: 'Switch', maxLength: 4, type: 'password', inputMode: 'numeric', secret: true, message: `${u.title} has a PIN on Plex.` });
+    if (pin === null) return;
+    if (!/^\d{4}$/.test(pin)) return toast('A PIN is four numbers.');
+  }
+  if (switching) return;
+  switching = true;
+  const cover = h('div.switching-cover', null, h('div.spinner', { 'aria-hidden': 'true' }, h('span')), h('p', { role: 'status' }, `Switching to ${u.title}…`));
+  document.body.append(cover);
+  try {
+    const user = await switchHomeUser(app.auth.token, u.uuid, pin);
+    pin = null;
+    const token = user.authToken;
+    const source = await sourceFor(token);
+    // (By the name they were chosen by.)
+    const thumb = typeof user.thumb === 'string' && /^https:\/\//.test(user.thumb) ? user.thumb : u.thumb;
+    switchAccount({ auth: { token, username: u.title, thumb, manual: false }, source });
+  } catch (err) {
+    switching = false;
+    cover.remove();
+    const refused = err?.status === 401 || err?.status === 403 || err?.status === 422;
+    toast(refused ? (pin ? 'That PIN isn’t right.' : `Plex didn’t let you switch to ${u.title}.`) : `Couldn’t switch to ${u.title}. ${describeError(err)}`, { timeout: 6000 });
+  }
+}
+
+// The server and library this is on, for whoever `token` is for, where
+// they can use them: the same way to the server, with their own token for
+// it, and the same library (or the server's first, where they can't see
+// that one). Null where they can't use the server: then they choose one.
+async function sourceFor(token) {
+  const src = app.source;
+  if (!src?.serverId) return null;
+  const theirs = (await listServers(token).catch(() => [])).find((x) => x.id === src.serverId);
+  if (!theirs) return null;
+  const sections = await new PlexServer({ uri: src.uri, token: theirs.token }).musicSections({ timeout: 10000 }).catch(() => []);
+  if (!sections.length) return null;
+  const sec = sections.find((x) => String(x.key) === String(src.sectionKey)) || sections[0];
+  return {
+    serverId: src.serverId,
+    serverName: theirs.name || src.serverName,
+    uri: src.uri,
+    kind: src.kind,
+    token: theirs.token,
+    connections: theirs.connections,
+    sectionKey: String(sec.key),
+    sectionTitle: sec.title,
+  };
+}
+
 // ---------- Source (server + library) ----------
 
 export async function sourceView({ el, firstRun = false }) {
@@ -162,6 +280,9 @@ export async function sourceView({ el, firstRun = false }) {
   if (firstRun) el.append(h('p.lede', null, 'Pick the Plex server and music library to play from. You can change this later in Settings.'));
   const body = h('div.source-body');
   el.append(body);
+  // Who's signed in, to switch user or sign out from here too (someone in
+  // a Plex Home may have no server to choose).
+  if (firstRun && app.auth?.token) el.append(h('div.setup-account', null, h('div.setup-account-who', null, `Signed in as ${app.auth.username || 'Plex user'}`), accountButtons()));
   await showServers(body);
 }
 
@@ -491,6 +612,13 @@ function playbackView({ el }) {
         checked: !!s.loudness,
         disabled: !canFade,
         onChange: (v) => saveSettings({ loudness: v }),
+      }),
+      toggleRow({
+        title: 'Skip tracks you’ve rated down',
+        subtitle:
+          'A thumbs down, or one star or less (here or in any Plex app): never in what the app picks for you, so radio and stations, mixes, shuffling an artist or your library, Guest DJs and AI playlists leave them out. Albums and playlists you play yourself play as they are. Your ratings are your own: everyone else’s picks go by theirs.',
+        checked: app.settings.skipDisliked !== false,
+        onChange: (v) => saveSettings({ skipDisliked: v }),
       }),
       // (With the MusicBrainz features, on to begin with, as it was with
       // those: turned off or on, it's that with them or without.)

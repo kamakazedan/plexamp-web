@@ -1747,6 +1747,51 @@ a.hero-link:hover {
   margin-bottom: 14px;
 }
 
+/* Switch user (in a Plex Home) and Sign out. */
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+/* While choosing a server: who's signed in. */
+.setup-account {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin: 32px var(--gutter) 16px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  text-align: center;
+}
+
+/* Settings › Account › Switch user: who's in your Plex Home. */
+.home-user-you {
+  color: var(--fav);
+}
+
+/* Over everything while switching to them, till the page loads as them. */
+.switching-cover {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gutter);
+  background: var(--bg);
+  text-align: center;
+}
+
+.switching-cover p {
+  margin: 0;
+  color: var(--muted);
+}
+
 .about p {
   max-width: 46ch;
   color: var(--muted);
@@ -2835,7 +2880,8 @@ body.np-open #toasts {
   cursor: default;
 }
 
-.cast-note {
+.cast-note,
+.home-users-note {
   margin: 4px 24px 20px;
   color: var(--muted);
   font-size: calc(13px * var(--fs, 1));

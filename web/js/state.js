@@ -26,6 +26,7 @@ export const DEFAULT_SETTINGS = {
   shareDevices: true, // your devices share what's playing; one plays (devices.js)
   reportPlays: true, // "Sync recent plays": tell Plex what's played
   skipLive: false, // live tracks and demos left out of what the app picks (mb.js skipLiveOn; on with mbSkipLive where the player has the MusicBrainz features)
+  skipDisliked: true, // tracks you've rated down (thumbs down, one star) never in what the app picks (picks.js)
   // mode: 'auto' (the app's shared model when there is one) | 'shared' | 'custom' | 'off'
   ai: { mode: 'auto', url: '', apiKey: '', model: '', notes: '' },
 
@@ -117,6 +118,43 @@ export function migrateSettings(s) {
   return s;
 }
 
+// Set once this browser's settings may not be its next account's own (see
+// sync.js): they've followed an account, or someone signed out here (any
+// version: settings kept from before a sign-in are someone's), or signed in
+// over someone else.
+export const SYNCED_BEFORE = 'syncedBefore';
+
+// Someone signed out or switched user here (see leave): what's kept for
+// the next person, as it was kept ({ switch, auth, source }, or { settings }
+// on signing out), till the first start since.
+const LEFT = 'left';
+
+// What stays once someone has left: this device's id, what this browser
+// has met, a sign-in being started (Sign in with Plex), and what leaving
+// kept, exactly as it was kept: the next person's sign-in and server, or
+// this device's settings. Anything else (what another tab of theirs kept
+// in the moment before it heard, its queue, say) goes, as does anything
+// put in place of what was kept: then the next person signs in, or chooses
+// a server, or has the settings to begin with, afresh. Right before the
+// page goes (`stay`: the first start does it again), and at the first start
+// since, before anything's read. (Clearing isn't held back by the freeze.)
+function settleLeft(stay = false) {
+  const left = store.get(LEFT);
+  if (!left) return;
+  if (typeof left !== 'object') return void store.set(LEFT, null); // (one kept by a build of 0.29.0 before it was released)
+  const same = (key, value) => JSON.stringify(store.get(key)) === JSON.stringify(value ?? null);
+  const keep = ['clientId', SYNCED_BEFORE, 'pendingPin'];
+  if (stay) keep.push(LEFT);
+  if (left.switch) {
+    if (same('auth', left.auth)) keep.push('auth');
+    if (same('source', left.source)) keep.push('source');
+  } else if (same('settings', left.settings)) {
+    keep.push('settings');
+  }
+  store.clear(keep);
+}
+settleLeft();
+
 export const app = {
   config: window.PW_CONFIG || {},
   auth: store.get('auth'), // { token, username, thumb, manual }
@@ -124,6 +162,7 @@ export const app = {
   server: null,
   settings: { ...DEFAULT_SETTINGS, ...storedSettings() },
 };
+store.own(app.auth?.token);
 
 function storedSettings() {
   const s = store.get('settings') || {};
@@ -157,11 +196,6 @@ export const searchScope = () => (app.settings.searchAllLibraries ? undefined : 
 // its own until 0.19.0).
 export const homeKey = () => '*';
 
-// Set once this browser's settings may not be its next account's own (see
-// sync.js): they've followed an account, or someone signed out here (any
-// version: settings kept from before a sign-in are someone's), or signed in
-// over someone else.
-export const SYNCED_BEFORE = 'syncedBefore';
 // (sync.js: changes here not yet kept for the account, and the account's
 // settings as this browser last had them. Not the next account's.)
 export const SYNC_PENDING = 'syncPending';
@@ -180,6 +214,7 @@ export function setAuth(auth) {
   }
   app.auth = auth;
   store.set('auth', auth);
+  store.own(auth?.token);
 }
 
 // `serverChanged` tells listeners (the player, the backdrop) whether this is
@@ -198,12 +233,36 @@ export function setSource(source) {
 // layouts). How the app looks and plays stays. Then the page loads afresh,
 // so nothing of yours is left in it either.
 export function signOut() {
+  leave(null);
+}
+
+// Switching to someone else in your Plex Home (Settings › Account): as
+// signing out, and more, as they're another person: every setting goes
+// back to how it is to begin with too (theirs come from their account,
+// where the player keeps them for it), and none of yours goes with them.
+// Then the page loads afresh, signed in as them (`next.auth`), on the same
+// server and library where they can use those (`next.source`), or else
+// they choose.
+export function switchAccount(next) {
+  leave(next);
+}
+
+function leave(next) {
   // (Settings that follow your account stay as they are for it: see sync.js.)
   emit('signing-out');
-  const { ai, playerName } = DEFAULT_SETTINGS;
-  saveSettings({ ai: { ...ai, mode: app.settings.ai?.mode === 'off' ? 'off' : ai.mode }, playerName, home: {} });
+  if (!next) {
+    const { ai, playerName } = DEFAULT_SETTINGS;
+    saveSettings({ ai: { ...ai, mode: app.settings.ai?.mode === 'off' ? 'off' : ai.mode }, playerName, home: {} });
+  }
   store.set(SYNCED_BEFORE, true);
-  store.clear(['clientId', 'settings', SYNCED_BEFORE]);
+  store.clear(next ? ['clientId', SYNCED_BEFORE] : ['clientId', 'settings', SYNCED_BEFORE]);
+  // (This page is the next person's now, or nobody's: see the store.)
+  store.own(next?.auth?.token);
+  if (next) {
+    store.set('auth', next.auth);
+    if (next.source) store.set('source', next.source);
+  }
+  store.set(LEFT, next ? { switch: true, auth: next.auth, source: next.source ?? null } : { settings: store.get('settings') });
   // Nothing more is kept from here on (what's playing, say, as the page goes).
   store.freeze();
   app.auth = null;
@@ -216,27 +275,33 @@ export function signOut() {
   // (Sent the way a page's own requests are: browsers ignore the request
   // for one that couldn't carry cookies, though this player sets none.)
   const forget = fetch('signed-out', { cache: 'no-store', credentials: 'same-origin' }).catch(() => {});
-  Promise.race([forget, new Promise((r) => setTimeout(r, 1500))]).then(reloadClean);
+  Promise.race([forget, new Promise((r) => setTimeout(r, 1500))]).then(() => {
+    settleLeft(true);
+    reloadClean(!!next);
+  });
 }
 
-// The page afresh, without this tab's history of pages (and searches) either.
-function reloadClean() {
+// The page afresh, without this tab's history of pages (and searches) either
+// (`home`: at Home).
+function reloadClean(home = false) {
   try {
     sessionStorage.clear();
   } catch {
     /* storage unavailable */
   }
+  if (home) history.replaceState(null, '', `${location.pathname}${location.search}#/`);
   location.reload();
 }
 
-// Signed out (or in as someone else) in another tab: this one follows, so
-// nothing of the last account carries on here, and nothing it was doing is
-// kept as it goes.
+// Signed out (or in as someone else, or switched to someone else in the
+// Plex Home) in another tab: this one follows, at Home, so nothing of the
+// last account carries on here (not even the page it was on), and nothing
+// it was doing is kept as it goes.
 window.addEventListener('storage', (e) => {
   if (e.key !== null && e.key !== 'pw.auth') return;
   if ((store.get('auth')?.token || null) === (app.auth?.token || null)) return;
   store.freeze();
-  reloadClean();
+  reloadClean(true);
 });
 
 // The container can proxy one server at /pms (see docker/40-plexamp-web.sh),

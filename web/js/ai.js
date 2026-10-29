@@ -19,6 +19,7 @@ import { app, on } from './state.js';
 import { normTrack } from './plex.js';
 import { debugLog } from './debug.js';
 import { norm, otherScript } from './missinglist.js';
+import { withoutDisliked } from './picks.js';
 
 // How long to wait for the model to start answering (loading it, and
 // reading a long prompt, can take minutes) is a setting: Settings › AI ›
@@ -1040,10 +1041,17 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep, on
     if (err?.missing) err.missing = oneOfEach(err.missing);
     throw err;
   }
-  const { pool, basedOn, only, seen } = found;
+  const { basedOn, only, seen } = found;
+  // (Never a track you've rated down: see picks.js.)
+  const fine = new Set(withoutDisliked(found.pool.map((c) => c.track)));
+  const pool = found.pool.filter((c) => fine.has(c.track));
+  const downs = found.pool.length - pool.length;
   const missing = oneOfEach(found.missing);
   if (!pool.length) {
-    throw new AIError('no-matches', `Nothing in ${app.source.sectionTitle} matched. Try describing the playlist another way.`, { missing, seen });
+    const why = downs
+      ? `Everything in ${app.source.sectionTitle} that matched is a track you’ve rated down. Try describing the playlist another way, or turn off Skip tracks you’ve rated down in Settings › Playback.`
+      : `Nothing in ${app.source.sectionTitle} matched. Try describing the playlist another way.`;
+    throw new AIError('no-matches', why, { missing, seen });
   }
 
   let title = clean(plan.title, 60) || 'AI playlist';
@@ -1084,7 +1092,7 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep, on
     tracks: chosen.map((c) => c.track),
     basedOn,
     // Fewer tracks than asked for, because that's all there is.
-    note: only && pool.length < length ? `That’s every track by ${basedOn.artists.join(' and ')} in ${app.source.sectionTitle}.` : '',
+    note: only && pool.length < length ? `That’s every track by ${basedOn.artists.join(' and ')} in ${app.source.sectionTitle}${downs ? ' you haven’t rated down' : ''}.` : '',
     model: planned.model,
     seconds: Math.round((performance.now() - started) / 1000),
     missing,

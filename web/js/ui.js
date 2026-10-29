@@ -79,6 +79,8 @@ const ICONS = {
   note: S('<path d="M9.5 17.5V6l9-2v11.5"/><circle cx="7.2" cy="17.6" r="2.3"/><circle cx="16.2" cy="15.6" r="2.3"/>'),
   list: S('<path d="M4 6.5h11M4 11.5h11M4 16.5h7"/><circle cx="17.3" cy="16.6" r="2.3"/><path d="M19.6 16.6V7.4l1.4-.4"/>'),
   user: S('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.6 18.2a6.3 6.3 0 0 1 10.8 0"/>'),
+  // Switching to someone else in your Plex Home: a person, and arrows each way.
+  switchUser: S('<circle cx="9.5" cy="8" r="3.3"/><path d="M3.5 19.5a6 6 0 0 1 10.6-3.9"/><path d="M15.5 12.5h5.5l-2-2M21 17h-5.5l2 2"/>'),
   palette: S('<path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.2 0 1.8-.9 1.4-2l-.3-.8c-.4-1.1.4-2.2 1.6-2.2h1.8a4 4 0 0 0 4-4c0-4.4-3.8-8-8.5-8z"/><circle cx="7.8" cy="11.5" r="1" fill="currentColor"/><circle cx="10.5" cy="7.6" r="1" fill="currentColor"/><circle cx="15" cy="8" r="1" fill="currentColor"/>'),
   speaker: S('<path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a7.8 7.8 0 0 1 0 11"/>'),
   speakerOff: S('<path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/><path d="m16 9.5 5 5M21 9.5l-5 5"/>'),
@@ -735,10 +737,21 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
 
 // A question with a text answer, in a dialog: resolves to the trimmed text,
 // or null if it was cancelled.
-export function askText({ title, label, value = '', confirm = 'Save', maxLength = 120, message = '' }) {
+// (`type`: 'password' for a PIN, say, and `inputMode` 'numeric'; `secret`:
+// one that's never offered to the browser's, or a password manager's, keeping:
+// the browser's own is told it's a code.)
+export function askText({ title, label, value = '', confirm = 'Save', maxLength = 120, message = '', type = 'text', inputMode, secret = false }) {
   return new Promise((resolve) => {
     let answer = null;
-    const input = h('input', { type: 'text', value, maxLength, autocomplete: 'off', spellcheck: 'false' });
+    const input = h('input', {
+      type,
+      value,
+      maxLength,
+      autocomplete: secret ? 'one-time-code' : 'off',
+      spellcheck: 'false',
+      inputmode: inputMode || null,
+      ...(secret ? { 'data-1p-ignore': true, 'data-lpignore': 'true', 'data-bwignore': true, 'data-form-type': 'other' } : {}),
+    });
     const ok = h('button.btn.btn-primary', { type: 'submit' }, confirm);
     const form = h(
       'form.ask-form',

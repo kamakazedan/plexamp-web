@@ -199,6 +199,9 @@ test('redaction removes tokens and keys', () => {
   assert.ok(!redact('X-Plex-Token: secret2').includes('secret2'));
   assert.ok(!redact('{"accessToken":"secret3"}').includes('secret3'));
   assert.ok(!redact('token=secret4 first').includes('secret4'));
+  // A Plex Home PIN, as switching sends it to plex.tv, or in JSON.
+  assert.ok(!redact('POST https://clients.plex.tv/api/v2/home/users/abc/switch?X-Plex-Token=t&pin=0427').includes('0427'));
+  assert.ok(!redact('{"pin":"0913"}').includes('0913'));
 });
 
 test('redaction takes the same time whatever the text (nothing can make it crawl)', () => {

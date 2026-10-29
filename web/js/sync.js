@@ -62,6 +62,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'skipBack',
   'skipForward',
   'skipLive',
+  'skipDisliked',
   'mbSkipLive',
   'mbMissingAlbums',
   'mbMissingKinds',
@@ -470,6 +471,9 @@ export async function setAccountSync(on) {
 // player doesn't keep them), as last heard.
 export async function accountSyncState() {
   if (!syncOn()) return null;
+  // (A page the app opens on is shown before keeping them starts: a few
+  // seconds for that.)
+  for (let i = 0; !sync.started && i < 30; i++) await new Promise((r) => setTimeout(r, 100));
   await (sync.pulling || pull());
   return sync.reached && !sync.failed ? !sync.off : null;
 }

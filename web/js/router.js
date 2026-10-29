@@ -13,6 +13,13 @@
 // pictures while they're off screen, pages nothing can go back to are let
 // go, and beyond the last few, kept pages are limited by size, so a long
 // session doesn't pile up memory.
+//
+// Each page in the browser's record of the tab is marked as the signed-in
+// person's (history.state.e): a mark of their own, made for them on this
+// device and gone when they sign out or switch user, as everything kept for
+// them is. Going back to someone else's page shows Home instead, so nobody
+// finds where the last person had been.
+import { store } from './plex.js';
 
 const routes = [];
 const cache = new Map(); // history key -> { el, hash, disposers }, least recently shown first
@@ -39,6 +46,22 @@ let onChange = () => {};
 
 const newKey = () => `${Date.now().toString(36)}.${seq++}`;
 const hashOf = (path) => `#${path}`;
+
+const MARK = 'navMark';
+let mark = null;
+let markKept = true; // (false: this browser can't keep it, so a page's mark from before a reload says nothing)
+function ownMark() {
+  if (mark) {
+    // (Kept again where it went with something else's clearing up.)
+    if (!store.get(MARK)) store.set(MARK, mark);
+    return mark;
+  }
+  const kept = store.get(MARK);
+  if (typeof kept === 'string' && /^[0-9a-f]{16}$/.test(kept)) return (mark = kept);
+  mark = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+  markKept = store.set(MARK, mark);
+  return mark;
+}
 
 // Route parameters come from the address bar, so they're held to what they
 // can legitimately be: ids are numbers, everything else plain words.
@@ -111,10 +134,11 @@ function loadSaved() {
 }
 
 // Browsers limit how often history can be changed (Safari: 100 times in 30
-// seconds), so a refusal is caught rather than breaking navigation.
+// seconds), so a refusal is caught rather than breaking navigation. (A page
+// kept as it was keeps its mark: see ownMark.)
 function setHistory(method, state, hash) {
   try {
-    history[method](state, '', hash);
+    history[method](state && typeof state === 'object' && !('e' in state) ? { ...state, e: ownMark() } : state, '', hash);
     return true;
   } catch {
     return false;
@@ -196,6 +220,18 @@ export function startRouter({ mainEl, changed }) {
   });
 
   const st = forgetTyped(history.state) || {};
+  const own = ownMark();
+  if (markKept && st.k && st.e && st.e !== own) {
+    // Someone else's page, in a tab the browser brought back (Reopen
+    // closed tab, say), with what they'd typed in its pages: none of it.
+    try {
+      sessionStorage.removeItem(NAV_KEY);
+    } catch {
+      /* storage unavailable */
+    }
+    render(startStacks('home', hashOf('/')), false);
+    return;
+  }
   const saved = loadSaved();
   // A reload: the history and the stacks are as they were (unless they're
   // from a version of the app with other tabs).
@@ -381,9 +417,13 @@ function onPop(e) {
   }
   const depth = st.ov || 0;
   while (overlays.length > depth) overlays.pop()();
-  // An entry from a version of the app with other tabs: a page of its own.
-  if (!st.k || (st.t && st.t !== 'bare' && !(st.t in TAB_ROOTS))) {
-    // A hash typed into the address bar: a new page, in the tab it belongs to.
+  if (st.k && st.e !== ownMark()) {
+    // Someone else's page, from before they signed out or switched user
+    // here (or from before 0.29.0): Home in its place.
+    render(startStacks('home', hashOf('/')), false);
+  } else if (!st.k || (st.t && st.t !== 'bare' && !(st.t in TAB_ROOTS))) {
+    // A hash typed into the address bar (or an entry from a version of the
+    // app with other tabs): a new page, in the tab it belongs to.
     const hash = location.hash || hashOf('/');
     const own = tabFor(hash);
     if (own === 'bare') {

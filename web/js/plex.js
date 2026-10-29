@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.28.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.29.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -13,8 +13,20 @@ const CLIENTS = 'https://clients.plex.tv';
 // ---------- persistence ----------
 
 // Signed out (here or in another tab): nothing more is kept, while the page
-// goes (see signOut in state.js).
+// goes (see signOut in state.js). Nor once someone else is signed in here,
+// or nobody is, from another tab (`owner`: the token this page is signed in
+// with, or null, once state.js says): the page is about to follow (see its
+// storage listener), and nothing of its own goes to the next person, not
+// even in the moment before it hears.
 let frozen = false;
+let owner;
+const keptToken = () => {
+  try {
+    return JSON.parse(localStorage.getItem('pw.auth'))?.token ?? null;
+  } catch {
+    return null;
+  }
+};
 
 export const store = {
   get(key, fallback = null) {
@@ -28,6 +40,7 @@ export const store = {
   // Whether it was kept.
   set(key, value) {
     if (frozen) return false;
+    if (owner !== undefined && key !== 'auth' && keptToken() !== owner) return false;
     try {
       if (value === null || value === undefined) localStorage.removeItem(`pw.${key}`);
       else localStorage.setItem(`pw.${key}`, JSON.stringify(value));
@@ -49,6 +62,10 @@ export const store = {
   },
   freeze() {
     frozen = true;
+  },
+  // Whose this page is: the token it's signed in with (none: nobody).
+  own(token) {
+    owner = token || null;
   },
 };
 
@@ -206,6 +223,48 @@ export async function checkPin(id) {
 
 export async function getUser(token) {
   return request(withParams(`${PLEX_TV}/api/v2/user`, plexParams(token)));
+}
+
+// ---------- Plex Home ----------
+
+// The people in the Plex Home of the account a token is for (managed users
+// among them), as plex.tv lists them: [{ id, uuid, title, thumb, admin,
+// restricted (a managed user), guest, protected (with a PIN) }]; none (or
+// only them) where it isn't in a Plex Home.
+const HOME_UUID = /^[A-Za-z0-9_-]{1,64}$/;
+const yes = (v) => v === true || v === 1 || v === '1';
+export async function homeUsers(token) {
+  const url = (base) => withParams(`${base}/api/v2/home/users`, plexParams(token));
+  let home;
+  try {
+    home = await request(url(CLIENTS));
+  } catch (err) {
+    if (err.status) throw err;
+    home = await request(url(PLEX_TV));
+  }
+  return asArray(home?.users)
+    .filter((u) => u && typeof u === 'object' && HOME_UUID.test(String(u.uuid ?? '')))
+    .map((u) => ({
+      id: String(u.id ?? ''),
+      uuid: String(u.uuid),
+      title: String(u.friendlyName || u.title || u.username || 'Plex user').slice(0, 100),
+      thumb: typeof u.thumb === 'string' && /^https:\/\//.test(u.thumb) ? u.thumb : null,
+      admin: yes(u.admin),
+      restricted: yes(u.restricted),
+      guest: yes(u.guest),
+      protected: yes(u.protected),
+    }));
+}
+
+// Switches to one of them (`pin`: theirs, where they have one): plex.tv's
+// account for them, with its token (`authToken`). (The PIN goes to plex.tv
+// only, the way Plex's own apps send it; it isn't kept, and debug.js keeps
+// it out of the log.)
+export async function switchHomeUser(token, uuid, pin) {
+  if (!HOME_UUID.test(String(uuid ?? ''))) throw Object.assign(new Error('Not someone in your Plex Home.'), { status: 400 });
+  const user = await request(withParams(`${CLIENTS}/api/v2/home/users/${uuid}/switch`, { ...plexParams(token), pin: pin || undefined }), { method: 'POST' });
+  if (typeof user?.authToken !== 'string' || !/^[A-Za-z0-9_.~-]{1,200}$/.test(user.authToken)) throw Object.assign(new Error('plex.tv didn’t switch to them.'), { status: 502 });
+  return user;
 }
 
 // ---------- server discovery ----------
@@ -434,8 +493,8 @@ export class PlexServer {
     return this.get('/identity', null, opts);
   }
 
-  async musicSections() {
-    const mc = await this.get('/library/sections');
+  async musicSections(opts) {
+    const mc = await this.get('/library/sections', null, opts);
     return asArray(mc.Directory).filter((d) => d.type === 'artist');
   }
 
@@ -563,8 +622,8 @@ export class PlexServer {
     for (const k of this.cache.keys()) if (k.startsWith('playlists:')) this.cache.delete(k);
   }
 
-  async playlist(id) {
-    return asArray((await this.get(`/playlists/${id}`)).Metadata)[0] || null;
+  async playlist(id, opts) {
+    return asArray((await this.get(`/playlists/${id}`, null, opts)).Metadata)[0] || null;
   }
 
   // (`ids`: only each entry's id, as LIGHT asks.)

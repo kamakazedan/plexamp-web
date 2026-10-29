@@ -3,6 +3,55 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.29.0 - 2026-10-28
+
+### New
+
+- **Switch user, for a Plex Home**: where your Plex account is in a Plex
+  Home with others, **Settings › Account** has **Switch user** beside
+  **Sign out** (and so does choosing a server, for someone in the Home
+  with none of theirs). It lists everyone in the Home, and asks for the
+  PIN of anyone who has one. Each of you is your own person in the app:
+  switching clears everything the device keeps for whoever was signed in,
+  as signing out does, and every setting too, the device's own included,
+  so nothing of theirs carries over; the next person's settings come from
+  their own account, and their playlists, ratings and plays are their own
+  in Plex. They stay on the same server and library where they can use
+  them. The PIN goes to plex.tv only, and the browser isn't asked to
+  keep it. It's part of the app: there's nothing to set.
+- **Skip tracks you've rated down**, in **Settings › Playback**, on to
+  begin with: a track with a thumbs down, or one star or less (in this
+  app or any of Plex's), is never picked for you: not for radio, mixes or
+  stations, shuffling an artist or the library, similar tracks, Sonic
+  path, the Guest DJs or AI playlists. An album or playlist you play
+  yourself plays as it is. Ratings are each Plex account's own, so what
+  one person rates down is left out for them alone. In thumbs, a thumbs
+  down is now exactly that: two stars, given in another app, is neither
+  thumb (it showed as down). A rating changed in another Plex app since
+  you rated the track here is the one that counts, once Plex says so.
+  Random album picks another album where every track on one is rated
+  down.
+
+### Fixed
+
+- **Settings › Account said it couldn't check whether your settings
+  follow your account** when it was the page the app opened on (after a
+  reload, say): it asked before the app had started keeping them.
+
+### Changed
+
+- **Appears in leaves out playlists of the whole library**, such as
+  Plex's All Music: every track is in a smart playlist whose rules are
+  the whole library, so it says nothing. Other smart playlists are still
+  looked through. Their rules are read once, three at a time, and kept
+  until the playlist changes.
+- **Back never shows the last person's pages**: after signing out, or
+  switching user, going back to a page from before shows Home instead
+  (once, pages from before this update do too), as does a tab of theirs
+  the browser brings back, without what was typed in it. Another open
+  tab keeps nothing more from the moment someone else is signed in, and
+  anything it kept in the moment before (its queue, say) goes too.
+
 ## 0.28.0 - 2026-10-28
 
 ### New

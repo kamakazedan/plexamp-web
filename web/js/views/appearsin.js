@@ -21,7 +21,6 @@ export async function appearsInView({ el, params, onDispose }) {
   const t = normTrack(meta);
   const ctrl = new AbortController();
   onDispose?.(() => ctrl.abort());
-  const library = meta.librarySectionTitle || app.source?.sectionTitle || 'your library';
 
   const progress = h('span', null, LOOKING);
   const status = h('div.appears-status', { role: 'status' }, spinner('Looking'), progress);
@@ -88,10 +87,9 @@ export async function appearsInView({ el, params, onDispose }) {
     return row({ href: `/album/${a.id}`, image: a.thumb, fallback: 'disc', title: a.title, subtitle: parts.filter(Boolean).join(' · '), cls: 'appears-row appears-album' });
   }
 
-  function playlistRow({ list: pl, times, every }) {
+  function playlistRow({ list: pl, times }) {
     const what = [pl.smart ? 'Smart playlist' : 'Playlist', fmt.count(pl.leafCount || 0, 'track', 'tracks')];
-    if (every) what.push(`every track in ${library}`);
-    else if (times > 1) what.push(`in it ${times} times`);
+    if (times > 1) what.push(`in it ${times} times`);
     return row({ href: `/playlist/${pl.ratingKey}`, image: playlistArt(pl), fallback: 'list', title: pl.title, subtitle: what.join(' · '), cls: 'appears-row' });
   }
 

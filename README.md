@@ -60,6 +60,7 @@ Every setting, and how the app reaches your server: [docs/configuration.md](docs
 - **Guest DJs** that play along with your queue, and **AI playlists** from a description, with a model on your own hardware.
 - **Radio** from an artist, a playlist, your favourites or the whole library.
 - **Live updates** from other Plex apps, a home screen you arrange, themes from album artwork, and settings that follow your Plex account to every browser.
+- **Plex Home**: switch to anyone in your Plex Home, each of you with your own playlists, ratings and settings, and nothing of one person's left for the next.
 
 How each part works, and the settings in the app: [docs/features.md](docs/features.md). AI playlists, the AI DJ and Ollama: [docs/ai.md](docs/ai.md).
 

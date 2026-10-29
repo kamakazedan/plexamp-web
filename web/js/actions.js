@@ -9,7 +9,7 @@ import { sheet, toast, shuffleArray, fmt } from './ui.js';
 import { addToPlaylist, addToCollection, isAdminNow, tracksOf } from './editing.js';
 import { exportPlaylistFile } from './views/playlistfiles.js';
 import { lovedPlaylist, LOVED_TITLE } from './ratings.js';
-import { withoutLiveOrDemos } from './mb.js';
+import { pickable, withoutDisliked } from './picks.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 const REMOTE_LIMIT = 500; // tracks sent to a Play Together session at once (player.js)
@@ -60,12 +60,12 @@ export const playAlbum = (album, { shuffle = false, start = 0, tracks } = {}) =>
     playList(list, start, ctx(album.title, `/album/${album.ratingKey}`), { shuffle });
   });
 
-// (Shuffled, it's picked for you: without live tracks and demos, where
-// they're skipped: see mb.js.)
+// (Shuffled, it's picked for you: without tracks rated down, or live
+// tracks and demos, where those are skipped: see picks.js.)
 export const playArtist = (artist, { shuffle = false } = {}) =>
   guard(async () => {
     let list = (await app.server.allLeaves(artist.ratingKey)).map(normTrack);
-    if (shuffle) list = await withoutLiveOrDemos(list);
+    if (shuffle) list = await pickable(list);
     playList(list, 0, ctx(artist.title, `/artist/${artist.ratingKey}`), { shuffle });
   });
 
@@ -131,7 +131,7 @@ export const artistRadio = (artist) =>
     let tracks = [...own, ...others.flat()];
     if (tracks.length < 10) tracks = tracks.concat(await s.allLeaves(artist.ratingKey));
     const seen = new Set();
-    const list = await withoutLiveOrDemos(shuffleArray(tracks.filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey))).map(normTrack), { keep: 10 });
+    const list = await pickable(shuffleArray(tracks.filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey))).map(normTrack), { keep: 10 });
     playList(list, 0, ctx(`${artist.title} radio`, `/artist/${artist.ratingKey}`));
   });
 
@@ -139,7 +139,7 @@ export const artistRadio = (artist) =>
 // tracks replace what's up next; otherwise playback starts from it.
 export const similarRadio = (track) =>
   guard(async () => {
-    const similar = await withoutLiveOrDemos((await app.server.nearest(track.id, { limit: 60 })).filter((m) => m.type === 'track').map(normTrack));
+    const similar = await pickable((await app.server.nearest(track.id, { limit: 60 })).filter((m) => m.type === 'track').map(normTrack));
     if (!similar.length) {
       toast('No similar tracks found. Sonic analysis needs to be turned on for this library in Plex.');
       return;
@@ -195,9 +195,10 @@ export const playlistRadio = (pl) =>
     if (!own.length) return toast('That playlist has no tracks to start a radio from.');
     let more = (await Promise.all(pick(own, 8).map((t) => s.nearest(t.ratingKey, { limit: 12 }).catch(() => [])))).flat();
     if (once(more).length < 20) more = more.concat(await tracksFrom(artistsOf(own, 8), 6));
-    // (The playlist's own, as they are; what's added, picked for you.)
-    more = await withoutLiveOrDemos(once(more));
-    const list = shuffleArray(once([...pick(own, 40), ...more])).slice(0, 100).map(normTrack);
+    // (The playlist's own, as they are, but those rated down; what's
+    // added, picked for you.)
+    more = await pickable(once(more));
+    const list = shuffleArray(once([...pick(withoutDisliked(own), 40), ...more])).slice(0, 100).map(normTrack);
     playList(list, 0, ctx(`${pl.title} radio`, `/playlist/${pl.ratingKey}`));
   });
 
@@ -214,14 +215,14 @@ export const favouritesRadio = () =>
     const alike = [...new Set(near.filter((m) => m.type === 'artist').map((m) => String(m.ratingKey)))].filter((id) => !artists.includes(id)).slice(0, 8);
     const [theirs, others] = await Promise.all([tracksFrom(artists, 6), tracksFrom(alike, 4)]);
     // (Your favourites, as they are; the rest, picked for you.)
-    const picked = await withoutLiveOrDemos(once([...theirs, ...others]));
+    const picked = await pickable(once([...theirs, ...others]));
     const list = shuffleArray(once([...pick(loved, 20), ...picked])).slice(0, 100).map(normTrack);
     playList(list, 0, ctx('Favourites radio', `/playlist/${pl.ratingKey}`));
   });
 
 export const shuffleLibrary = () =>
   guard(async () => {
-    const list = await withoutLiveOrDemos((await app.server.randomTracks(app.source.sectionKey, 150)).map(normTrack), { keep: 20 });
+    const list = await pickable((await app.server.randomTracks(app.source.sectionKey, 150)).map(normTrack), { keep: 20 });
     playList(list, 0, ctx(app.source.sectionTitle, '/search'));
   });
 
@@ -232,7 +233,7 @@ export const deepCutsRadio = () =>
   guard(async () => {
     const { items } = await app.server.list(app.source.sectionKey, 10, { sort: 'viewCount:asc', size: 400 });
     const unplayed = items.filter((m) => !m.viewCount);
-    const pool = await withoutLiveOrDemos(shuffleArray(unplayed.length >= 20 ? unplayed : items).slice(0, 150).map(normTrack), { keep: 20 });
+    const pool = await pickable(shuffleArray(unplayed.length >= 20 ? unplayed : items).slice(0, 150).map(normTrack), { keep: 20 });
     playList(pool.slice(0, 100), 0, ctx('Deep cuts radio', null));
   });
 
@@ -245,14 +246,20 @@ export const timeTravelRadio = () =>
     if (!decades.length) return shuffleLibrary();
     const d = decades[Math.floor(Math.random() * decades.length)];
     const { items } = await s.list(sec, 10, { sort: 'random', size: 100, filters: { 'album.decade': d.key } });
-    playList(await withoutLiveOrDemos(items.map(normTrack), { keep: 10 }), 0, ctx(`Time travel: the ${String(d.key).slice(2)}s`, `/browse/albums?${new URLSearchParams({ decade: d.key, title: `The ${d.title || `${d.key}s`}` })}`));
+    playList(await pickable(items.map(normTrack), { keep: 10 }), 0, ctx(`Time travel: the ${String(d.key).slice(2)}s`, `/browse/albums?${new URLSearchParams({ decade: d.key, title: `The ${d.title || `${d.key}s`}` })}`));
   });
 
+// (A station: without the album's tracks you've rated down, and another
+// album where those are all of them.)
 export const randomAlbum = () =>
   guard(async () => {
-    const { items } = await app.server.list(app.source.sectionKey, 9, { sort: 'random', size: 1 });
+    const { items } = await app.server.list(app.source.sectionKey, 9, { sort: 'random', size: 5 });
     if (!items.length) return toast('This library has no albums.');
-    await playAlbum(items[0]);
+    for (const album of items) {
+      const tracks = withoutDisliked((await app.server.children(album.ratingKey)).filter((m) => m.type === 'track').map(normTrack));
+      if (tracks.length) return playAlbum(album, { tracks });
+    }
+    toast('Every track on the albums picked is one you’ve rated down. Try again for others.');
   });
 
 export const sonicPath = (from, to) =>
@@ -263,7 +270,7 @@ export const sonicPath = (from, to) =>
       return;
     }
     // (The two you chose, as they are; the way between, picked for you.)
-    if (list.length > 2) list = [list[0], ...(await withoutLiveOrDemos(list.slice(1, -1))), list[list.length - 1]];
+    if (list.length > 2) list = [list[0], ...(await pickable(list.slice(1, -1))), list[list.length - 1]];
     playList(list, 0, ctx(`${from.title} to ${to.title}`, null));
   });
 

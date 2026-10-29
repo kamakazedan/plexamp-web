@@ -27,14 +27,14 @@ export const debugOn = () => enabled;
 
 // As the service does (server/log.js): in query strings (also inside another
 // address, URL-encoded), headers and JSON.
-const SECRET_NAMES = 'X-Plex-Token|X-Plex-Server-Token|token|authToken|accessToken|apiKey|api_key|key';
+const SECRET_NAMES = 'X-Plex-Token|X-Plex-Server-Token|token|authToken|accessToken|apiKey|api_key|key|pin';
 const SECRET_PARAMS = new RegExp(`((?:^|[?&;]|%3F|%26|%3B)(?:${SECRET_NAMES})(?:=|%3D))(?:(?!%26|%23)[^&#\\s"'])*`, 'gi');
 
 export function redact(text) {
   return String(text ?? '')
     .replace(SECRET_PARAMS, '$1[redacted]')
     .replace(/(X-Plex-(?:Server-)?Token\s*:\s*)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
-    .replace(/("(?:authToken|accessToken|token|apiKey|api_key|X-Plex-Token|X-Plex-Server-Token)"\s*:\s*")[^"]*/gi, '$1[redacted]')
+    .replace(/("(?:authToken|accessToken|token|apiKey|api_key|X-Plex-Token|X-Plex-Server-Token|pin)"\s*:\s*")[^"]*/gi, '$1[redacted]')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]');
 }
 

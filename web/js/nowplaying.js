@@ -14,7 +14,7 @@ import { together } from './together.js';
 import { levelSamples } from './transitions.js';
 import { cast, openCastSheet, castLabel } from './cast.js';
 import { devices } from './devices.js';
-import { rateTrack, ratingEvents, ratingMode, LOVED, LOVED_TITLE } from './ratings.js';
+import { rateTrack, ratingEvents, ratingMode, isDownRating, LOVED, LOVED_TITLE } from './ratings.js';
 import { formatOf, audioStream } from './formats.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
@@ -542,9 +542,9 @@ function ratingControl() {
     }
     if (mode === 'thumbs') {
       const up = h('button.thumb', { type: 'button', 'aria-label': 'Thumbs up', 'aria-pressed': String(value >= 6), onclick: () => choose(value >= 6 ? 0 : 10) }, icon('thumbUp', 24));
-      const down = h('button.thumb', { type: 'button', 'aria-label': 'Thumbs down', 'aria-pressed': String(value > 0 && value <= 4), onclick: () => choose(value > 0 && value <= 4 ? 0 : 2) }, icon('thumbDown', 24));
+      const down = h('button.thumb', { type: 'button', 'aria-label': 'Thumbs down', 'aria-pressed': String(isDownRating(value)), onclick: () => choose(isDownRating(value) ? 0 : 2) }, icon('thumbDown', 24));
       up.classList.toggle('on', value >= 6);
-      down.classList.toggle('on', value > 0 && value <= 4);
+      down.classList.toggle('on', isDownRating(value));
       el.replaceChildren(down, up);
       return;
     }
