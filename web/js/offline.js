@@ -82,9 +82,12 @@ export function watchOffline() {
       return;
     }
     if (state.session !== 'ended' || app.auth?.token !== token) return;
-    debugLog('offline', 'plex.tv is answering again, so the offline key’s session has ended: signing out');
+    // (`gone`: plex.tv still isn't answering, so it ended otherwise: the
+    // player restarted, or it was 14 days.)
+    const why = state.plexTv === 'down' ? 'gone' : 'ended';
+    debugLog('offline', why === 'ended' ? 'plex.tv is answering again, so the offline key’s session has ended: signing out' : 'the offline key’s session has ended: signing out');
     stopWatching();
-    history.replaceState(null, '', `${location.pathname}${location.search}#/login?offline=ended`);
+    history.replaceState(null, '', `${location.pathname}${location.search}#/login?offline=${why}`);
     signOut();
   };
   const onShown = () => !document.hidden && check();

@@ -2277,10 +2277,18 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
   const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
   const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_OFFLINE_KEY: 'the offline key', PW_SERVICE_OFFLINE_TIMING: '400,1500,100,100' };
   let svc = await startService(env, dir);
-  // nginx's check of a request to /pms/: its token (from the query string, or the header), and where it came from.
-  const check = (token, { stream = false, header = false } = {}) =>
+  // nginx's check of a request to /pms/: its token (from the query string, or the header), where it came from, how often a
+  // token's name is in it (`seen`, as nginx counts: one in the query string, to begin with), and whether it asks for a stream.
+  const check = (token, { stream = false, header = false, seen = header ? 0 : 1, also = {}, asks = '' } = {}) =>
     fetch(`${svc.url}/api/internal/pms-auth${stream ? '/stream' : ''}`, {
-      headers: { 'X-PW-Route': 'internal', 'X-Real-IP': '192.168.1.20', ...(header ? { 'X-Plex-Token': token } : { 'X-PW-Plex-Token': token }) },
+      headers: {
+        'X-PW-Route': 'internal',
+        'X-Real-IP': '192.168.1.20',
+        'X-PW-PMS-Tokens': `${seen} 0`,
+        ...(asks ? { 'X-PW-PMS-Stream': asks } : {}),
+        ...(header ? { 'X-Plex-Token': token } : { 'X-PW-Plex-Token': token }),
+        ...also,
+      },
     }).then((r) => r.status);
   try {
     // A server that doesn't let this container in: everything goes through, as Plex checks it.
@@ -2306,6 +2314,15 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     assert.equal(await check('sam-token'), 403);
     p.known.add('sam-token');
     assert.equal(await check('sam-token'), 204);
+    // ...and only with that one sign-in in the request: nothing Plex might read as another, and take for its owner's
+    assert.equal(await check('sam-token', { seen: 2 }), 403); // (a second token, or something like one: X-Plex-Token=…&x-plex-token=…)
+    assert.equal(await check('sam-token', { also: { 'X-Plex-Token': 'made-up-token' } }), 401); // (another in the header: that one's checked, and made up)
+    assert.equal(await check('sam-token', { header: true, also: { 'X-PW-Plex-Token': 'made-up-token' } }), 403); // (another in the query string)
+    assert.equal(await check('sam-token', { header: true, also: { 'X-PW-Plex-Token': 'sam-token' }, seen: 1 }), 204); // (the same in both)
+    assert.equal(await check('sam-token', { asks: 'websocket' }), 403); // (a stream, at any path)
+    assert.equal(await check('sam-token', { asks: 'events' }), 403);
+    assert.equal(await check('owner-token', { seen: 2 }), 204); // (the owner's own: whatever else, it's theirs)
+    assert.equal(await check('owner-token', { asks: 'websocket' }), 204);
     // The offline key, while plex.tv is answering: no
     const signIn = (key, ip = '192.168.1.20') =>
       fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': ip, 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });

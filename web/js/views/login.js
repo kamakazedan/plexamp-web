@@ -91,13 +91,14 @@ function offlinePanel(query) {
     said,
   );
   const el = h('div.login-offline', { hidden: true }, h('p.login-offline-title', null, icon('lock', 18), h('span', null, 'Offline mode')), text, form);
-  const ended = query.offline === 'ended';
+  const ended = query.offline === 'ended' || query.offline === 'gone';
   const show = (words, { withKey = false } = {}) => {
     text.textContent = words;
     form.hidden = !withKey;
     el.hidden = false;
   };
-  if (ended) show('plex.tv is answering again, so the offline key’s session has ended. Sign in with Plex.');
+  if (query.offline === 'ended') show('plex.tv is answering again, so the offline key’s session has ended. Sign in with Plex.');
+  if (query.offline === 'gone') show('The offline key’s session has ended (the player restarted, say). Use the key again.');
   const why = {
     off: '',
     'plex-tv': ' If it stays that way, this player’s offline key can be used here in a moment.',

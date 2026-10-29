@@ -64,6 +64,7 @@ export const SYNCED_SETTINGS = Object.freeze({
   mbMissingAlbums: 'boolean',
   mbMissingKinds: 'kinds', // ['albums', 'singles', ...]
   mbOriginalYears: 'boolean',
+  mbNamesakes: 'boolean',
   home: 'layout', // { '*': { order, hidden, options, seen } }
 });
 

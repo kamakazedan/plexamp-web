@@ -72,6 +72,7 @@ export const DEFAULT_SETTINGS = {
   mbMissingAlbums: true, // an artist's albums the library hasn't, on their page
   mbMissingKinds: ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'], // ...those of these kinds (mb.js RELEASE_KINDS)
   mbOriginalYears: true, // albums by the year they first came out
+  mbNamesakes: true, // another artist's albums of the same name kept apart on an artist's page
 
   // Home screen, one for every library: { '*': { order, hidden, options, seen } }
   home: {},

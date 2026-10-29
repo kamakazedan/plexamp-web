@@ -425,6 +425,18 @@ lacks "open server that knows sign-ins: ...with their own playlists, not the own
 contains "open server that knows sign-ins: ...as the owner has theirs" "Sunday morning" "$(cb -H 'Accept: application/json' "http://pw-web5/pms/playlists?X-Plex-Token=t")"
 expect "open server that knows sign-ins: accounts without access still refused" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t3")"
 expect "open server that knows sign-ins: made-up tokens still refused" 401 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=made-up-token")"
+# ...and a friend's request only with the one sign-in checked: nothing in it
+# the server might read as another (and take for its owner's, not knowing it).
+expect "open server: a friend's request with another token after theirs is refused" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2&x-plex-token=made-up-token")"
+expect "open server: ...written with %-escapes" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2&X-Plex-T%6Fken=made-up-token")"
+expect "open server: ...or tucked in another value" 403 "$(c "http://pw-web5/pms/library/sections?q=a%26X-Plex-Token%3Dmade-up-token&X-Plex-Token=t2")"
+expect "open server: ...or after a semicolon" 403 "$(c "http://pw-web5/pms/library/sections?a=1;X-Plex-Token=made-up-token&X-Plex-Token=t2")"
+expect "open server: a header token other than the query string's is the one checked (made up here)" 401 "$(c -H 'X-Plex-Token: made-up-token' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+expect "open server: the same token in both goes through" 200 "$(c -H 'X-Plex-Token: t2' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+expect "open server: Plex's own /security/token, for a friend" 200 "$(c "http://pw-web5/pms/security/token?X-Plex-Token=t2")"
+expect "open server: a friend's WebSocket, at any path, is refused" 403 "$(c --max-time 3 -H 'Connection: Upgrade' -H 'Upgrade: websocket' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+expect "open server: ...and an event stream" 403 "$(c --max-time 3 -H 'Accept: text/event-stream' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+expect "open server: the owner's own sign-in, whatever else is in the request" 200 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t&x-plex-token=made-up-token")"
 # The server's notification stream stays open for hours: only the owner's
 # goes through, however its path is written.
 expect "open server: a friend's notification stream refused" 403 "$(c --max-time 3 "http://pw-web5/pms/:/eventsource/notifications?X-Plex-Token=t2")"

@@ -460,6 +460,11 @@ if [ -n "${PLEX_SERVER_URL:-}" ]; then
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header Cookie \"\";
+    # Nothing that could carry a sign-in but what was checked: no
+    # Authorization, and no Content-Type for Plex to read a form by (the
+    # app's uploads, pictures, go without one).
+    proxy_set_header Authorization \"\";
+    proxy_set_header Content-Type \"\";
     proxy_ssl_server_name on;
     proxy_ssl_name ${PMS_NAME};
     proxy_buffering off;
@@ -484,7 +489,7 @@ location /pms/ {
 }
 # The server's notification streams (a WebSocket, or an event stream), by
 # the path as nginx reads it (however it's written).
-location ~* ^/pms/:/(websockets|eventsource)/ {
+location ~* ^/pms/:/[^?]*(?:websocket|eventsource|notification) {
     if (\$pms_has_token = 0) { return 401; }
     ${PMS_AUTH_STREAM}
     proxy_pass ${PMS_URL}\$pms_path;
@@ -518,8 +523,12 @@ location = /$1 {
     proxy_set_header X-Real-IP \$remote_addr;
     # The token from the request's query string, and nothing else of it
     # (what's searched for, a playlist's name: see nginx.conf). A token in
-    # the X-Plex-Token header comes as it is.
+    # the X-Plex-Token header comes as it is. And how often a token's name
+    # could be in the request, whether it's to /security/token, and whether
+    # it asks for a stream (see nginx.conf).
     proxy_set_header X-PW-Plex-Token \$pms_auth_token;
+    proxy_set_header X-PW-PMS-Tokens "\$pms_tokenish \$pms_token_path";
+    proxy_set_header X-PW-PMS-Stream "\$pw_upgrade\$pms_event_stream";
     proxy_connect_timeout 5s;
     proxy_read_timeout 20s;
 }

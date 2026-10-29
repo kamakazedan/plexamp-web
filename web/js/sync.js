@@ -67,6 +67,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'mbMissingAlbums',
   'mbMissingKinds',
   'mbOriginalYears',
+  'mbNamesakes',
   'home',
 ]);
 export const DEVICE_SETTINGS = Object.freeze(['quality', 'route', 'shareDevices', 'playerName', 'speed', 'ai', 'loadAhead', 'keepPlayed', 'version']);

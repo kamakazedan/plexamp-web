@@ -679,15 +679,28 @@ async function aiVerdict(req, token, serverToken) {
 // X-Plex-Token header, or from the original request's query string, which
 // nginx passes on alone (X-PW-Plex-Token: nothing else of the request comes
 // here, so what's searched for, or a playlist's name, doesn't either).
+// { token, single }: single, when nothing else in the request could be
+// read by Plex as another sign-in (no other X-Plex-Token header, nor one
+// that's different in the query string, and "token", in any case or with
+// %-escapes, nowhere else in it, as nginx counts: see nginx.conf). Plex
+// might read the other instead, and take one it doesn't know for its
+// owner's: so where the server lets this container in, anyone but its owner
+// gets through only with a single one.
 function pmsToken(req) {
   const header = req.headers['x-plex-token'];
-  if (validToken(header)) return header;
+  let query = null;
+  const given = String(req.headers['x-pw-plex-token'] || '');
   try {
-    const t = decodeURIComponent(String(req.headers['x-pw-plex-token'] || '').replace(/\+/g, ' '));
-    return validToken(t) ? t : null;
+    const t = decodeURIComponent(given.replace(/\+/g, ' '));
+    if (validToken(t)) query = t;
   } catch {
-    return null;
+    /* not a token */
   }
+  const token = validToken(header) ? header : query;
+  const [seen, tokenPath] = String(req.headers['x-pw-pms-tokens'] || '').split(' ');
+  const expected = (tokenPath === '1' ? 1 : 0) + (given ? 1 : 0);
+  const single = !!token && seen === String(expected) && (header === undefined || header === token) && (!given || query === token);
+  return { token, single };
 }
 
 // Called by nginx (auth_request) for each request to /pms/, with its
@@ -704,14 +717,18 @@ function pmsToken(req) {
 //     isn't answering, one it said was: see owners.js);
 //   - anyone else's once the server, asked with it there and then, has
 //     refused it what only its owner may see (see showsOwnersOnly): the
-//     server knows them as themselves. Not for the server's notification
-//     stream (`stream`): that stays open for hours, and is the owner's;
+//     server knows them as themselves. Only with that one sign-in in the
+//     request, and nothing Plex might read as another (see pmsToken). Not
+//     for a stream (`stream`, the server's notifications): that stays open
+//     for hours, and is the owner's;
 //   - a session of the offline key's (see offline.js), whose requests the
 //     server does take for its owner's: that's what the key is for.
 // Anything that can't be told is refused (503), never let through.
 async function pmsAuth(req, res, { stream = false } = {}) {
-  const token = pmsToken(req);
+  const { token, single } = pmsToken(req);
   if (!token) return send(res, 401);
+  // (A WebSocket, or an event stream, at any path: see nginx.conf.)
+  if (req.headers['x-pw-pms-stream']) stream = true;
   if (isOfflineToken(token)) return send(res, offline.valid(token) ? 204 : 401);
   if (auth.ownerLately(token)) {
     owners?.add(fingerprintOf(token));
@@ -722,7 +739,7 @@ async function pmsAuth(req, res, { stream = false } = {}) {
     // (Found again now if it was last found otherwise.)
     let state = await auth.serverState();
     if (!state.open) state = await auth.serverState({ fresh: true });
-    if (!stream && state.tells) {
+    if (!stream && single && state.tells) {
       if (!pmsCheckable(req, token)) return send(res, 503);
       if (!(await auth.showsOwnersOnly(token))) {
         refusedOwnersOnly(token);
