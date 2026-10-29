@@ -171,7 +171,6 @@ export class PlexAuth {
     // plex.tv: whether it's answering, since when, and when it was last
     // asked anything.
     this.tv = { down: false, since: Date.now(), tried: 0, pinged: 0 };
-    this.tvListeners = [];
     this.askingOwnersOnly = new Map(); // token hash -> the server being asked (see showsOwnersOnly)
   }
 
@@ -187,17 +186,6 @@ export class PlexAuth {
     } else {
       log.info('plex.tv is answering this container again');
     }
-    for (const fn of this.tvListeners) {
-      try {
-        fn(this.tv);
-      } catch (err) {
-        log.error(`plex.tv state: ${err.message}`);
-      }
-    }
-  }
-
-  onPlexTv(fn) {
-    this.tvListeners.push(fn);
   }
 
   // Whether plex.tv isn't answering (`forMs`: and hasn't for that long),
@@ -474,8 +462,10 @@ export class PlexAuth {
       let state;
       try {
         const open = await this.openNow();
-        // (Not there, or any other answer but one: it doesn't tell.)
-        const tells = open && (await Promise.all(OWNERS_ONLY.map((p) => this.pmsShows(p, null).catch((err) => (err.upstream ? false : Promise.reject(err)))))).every(Boolean);
+        // (Not there, or an answer that's neither, but the server's own
+        // trouble: it doesn't tell. That's found again in 15 seconds.)
+        const shown = (p) => this.pmsShows(p, null).catch((err) => (err.upstream >= 400 && err.upstream < 500 ? false : Promise.reject(err)));
+        const tells = open && (await Promise.all(OWNERS_ONLY.map(shown))).every(Boolean);
         state = { open, tells };
       } catch (err) {
         this.access.set('pms-state', null, 15000);

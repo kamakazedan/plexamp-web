@@ -417,6 +417,7 @@ expect "open server: an empty token first isn't passed over for the next" 401 "$
 expect "open server: a token in the path isn't the query string's" 403 "$(c --path-as-is "http://pw-web5/pms/library/sections&X-Plex-Token=t?X-Plex-Token=t2")"
 expect "open server: shared AI not opened up by it" 401 "$(c -H 'X-Plex-Token: made-up-token' http://pw-web5/ollama/api/tags)"
 docker logs pw-web5 2>&1 | grep -q "lets this container in without signing in" && pass "open server: the log explains" || fail "open server: the log explains"
+docker logs pw-web5 2>&1 | grep -q "took someone else's Plex sign-in, from this container, for yours" && pass "open server: ...and why friends are refused" || fail "open server: ...and why friends are refused"
 # Where it knows its people's sign-ins as theirs, friends get through as
 # themselves: each request checked with it first, with their own sign-in.
 c "http://pw-plex:32400/__mock/config?honour=1" >/dev/null

@@ -734,6 +734,7 @@ async function pmsAuth(req, res, { stream = false } = {}) {
     owners?.add(fingerprintOf(token));
     return send(res, 204);
   }
+  let takenForOwner = false;
   try {
     if (!(await auth.openNow())) return send(res, 204);
     // (Found again now if it was last found otherwise.)
@@ -745,6 +746,7 @@ async function pmsAuth(req, res, { stream = false } = {}) {
         refusedOwnersOnly(token);
         return send(res, 204);
       }
+      takenForOwner = true;
     }
   } catch (err) {
     log.debug(`couldn't check a request to /pms/ with the Plex server: ${err.message}`);
@@ -752,8 +754,17 @@ async function pmsAuth(req, res, { stream = false } = {}) {
   }
   const owner = await ownerOf(req, token);
   if (owner === 'owner') return send(res, 204);
+  // (Said now and then: why friends can't use the server through /pms/.)
+  if (owner === 'not' && takenForOwner && Date.now() > takenSaidUntil) {
+    takenSaidUntil = Date.now() + 6 * 3600000;
+    log.warn(
+      'the Plex server at PLEX_SERVER_URL took someone else\'s Plex sign-in, from this container, for yours (it showed them what only you may see), so they were refused at /pms/, as everyone but you is while it lets this container in without signing in. ' +
+        'Some Plex servers do that for everyone from an address on their list of networks allowed without auth: see "Offline mode" in docs/configuration.md.',
+    );
+  }
   return send(res, { not: 403, invalid: 401 }[owner] || 503);
 }
+let takenSaidUntil = 0;
 
 // Where the Plex server lets this container in, it's asked about each
 // request to /pms/ that isn't its owner's (see pmsAuth). Sign-ins it hasn't
