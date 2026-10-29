@@ -5089,8 +5089,10 @@ with sync_playwright() as pw:
         got = watch(13, qn['ratingKey'])
         fading = [x for x in got if x['kind'] == 'fade']
         last, first = switch_point(got, qe['ratingKey'], qn['ratingKey'])
+        # (The old track's last time as seen, a sample every 0.2 s or so:
+        # up to a quarter of a second before it gave way.)
         check('fades: the next track starts over a quiet ending, where it begins, and fades in until the ending\'s done',
-              fading and 11.6 <= fading[0]['t'] <= 13.2 and 6 <= (fading[0]['fade'] or 0) <= 8.5 and last is not None and last >= 18.6,
+              fading and 11.6 <= fading[0]['t'] <= 13.2 and 6 <= (fading[0]['fade'] or 0) <= 8.5 and last is not None and last >= 18.35,
               f'{fading[0]["t"] if fading else None} {fading[0]["fade"] if fading else None}, {last} -> {first}')
         # Smart crossfade length, from what the loudness analysis says of an
         # ending (here put in place for the track playing): over a quiet
