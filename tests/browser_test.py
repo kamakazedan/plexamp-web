@@ -7640,6 +7640,9 @@ with sync_playwright() as pw:
             page.locator('.toast-action', has_text='Undo').last.click()
             wait_for(lambda: len(edits()) >= 2, 10, 0.3)
             undone = edits()[-1]['q']
+            # (Listed again once Plex has answered the Undo: the page's list,
+            # not the mock's record of it, is what's counted below.)
+            page.wait_for_selector('.mb-year-row:has-text("Hearthstone")', timeout=10000)
             check('mb: years to fix: Use 1998 changes the album\'s year in Plex, locked, and Undo puts it back, unlocked',
                   '2015 in Plex, 1998 on MusicBrainz' in year_line and fixed.get('year.value') == '1998' and fixed.get('year.locked') == '1'
                   and fixed.get('originallyAvailableAt.value') == '1998-03-01' and undone.get('year.value') == '2015' and undone.get('year.locked') == '0', f'{year_line!r} {fixed} {undone}')
