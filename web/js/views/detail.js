@@ -47,7 +47,7 @@ import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
-import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, RELEASE_KINDS, KIND_NAMES } from '../mb.js';
+import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES } from '../mb.js';
 import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
 import { artistAppearsIn } from '../membership.js';
 import { chooseMissingKinds, missingKinds } from './mbsettings.js';
@@ -373,7 +373,11 @@ export async function artistView({ el, params, onDispose }) {
   const artist = await s.metadata(params.id, mbFeatures() ? { includeGuids: 1 } : undefined);
   if (!artist) throw Object.assign(new Error('Not found'), { status: 404 });
 
-  const head = backHeader(artist.title, { collapse: true, actions: iconButton('more', 'More options', () => artistMenu(artist)) });
+  // Albums of another artist of their name's, which Plex has here with
+  // theirs (Artists of the same name, below): id -> that artist.
+  let apart = new Map();
+  const apartIds = () => new Set(apart.keys());
+  const head = backHeader(artist.title, { collapse: true, actions: iconButton('more', 'More options', () => artistMenu(artist, { without: apartIds() })) });
   const title = h('h1.hero-title', null, artist.title);
   // On a desktop the photo is a banner as wide as the page, so it's asked
   // for at that width (up to 1920 pixels) rather than stretched.
@@ -389,8 +393,8 @@ export async function artistView({ el, params, onDispose }) {
         null,
         title,
         actionButtons([
-          { icon: 'play', label: 'Play', primary: true, onClick: () => playArtist(artist) },
-          { icon: 'shuffle', label: 'Shuffle', onClick: () => playArtist(artist, { shuffle: true }) },
+          { icon: 'play', label: 'Play', primary: true, onClick: () => playArtist(artist, { without: apartIds() }) },
+          { icon: 'shuffle', label: 'Shuffle', onClick: () => playArtist(artist, { shuffle: true, without: apartIds() }) },
           { icon: 'radio', label: 'Radio', onClick: () => artistRadio(artist) },
         ]),
       ),
@@ -398,14 +402,15 @@ export async function artistView({ el, params, onDispose }) {
   );
   collapseWhenHidden(head, title);
 
-  const popularSlot = h('div');
+  const popularBox = h('div.artist-popular');
   const albumsBox = h('div.artist-albums');
+  const apartBox = h('div.artist-apart');
   const appearsBox = h('div.artist-appears');
   const inBox = h('div.artist-appears-in');
   const missingBox = h('div.artist-missing');
   const similarSlot = h('div');
   const sonicSlot = h('div');
-  el.append(popularSlot, albumsBox, appearsBox, inBox, missingBox, similarSlot, sonicSlot);
+  el.append(popularBox, albumsBox, apartBox, appearsBox, inBox, missingBox, similarSlot, sonicSlot);
   // Its styles, each opening the library's artists of that style.
   const styles = (artist.Style || []).filter((t) => t?.tag && tagKey(t));
   if (styles.length) {
@@ -424,9 +429,11 @@ export async function artistView({ el, params, onDispose }) {
   }
   if (artist.summary) el.append(h('section.block.about', null, sectionHeader('About'), h('div.pad', null, clampText(artist.summary, 4))));
 
-  const popularP = s.popularTracks(sec, artist.ratingKey, 20).then((items) => {
-    const tracks = items.map(normTrack);
-    if (!tracks.length) return;
+  // (Not another artist's of their name: see apart.)
+  let popular = [];
+  const paintPopular = () => {
+    const tracks = popular.filter((t) => !apart.has(String(t.albumId)));
+    if (!tracks.length) return popularBox.replaceChildren();
     const list = numberedList({ total: tracks.length });
     const context = { title: `${artist.title}: popular`, href: `/artist/${artist.ratingKey}` };
     tracks.forEach((t, i) => {
@@ -450,7 +457,11 @@ export async function artistView({ el, params, onDispose }) {
             'Show more',
           )
         : null;
-    popularSlot.replaceWith(h('section.block', null, sectionHeader('Popular tracks'), list, more));
+    popularBox.replaceChildren(h('section.block', null, sectionHeader('Popular tracks'), list, more));
+  };
+  const popularP = s.popularTracks(sec, artist.ratingKey, 20).then((items) => {
+    popular = items.map(normTrack);
+    paintPopular();
   });
 
   // What MusicBrainz says of them, with the player's MusicBrainz features
@@ -459,7 +470,7 @@ export async function artistView({ el, params, onDispose }) {
   // (Missing albums on artist pages). (Not for Various Artists: theirs is
   // no one's discography.)
   const various = norm(artist.title) === 'various artists';
-  const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums')) && !various;
+  const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums') || mbOn('mbNamesakes')) && !various;
   const mbP = wantMB ? artistOnMB(artist.title, { id: mbidOf(artist) }).catch(() => null) : Promise.resolve(null);
   // Plex's rows for the page (hubs.js): which kind each of their albums is,
   // and what they appear on.
@@ -495,8 +506,9 @@ export async function artistView({ el, params, onDispose }) {
   };
   let painted = '';
   const paintAlbums = () => {
-    const albums = albumsNow();
+    const albums = albumsNow().filter((m) => !apart.has(idOf(m)));
     paintMissing(albums);
+    paintApart();
     // (Those whose kind isn't known yet wait for it.)
     const list = placed(albums)
       .filter((x) => x.kind)
@@ -517,6 +529,84 @@ export async function artistView({ el, params, onDispose }) {
       return h('section.block', { dataset: { group: name } }, sectionHeader(name, null, null, strip), strip);
     });
     albumsBox.replaceChildren(...(blocks.length ? blocks : st.settled ? [emptyState('No albums for this artist.')] : []));
+  };
+
+  // Artists of the same name (mb.js apartFromNamesakes): the albums of
+  // another artist of theirs that Plex has here, from what MusicBrainz says
+  // of the others of their name, once their albums and their own release
+  // groups are in, and only where one of their albums isn't one MusicBrainz
+  // has for them. Without Plex's word for who they are (their MusicBrainz
+  // id, and MusicBrainz found them by it: one it doesn't know has it look
+  // them up by name), they're the one of the name MusicBrainz has most of
+  // the page's albums for, if that's plain (two at least, and more than the
+  // one it found by name).
+  let apartAsked = false;
+  const lookApart = async () => {
+    if (apartAsked || various || !mbOn('mbNamesakes') || !mb?.artist || !st.settled) return;
+    const byId = !!mbidOf(artist) && mb.artist.id === mbidOf(artist);
+    const albums = albumsNow();
+    const near = (gs, m) => (gs || []).some((g) => sameTitle(albumKey(g.title), albumKey(m.title)));
+    if (albums.every((m) => near(mb.groups, m))) return;
+    apartAsked = true;
+    let got;
+    try {
+      got = await artistOnMB(artist.title, { id: mbidOf(artist), namesakes: true });
+    } catch {
+      return;
+    }
+    if (ctrl.signal.aborted) return;
+    let others = (got?.namesakes || []).filter((n) => n?.id && n.id !== mb.artist.id && Array.isArray(n.groups));
+    if (!others.length) return;
+    const items = albums.map((m) => ({ id: idOf(m), title: m.title, year: Number(year(m)) || null }));
+    let capped = !!(got?.capped ?? mb.capped);
+    if (!byId) {
+      const count = (gs) => albums.filter((m) => near(gs, m)).length;
+      const best = others.reduce((a, n) => (count(n.groups) > count(a.groups) ? n : a));
+      if (count(best.groups) >= 2 && count(best.groups) > count(mb.groups)) {
+        others = [{ id: mb.artist.id, name: mb.artist.name, note: '', groups: mb.groups, capped }, ...others.filter((n) => n !== best)];
+        mb = { ...mb, artist: { ...mb.artist, id: best.id, name: best.name }, groups: best.groups, capped: !!best.capped };
+        capped = !!best.capped;
+      }
+    }
+    apart = apartFromNamesakes(items, { name: artist.title, groups: mb.groups, capped, byId, namesakes: others });
+    paintAlbums();
+    paintPopular();
+  };
+  let apartPainted = '';
+  const paintApart = () => {
+    const of = new Map();
+    for (const m of albumsNow()) {
+      const n = apart.get(idOf(m));
+      if (!n) continue;
+      if (!of.has(n)) of.set(n, []);
+      of.get(n).push(m);
+    }
+    // (As it was: left as it is, so what has focus keeps it.)
+    const shape = JSON.stringify([...of].map(([n, list]) => [n.id, list.map(idOf)]));
+    if (shape === apartPainted) return;
+    apartPainted = shape;
+    apartBox.replaceChildren(
+      ...[...of].map(([n, list]) =>
+        h(
+          'section.block.artist-namesake',
+          { dataset: { namesake: n.id } },
+          sectionHeader(`Another artist called ${n.name || artist.title}`),
+          h(
+            'p.hint.pad',
+            null,
+            `MusicBrainz has ${list.length === 1 ? 'this album' : 'these albums'} as another artist’s of the name${n.note ? ` (“${n.note}”)` : ''}, not this one’s: so ${list.length === 1 ? 'it’s' : 'they’re'} kept apart here, and out of this page’s Play, Shuffle and Popular tracks. `,
+            h('a', { href: `https://musicbrainz.org/artist/${n.id}`, target: '_blank', rel: 'noopener noreferrer' }, 'See them on MusicBrainz'),
+          ),
+          grid(
+            list
+              .slice()
+              .sort((a, b) => (Number(year(b)) || 0) - (Number(year(a)) || 0))
+              .map((m) => albumCard(m, { subtitle: year(m) ? String(year(m)) : '' })),
+            { centered: true },
+          ),
+        ),
+      ),
+    );
   };
 
   // Not in your library (Missing albums on artist pages): their release
@@ -643,6 +733,9 @@ export async function artistView({ el, params, onDispose }) {
     const rowsP = hubsP.then((rows) => (st.rows = rows));
     const mbIn = mbP.then((got) => (mb = got));
     const all = Promise.all([typesP, rowsP]).then(() => (st.settled = true));
+    Promise.all([all, mbIn])
+      .then(lookApart)
+      .catch(() => {});
     const soon = await Promise.race([Promise.all([all, mbIn]).then(() => true), new Promise((r) => setTimeout(r, TYPES_WAIT))]);
     if (soon) return paintAlbums();
     // (Shown as it is, then again with each, as it comes.)

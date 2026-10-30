@@ -148,3 +148,47 @@ export function matchGroup(groups, title, kind = null, year = null) {
   }
   return near.slice().sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'))[0] || null;
 }
+
+// The albums on an artist's page that are another artist's of the same name
+// (Plex can have two artists of one name as one, their albums together):
+// Map(album id -> that artist, one of `namesakes`), from MusicBrainz, and
+// from nothing less than all of this:
+//   - who the page's artist is, is plain: Plex says (their MusicBrainz id,
+//     `byId`), and MusicBrainz has one of the page's albums for them at
+//     least; or else two at least, and more than for the namesake;
+//   - MusicBrainz has the album for one of the namesakes, by its very
+//     title (as albumKey has it), first out within a year of the year Plex
+//     has for it, and for no other namesake;
+//   - nothing of that title, or near it, for the page's artist;
+//   - it isn't titled as the artist is (a self-titled album, by its name:
+//     artists of one name have those by construction);
+//   - and what MusicBrainz lists of each of them is all they have (not
+//     `capped`, as it is for those with more than it's asked for).
+// Anything less, and an album stays theirs, as Plex has it. `items`: the
+// page's albums, [{ id, title, year }]; `name`: the artist's; `groups`:
+// their release groups (`capped`: as above); `namesakes`: [{ id, name,
+// groups, capped }].
+export function apartFromNamesakes(items, { name = '', groups = [], capped = false, byId = false, namesakes = [] } = {}) {
+  const out = new Map();
+  if (!Array.isArray(items) || !items.length || !Array.isArray(namesakes) || !namesakes.length) return out;
+  if (capped || namesakes.some((n) => n?.capped)) return out;
+  const near = (gs, key) => (Array.isArray(gs) ? gs : []).some((g) => sameTitle(albumKey(g.title), key));
+  const theirs = items.filter((it) => near(groups, albumKey(it.title))).length;
+  if (theirs < (byId ? 1 : 2)) return out;
+  const self = albumKey(name);
+  const found = new Map();
+  for (const it of items) {
+    const key = albumKey(it.title);
+    const y = Number(it.year) || null;
+    if (!key || !y || key === self || near(groups, key)) continue;
+    const hits = namesakes.filter((n) => (Array.isArray(n?.groups) ? n.groups : []).some((g) => albumKey(g.title) === key && firstYear(g) && Math.abs(firstYear(g) - y) <= 1));
+    if (hits.length !== 1) continue;
+    if (!found.has(hits[0])) found.set(hits[0], []);
+    found.get(hits[0]).push(it);
+  }
+  for (const [n, list] of found) {
+    if (!byId && list.length >= theirs) continue;
+    for (const it of list) out.set(String(it.id), n);
+  }
+  return out;
+}

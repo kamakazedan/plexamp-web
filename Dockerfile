@@ -39,7 +39,7 @@ ENV PLEX_SERVER_URL="" \
     DEBUG=""
 
 RUN rm -rf /usr/share/nginx/html/* \
-    && touch /etc/nginx/conf.d/pms-proxy.inc /etc/nginx/conf.d/ai-proxy.inc /etc/nginx/conf.d/api.inc /etc/nginx/conf.d/log.inc
+    && touch /etc/nginx/conf.d/pms-proxy.inc /etc/nginx/conf.d/pms-probe.inc /etc/nginx/conf.d/ai-proxy.inc /etc/nginx/conf.d/api.inc /etc/nginx/conf.d/log.inc
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --chmod=755 docker/40-plexamp-web.sh /docker-entrypoint.d/40-plexamp-web.sh
 COPY server/ /opt/plexamp-web/server/

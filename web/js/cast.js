@@ -7,7 +7,7 @@
 // server/cast.js) to play it with a temporary token from the server, and
 // this app follows what the player does by asking it every second. Changes
 // to the queue go to the play queue, and the player is told to look again.
-import { app, on } from './state.js';
+import { app, on, plexAccount } from './state.js';
 import { player } from './player.js';
 import { normTrack, store } from './plex.js';
 import { popOverlay, describeError } from './router.js';
@@ -100,7 +100,7 @@ class Cast extends EventTarget {
   // Plex players are listed when the container's service is there to reach
   // them and you're signed in with Plex.
   get available() {
-    return !!app.config.cast && !!app.auth?.token;
+    return !!app.config.cast && plexAccount();
   }
 
   emit(type) {

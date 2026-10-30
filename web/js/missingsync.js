@@ -22,7 +22,7 @@
 // never goes to another account. Signing out clears it here, as before; the
 // account's stays with the player. Everyone else's, for the server's owner,
 // is only ever in memory.
-import { app, on, emit, MISSING_OVER } from './state.js';
+import { app, on, emit, MISSING_OVER, plexAccount } from './state.js';
 import { store } from './plex.js';
 import { applyOp, idOf, listId, shortList, withShortLists, sourceOf } from './missinglist.js';
 
@@ -91,7 +91,7 @@ const serverNow = () => app.source?.serverId || '';
 
 // The player keeps lists for accounts, and could for this one on the server
 // in use (`room`: and has room for it, as far as it's said).
-const keeps = () => !!app.config.missingSync && !!app.auth?.token && !!serverNow() && !ms.off && !ms.refused.has(serverNow());
+const keeps = () => !!app.config.missingSync && plexAccount() && !!serverNow() && !ms.off && !ms.refused.has(serverNow());
 export const missingSyncOn = () => keeps() && !ms.full.has(serverNow());
 
 function synced() {

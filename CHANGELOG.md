@@ -3,6 +3,99 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.30.0 - 2026-10-30
+
+### New
+
+- **Offline mode** (`OFFLINE_KEY`, with `PLEX_SERVER_URL`), for days
+  without the internet. While plex.tv can't be reached, nobody can sign in
+  with Plex: once it hasn't answered the player for 20 seconds, the
+  sign-in page says so, and takes the player's offline key, a key of your
+  own set on the container. Signed in with it, the player plays your
+  library as your Plex server lets it in without signing in: as you, its
+  owner, with your playlists, ratings and history, so give it only to
+  those you'd let use your Plex account. Play Together, your devices,
+  shared playlists, and the settings and Missing tracks that follow an
+  account wait for a Plex sign-in. Once plex.tv has been answering again
+  for two minutes, everyone signed in with the key is signed out, and the
+  sign-in page says why. It needs your Plex server to let the player in
+  without signing in (add the player's own address to Plex's "List of IP
+  addresses and networks that are allowed without auth"), works only from
+  your own networks unless `OFFLINE_FROM` says otherwise, and takes five
+  tries a minute from an address, and none for the rest of the hour from
+  an address that's sent 30 wrong ones, or (after 30 from anywhere) one
+  wrong one, or (after 200) from anywhere the key hasn't signed in from in
+  the last 14 days.
+  The key's sessions never leave the player: their requests go to your
+  server without them, as the player's own do. On Proxmox VE, an update
+  keeps your settings file as it was, so add `OFFLINE_KEY` there with
+  `plexamp-web-settings`. See docs/configuration.md.
+- **Signed in already, you carry on while plex.tv isn't answering**, with
+  the player let in: you, the server's owner, by a fingerprint of each of
+  your sign-ins the container keeps in `/data` (a hash that can't be
+  turned back into the sign-in); friends and those in your Plex Home as
+  themselves, for as long as your Plex server knows them.
+- **Friends through a Plex server that lets the player in without signing
+  in**, as themselves: they were refused, as the server could take them for
+  its owner. Before each of their requests, the player now asks the
+  server, with their own sign-in, for what only its owner may see, and
+  lets them through only if the server refuses them that, while it shows
+  it, asked along with them, to a request it takes for its owner's: then
+  it knows them as themselves, with their own playlists, ratings and
+  plays. Asked every time, so someone the server stops knowing (a share
+  taken away) is refused from their next request. Some servers take
+  everyone from an address on that list for their owner, whoever's signed
+  in: there only you get through, as before, and the log says so.
+- **Artists of the same name** (a MusicBrainz feature, with
+  `MUSICBRAINZ_ADVANCED`): Plex can have two artists of one name as one,
+  with both of their albums on its page. Where MusicBrainz plainly knows
+  them apart, the other's albums are kept apart, under **Another artist
+  called …** at the foot of the page, with what MusicBrainz says to tell
+  them apart, and out of the page's Play, Shuffle, Popular tracks and the
+  rest of its menu. Only on plain evidence: who the page's artist is (by
+  the MusicBrainz id Plex has for them, where MusicBrainz knows them by it,
+  or by more of the page being theirs), and the album the other's alone,
+  by its very title and year, with nothing like it for the page's artist.
+  Never a self-titled album, and nothing for artists with more release
+  groups than MusicBrainz is asked for. Anything less, and an album stays
+  where Plex has it. **Settings › MusicBrainz** turns it off for you.
+
+### Changed
+
+- **Plex is told nothing of where a request through `/pms/` came from**:
+  nginx sent your browser's address (`X-Forwarded-For`, `X-Real-IP`), and
+  some Plex versions judge by it whether to let a request in without
+  signing in, so a request from an address on that list of theirs (a
+  friend on the same VPN, say) could be let in as the server's owner. Now
+  every request reaches Plex from the container's own address, as the
+  player's checks do (it asks your server through its own nginx). Plex
+  sees everyone using the player as the container, so its limits for
+  remote streams don't apply to them.
+- **Without Node.js in the container** (an image of your own without it),
+  there's no `/pms/`: nothing would check what goes through it.
+- **`PLEX_SERVER_URL` as a name with more than one address**: nginx takes
+  turns between them, so the player can't ask your Plex server how it will
+  take each request, and only you get through `/pms/` (the log says so),
+  as for a minute after its address changes. Use one fixed address there.
+
+### Fixed
+
+- **A Plex server that had just been set to let the player in without
+  signing in** wasn't seen to for up to ten minutes, and meanwhile anyone's
+  sign-in went through `/pms/`, where the server could take it for its
+  owner's. Whether it does is now asked for each request, and never taken
+  from before.
+- **The shared AI model, MusicBrainz checks and Spotify imports**, where
+  the Plex server lets the player in without signing in: for a couple of
+  minutes after the server didn't answer the player, a server token
+  anyone made up could be taken as one the server accepts.
+- **While plex.tv isn't answering**, nothing waits on it: it's asked again
+  every 15 seconds, not for each request.
+- **Many sign-ins checked from one address** (behind a reverse proxy, say)
+  could keep the server's owner out of `/pms/` for a minute: theirs aren't
+  counted now, once plex.tv has said they're theirs, and a sign-in's many
+  requests at once (a page of pictures) ask plex.tv once.
+
 ## 0.29.0 - 2026-10-28
 
 ### New

@@ -54,11 +54,23 @@
 #                       page for the playlist (the first 100 tracks), which
 #                       Spotify's terms don't allow, and which can stop
 #                       working. (SPOTIFY_IMPORT, its old name, still works.)
+#   OFFLINE_KEY         Offline mode, with PLEX_SERVER_URL: while plex.tv isn't
+#                       answering (your internet's down, say), the player can
+#                       be signed in to with this key, as your Plex server's
+#                       owner, till plex.tv is back. Needs your server to let
+#                       the player in without signing in: see
+#                       docs/configuration.md. 12 to 200 letters, digits and
+#                       . _ ~ + / = : , @ - (openssl rand -base64 24 makes
+#                       one; a # or $ would be read otherwise here).
+#   OFFLINE_FROM        Where the key can be used from: "private" (the
+#                       default: your own networks), "any", or addresses and
+#                       networks, such as 192.168.1.0/24.
 #   DEBUG               "true" writes extra detail to the log, with tokens and
 #                       keys removed. Turn it off when you're done.
 #
-# Shared playlists, each account's settings and Missing tracks, and what the
-# MusicBrainz features look up, are kept in /data: the volume below, or a
+# Shared playlists, each account's settings and Missing tracks, what the
+# MusicBrainz features look up, and your own sign-ins' fingerprints (for
+# offline mode), are kept in /data: the volume below, or a
 # folder of your own (./plexamp-web-data:/data). To build from this folder instead of using
 # the published image, replace the image line with:  build: .
 
@@ -83,6 +95,8 @@ services:
       SYNC_MISSING_TRACKS: "true"
       SPOTIFY_FILE_IMPORT: ""
       SPOTIFY_LINK_IMPORT: ""
+      # OFFLINE_KEY: "a long random key of your own"
+      # OFFLINE_FROM: "private"
       DEBUG: ""
     volumes:
       - plexamp-web-data:/data

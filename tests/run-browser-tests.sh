@@ -6,15 +6,17 @@
 #   pip install playwright && python -m playwright install --with-deps chromium
 #   docker build -t plexamp-web:test . && sh tests/run-browser-tests.sh plexamp-web:test [screenshot-dir]
 #
-# Five copies of the app run: one with a shared AI model and WebSockets
+# Six copies of the app run: one with a shared AI model and WebSockets
 # allowed, checking on the mock's MusicBrainz (port 8081), one with
 # DISABLE_WEBSOCKETS=true and no shared model (port 8082), one with
 # DEBUG=true, WEBSOCKETS=on and a shared model that won't take "think" (port
 # 8083), one on a second mock server with a big library, for the memory
-# tests (port 8084), and one with the MusicBrainz features
-# (MUSICBRAINZ_ADVANCED=true, on the mock's MusicBrainz: port 8086). All
-# reach their mock Plex server through their /pms proxy, and their service
-# uses the mock for plex.tv too (its accounts are needed for Play Together).
+# tests (port 8084), one with the MusicBrainz features
+# (MUSICBRAINZ_ADVANCED=true, on the mock's MusicBrainz: port 8086), and one
+# with an offline key, on a third mock server that lets it in without
+# signing in (port 8087). All reach their mock Plex server through their
+# /pms proxy, and their service uses the mock for plex.tv too (its accounts
+# are needed for Play Together).
 set -eu
 
 IMAGE="${1:-plexamp-web:test}"
@@ -24,7 +26,7 @@ NET="pw-browser-$$"
 PY="python:3.12-alpine"
 
 cleanup() {
-    docker rm -f pwb-plex pwb-plex-big pwb-ollama pwb-ollama2 pwb-web pwb-web2 pwb-web3 pwb-web4 pwb-web5 >/dev/null 2>&1 || true
+    docker rm -f pwb-plex pwb-plex-big pwb-plex-open pwb-ollama pwb-ollama2 pwb-web pwb-web2 pwb-web3 pwb-web4 pwb-web5 pwb-web6 >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -59,6 +61,7 @@ wait_for() { # url
 docker network create "$NET" >/dev/null
 mock pwb-plex 32400 mock-plex.py 32400 --quiet
 mock pwb-plex-big 32401 mock-plex.py 32401 --big 3000 --quiet
+mock pwb-plex-open 32402 mock-plex.py 32402 --open --honour --quiet
 mock pwb-ollama 11434 mock-ollama.py --port 11434 --quiet
 mock pwb-ollama2 11435 mock-ollama.py --port 11435 --reject-think --quiet
 TV=PLEX_TV_URL=http://pwb-plex:32400
@@ -79,10 +82,13 @@ docker run -d --name pwb-web4 --network "$NET" -p 127.0.0.1:8084:80 -e PLEX_TV_U
     -e PLEX_SERVER_URL=http://pwb-plex-big:32401 "$IMAGE" >/dev/null
 docker run -d --name pwb-web5 --network "$NET" -p 127.0.0.1:8086:80 -e "$TV" -e SYNC_SETTINGS=false -e SYNC_MISSING_TRACKS=false \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e MUSICBRAINZ_ADVANCED=true "$IMAGE" >/dev/null
+# (Offline mode's times shortened, for the tests: see server/index.js.)
+docker run -d --name pwb-web6 --network "$NET" -p 127.0.0.1:8087:80 -e PLEX_TV_URL=http://pwb-plex-open:32402 \
+    -e PLEX_SERVER_URL=http://pwb-plex-open:32402 -e OFFLINE_KEY=offline-key-for-tests -e PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500 "$IMAGE" >/dev/null
 
-for url in "http://127.0.0.1:32400/identity" "http://127.0.0.1:32401/identity" http://127.0.0.1:11434/api/version \
+for url in "http://127.0.0.1:32400/identity" "http://127.0.0.1:32401/identity" "http://127.0.0.1:32402/identity" http://127.0.0.1:11434/api/version \
     http://127.0.0.1:11435/api/version http://127.0.0.1:8081/api/health http://127.0.0.1:8082/api/health \
-    http://127.0.0.1:8083/api/health http://127.0.0.1:8084/api/health http://127.0.0.1:8086/api/health; do
+    http://127.0.0.1:8083/api/health http://127.0.0.1:8084/api/health http://127.0.0.1:8086/api/health http://127.0.0.1:8087/api/health; do
     wait_for "$url"
 done
 
@@ -90,6 +96,7 @@ status=0
 APP_URL=http://127.0.0.1:8081/ APP_URL_NOWS=http://127.0.0.1:8082/ APP_URL_DEBUG=http://127.0.0.1:8083/ \
     MOCK_PLEX=http://127.0.0.1:32400 PLEX_LOGIN_URL= \
     APP_URL_BIG=http://127.0.0.1:8084/ MOCK_PLEX_BIG=http://127.0.0.1:32401 APP_URL_MB=http://127.0.0.1:8086/ \
+    APP_URL_OFFLINE=http://127.0.0.1:8087/ MOCK_PLEX_OPEN=http://127.0.0.1:32402 \
     OLLAMA_DIRECT=http://127.0.0.1:11434 OLLAMA_NOTHINK=http://127.0.0.1:11435 \
     python3 "$ROOT/tests/browser_test.py" "$OUT" || status=$?
 
@@ -107,7 +114,7 @@ else
 fi
 
 if [ "$status" -ne 0 ]; then
-    for n in pwb-web pwb-web3 pwb-web5; do
+    for n in pwb-web pwb-web3 pwb-web5 pwb-web6; do
         echo "--- $n log"
         docker logs "$n" 2>&1 | tail -40
     done

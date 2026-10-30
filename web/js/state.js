@@ -72,6 +72,7 @@ export const DEFAULT_SETTINGS = {
   mbMissingAlbums: true, // an artist's albums the library hasn't, on their page
   mbMissingKinds: ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'], // ...those of these kinds (mb.js RELEASE_KINDS)
   mbOriginalYears: true, // albums by the year they first came out
+  mbNamesakes: true, // another artist's albums of the same name kept apart on an artist's page
 
   // Home screen, one for every library: { '*': { order, hidden, options, seen } }
   home: {},
@@ -157,7 +158,7 @@ settleLeft();
 
 export const app = {
   config: window.PW_CONFIG || {},
-  auth: store.get('auth'), // { token, username, thumb, manual }
+  auth: store.get('auth'), // { token, username, thumb, manual, offline }
   source: store.get('source'), // { serverId, serverName, uri, token, kind, sectionKey, sectionTitle, connections }
   server: null,
   settings: { ...DEFAULT_SETTINGS, ...storedSettings() },
@@ -203,6 +204,11 @@ export const SYNC_REV = 'syncRev';
 // (missingsync.js: someone signed in over someone else here, so the Missing
 // tracks list here may be theirs, never to go to the next account.)
 export const MISSING_OVER = 'aiMissingOver';
+
+// Signed in with a Plex account (or a server token): not with the player's
+// offline key (see offline.js), which is no Plex account, so nothing that
+// needs one is used then.
+export const plexAccount = () => !!app.auth?.token && !app.auth.offline;
 
 export function setAuth(auth) {
   const over = app.auth?.token && app.auth.token !== auth?.token;

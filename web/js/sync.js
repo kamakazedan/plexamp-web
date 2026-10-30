@@ -21,7 +21,7 @@
 // else): what this browser has then may be theirs, and never goes to
 // another account. Keeping them can be turned off for the account
 // (Settings › Account): then each device has its own again.
-import { app, on, saveSettings, DEFAULT_SETTINGS, SYNCED_BEFORE, SYNC_PENDING, SYNC_REV } from './state.js';
+import { app, on, saveSettings, DEFAULT_SETTINGS, SYNCED_BEFORE, SYNC_PENDING, SYNC_REV, plexAccount } from './state.js';
 import { store } from './plex.js';
 import { dropCached, refresh, parseHash } from './router.js';
 
@@ -67,6 +67,7 @@ export const SYNCED_SETTINGS = Object.freeze([
   'mbMissingAlbums',
   'mbMissingKinds',
   'mbOriginalYears',
+  'mbNamesakes',
   'home',
 ]);
 export const DEVICE_SETTINGS = Object.freeze(['quality', 'route', 'shareDevices', 'playerName', 'speed', 'ai', 'loadAhead', 'keepPlayed', 'version']);
@@ -77,7 +78,7 @@ const SEND_AFTER = 800;
 const PULL_EVERY = 5 * 60000;
 const PULL_AGAIN = 30000; // at most this often when the app's shown again
 
-export const syncOn = () => !!app.config.settingsSync && !!app.auth?.token && !!app.source?.serverId;
+export const syncOn = () => !!app.config.settingsSync && plexAccount() && !!app.source?.serverId;
 
 const sync = {
   started: false,

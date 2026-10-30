@@ -36,7 +36,7 @@ export const mbOn = (setting) => mbFeatures() && app.settings[setting] !== false
 // it's been turned off (as it was on to begin with, with those).
 export const skipLiveOn = () => app.settings.skipLive === true || mbOn('mbSkipLive');
 
-export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup } from './releases.js';
+export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup, sameTitle, apartFromNamesakes } from './releases.js';
 export const KIND_NAMES = Object.fromEntries(RELEASE_KINDS);
 // Shown to begin with among an artist's missing albums.
 export const MISSING_KINDS = ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'];
@@ -65,18 +65,19 @@ async function call(path, body, { signal } = {}) {
 
 // An artist on MusicBrainz, by name (or by their MusicBrainz id, `id`,
 // where Plex has it): { artist: { id, name, aliases, genres } | null,
-// groups: [{ id, title, primary, secondary, date }] } (`groups`: false,
-// without those), kept while the app's open (a failure isn't, to be asked
-// again).
+// groups: [{ id, title, primary, secondary, date }], namesakes } (`groups`:
+// false, without those; `namesakes`: true, with the other artists of the
+// name too, [{ id, name, note, groups }]: see apartFromNamesakes), kept
+// while the app's open (a failure isn't, to be asked again).
 const artists = new Map();
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export function artistOnMB(name, { groups = true, id = null } = {}) {
+export function artistOnMB(name, { groups = true, id = null, namesakes = false } = {}) {
   const byId = MBID.test(String(id)) ? id : null;
-  const key = `${groups ? 1 : 0}|${byId || norm(name)}`;
-  if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [] });
+  const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${byId || norm(name)}`;
+  if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], capped: false, namesakes: [] });
   if (!artists.has(key)) {
-    const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}) }).then(
-      (r) => ({ artist: r.artist || null, groups: Array.isArray(r.groups) ? r.groups : [] }),
+    const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}) }).then(
+      (r) => ({ artist: r.artist || null, groups: Array.isArray(r.groups) ? r.groups : [], capped: r.capped === true, namesakes: Array.isArray(r.namesakes) ? r.namesakes : [] }),
       (err) => {
         artists.delete(key);
         throw err;

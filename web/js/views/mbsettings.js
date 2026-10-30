@@ -80,6 +80,12 @@ export async function musicbrainzSettingsView({ el }) {
         checked: s.mbOriginalYears !== false,
         onChange: set('mbOriginalYears'),
       }),
+      toggleRow({
+        title: 'Artists of the same name',
+        subtitle: 'Where Plex has two artists of one name as one, the other’s albums kept apart on the artist’s page, under Another artist called…, and out of its Play, Shuffle and Popular tracks. Only where MusicBrainz plainly has each album as the other’s, by its title and year.',
+        checked: s.mbNamesakes !== false,
+        onChange: set('mbNamesakes'),
+      }),
     ),
     h('p.hint.pad', null, 'An artist who isn’t found by their name (importing a playlist, checking Missing tracks again) is looked for by the other names MusicBrainz has for them too: other spellings and scripts, what they were called before.'),
     h('p.hint.pad', null, 'Skip live tracks and demos (in Settings › Playback) goes by MusicBrainz too, for an album Plex hasn’t said the kind of. What’s in your library is shown as Plex has it: MusicBrainz never changes which kind an album is.'),

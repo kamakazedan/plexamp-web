@@ -17,6 +17,13 @@ config.js. Settings come from the environment:
                      MusicBrainz, SYNC_SETTINGS=false and
                      SYNC_MISSING_TRACKS=false (the mb section is skipped
                      without it)
+    APP_URL_OFFLINE  app with OFFLINE_KEY=offline-key-for-tests and
+                     PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500, on a mock
+                     Plex server started with --open --honour (one that
+                     lets the app in without signing in, and knows its
+                     people's sign-ins as theirs), its plex.tv too, and
+    MOCK_PLEX_OPEN   that server (the offline section is skipped without
+                     them)
     MOCK_PLEX        mock Plex server, e.g. http://127.0.0.1:32400
     PLEX_LOGIN_URL   server address to sign in with; empty to use the
                      container's /pms proxy
@@ -33,7 +40,7 @@ Plex Home (plexhome sends the browser's plex.tv calls to the mock too).
 Sections: core ws ai dj djs nows blocked poll wsonly custom desktop nav library edit
 lists pictures missing files sharing routes privacy np stream cast ratings
 devices fades together settings home formats select spotify debug sync
-plexhome missingsync mb memory (default: all).
+plexhome missingsync mb offline memory (default: all).
 """
 
 import json
@@ -55,6 +62,8 @@ APP_NOWS = os.environ.get('APP_URL_NOWS', 'http://127.0.0.1:8082/')
 APP_DEBUG = os.environ.get('APP_URL_DEBUG', '')
 APP_BIG = os.environ.get('APP_URL_BIG', '')
 APP_MB = os.environ.get('APP_URL_MB', '')
+APP_OFFLINE = os.environ.get('APP_URL_OFFLINE', '')
+MOCK_OPEN = os.environ.get('MOCK_PLEX_OPEN', '').rstrip('/')
 MOCK_BIG = os.environ.get('MOCK_PLEX_BIG', '').rstrip('/')
 MOCK = os.environ.get('MOCK_PLEX', 'http://127.0.0.1:32400').rstrip('/')
 LOGIN_URL = os.environ.get('PLEX_LOGIN_URL', '')
@@ -150,8 +159,9 @@ def login(page, app, token='t', app_defaults=False):
     page.goto(app + '#/login')
     page.click('text=Use a server address and token instead')
     if LOGIN_URL:
-        page.fill('input[type=url]', LOGIN_URL)
-    page.fill('input[type=password]', token)
+        page.fill('.login-form input[type=url]', LOGIN_URL)
+    # (The token's field: with an offline key, its field is a password's too.)
+    page.fill('.login-form input[type=password]', token)
     page.click('button:has-text("Connect")')
     page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
     # (Most tests were written for loudness levelling, Load ahead and Keep
@@ -7605,6 +7615,33 @@ with sync_playwright() as pw:
         interference = page.locator('.view section[data-group="Albums"] .card', has_text='Interference').locator('.card-sub').inner_text()
         check('mb: ...an album of a title the artist has another of keeps the year Plex has (2016, not the other\'s 2009)', interference == '2016', interference)
 
+        # Artists of the same name: an album MusicBrainz has for another
+        # Northbound Static (and nothing like it for this one) is kept apart
+        # on the page, saying who, and out of its Shuffle; not with it off.
+        artist_page('Northbound Static', '.view section.artist-namesake .card')
+        apart = page.locator('.view section.artist-namesake .card-title').all_inner_texts()
+        own = group('Albums')
+        note = page.locator('.view section.artist-namesake').inner_text()
+        shot(page, 'mb-03b-namesake')
+        check('mb: Artists of the same name: an album MusicBrainz has for another artist of the name is kept apart on the page, saying who',
+              apart == ['Long Way North'] and 'Long Way North' not in own and 'Interference' in own
+              and 'ANOTHER ARTIST CALLED NORTHBOUND STATIC' in note.upper() and 'Norwegian black metal band' in note, f'{apart} {own} {note[:300]}')
+        page.locator('.view .hero-actions button[aria-label="Shuffle"]').click()
+        wait_for(lambda: player(page, "p.state === 'playing'"), 10)
+        shuffled = set(player(page, 'p.queue.map((t) => t.album)') or [])
+        player(page, 'p.pause()')
+        check('mb: ...and left out of the page\'s Shuffle', shuffled == {'Interference'}, shuffled)
+        before = player(page, 'p.queue.length')
+        sheet_action(page, '.back-head button[aria-label="More options"]', 'Add to queue')
+        wait_for(lambda: player(page, 'p.queue.length') > before, 5)
+        added = set(player(page, f'p.queue.slice({before}).map((t) => t.album)') or [])
+        check('mb: ...and out of what the page\'s menu adds to the queue', added == {'Interference'}, added)
+        settings(page, {'mbNamesakes': False})
+        artist_page('Northbound Static', '.view section[data-group="Albums"] .card')
+        page.wait_for_timeout(1500)
+        check('mb: ...and not with it off', page.locator('.view section.artist-namesake').count() == 0 and 'Long Way North' in group('Albums'), group('Albums'))
+        settings(page, {'mbNamesakes': True})
+
         # Other names: an artist not found by their name is looked for by
         # the others MusicBrainz has for them (not without the features).
         match = """() => import('./js/playlistio.js').then((m) => m.matchEntries([{ artist: 'Нортбаунд Статик', title: 'Signal Fires' }]).then((r) => r.map((x) => x && x.grandparentTitle)))"""
@@ -7708,6 +7745,124 @@ with sync_playwright() as pw:
     # Waits here poll with evaluate() rather than using locators or
     # wait_for_selector: element handles Playwright keeps would themselves
     # hold pages in memory.
+    # ---------- offline: a Plex server that lets the player in, and the offline key ----------
+
+    if run('offline') and APP_OFFLINE and MOCK_OPEN:
+        A = APP_OFFLINE
+        KEY = 'offline-key-for-tests'
+
+        def open_mock(q):
+            with urllib.request.urlopen(f'{MOCK_OPEN}/__mock/config?{q}', timeout=20) as r:
+                r.read()
+
+        def pms_status(token, path='/library/sections'):
+            req = urllib.request.Request(f'{A}pms{path}?X-Plex-Token={token}', headers={'Accept': 'application/json'})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        def playlist_titles(pg):
+            pg.goto(A + '#/playlists')
+            pg.wait_for_selector('.view .empty-state, .view .card, .view .row', timeout=20000)
+            pg.wait_for_timeout(800)
+            return pg.locator('.card-title, .row-title').all_text_contents()
+
+        def recording(pg):
+            urls = []
+            pg.on('request', lambda r: urls.append(r.url))
+            return urls
+
+        open_mock('open=1&honour=1&tv=up')
+        # A server that lets the player in without signing in, and knows its
+        # people's sign-ins as theirs: Sam (a friend) gets through as himself,
+        # and sees his own playlists, never Dan's.
+        ctx = browser.new_context(**MOBILE)
+        sam = ctx.new_page()
+        attach(sam, 'offline-sam', expected=('403', '500'))
+        login(sam, A, token='t2')
+        mine = playlist_titles(sam)
+        check('offline: on a server that lets the player in, a friend it knows gets through as themselves',
+              not any(t in mine for t in ('Sunday morning', 'Late night', 'Workout')), mine)
+        dan_ctx = browser.new_context(**MOBILE)
+        dan = dan_ctx.new_page()
+        attach(dan, 'offline-dan', expected=('403', '500'))
+        login(dan, A, token='t')
+        theirs = playlist_titles(dan)
+        check('offline: ...and the owner as the owner', 'Sunday morning' in theirs, theirs)
+        check('offline: someone without access is refused there', pms_status('t3') == 403, pms_status('t3'))
+        check('offline: ...and a sign-in no one has', pms_status('made-up-token') == 401, pms_status('made-up-token'))
+        # A server that takes everyone here for its owner: Sam is refused at
+        # once (each request is checked), so he never sees Dan's.
+        open_mock('honour=0')
+        check('offline: a server that takes everyone for its owner refuses friends there, from the next request',
+              pms_status('t2') == 403 and pms_status('t2', '/playlists') == 403, (pms_status('t2'), pms_status('t2', '/playlists')))
+        again = sam.evaluate("() => import('./js/state.js').then(({ app }) => app.server.get('/playlists').then(() => 'answered', (e) => e.status))")
+        check('offline: ...in the app too', again == 403, again)
+        open_mock('honour=1')
+        # plex.tv stops answering: those signed in carry on.
+        open_mock('tv=down')
+        theirs = playlist_titles(dan)
+        mine = playlist_titles(sam)
+        check('offline: plex.tv not answering, the owner carries on', 'Sunday morning' in theirs, theirs)
+        check('offline: ...and so does a friend the server knows, as themselves', 'Sunday morning' not in mine and pms_status('t2') == 200, mine)
+        ctx.close()
+        dan_ctx.close()
+
+        # Someone new can't sign in with Plex: the sign-in page says so, and
+        # takes the offline key once plex.tv hasn't answered for a while.
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'offline-key', expected=('401', '403', '409', '500'))
+        urls = recording(page)
+        page.goto(A + '#/login')
+        page.wait_for_selector('.login-offline-form:not([hidden])', timeout=30000)
+        shot(page, 'offline-login')
+        check('offline: the sign-in page says plex.tv isn\'t answering, and takes the offline key',
+              'offline key' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
+        page.fill('.login-offline-form input', 'not the key')
+        page.click('.login-offline-form button')
+        page.wait_for_function("() => document.querySelector('.login-offline-form .login-status').textContent.length > 0")
+        said = page.inner_text('.login-offline-form .login-status')
+        check('offline: a wrong key is refused', 'isn’t this player’s offline key' in said, said)
+        page.fill('.login-offline-form input', KEY)
+        page.click('.login-offline-form button')
+        page.wait_for_selector('.wide-card:not(.skeleton)', timeout=30000)
+        shot(page, 'offline-home')
+        auth = js(page, "() => import('./js/state.js').then(({ app }) => ({ offline: !!app.auth?.offline, token: app.auth?.token || '' }))")
+        check('offline: the offline key signs in, as the server lets the player in', auth['offline'] and auth['token'].startswith('pwoff-'), auth)
+        tabs = page.eval_on_selector_all('#tabs .tab', 'els => els.map((e) => e.dataset.tab)')
+        check('offline: no Play Together with the key', 'together' not in tabs, tabs)
+        theirs = playlist_titles(page)
+        check('offline: ...it plays the library as its owner (what the key is for)', 'Sunday morning' in theirs, theirs)
+        page.goto(A + '#/settings/account')
+        page.wait_for_selector('.account-card')
+        shot(page, 'offline-account')
+        card = page.inner_text('.account-card')
+        check('offline: Settings › Account says it\'s the offline key, and that it\'s as the owner', 'offline key' in card and 'owner' in card, card)
+        page.wait_for_timeout(1500)
+        asked = [u for u in urls if re.search(r'/api/(settings|missing|together|devices|shares|cast)\b', u)]
+        check('offline: nothing that needs a Plex account is asked for with the key', not asked, asked[:5])
+        check('offline: ...and the key\'s sign-in never goes to plex.tv', not [u for u in urls if 'plex.tv' in u and 'pwoff-' in u])
+        # plex.tv answering again: the session ends, and the app signs out.
+        open_mock('tv=up')
+        try:
+            page.wait_for_url(re.compile(r'#/login'), timeout=60000)
+            page.wait_for_selector('.login-offline:not([hidden])', timeout=15000)
+            ended = True
+        except Exception:  # noqa: BLE001 - said below
+            ended = False
+        check('offline: once plex.tv is answering again, the key\'s session ends and the app signs out', ended, page.url)
+        if ended:
+            shot(page, 'offline-ended')
+            check('offline: ...saying why', 'answering again' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
+        left = js(page, "() => import('./js/state.js').then(({ app }) => !app.auth && !app.source)")
+        check('offline: ...and nothing of the session is left', left)
+        check('offline: the key\'s session is refused at the server once it\'s over', pms_status(auth['token']) == 401, pms_status(auth['token']))
+        ctx.close()
+        open_mock('open=1&honour=1&tv=up')
+
     if run('memory') and APP_BIG and MOCK_BIG:
         ctx = browser.new_context(**MOBILE)
         page = ctx.new_page()

@@ -61,10 +61,13 @@ export const playAlbum = (album, { shuffle = false, start = 0, tracks } = {}) =>
   });
 
 // (Shuffled, it's picked for you: without tracks rated down, or live
-// tracks and demos, where those are skipped: see picks.js.)
-export const playArtist = (artist, { shuffle = false } = {}) =>
+// tracks and demos, where those are skipped: see picks.js. `without`: the
+// ids of albums that aren't theirs, but another artist's of the same name:
+// see their page.)
+export const playArtist = (artist, { shuffle = false, without = null } = {}) =>
   guard(async () => {
     let list = (await app.server.allLeaves(artist.ratingKey)).map(normTrack);
+    if (without?.size) list = list.filter((t) => !without.has(String(t.albumId)));
     if (shuffle) list = await pickable(list);
     playList(list, 0, ctx(artist.title, `/artist/${artist.ratingKey}`), { shuffle });
   });
@@ -339,17 +342,22 @@ export function albumMenu(album, { select = null, open = false } = {}) {
   });
 }
 
-export function artistMenu(artist) {
+// (`without`: as for playArtist, in everything here that takes their tracks.)
+export function artistMenu(artist, { without = null } = {}) {
+  const theirs = async (opts) => {
+    const list = await tracksOf([artist], opts);
+    return without?.size ? list.filter((t) => !without.has(String(t.albumId))) : list;
+  };
   sheet({
     title: artist.title,
     image: artist.thumb,
     round: true,
     actions: [
-      { icon: 'play', label: 'Play', onSelect: () => playArtist(artist) },
-      { icon: 'shuffle', label: 'Shuffle', onSelect: () => playArtist(artist, { shuffle: true }) },
+      { icon: 'play', label: 'Play', onSelect: () => playArtist(artist, { without }) },
+      { icon: 'shuffle', label: 'Shuffle', onSelect: () => playArtist(artist, { shuffle: true, without }) },
       { icon: 'radio', label: 'Artist radio', onSelect: () => artistRadio(artist) },
-      ...queueActions(() => tracksOf([artist], { limit: PLAYLIST_PLAY_LIMIT })),
-      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: artist.title, load: () => tracksOf([artist]), suggest: artist.title }) },
+      ...queueActions(() => theirs({ limit: PLAYLIST_PLAY_LIMIT })),
+      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: artist.title, load: () => theirs(), suggest: artist.title }) },
       isAdminNow() && {
         icon: 'collection',
         label: 'Add to collection…',
