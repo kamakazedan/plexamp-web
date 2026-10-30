@@ -50,7 +50,8 @@ you're running is shown in **Settings › About**.
   a value that doesn't make sense does, so nothing you've set is off
   without you knowing: `OFFLINE_PWD` without `PLEX_SERVER_URL`,
   `OFFLINE_NETWORKS` (but `private`, the default) without `OFFLINE_PWD`,
-  `MUSICBRAINZ_ADVANCED` without `MUSICBRAINZ_URL`, and `OLLAMA_MODEL`,
+  `MUSICBRAINZ_ADVANCED` without `MUSICBRAINZ_URL` (or with
+  `MUSICBRAINZ=false`), and `OLLAMA_MODEL`,
   `OLLAMA_API_KEY` or `OLLAMA_AUTH=off` without `OLLAMA_URL`. Before, the
   log said so and the feature was off. Check your settings before updating.
 
