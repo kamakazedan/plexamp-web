@@ -22,11 +22,12 @@ you're running is shown in **Settings › About**.
   without signing in (add the player's own address to Plex's "List of IP
   addresses and networks that are allowed without auth"), works only from
   your own networks unless `OFFLINE_FROM` says otherwise, and takes five
-  tries a minute from an address, and after 30 wrong keys from anywhere,
-  none for the rest of the hour from wherever a wrong one came. The key's
-  sessions never leave the player: their requests go to your server
-  without them, as the player's own do. On Proxmox VE, an update keeps
-  your settings file as it was, so add `OFFLINE_KEY` there with
+  tries a minute from an address; after 30 wrong keys from anywhere, none
+  for the rest of the hour from wherever a wrong one came, and after 200,
+  none from anywhere the key hasn't signed in from in the last 14 days.
+  The key's sessions never leave the player: their requests go to your
+  server without them, as the player's own do. On Proxmox VE, an update
+  keeps your settings file as it was, so add `OFFLINE_KEY` there with
   `plexamp-web-settings`. See docs/configuration.md.
 - **Signed in already, you carry on while plex.tv isn't answering**, with
   the player let in: you, the server's owner, by a fingerprint of each of
@@ -73,8 +74,8 @@ you're running is shown in **Settings › About**.
   there's no `/pms/`: nothing would check what goes through it.
 - **`PLEX_SERVER_URL` as a name with more than one address**: nginx takes
   turns between them, so the player can't ask your Plex server how it will
-  take each request, and only you get through `/pms/` (the log says so).
-  Use one address there.
+  take each request, and only you get through `/pms/` (the log says so),
+  as for a minute after its address changes. Use one fixed address there.
 
 ### Fixed
 

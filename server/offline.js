@@ -20,6 +20,8 @@ export const OFFLINE_LIMITS = {
   sessions: 50, // at most (the oldest go first)
   triesPerMinute: 5, // from one address
   wrongPerHour: 30, // wrong keys from everywhere together: then none is tried, for the rest of the hour, from where one came
+  wrongCapPerHour: 200, // ...and none from anywhere at all (but where the key signed in from lately)
+  knownForMs: 14 * 24 * 3600 * 1000, // where the key signed in from: tried whatever else has come, for this long
 };
 
 const TOKEN = /^pwoff-[0-9a-f]{48}$/;
@@ -82,6 +84,7 @@ export class Offline {
     this.sessions = new Map(); // token hash -> { at, until }, oldest first
     this.wrong = []; // when wrong keys were tried, this last hour
     this.wrongFrom = new Map(); // address -> when one was last tried from it
+    this.signedInFrom = new Map(); // address -> when the key last signed in from it, oldest first
     this.tries = new Map(); // address -> { at, n }
     this.lockedSaid = false;
   }
@@ -139,12 +142,16 @@ export class Offline {
     if (t.n > OFFLINE_LIMITS.triesPerMinute) throw new OfflineError(429, 'Too many tries. Wait a minute and try again.');
     this.wrong = this.wrong.filter((at) => now - at < 3600000);
     for (const [from, at] of this.wrongFrom) if (now - at >= 3600000) this.wrongFrom.delete(from);
-    // (Only where a wrong one came from, so nobody else's wrong keys keep the
-    // right one out from anywhere they haven't tried from.)
-    if (this.wrong.length >= OFFLINE_LIMITS.wrongPerHour && this.wrongFrom.has(limitKey)) {
+    // After too many wrong keys from anywhere, none is tried from where a
+    // wrong one came; after many more, from nowhere at all. But where the key
+    // signed in from lately (the owner's own devices), it's tried whatever
+    // else has come, so nobody else's wrong keys can keep it out there.
+    const known = now - (this.signedInFrom.get(limitKey) ?? -Infinity) < OFFLINE_LIMITS.knownForMs;
+    const locked = !known && (this.wrong.length >= OFFLINE_LIMITS.wrongCapPerHour || (this.wrong.length >= OFFLINE_LIMITS.wrongPerHour && this.wrongFrom.has(limitKey)));
+    if (locked) {
       if (!this.lockedSaid) {
         this.lockedSaid = true;
-        this.log?.warn(`offline mode: ${this.wrong.length} wrong offline keys tried in the last hour, so no more are tried until it's over`);
+        this.log?.warn(`offline mode: ${this.wrong.length} wrong offline keys tried in the last hour, so no more are tried until it's over from where one came${this.wrong.length >= OFFLINE_LIMITS.wrongCapPerHour ? ', nor from anywhere the key hasn\'t signed in from lately' : ''}`);
       }
       throw new OfflineError(429, 'Too many wrong keys have been tried here. Try again in an hour.');
     }
@@ -170,6 +177,9 @@ export class Offline {
     }
     const token = `pwoff-${randomBytes(24).toString('hex')}`;
     this.sessions.set(hash(token), { at: now, until: now + OFFLINE_LIMITS.sessionMs });
+    this.signedInFrom.delete(limitKey);
+    this.signedInFrom.set(limitKey, now);
+    if (this.signedInFrom.size > 1000) this.signedInFrom.delete(this.signedInFrom.keys().next().value);
     while (this.sessions.size > OFFLINE_LIMITS.sessions) this.sessions.delete(this.sessions.keys().next().value);
     this.log?.info(`offline mode: signed in with the offline key from ${addr || 'an unknown address'} (${this.sessions.size} signed in with it now)`);
     return { token, until: now + OFFLINE_LIMITS.sessionMs };

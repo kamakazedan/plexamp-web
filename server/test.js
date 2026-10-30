@@ -2184,13 +2184,21 @@ test('offline mode: a few tries a minute from an address, and once too many wron
   assert.ok((await off.signIn(key, '10.0.0.1')).token);
   for (let i = OFFLINE_LIMITS.triesPerMinute; i < OFFLINE_LIMITS.wrongPerHour; i++) await assert.rejects(off.signIn('wrong', `10.0.1.${i}`), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.1.9'), (e) => e.status === 429 && /hour/.test(e.message));
-  await assert.rejects(off.signIn(key, '10.0.0.1'), (e) => e.status === 429 && /hour/.test(e.message));
   // ...but from anywhere else, the right key: nobody else's wrong ones keep it out
   assert.ok((await off.signIn(key, '10.0.2.1')).token);
   await assert.rejects(off.signIn('wrong', '10.0.2.2'), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.2.2'), (e) => e.status === 429 && /hour/.test(e.message));
+  // ...nor where it signed in from lately (10.0.0.1, 10.0.0.2), whatever came from there since
+  assert.ok((await off.signIn(key, '10.0.0.1')).token);
+  // After many more, from nowhere at all (each address one try), but where it signed in from lately
+  let n = off.wrong.length;
+  for (let i = 0; n < OFFLINE_LIMITS.wrongCapPerHour; i++, n++) await assert.rejects(off.signIn('wrong', `10.1.${i >> 8}.${i & 255}`), (e) => e.status === 401);
+  await assert.rejects(off.signIn(key, '10.0.3.1'), (e) => e.status === 429 && /hour/.test(e.message));
+  assert.ok((await off.signIn(key, '10.0.2.1')).token);
+  assert.ok((await off.signIn(key, '10.0.0.2')).token);
   tick(3600001);
   assert.ok((await off.signIn(key, '10.0.1.9')).token);
+  assert.ok((await off.signIn(key, '10.0.3.1')).token);
 });
 
 test('/pms/: where the Plex server lets this container in, it\'s asked about each request with that sign-in, there and then, never from what it said before', async () => {
@@ -2296,14 +2304,21 @@ test('/pms/: a Plex server\'s name with more than one address can\'t be asked fo
     addresses = ['10.0.0.6'];
     await sleep(1100);
     await assert.rejects(auth.openNow(), /more than one address/); // (for a while after, as nginx may still have both)
+    // ...or one that's just changed address (nginx may still have the old one)
+    addresses = ['10.0.0.5'];
+    const moved = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: 'http://plex.test:32400', pmsProbe: nginx.path, pmsResolver: '10.0.0.1', resolve4 });
+    assert.equal(await moved.openNow(), false);
+    addresses = ['10.0.0.7'];
+    await sleep(1100);
+    await assert.rejects(moved.openNow(), /just changed address/);
     addresses = null;
     const other = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: 'http://plex.test:32400', pmsProbe: nginx.path, pmsResolver: '10.0.0.1', resolve4 });
     await assert.rejects(other.openNow(), /couldn't look up plex\.test/);
     // (An address, or a name nginx isn't asked to look up: nothing to look up.)
-    const plain = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms, pmsResolver: '10.0.0.1', resolve4 });
-    looked = 0;
+    let plainLooked = 0;
+    const plain = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms, pmsResolver: '10.0.0.1', resolve4: async () => (plainLooked += 1) && [] });
     assert.equal(await plain.openNow(), false);
-    assert.equal(looked, 0);
+    assert.equal(plainLooked, 0);
   } finally {
     nginx.close();
     p.close();

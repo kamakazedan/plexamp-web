@@ -198,7 +198,10 @@ export class PlexAuth {
       }
       this.resolve4 = resolve4 || ((name) => r.resolve4(name));
     }
-    this.addresses = { count: 0, at: 0, many: 0, error: null };
+    this.addresses = { seen: '', at: 0, many: 0, error: null };
+    // (Looked up every few seconds, so a time it had more than one address is
+    // seen, whatever's asked meanwhile.)
+    if (this.pmsName) setInterval(() => this.lookUpAddresses(), 5000).unref();
     this.users = new TTLCache();
     this.denied = new TTLCache();
     this.access = new TTLCache();
@@ -354,8 +357,9 @@ export class PlexAuth {
   // At an https:// network address, where nginx can't check the server's
   // certificate (it's for the server's plex.direct name), it's asked straight
   // there too (the same address), with its certificate checked (see
-  // isPlexDirectCert). Asked again at most every 15 seconds while it isn't
-  // known (every second while nginx isn't there yet: it starts after this).
+  // isPlexDirectCert). Asked again every couple of seconds while it isn't
+  // known (with each request while nginx isn't there yet: it starts after
+  // this; every 15 while its certificate doesn't check out).
   async loadServerId() {
     if (this.serverId || !this.pms) return this.serverId;
     if (Date.now() < (this.identityRetryAt || 0)) return null;
@@ -370,7 +374,12 @@ export class PlexAuth {
         this.serverId = id;
         log.debug(`Plex server at PLEX_SERVER_URL is ${this.serverId}`);
       } catch (err) {
-        if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') again = 1000;
+        // (nginx not started yet: asked again with the next request, which
+        // comes through nginx; the server not answering yet, starting
+        // alongside, say: in two seconds; its certificate, which won't fix
+        // itself: in fifteen.)
+        if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') again = 0;
+        else if (!err.cert) again = 2000;
         if (err.cert && !this.certWarned) {
           // Not going to fix itself: said once, whether or not debug mode is on.
           this.certWarned = true;
@@ -560,41 +569,48 @@ export class PlexAuth {
   }
 
   // Where PLEX_SERVER_URL is a name nginx looks up for each request: that it
-  // has one address (IPv4: as nginx is told them, by the same name server).
-  // With more, nginx takes turns between them for each request, so a request
-  // could go another way than the server was asked by (from another of this
-  // container's addresses, say, as the server sees it), and so it can't be
-  // asked whether it lets this container in: that throws (and for a minute
-  // after: longer than nginx keeps what it was told), as where it can't be
-  // looked up. Looked up again every second at most.
+  // has one address, and the same one as a moment ago (IPv4: as nginx is told
+  // them, by the same name server). nginx keeps what it's told for 30
+  // seconds, and with more than one address takes turns between them for
+  // each request, so a request could go another way than the server was
+  // asked by (from another of this container's addresses, say, as the server
+  // sees it), and so it can't be asked whether it lets this container in:
+  // that throws, while it's so and for a minute after (longer than nginx
+  // keeps what it was told), as where the name can't be looked up. It's
+  // looked up every few seconds whatever's asked (see lookUpAddresses), and
+  // again here if it hasn't been for a second.
   async oneAddress() {
     if (!this.pmsName) return;
-    if (Date.now() - this.addresses.at >= 1000) {
-      this.addressesAsking ||= this.resolve4(this.pmsName)
-        .then(
-          (list) => {
-            this.addresses = { ...this.addresses, count: new Set(list).size, at: Date.now(), error: null };
-            if (this.addresses.count > 1) this.addresses.many = Date.now() + 60000;
-          },
-          (err) => {
-            this.addresses = { ...this.addresses, at: Date.now(), error: Object.assign(new Error(`couldn't look up ${this.pmsName}: ${err.code || err.message}`), { network: true }) };
-          },
-        )
-        .finally(() => {
-          this.addressesAsking = null;
-        });
-      await this.addressesAsking;
-    }
+    if (Date.now() - this.addresses.at >= 1000) await this.lookUpAddresses();
     if (this.addresses.error) throw this.addresses.error;
     if (Date.now() >= this.addresses.many) return;
     if (Date.now() >= (this.manySaidUntil || 0)) {
       this.manySaidUntil = Date.now() + 6 * 3600000;
       log.warn(
-        `PLEX_SERVER_URL's name (${this.pmsName}) has more than one address, and nginx takes turns between them: your Plex server judges by where a request comes from whether to let it in without signing in, so it can't be told from one request how it would take the next. ` +
-          'While that\'s so, only your own Plex sign-in gets through /pms/, and everyone else is refused. Use one address in PLEX_SERVER_URL (the server\'s own, as http://192.168.1.10:32400).',
+        `PLEX_SERVER_URL's name (${this.pmsName}) has more than one address, or has just changed address, so nginx can reach the server either way: your Plex server judges by where a request comes from whether to let it in without signing in, so it can't be told from one request how it would take the next. ` +
+          'While that\'s so (and for a minute after), only your own Plex sign-in gets through /pms/, and everyone else is refused. Use one fixed address in PLEX_SERVER_URL (the server\'s own, as http://192.168.1.10:32400).',
       );
     }
-    throw Object.assign(new Error(`${this.pmsName} has more than one address`), { network: true });
+    throw Object.assign(new Error(`${this.pmsName} has more than one address, or has just changed address`), { network: true });
+  }
+
+  // (Asked once, however many wait for it.)
+  lookUpAddresses() {
+    this.addressesAsking ||= this.resolve4(this.pmsName)
+      .then(
+        (list) => {
+          const seen = [...new Set(list)].sort().join(' ');
+          if (seen.includes(' ') || (this.addresses.seen && seen !== this.addresses.seen)) this.addresses.many = Date.now() + 60000;
+          this.addresses = { ...this.addresses, seen, at: Date.now(), error: null };
+        },
+        (err) => {
+          this.addresses = { ...this.addresses, at: Date.now(), error: Object.assign(new Error(`couldn't look up ${this.pmsName}: ${err.code || err.message}`), { network: true }) };
+        },
+      )
+      .finally(() => {
+        this.addressesAsking = null;
+      });
+    return this.addressesAsking;
   }
 
   // (Said now and then.)

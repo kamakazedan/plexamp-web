@@ -464,9 +464,9 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
             esac
             ;;
     esac
-    # Shared by the locations below, and the service's socket.
+    # Shared by the locations below, and the service's socket. (Its resolver,
+    # for a name, is at http level: see pms-probe.inc.)
     PMS_PROXY="${PMS_ERROR_LOG}
-    ${PMS_RESOLVER}
     ${PMS_TLS}
     proxy_http_version 1.1;
     proxy_set_header Host ${PMS_HOST};
@@ -481,15 +481,37 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
     proxy_set_header X-Forwarded-For \"\";
     proxy_set_header X-Real-IP \"\";
     proxy_set_header Forwarded \"\";
+    proxy_set_header Forwarded-For \"\";
+    proxy_set_header X-Forwarded \"\";
     proxy_set_header X-Forwarded-Host \"\";
     proxy_set_header X-Forwarded-Proto \"\";
     proxy_set_header X-Forwarded-Port \"\";
+    proxy_set_header X-Forwarded-Server \"\";
+    proxy_set_header X-Forwarded-By \"\";
+    proxy_set_header X-Forwarded-Scheme \"\";
+    proxy_set_header X-Forwarded-Ssl \"\";
+    proxy_set_header X-Original-Forwarded-For \"\";
     proxy_set_header X-Client-IP \"\";
+    proxy_set_header Client-IP \"\";
+    proxy_set_header X-Real-Client-IP \"\";
     proxy_set_header True-Client-IP \"\";
     proxy_set_header CF-Connecting-IP \"\";
-    proxy_set_header X-Cluster-Client-IP \"\";
+    proxy_set_header CF-Connecting-IPv6 \"\";
     proxy_set_header Fastly-Client-IP \"\";
+    proxy_set_header X-Cluster-Client-IP \"\";
     proxy_set_header X-Originating-IP \"\";
+    proxy_set_header X-Remote-IP \"\";
+    proxy_set_header X-Remote-Addr \"\";
+    proxy_set_header X-ProxyUser-Ip \"\";
+    proxy_set_header X-Envoy-External-Address \"\";
+    proxy_set_header X-Azure-ClientIP \"\";
+    proxy_set_header X-Azure-SocketIP \"\";
+    proxy_set_header X-Appengine-User-IP \"\";
+    proxy_set_header X-Host \"\";
+    proxy_set_header X-Original-Host \"\";
+    proxy_set_header X-Original-URL \"\";
+    proxy_set_header X-Rewrite-URL \"\";
+    proxy_set_header Via \"\";
     proxy_set_header Cookie \"\";
     # Nothing that could carry a sign-in but what was checked: no
     # Authorization, and no Content-Type for Plex to read a form by (the
@@ -579,7 +601,10 @@ CONF
     # nginx goes over IPv4) could be answered for somewhere else. Only the
     # service (and nginx, and root) can reach this socket: see "start the
     # service".
+    # (A name is looked up by one resolver, for all of it: one answer kept for
+    # everything that reaches the server, the service's requests too.)
     cat >"$PMS_PROBE_CONF" <<CONF
+${PMS_RESOLVER}
 server {
     listen unix:${PMS_PROBE_SOCKET};
     server_name _;

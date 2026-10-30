@@ -23,7 +23,7 @@ TV="PLEX_TV_URL=http://pw-plex:32400"
 CERTS=""
 
 cleanup() {
-    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-plex-m1 pw-plex-m2 pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web5c pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-web11 pw-bad >/dev/null 2>&1 || true
+    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-plex-m1 pw-plex-m2 pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web5c pw-web5d pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-web11 pw-bad >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     docker volume rm "$DATA_VOLUME" "$LINK_VOLUME" >/dev/null 2>&1 || true
     if [ -n "$CERTS" ]; then rm -rf "$CERTS"; fi
@@ -468,10 +468,14 @@ owners="$(docker exec pw-web5 cat /data/owners.json 2>/dev/null || true)"
 contains "the owner's sign-ins are kept in /data" '"owners":{"' "$owners"
 lacks "...as fingerprints, never as they are" '"t"' "$owners"
 c "http://pw-plex:32400/__mock/config?tv=up" >/dev/null
-# The service asks the server only the way nginx reaches it: without nginx's
-# socket it can't, and nothing that needs asking gets through.
-docker exec pw-web5 rm -f /run/plexamp-web/pms/plex.sock
-expect "open server: the service's checks go only through nginx (without its socket, a friend is refused)" 500 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+# The service asks the server only the way nginx reaches it: given a socket
+# of nginx's that isn't there, it never asks some other way, and nothing gets
+# through (the server can't be known).
+docker run -d --name pw-web5d --network "$NET" -e "$TV" -e PLEX_SERVER_URL=http://pw-plex:32400 -e PW_SERVICE_PMS_PROBE=/run/plexamp-web/pms/none.sock "$IMAGE" >/dev/null
+wait_http pw-web5d http://pw-web5d/
+wait_service pw-web5d
+expect "open server: the service asks the server only through nginx (given a socket that isn't there, nothing gets through)" 500 "$(c "http://pw-web5d/pms/library/sections?X-Plex-Token=t")"
+docker rm -f pw-web5d >/dev/null
 
 # ---------- 5b. Offline mode: the offline key, while plex.tv isn't answering ----------
 # (Its times shortened, for the test: see server/index.js.)
