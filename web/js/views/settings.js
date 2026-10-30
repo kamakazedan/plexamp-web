@@ -635,7 +635,7 @@ function playbackView({ el }) {
       toggleRow({
         title: 'Loudness levelling',
         subtitle: canFade
-          ? 'Turns louder tracks down to match quieter ones. Albums keep their own ups and downs. Needs Plex’s loudness analysis.'
+          ? 'Turns louder tracks down to match quieter ones, never up, so nothing distorts. Albums keep their own ups and downs. Needs Plex’s loudness analysis.'
           : 'This browser can’t change the volume (iPhone and iPad), so this doesn’t work here.',
         checked: !!s.loudness,
         disabled: !canFade,

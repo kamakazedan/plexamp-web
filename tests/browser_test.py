@@ -364,7 +364,7 @@ with sync_playwright() as pw:
         mock('/__mock/add-album?title=Fresh%20Arrival')
         check('ws: new album appears on Home without reloading', wait_for(lambda: has_card(page, 'Fresh Arrival'), 20))
         page.goto(APP + '#/settings/debug')
-        check('ws: Connection page names the WebSocket', 'WebSocket' in live_status(page), live_status(page))
+        check('ws: Connection page says live updates are instant', live_status(page).split(' | ')[1:2] == ['Instant'], live_status(page))
         shot(page, 'ws-01-connection')
         play_first_album_track(page, APP, album=1)
         page.click('.pb-main')
@@ -848,7 +848,7 @@ with sync_playwright() as pw:
         check('nows: new album appears on Home', wait_for(lambda: has_card(page, 'Second Arrival'), 20))
         page.goto(APP_NOWS + '#/settings/debug')
         status = live_status(page)
-        check('nows: Connection page explains WebSockets are off', 'WEBSOCKETS=off' in status, status)
+        check('nows: Connection page explains WebSockets are off', 'Instant (backup route)' in status and 'set up not to use WebSockets' in status, status)
         shot(page, 'nows-01-connection')
         check('nows: ...with no setting of this device\'s for them', page.locator('.radio-row', has_text='Without WebSockets').count() == 0
               and page.locator('button', has_text='Reconnect live updates').count() == 0)
@@ -870,7 +870,7 @@ with sync_playwright() as pw:
         check('blocked: updates still arrive', wait_for(lambda: has_card(page, 'Third Arrival'), 20))
         page.goto(APP + '#/settings/debug')
         status = live_status(page)
-        check('blocked: Connection page says why', 'couldn’t' in status, status)
+        check('blocked: Connection page says why', 'Instant (backup route)' in status and 'WebSockets don’t work on this network' in status, status)
         ctx.close()
 
     # ---------- poll: event stream held back too ----------
