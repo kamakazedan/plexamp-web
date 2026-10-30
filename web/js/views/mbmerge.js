@@ -72,6 +72,9 @@ export async function mbMergeView({ el, onDispose }) {
   const busy = (text) => status.replaceChildren(spinner('Looking'), h('span', null, ` ${text}`));
 
   async function scan() {
+    // (What's listed from before can't be merged meanwhile: it may be out
+    // of date by then.)
+    for (const b of lists.querySelectorAll('button.mb-merge')) b.disabled = true;
     busy(`Reading your artists from ${app.source.sectionTitle}…`);
     status.classList.remove('warn');
     const all = [];

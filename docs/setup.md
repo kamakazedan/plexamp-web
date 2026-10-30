@@ -69,7 +69,7 @@ Then, on the node (or inside the container, without `pct exec <ID> --`):
 - **Docker**: `docker pull ghcr.io/kamakazedan/plexamp-web:latest`, then recreate the container with the same settings and volume (`docker compose pull` then `docker compose up -d` does both). In Portainer: for a stack, **Update the stack** with **Re-pull image and redeploy** on; for a container, **Recreate** with **Re-pull image** on.
 - **Proxmox VE**: `pct exec <ID> -- update-plexamp-web` (add `--verbose` to follow every step).
 
-What's new is in [CHANGELOG.md](../CHANGELOG.md), and in the app under **Settings › About**.
+What's new is in [CHANGELOG.md](../CHANGELOG.md), and in the app under **Settings › About**. If the container doesn't start after an update, its log says which setting to change, and how: a setting renamed, say (as offline mode's were in 0.31.0), or one that does nothing as another it needs isn't set.
 
 ## From outside your home: HTTPS
 
