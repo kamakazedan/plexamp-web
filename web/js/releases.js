@@ -222,7 +222,8 @@ function plainly(groups, it, self) {
 // "Love", "Home"), of three letters or fewer ("Up"), live at somewhere
 // ("Live in Tokyo"), or of stock words and numbers alone ("Greatest Hits
 // Vol. 2", "BBC Sessions", "The Complete Recordings", "Second Album",
-// "II"), the artist's own name aside ("The Best of Alphabeat", "Alphabeat
+// "II", "The Ultimate Collection", "20th Century Masters"), the artist's
+// own name aside ("The Best of Alphabeat", "Alphabeat
 // Live"). `key`: the title as albumKey has it; `self`: the artist's name,
 // as albumKey has it. An album of one such title that's an artist's, by its
 // title and year, isn't plain evidence on its own that it's that artist's
@@ -236,6 +237,8 @@ const STOCK = new Set(
   christmas xmas holiday holidays songs song love ballads bbc peel mtv radio tracks bonus
   remastered remaster deluxe edition expanded version versions vol volume part pt no chapter book
   first second third new early years favourites favorites selected works anniversary special
+  ultimate definitive original classics classic series masters millennium century playlist super all
+  number ones concert soundtrack tapes lost john
   one two three four five six seven eight nine ten`.split(/\s+/),
 );
 const ROMAN = /^(?=[mdclxvi])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$/;
@@ -244,7 +247,7 @@ export function genericTitle(key, self = '') {
   if (self && k !== self) k = ` ${k} `.replace(` ${self} `, ' ').trim();
   const words = k.split(' ').filter(Boolean);
   if (k.length < 4 || words.length < 2 || /^live (?:in|at|from|on) /.test(k)) return true;
-  return words.every((w) => STOCK.has(w) || /^\d+$/.test(w) || ROMAN.test(w));
+  return words.every((w) => STOCK.has(w) || /^\d+(?:st|nd|rd|th)?$/.test(w) || ROMAN.test(w));
 }
 
 // Whether library artists are one artist, the artist of `name`, to merge

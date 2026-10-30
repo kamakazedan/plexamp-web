@@ -2330,20 +2330,23 @@ class Player extends EventTarget {
     // playing one's, if both have it: a queue of one track, repeated).
     const deck = this.deck.qid === track.qid ? this.deck : this.decks.find((d) => d.qid != null && d.qid === track.qid);
     const playback = deck?.playback || (this.resumeAs?.qid === track.qid ? this.resumeAs.playback : null);
-    const sentAt = Date.now();
+    // (Whether it may get there: not while the browser's offline.)
+    const sentAt = navigator.onLine === false ? null : Date.now();
     const sent = app.server.timeline(track, state, time * 1000, playback);
     // A track's last report (played to its end from what was loaded ahead,
-    // say) that couldn't get there: kept, and sent from there (outbox.js),
-    // so the play counts as it would have (but not twice: not if Plex has
-    // it as played already, as it may, from this one timed out): once the
-    // connection's back, or now, if the server answers again already (it
-    // was gone a moment).
+    // say) that couldn't get there (no answer of the server's under 500):
+    // kept, and sent from there (outbox.js), so the play counts as it would
+    // have (but not twice: not if Plex has it as played already, as it may
+    // from this one, its answer lost), once the connection's back, or in a
+    // while, if the server answers again already.
     if (state !== 'stopped') return;
     const s = app.server;
-    sent.then(async (ok) => {
-      if (ok || app.server !== s) return;
+    sent.then(async (status) => {
+      if ((status > 0 && status < 500) || app.server !== s) return;
       keepPlayed(track, time * 1000, playback, sentAt);
-      if (await serverAnswers()) flush();
+      const answers = await serverAnswers();
+      if (app.server !== s) return;
+      if (answers) flush();
       else connectionLost();
     });
   }

@@ -2681,6 +2681,8 @@ test('MusicBrainz features: artists Plex has more than once, merged only on plai
   for (const [title, name] of [['Live'], ['Greatest Hits, Vol. 2'], ['The Very Best Of'], ['Demos'], ['B-Sides'], ['Remixes'], ['EP 1'], ['II'], ['1999'], ['Up'], ['Live 2009'],
     ['Christmas'], ['Christmas Album'], ['Greatest Hits Live'], ['Live Hits'], ['Hits & Rarities'], ['BBC Sessions'], ['Peel Sessions'], ['MTV Unplugged'], ['Live in Tokyo'],
     ['The Complete Recordings'], ['Best of the Best'], ['Second Album'], ['Bonus Tracks'], ['Remastered'], ['Deluxe'], ['Ballads'], ['Love Songs'], ['Love'], ['Home'], ['Blue'],
+    ['The Ultimate Collection'], ['The Definitive Collection'], ['Original Album Classics'], ['Original Album Series'], ['20th Century Masters: The Millennium Collection'],
+    ['Super Hits'], ['All the Hits'], ['Number Ones'], ['In Concert'], ['Christmas Classics'], ['Ultimate Hits'], ['Original Soundtrack'], ['John Peel Sessions'], ['The Lost Tapes'],
     ['The Best of Alphabeat', 'Alphabeat'], ['Alphabeat Live', 'Alphabeat'], ['Led Zeppelin IV', 'Led Zeppelin']]) {
     assert.equal(generic(title, name), true, title);
   }

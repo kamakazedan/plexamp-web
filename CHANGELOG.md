@@ -14,10 +14,14 @@ you're running is shown in **Settings › About**.
   never skipped, nor converted instead, for want of the connection (before,
   up to three were skipped, then it stopped). Plays and ratings are kept on
   the device meanwhile and sent to Plex once it's back, so the tracks played
-  count as they would have (and not twice), and a rating shows at once (but
-  one of a track rated again since, in another app or on another device,
-  stays as that one has it). The banner says what's happening till then, asking again
-  every half a minute (and for another way to your server). Your Plex
+  count as they would have (and not twice: a report that may have got
+  there, its answer lost, goes again only if Plex hasn't it a minute later),
+  and a rating shows at once (but one of a track rated again since, in
+  another app or on another device, stays as that one has it). One that
+  can't get there while your server answers otherwise waits, longer each
+  time, the rest going meanwhile, and is let go only once your server has
+  plainly failed it five times. The banner says what's happening till then,
+  asking again every half a minute (and for another way to your server). Your Plex
   server down or restarting behind the container (`PLEX_SERVER_URL`) counts
   as the connection gone too. What's kept is your account's, on that
   device: signing out clears it, and says so if any of it hasn't been sent.
@@ -30,8 +34,9 @@ you're running is shown in **Settings › About**.
   tagged), into the artist of the first of those names. Only on plain
   evidence, album by album, even where Plex has the same MusicBrainz id for
   them: albums of each that MusicBrainz has as that artist's (by their very
-  titles and years: two, or one of a title few others have, not "Live" or
-  "Greatest Hits"), and none as another's of the name; for a name of
+  titles and years: two, or one of a title few others have, not one word,
+  "Live at …" or stock words such as "Greatest Hits"), and none as
+  another's of the name; for a name of
   several in one, the library's artist of its first name is MusicBrainz's,
   plainly, and its albums are too, unless MusicBrainz knows only one artist
   of the name. What it has as different artists, can't tell apart, or has

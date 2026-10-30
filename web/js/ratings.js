@@ -11,7 +11,7 @@ import { h, toast } from './ui.js';
 import { refreshLists } from './editing.js';
 import { live } from './live.js';
 import { offlineFor, unreachable } from './connection.js';
-import { keep, forget, restore, kept, keptOf, sendsWith } from './outbox.js';
+import { keep, forget, restore, kept, keptOf, sendsWith, stillOn, CLOCKS_APART_MS } from './outbox.js';
 
 export const LOVED = 10;
 export const LOVED_TITLE = '❤️ Tracks';
@@ -106,17 +106,18 @@ export async function rateTrack(track, rating) {
   return { kept: held };
 }
 
-// A rating kept while the connection was gone (rateTrack), sent now:
-// ❤️ Tracks then, as it changed it. Not one rated again since, in another
-// Plex app or on another device (Plex's lastRatedAt for it is later, by
-// more than this device's clock and the server's could be apart): that
-// one stands, and shows here. One Plex refuses is let go, saying so.
-const CLOCKS_APART_MS = 120000;
+// A rating kept while the connection was gone (rateTrack), sent now (to
+// `s`, its server): ❤️ Tracks then, as it changed it. Not one rated again
+// since, in another Plex app or on another device (Plex's lastRatedAt for
+// it is later, by more than this device's clock and the server's could be
+// apart): that one stands, and shows here. One Plex refuses is let go,
+// saying so.
 sendsWith(
   'rated',
-  async (x) => {
+  async (x, s) => {
     try {
-      const now = await app.server.metadata(x.id);
+      const now = await s.metadata(x.id);
+      stillOn(s);
       if (Number(now?.lastRatedAt) * 1000 > x.at + CLOCKS_APART_MS) {
         const value = now.userRating ?? null;
         known.set(String(x.id), value);
@@ -127,13 +128,14 @@ sendsWith(
       // (Not one rated again here meanwhile, in this tab or another: that
       // one's sent itself, or kept in its place.)
       if (kept(x.key)?.at !== x.at) return false;
-      await app.server.rate(x.id, x.value);
+      await s.rate(x.id, x.value);
     } catch (err) {
-      if (unreachable(err)) throw err;
+      if (err?.switched || unreachable(err)) throw err;
       toast(`Couldn’t save your rating of “${x.title || 'a track'}” from while the connection was gone. ${describeError(err)}`, { timeout: 6000 });
       return false;
     }
-    if (x.loved && app.settings.lovedPlaylist !== false) keepLoved({ id: x.id, title: x.title, userRating: x.value });
+    // (❤️ Tracks is the server's: not another's, chosen meanwhile.)
+    if (x.loved && app.settings.lovedPlaylist !== false && app.server === s) keepLoved({ id: x.id, title: x.title, userRating: x.value });
     return true;
   },
   {

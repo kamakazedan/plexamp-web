@@ -1037,8 +1037,9 @@ export class PlexServer {
   // Tell the server what is playing. This drives play counts, "recent plays"
   // and the Now Playing view on the Plex dashboard. `playback`: the
   // track's playback (see playbackId), as its stream was started with.
-  // Whether it got to the server (false: the connection's gone; see the
-  // player's report, which keeps a track's last for when it's back).
+  // The HTTP status of the server's answer, or 0 for none (see the
+  // player's report, which keeps a track's last for when it can get there:
+  // an answer under 500 says it got there).
   timeline(track, state, timeMs, playback) {
     const url = this.url('/:/timeline', {
       ratingKey: track.id,
@@ -1049,11 +1050,10 @@ export class PlexServer {
       duration: track.duration || undefined,
       'X-Plex-Session-Identifier': playback || undefined,
     });
-    // (Not by a 500 or more: from the container's /pms/ proxy while the
-    // server's down, say. And not waited on for ever: see outbox.js.)
+    // (Not waited on for ever: see outbox.js.)
     return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true, signal: AbortSignal.timeout(15000) }).then(
-      (res) => res.status < 500,
-      () => false,
+      (res) => res.status,
+      () => 0,
     );
   }
 
