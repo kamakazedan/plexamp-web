@@ -31,7 +31,7 @@ import { initSharing, invitations } from './sharing.js';
 import { startSync } from './sync.js';
 import { startMissingSync } from './missingsync.js';
 import { watchOffline } from './offline.js';
-import { connection, connectionLost, connectionBack } from './connection.js';
+import { connection, connectionLost, connectionBack, unreachable } from './connection.js';
 import './outbox.js';
 
 const TABS = [
@@ -176,7 +176,7 @@ function ensureConnection() {
 async function checkConnection() {
   const src = app.source;
   if (!src || !app.server) return;
-  let unreachable = true;
+  let gone = true;
   try {
     await app.server.identity({ timeout: 5000, cache: 'no-store' });
     debugLog('connection', `${src.serverName} answers at ${where(src.kind)}`);
@@ -199,8 +199,9 @@ async function checkConnection() {
       showBanner('Plex rejected the saved sign-in.', 'Sign in again', () => navigate('/settings/account'));
       return;
     }
-    // (It answered, if not as it should: there, if not right.)
-    unreachable = !!err.network;
+    // (It answered, if not as it should: there, if not right. Not from in
+    // between, the container's /pms/ proxy with the server down, say.)
+    gone = unreachable(err);
   }
   if (pickable(src)) {
     try {
@@ -217,7 +218,7 @@ async function checkConnection() {
     }
   }
   if (app.source !== src) return;
-  if (!unreachable) {
+  if (!gone) {
     showBanner(`Can’t reach ${src.serverName}.`, 'Try again', () => ensureConnection(), 'connection');
     return;
   }

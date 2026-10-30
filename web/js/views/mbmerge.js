@@ -113,7 +113,9 @@ export async function mbMergeView({ el, onDispose }) {
     }
 
     // Each: what Plex has of their albums, and what MusicBrainz has of the
-    // name (by the MusicBrainz id Plex has for one of them, if it has one).
+    // name (by the MusicBrainz id Plex has for one of them, if it has one:
+    // for a name of several in one, the artist of its plain name, as which
+    // of the names Plex has an id for can't be told).
     const albums = new Map(); // artist id -> [{ title, year }]
     const albumsOf = async (a) => {
       if (!albums.has(a.ratingKey)) albums.set(a.ratingKey, (await s.artistAlbums(sec, a.ratingKey)).map((m) => ({ title: m.title, year: Number(m.year) || Number(String(m.originallyAvailableAt || '').slice(0, 4)) || null })));
@@ -132,12 +134,14 @@ export async function mbMergeView({ el, onDispose }) {
       try {
         const withAlbums = [];
         for (const a of entries) withAlbums.push({ artist: a, mbid: mbidOf(a), albums: await albumsOf(a) });
-        const id = withAlbums.map((e) => e.mbid).find(Boolean) || null;
+        const id = (g.kind === 'joined' ? withAlbums[0].mbid : withAlbums.map((e) => e.mbid).find(Boolean)) || null;
         const mb = await artistOnMB(g.name, { id, namesakes: true });
         g.mb = mb;
         g.entries = withAlbums;
         g.verdict = sameArtist(withAlbums, { name: g.name, ...mb, joined: g.kind === 'joined' });
-        g.byId = withAlbums.length > 0 && withAlbums.every((e) => e.mbid && e.mbid === withAlbums[0].mbid);
+        g.byId = withAlbums.every((e) => e.mbid && e.mbid === withAlbums[0].mbid);
+        g.idsDiffer = new Set(withAlbums.map((e) => e.mbid).filter(Boolean)).size > 1;
+        g.otherId = !!mb.artist?.id && withAlbums.some((e) => e.mbid && e.mbid !== mb.artist.id);
         // Merged into: the library's artist of the plain name, of those of
         // one name the one Plex has MusicBrainz's id for, or with the most
         // albums.
@@ -161,20 +165,32 @@ export async function mbMergeView({ el, onDispose }) {
     const joined = groups.filter((g) => g.kind === 'joined' && g.verdict === 'same');
     const left = groups.filter((g) => g.verdict !== 'same');
     const evidence = (g) => {
-      if (g.byId) return 'Plex has the same MusicBrainz id for them.';
-      if (g.kind === 'joined' && !g.mb?.namesakes?.length) return `Its files name ${g.name}, and MusicBrainz knows only one ${g.name}.`;
-      return `MusicBrainz has ${g.kind === 'joined' ? 'its albums' : 'albums of each of them'} as ${g.name}’s, and none as another’s of the name.`;
+      if (g.kind === 'joined') {
+        return g.mb?.namesakes?.length
+          ? `MusicBrainz has its albums and your ${g.name}’s as ${g.name}’s, and none as another’s of the name.`
+          : `MusicBrainz has your ${g.name}’s albums as theirs, and knows only one ${g.name}.`;
+      }
+      return `MusicBrainz has albums of each of them as ${g.name}’s, and none as another’s of the name${g.byId ? ' (and Plex has the same MusicBrainz id for them)' : ''}.`;
     };
-    const why = (g) =>
-      ({
-        first: `Plex has ${fmt.number(g.members.length)} artists called ${g.name}: those first, if they’re one.`,
-        different: g.kind === 'joined' ? `MusicBrainz has its albums as another ${g.name}’s.` : 'MusicBrainz has them as different artists of one name.',
-        unknown:
-          g.mb && !g.mb.artist
-            ? `MusicBrainz doesn’t know ${g.name}, so it can’t say whether ${g.kind === 'joined' ? 'it’s theirs' : 'they’re one artist'}.`
-            : `MusicBrainz can’t say whether ${g.kind === 'joined' ? 'it’s theirs' : 'they’re one artist'}: not by what it has of their albums.`,
-        error: `Couldn’t be looked up just now (${g.error}). Open this page again to try again.`,
-      })[g.verdict] || '';
+    const why = (g) => {
+      const one = g.kind === 'joined' ? 'it’s theirs' : 'they’re one artist';
+      let unknown = `MusicBrainz can’t say whether ${one}: not by what it has of their albums.`;
+      if (g.mb && !g.mb.artist) unknown = `MusicBrainz doesn’t know ${g.name}, so it can’t say whether ${one}.`;
+      else if (g.idsDiffer || g.otherId) unknown = `Plex has another artist’s MusicBrainz id for ${g.kind === 'joined' ? 'it' : 'one of them'}, so MusicBrainz can’t say whether ${one}.`;
+      else if (g.mb?.moreNamesakes) unknown = `MusicBrainz has more artists called ${g.name} than are looked through here, so it can’t say whether ${one}.`;
+      return (
+        {
+          first: `Plex has ${fmt.number(g.members.length)} artists called ${g.name}: those first, if they’re one.`,
+          different: g.idsDiffer
+            ? 'Plex has different MusicBrainz ids for them: different artists of one name.'
+            : g.kind === 'joined'
+              ? `MusicBrainz has its albums as another ${g.name}’s.`
+              : 'MusicBrainz has them as different artists of one name.',
+          unknown,
+          error: `Couldn’t be looked up just now (${g.error}). Open this page again to try again.`,
+        }[g.verdict] || ''
+      );
+    };
     const mergeButton = (g, label) => h('button.btn.btn-secondary.btn-small.mb-merge', { type: 'button', onclick: (e) => merge(g, e.currentTarget) }, label);
     const block = (title, rows) => (rows.length ? h('section.block', null, sectionHeader(`${title} (${fmt.number(rows.length)})`), h('div.rows.mb-merge-rows', null, rows)) : null);
     lists.replaceChildren(

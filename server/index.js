@@ -541,11 +541,13 @@ async function musicbrainzRoute(req, res, parts) {
 // MusicBrainz checks are for:
 //   POST /api/musicbrainz/artist { name, id, groups, namesakes } -> {
 //     artist: { id, name, aliases, genres } | null, groups: [{ id, title,
-//     primary, secondary, date }], namesakes? }: an artist's other names
-//     and genres, and (unless `groups` is false) their release groups; by
-//     their MusicBrainz id (`id`), where Plex has it, else by name. With
-//     `namesakes`, other artists of that name too, with theirs ([{ id,
-//     name, note, groups }]: see MusicBrainz.namesakes).
+//     primary, secondary, date }], namesakes?, moreNamesakes? }: an
+//     artist's other names and genres, and (unless `groups` is false) their
+//     release groups; by their MusicBrainz id (`id`), where Plex has it,
+//     else by name. With `namesakes`, other artists of that name too, with
+//     theirs ([{ id, name, note, groups }]: see MusicBrainz.namesakes), and
+//     `moreNamesakes` (true) where MusicBrainz has more of the name than
+//     those.
 //   POST /api/musicbrainz/albums { items: [{ artist, title, year }], genres,
 //     wait } -> { results: [{ id, title, primary, secondary, date, genres? }
 //     | null | 'pending'] }: albums' release groups as far as they're known
@@ -577,10 +579,11 @@ async function musicbrainzFeatures(req, res, what) {
       const artist = await musicbrainz.artistInfo(name(body.name), { id: mbid(body.id), signal: ctrl.signal });
       const groups = artist && body.groups !== false ? await musicbrainz.releaseGroups(artist.id, { signal: ctrl.signal }) : [];
       // (`capped`: they have more than are listed. `namesakes`: other artists of the name too, with their release
-      // groups.)
+      // groups; `moreNamesakes`: there are more of those than are listed.)
       const capped = !!groups.capped;
       if (body.namesakes !== true) return send(res, 200, { artist, groups, capped });
-      return send(res, 200, { artist, groups, capped, namesakes: await musicbrainz.namesakes(name(body.name), { but: artist?.id, signal: ctrl.signal }) });
+      const namesakes = await musicbrainz.namesakes(name(body.name), { but: artist?.id, signal: ctrl.signal });
+      return send(res, 200, { artist, groups, capped, namesakes, ...(namesakes.more ? { moreNamesakes: true } : {}) });
     } catch (err) {
       if (ctrl.signal.aborted && !res.writableEnded) throw new HttpError(504, 'MusicBrainz took too long to answer. Try again later.');
       throw err;

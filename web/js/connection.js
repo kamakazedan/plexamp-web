@@ -21,9 +21,16 @@ export function connectionBack() {
   connection.dispatchEvent(new Event('back'));
 }
 
-// Whether the server answers right now: any answer at all, even a refusal,
-// says it's there. Not while the browser says it's offline (and never from
-// the browser's cache).
+// A request (as plex.js throws them) that didn't reach a Plex server that
+// could answer it: no answer at all, or one from in between (the
+// container's /pms/ proxy while your Plex server is down or restarting, a
+// 502 or a 503, say), or a server not working (a 500).
+export const unreachable = (err) => !!err?.network || err?.status >= 500;
+
+// Whether the server answers right now: any answer from it, even a
+// refusal, says it's there (but not one from in between: see unreachable).
+// Not while the browser says it's offline (and never from the browser's
+// cache).
 export async function serverAnswers() {
   const s = app.server;
   if (navigator.onLine === false || !s) return false;
@@ -31,7 +38,7 @@ export async function serverAnswers() {
     await s.identity({ timeout: 5000, cache: 'no-store' });
     return true;
   } catch (err) {
-    return !err?.network;
+    return !unreachable(err);
   }
 }
 
@@ -39,7 +46,7 @@ export async function serverAnswers() {
 // throws them), rather than the server saying no: and the server isn't
 // answering now either.
 export async function offlineFor(err) {
-  if (!err?.network) return false;
+  if (!unreachable(err)) return false;
   if (await serverAnswers()) return false;
   connectionLost();
   return true;

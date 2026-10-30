@@ -330,8 +330,9 @@ export class MusicBrainz {
   // by id): [{ id, name, note, groups }], MB_ADVANCED_LIMITS.namesakes at
   // most, the likeliest first, each with their release groups (`note`:
   // MusicBrainz's word for telling them apart, "Dutch drum & bass producer",
-  // say). For telling an artist's albums from those of another of the same
-  // name, which Plex can have as one artist (see the app's mb.js).
+  // say), and `more` (true) where it has more of the name than those. For
+  // telling an artist's albums from those of another of the same name,
+  // which Plex can have as one artist (see the app's mb.js).
   async namesakes(name, { but = null, signal, background = false } = {}) {
     const want = norm(name);
     if (!this.adv || !want || VARIOUS.has(want)) return [];
@@ -342,11 +343,13 @@ export class MusicBrainz {
       const found = await this.ask('/ws/2/artist', { query: `artist:${phrase(name)} OR sortname:${phrase(name)}`, limit: '25' }, signal, { background });
       list = this.adv.set(key, sameNamed(found.artists, want));
     }
+    const rest = (list || []).filter((x) => x.id !== but);
     const out = [];
-    for (const a of (list || []).filter((x) => x.id !== but).slice(0, MB_ADVANCED_LIMITS.namesakes)) {
+    for (const a of rest.slice(0, MB_ADVANCED_LIMITS.namesakes)) {
       const groups = await this.releaseGroups(a.id, { signal, background });
       out.push({ ...a, groups, capped: !!groups.capped });
     }
+    if (rest.length > out.length) out.more = true;
     return out;
   }
 

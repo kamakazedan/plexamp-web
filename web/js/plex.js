@@ -1049,8 +1049,10 @@ export class PlexServer {
       duration: track.duration || undefined,
       'X-Plex-Session-Identifier': playback || undefined,
     });
-    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true }).then(
-      () => true,
+    // (Not by a 500 or more: from the container's /pms/ proxy while the
+    // server's down, say. And not waited on for ever: see outbox.js.)
+    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true, signal: AbortSignal.timeout(15000) }).then(
+      (res) => res.status < 500,
       () => false,
     );
   }

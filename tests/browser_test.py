@@ -4561,6 +4561,18 @@ with sync_playwright() as pw:
         refused = wait_for(lambda: page.locator('.toast:has-text("Gone Track")').count() > 0, 8, 0.25)
         page.unroute('**/:/rate?**')
         check('signal: a kept rating Plex refuses is let go, saying so', refused and outbox() == [], str(outbox()))
+        # A kept rating of a track rated since on another device (Plex's
+        # lastRatedAt after it was kept) is let go too, leaving the newer
+        # one, in Plex and here.
+        mock(f'/:/rate?key={first["id"]}&rating=8&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        page.evaluate("""(id) => Promise.all([import('./js/outbox.js'), import('./js/state.js')]).then(([o, { app }]) => {
+            o.restore({ kind: 'rated', key: `rated|${id}`, id, value: 2, title: 'Rated since', loved: false, server: app.source.serverId, at: Date.now() - 600000 });
+            return o.flush();
+        })""", first['id'])
+        let_go = wait_for(lambda: outbox() == [], 10, 0.3)
+        shown_now = page.evaluate("(id) => import('./js/ratings.js').then((r) => r.ratingOf({ id }))", first['id'])
+        check('signal: ...as is one of a track rated since on another device, leaving the newer rating (in Plex and here)',
+              let_go and track_meta(first['id']).get('userRating') == 8 and shown_now == 8, f'{outbox()} {track_meta(first["id"]).get("userRating")} {shown_now}')
         player(page, 'p.pause()')
         mock(f'/:/rate?key={first["id"]}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
         # What's kept is the account's: signing out clears it, unsent.

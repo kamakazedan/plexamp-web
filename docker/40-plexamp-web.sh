@@ -372,7 +372,10 @@ fi
 MB_ADV=false
 if truthy MUSICBRAINZ_ADVANCED "${MUSICBRAINZ_ADVANCED:-}"; then
     # (Not off unseen: the container stops, so it's set right.)
-    [ "$MB" = true ] || fail "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL (the MusicBrainz to ask): set MUSICBRAINZ_URL too, or take MUSICBRAINZ_ADVANCED out"
+    if [ "$MB" != true ]; then
+        [ -z "${MUSICBRAINZ_URL:-}" ] || fail "MUSICBRAINZ_ADVANCED needs MusicBrainz, which MUSICBRAINZ=$MUSICBRAINZ turns off (though MUSICBRAINZ_URL is set): take MUSICBRAINZ out, or MUSICBRAINZ_ADVANCED"
+        fail "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL (the MusicBrainz to ask): set MUSICBRAINZ_URL too, or take MUSICBRAINZ_ADVANCED out"
+    fi
     MB_ADV=true
 fi
 
@@ -646,7 +649,9 @@ renamed() { # OLD NEW NEW_VALUE: the setting's old name is set
 [ -z "${OFFLINE_FROM:-}" ] || renamed OFFLINE_FROM OFFLINE_NETWORKS "${OFFLINE_NETWORKS:-}"
 OFFLINE=false
 OFFLINE_PWD_SET="${OFFLINE_PWD:-}"
-OFFLINE_NETWORKS_SET="$(lower "${OFFLINE_NETWORKS:-private}")"
+# (Spaces around it don't count, as offline.js reads it.)
+OFFLINE_NETWORKS_SET="$(lower "${OFFLINE_NETWORKS:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+[ -n "$OFFLINE_NETWORKS_SET" ] || OFFLINE_NETWORKS_SET=private
 if [ -n "$OFFLINE_PWD_SET" ]; then
     # (Its length isn't said either: nothing of the password goes in the
     # log.) Only characters that settings files keep as they are: a # or a
@@ -783,7 +788,8 @@ else
     [ -z "${OLLAMA_API_KEY:-}" ] || fail "OLLAMA_API_KEY needs OLLAMA_URL (the AI server it's for): set OLLAMA_URL too, or take OLLAMA_API_KEY out"
     case "$(lower "${OLLAMA_AUTH:-plex}")" in
         plex | on | true | yes | 1) ;;
-        *) fail "OLLAMA_AUTH needs OLLAMA_URL (the AI server it's for): set OLLAMA_URL too, or take OLLAMA_AUTH out" ;;
+        off | none | false | no | 0) fail "OLLAMA_AUTH needs OLLAMA_URL (the AI server it's for): set OLLAMA_URL too, or take OLLAMA_AUTH out" ;;
+        *) fail "OLLAMA_AUTH must be plex or off (got: $OLLAMA_AUTH)" ;;
     esac
     echo 'location ^~ /ollama/ { return 404; }' >"$AI_CONF"
 fi

@@ -2527,6 +2527,7 @@ class Handler(BaseHTTPRequestHandler):
                     t.pop('userRating', None)
                 else:
                     t['userRating'] = rating
+                t['lastRatedAt'] = int(time.time())
             sys.stderr.write(f'  rate {q.get("key", [""])[0]} -> {rating}\n')
             if t is not None:
                 timeline(t['ratingKey'], 10, 5)

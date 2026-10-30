@@ -700,7 +700,7 @@ bad "rejects an OFFLINE_NETWORKS that isn't addresses" "OFFLINE_NETWORKS: home i
 bad "OFFLINE_PWD without PLEX_SERVER_URL stops the container" "OFFLINE_PWD needs PLEX_SERVER_URL" -e OFFLINE_PWD=offline-pwd-for-tests
 bad "OFFLINE_NETWORKS without OFFLINE_PWD stops it" "OFFLINE_NETWORKS is set but OFFLINE_PWD isn't" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_NETWORKS=any
 bad "MUSICBRAINZ_ADVANCED without a MusicBrainz to ask stops it" "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL" -e MUSICBRAINZ_ADVANCED=true
-bad "...as with MUSICBRAINZ=false" "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL" -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e MUSICBRAINZ_ADVANCED=true
+bad "...nor with MUSICBRAINZ=false, which turns MUSICBRAINZ_URL off" "MUSICBRAINZ_ADVANCED needs MusicBrainz, which MUSICBRAINZ=false turns off" -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e MUSICBRAINZ_ADVANCED=true
 bad "OLLAMA_MODEL without OLLAMA_URL stops it" "OLLAMA_MODEL needs OLLAMA_URL" -e OLLAMA_MODEL=llama3.1:8b
 bad "OLLAMA_API_KEY without OLLAMA_URL stops it" "OLLAMA_API_KEY needs OLLAMA_URL" -e OLLAMA_API_KEY=sk-not-printed-123
 docker run -d --name pw-bad -e OLLAMA_API_KEY=sk-not-printed-123 "$IMAGE" >/dev/null
@@ -708,6 +708,7 @@ sleep 3
 lacks "...without printing the key" "sk-not-printed-123" "$(docker logs pw-bad 2>&1 || true)"
 docker rm -f pw-bad >/dev/null 2>&1 || true
 bad "OLLAMA_AUTH=off without OLLAMA_URL stops it" "OLLAMA_AUTH needs OLLAMA_URL" -e OLLAMA_AUTH=off
+bad "...and one that's neither plex nor off says so first" "OLLAMA_AUTH must be plex or off (got: sometimes)" -e OLLAMA_AUTH=sometimes
 # Their names in 0.30.0: the container stops, saying what they're called now.
 bad "OFFLINE_KEY (0.30.0's name) stops the container, saying what it's called now" "OFFLINE_KEY is called OFFLINE_PWD since 0.31.0: rename it" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=offline-pwd-for-tests
 bad "...and where both are set, which to take out" "OFFLINE_KEY is called OFFLINE_PWD since 0.31.0, and both are set: take OFFLINE_KEY out" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=offline-pwd-for-tests -e OFFLINE_PWD=offline-pwd-for-tests

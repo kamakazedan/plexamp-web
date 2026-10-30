@@ -10,8 +10,8 @@ import { describeError } from './router.js';
 import { h, toast } from './ui.js';
 import { refreshLists } from './editing.js';
 import { live } from './live.js';
-import { offlineFor } from './connection.js';
-import { keep, forget, kept, keptOf, sendsWith } from './outbox.js';
+import { offlineFor, unreachable } from './connection.js';
+import { keep, forget, restore, kept, keptOf, sendsWith } from './outbox.js';
 
 export const LOVED = 10;
 export const LOVED_TITLE = '❤️ Tracks';
@@ -80,18 +80,20 @@ export async function rateTrack(track, rating) {
   const before = knownRating(track);
   const lovedChanged = (before === LOVED) !== (value === LOVED) && app.settings.lovedPlaylist !== false;
   let held = false;
-  let earlier = null;
+  // (One kept from before, while the connection was gone, is out of date
+  // now, so it's taken out first, not to be sent after this one: ❤️ Tracks
+  // as this one has it, if that one was to change it.)
+  const earlier = forget(`rated|${id}`);
   try {
     await app.server.rate(id, value);
-    // (One kept from before, while the connection was gone, is out of date
-    // now: ❤️ Tracks as this one has it, if that one changed it.)
-    earlier = forget(`rated|${id}`);
   } catch (err) {
-    if (!(await offlineFor(err))) throw err;
+    if (!(await offlineFor(err))) {
+      restore(earlier);
+      throw err;
+    }
     // (❤️ Tracks to change once it's sent: whether it's to change from how
     // it was before the first one kept.)
-    const prior = kept(`rated|${id}`);
-    keep({ kind: 'rated', key: `rated|${id}`, id, value, title: String(track.title || '').slice(0, 200), loved: lovedChanged !== !!prior?.loved });
+    keep({ kind: 'rated', key: `rated|${id}`, id, value, title: String(track.title || '').slice(0, 200), loved: lovedChanged !== !!earlier?.loved });
     held = true;
   }
   track.userRating = value;
@@ -105,12 +107,24 @@ export async function rateTrack(track, rating) {
 }
 
 // A rating kept while the connection was gone (rateTrack), sent now:
-// ❤️ Tracks then, as it changed it. One Plex refuses is let go, saying so.
+// ❤️ Tracks then, as it changed it. Not one rated again since, in another
+// Plex app or on another device (Plex's lastRatedAt for it is later, by
+// more than this device's clock and the server's could be apart): that
+// one stands, and shows here. One Plex refuses is let go, saying so.
+const CLOCKS_APART_MS = 120000;
 sendsWith('rated', async (x) => {
   try {
+    const now = await app.server.metadata(x.id);
+    if (Number(now?.lastRatedAt) * 1000 > x.at + CLOCKS_APART_MS) {
+      const value = now.userRating ?? null;
+      known.set(String(x.id), value);
+      ratingEvents.dispatchEvent(new CustomEvent('rated', { detail: { id: String(x.id), rating: value } }));
+      paintRows(String(x.id), value);
+      return false;
+    }
     await app.server.rate(x.id, x.value);
   } catch (err) {
-    if (err?.network) throw err;
+    if (unreachable(err)) throw err;
     toast(`Couldn’t save your rating of “${x.title || 'a track'}” from while the connection was gone. ${describeError(err)}`, { timeout: 6000 });
     return false;
   }

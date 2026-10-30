@@ -11,7 +11,7 @@ import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
-import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, sameArtist } from './releases.js';
+import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, sameArtist, genericTitle } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
@@ -2663,10 +2663,12 @@ test('MusicBrainz features: artists Plex has more than once, merged only on plai
   const id = '11111111-1111-4111-8111-111111111111';
   const other = '22222222-2222-4222-8222-222222222222';
   const band = { id, name: 'Alphabeat' };
-  const groups = [g('This Is Alphabeat', '2007-01-01'), g('The Beat Is...', '2009-11-02'), g('Express Non-Stop', '2012-09-24'), g('Alphabeat', '2007-03-01')];
-  const namesake = { id: other, name: 'Alphabeat', groups: [g('Night Shift', '2021-05-05')] };
+  const groups = [g('This Is Alphabeat', '2007-01-01'), g('The Beat Is...', '2009-11-02'), g('Express Non-Stop', '2012-09-24'), g('Alphabeat', '2007-03-01'),
+    g('Live', '2010-05-05'), g('Greatest Hits', '2015-01-01'), g('The Best of Alphabeat', '2016-01-01')];
+  const namesake = { id: other, name: 'Alphabeat', groups: [g('Night Shift', '2021-05-05'), g('Demos', '2020-01-01')] };
   const old = { mbid: id, albums: [{ title: 'This Is Alphabeat', year: 2007 }, { title: 'The Beat Is...', year: 2009 }] };
   const fresh = { mbid: null, albums: [{ title: 'Express Non-Stop (Deluxe)', year: 2012 }] };
+  const only = (...albums) => ({ mbid: null, albums });
   const mb = { name: 'Alphabeat', artist: band, groups, namesakes: [] };
 
   // Names of several artists in one, joined by ";" (and only by that)
@@ -2674,42 +2676,66 @@ test('MusicBrainz features: artists Plex has more than once, merged only on plai
   assert.deepEqual(joinedParts(' Alphabeat ; FORCE '), ['Alphabeat', 'FORCE']);
   for (const one of ['Alphabeat', 'Simon & Garfunkel', 'Earth, Wind & Fire', 'AC/DC', 'Alphabeat;', ';', '']) assert.equal(joinedParts(one), null, one);
 
-  // The very same MusicBrainz id in Plex for each: one artist, whatever else
-  assert.equal(sameArtist([old, { ...fresh, mbid: id }], { name: 'Alphabeat' }), 'same');
-  // ...different ids: different artists
-  assert.equal(sameArtist([old, { ...fresh, mbid: other }], mb), 'different');
+  // Album titles plenty of artists have
+  const generic = (title, name = '') => genericTitle(albumKey(title), albumKey(name));
+  for (const [title, name] of [['Live'], ['Greatest Hits, Vol. 2'], ['The Very Best Of'], ['Demos'], ['B-Sides'], ['Remixes'], ['EP 1'], ['II'], ['1999'], ['Up'], ['Live 2009'],
+    ['The Best of Alphabeat', 'Alphabeat'], ['Alphabeat Live', 'Alphabeat'], ['Led Zeppelin IV', 'Led Zeppelin']]) {
+    assert.equal(generic(title, name), true, title);
+  }
+  for (const title of ['This Is Alphabeat', 'The Beat Is...', 'Express Non-Stop', 'Live at Roskilde', 'Civil War', 'Night Shift']) assert.equal(generic(title, 'Alphabeat'), false, title);
+
   // An album of each that's plainly theirs on MusicBrainz (by its title, within a year), none another's
   assert.equal(sameArtist([old, fresh], mb), 'same');
   assert.equal(sameArtist([fresh, { ...fresh }], mb), 'same');
+  // ...even where Plex has the very same MusicBrainz id for each (it can have taken an artist MusicBrainz doesn't know for the one it does)
+  assert.equal(sameArtist([old, { ...fresh, mbid: id }], mb), 'same');
+  assert.equal(sameArtist([old, { mbid: id, albums: [{ title: 'Unreleased', year: 2020 }] }], mb), 'unknown');
+  assert.equal(sameArtist([old, { ...fresh, mbid: id }], { name: 'Alphabeat' }), 'unknown');
+  // ...different ids: different artists
+  assert.equal(sameArtist([old, { ...fresh, mbid: other }], mb), 'different');
   // ...not by a self-titled album (artists of one name have those by construction)
-  assert.equal(sameArtist([old, { mbid: null, albums: [{ title: 'Alphabeat', year: 2007 }] }], mb), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Alphabeat', year: 2007 })], mb), 'unknown');
   // ...nor another year, a title only near theirs, or no year
   for (const it of [{ title: 'Express Non-Stop', year: 2015 }, { title: 'Express Non-Stops', year: 2012 }, { title: 'Express Non-Stop', year: null }]) {
-    assert.equal(sameArtist([old, { mbid: null, albums: [it] }], mb), 'unknown', JSON.stringify(it));
+    assert.equal(sameArtist([old, only(it)], mb), 'unknown', JSON.stringify(it));
   }
+  // ...nor one of a title plenty have (two of those, though, are plain enough; one in two editions isn't two)
+  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 })], mb), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'The Best of Alphabeat', year: 2016 })], mb), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 }, { title: 'Live (Deluxe)', year: 2010 })], mb), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 }, { title: 'Greatest Hits', year: 2015 })], mb), 'same');
   // ...nor with nothing of theirs on MusicBrainz for one of them
-  assert.equal(sameArtist([old, { mbid: null, albums: [{ title: 'Unreleased', year: 2020 }] }], mb), 'unknown');
-  // An album plainly another's of the name: different
-  assert.equal(sameArtist([old, { mbid: null, albums: [{ title: 'Night Shift', year: 2021 }] }], { ...mb, namesakes: [namesake] }), 'different');
+  assert.equal(sameArtist([old, only({ title: 'Unreleased', year: 2020 })], mb), 'unknown');
+  // An album plainly another's of the name: different (but one of a title plenty have only says it can't be told)
+  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake] }), 'different');
+  assert.equal(sameArtist([old, only({ title: 'Demos', year: 2020 })], { ...mb, namesakes: [namesake] }), 'unknown');
+  assert.equal(sameArtist([old, { ...fresh, albums: [...fresh.albums, { title: 'Demos', year: 2020 }] }], { ...mb, namesakes: [namesake] }), 'unknown');
   // ...but one theirs and another's both proves nothing either way
   const both = { ...namesake, groups: [...namesake.groups, g('The Beat Is...', '2009-01-01')] };
-  assert.equal(sameArtist([old, { mbid: null, albums: [{ title: 'The Beat Is...', year: 2009 }] }], { ...mb, namesakes: [both] }), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'The Beat Is...', year: 2009 })], { ...mb, namesakes: [both] }), 'unknown');
   // MusicBrainz's artist isn't the one Plex has the id of, or isn't known: can't tell
   assert.equal(sameArtist([old, fresh], { ...mb, artist: { id: other } }), 'unknown');
   assert.equal(sameArtist([old, fresh], { ...mb, artist: null }), 'unknown');
-  // ...nor where what's listed of either isn't all they have
+  // ...nor where what's listed of either isn't all they have, nor where there are more of the name than are listed
   assert.equal(sameArtist([old, fresh], { ...mb, capped: true }), 'unknown');
   assert.equal(sameArtist([old, fresh], { ...mb, namesakes: [{ ...namesake, capped: true }] }), 'unknown');
+  assert.equal(sameArtist([old, fresh], { ...mb, namesakes: [namesake], moreNamesakes: true }), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake], moreNamesakes: true }), 'different');
   // One alone isn't more than once
   assert.equal(sameArtist([old], mb), 'unknown');
 
-  // A name of several in one, as theirs: MusicBrainz knows the artist, and no other of the name
+  // A name of several in one, as theirs: the artist of the plain name is MusicBrainz's, plainly, and it knows no other of the name
   const joined = { mbid: null, albums: [{ title: 'Shadows (FORCE Remix)', year: 2023 }] };
   assert.equal(sameArtist([old, joined], { ...mb, joined: true }), 'same');
+  assert.equal(sameArtist([only({ title: 'Unreleased', year: 2020 }), joined], { ...mb, joined: true }), 'unknown');
+  assert.equal(sameArtist([only({ title: 'Live', year: 2010 }), joined], { ...mb, joined: true }), 'unknown');
   // ...where it knows another of the name, only on an album plainly theirs
   assert.equal(sameArtist([old, joined], { ...mb, namesakes: [namesake], joined: true }), 'unknown');
-  assert.equal(sameArtist([old, { mbid: null, albums: [{ title: 'Express Non-Stop', year: 2012 }] }], { ...mb, namesakes: [namesake], joined: true }), 'same');
-  assert.equal(sameArtist([old, { mbid: null, albums: [{ title: 'Night Shift', year: 2021 }] }], { ...mb, namesakes: [namesake], joined: true }), 'different');
+  assert.equal(sameArtist([old, only({ title: 'Express Non-Stop', year: 2012 })], { ...mb, namesakes: [namesake], joined: true }), 'same');
+  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake], joined: true }), 'different');
+  // ...an id Plex has for it that isn't the artist's: which of the names it's for can't be told
+  assert.equal(sameArtist([old, { ...joined, mbid: other }], { ...mb, joined: true }), 'unknown');
+  assert.equal(sameArtist([old, { ...joined, mbid: id }], { ...mb, joined: true }), 'same');
   // ...and never where MusicBrainz doesn't know the artist at all
   assert.equal(sameArtist([old, joined], { ...mb, artist: null, joined: true }), 'unknown');
 });
@@ -2721,7 +2747,9 @@ test('MusicBrainz features: other artists of a name, and their release groups, l
     const u = new URL(url);
     asked.push(`${u.pathname}?${u.searchParams.get('query') || u.searchParams.get('artist') || ''}`);
     let body = {};
-    if (u.pathname === '/ws/2/artist') {
+    if (u.pathname === '/ws/2/artist' && /Phoenix/.test(u.searchParams.get('query'))) {
+      body = { artists: [1, 2, 3, 4, 5].map((i) => ({ id: `55555555-5555-4555-8555-55555555555${i}`, name: 'Phoenix', score: 100 - i })) };
+    } else if (u.pathname === '/ws/2/artist') {
       body = { artists: [
         { id: ids.a, name: 'Maduk', disambiguation: 'Dutch drum & bass producer', score: 100 },
         { id: ids.b, name: 'Maduk', disambiguation: 'Brazilian rapper', score: 100 },
@@ -2736,9 +2764,14 @@ test('MusicBrainz features: other artists of a name, and their release groups, l
   const mb = new MusicBrainz({ base: 'http://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const others = await mb.namesakes('Maduk', { but: ids.a });
   assert.deepEqual(others.map((a) => [a.id, a.name, a.note, a.groups.map((x) => x.title)]), [[ids.b, 'Maduk', 'Brazilian rapper', ['Cocaine']]]);
+  assert.equal(others.more, undefined);
   assert.match(asked[0], /^\/ws\/2\/artist\?artist:"Maduk" OR sortname:"Maduk"$/);
   const n = asked.length;
   await mb.namesakes('Maduk', { but: ids.b });
   assert.equal(asked.length, n + 1); // (the search kept: only the other's release groups asked for)
   assert.deepEqual(await mb.namesakes('Various Artists'), []);
+  // More of the name than are looked at: said so
+  const many = await mb.namesakes('Phoenix', { but: '55555555-5555-4555-8555-555555555551' });
+  assert.deepEqual(many.map((a) => a.id.slice(-1)), ['2', '3', '4']);
+  assert.equal(many.more, true);
 });

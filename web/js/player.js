@@ -453,6 +453,8 @@ class Player extends EventTarget {
   }
   get time() {
     if (this.cast) return this.cast.time();
+    // Waiting for the connection (see holdFor): where it goes on from.
+    if (this.held && this.held.qid === this.current?.qid) return this.held.at;
     // Starting part-way (a stream started again, say): there until it's
     // ready to be moved there.
     if (this.startingAt != null && (!this.deck.hasSource() || this.audio.readyState < 1)) return this.startingAt;
@@ -1367,6 +1369,13 @@ class Player extends EventTarget {
     this.cancelTransition();
     const d = this.duration;
     const t = Math.max(0, Math.min(sec, d ? d - 0.25 : sec));
+    // (Waiting for the connection: from there once it's back.)
+    if (this.held?.qid === this.current.qid) {
+      this.held.at = t;
+      this.restoredAt = t;
+      this.queueTime();
+      return;
+    }
     if (!this.deck.hasSource()) {
       this.restoredAt = t;
     } else {
@@ -1505,7 +1514,7 @@ class Player extends EventTarget {
       const autoplay = this.loadAutoplay || this.state === 'playing' || this.state === 'loading';
       serverAnswers().then((answers) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
-        if (answers) this.couldntPlay(track, err, media);
+        if (answers || this.remote || this.cast) this.couldntPlay(track, err, media);
         else this.holdFor(track, at, autoplay);
       });
       return;
@@ -1667,17 +1676,18 @@ class Player extends EventTarget {
   // ---------- the connection gone ----------
 
   // A track that couldn't load, or stopped coming, as the connection's gone
-  // (see onError): it waits for it, at `at`, and once the server answers
-  // again loads from there (playing, if it was to play and hasn't been
-  // paused since), as the same playback. Asked again as the browser says
-  // it's online, or the app finds the connection's back (connection.js),
-  // and every so often anyway (a phone that loses its signal doesn't always
-  // say it's offline). What's loaded already, and changing to it, needs no
-  // connection: Next and the rest still work meanwhile.
+  // (see onError): it waits for it, at `at` (or where it's moved to
+  // meanwhile: see _seek), and once the server answers again loads from
+  // there (playing, if it was to play and hasn't been paused since), as the
+  // same playback. Asked again as the browser says it's online, or the app
+  // finds the connection's back (connection.js), and every so often anyway
+  // (a phone that loses its signal doesn't always say it's offline). What's
+  // loaded already, and changing to it, needs no connection: Next and the
+  // rest still work meanwhile.
   holdFor(track, at, autoplay) {
     this.cancelHold();
     const qid = track.qid;
-    const hold = { qid, tries: 0, timer: 0 };
+    const hold = { qid, at, tries: 0, timer: 0 };
     this.held = hold;
     this.loadAutoplay = autoplay;
     this.setState(autoplay ? 'loading' : 'paused');
@@ -1700,8 +1710,8 @@ class Player extends EventTarget {
       const play = this.loadAutoplay && this.state !== 'paused';
       this.cancelHold();
       connectionBack();
-      debugLog('player', `the connection’s back: “${track.title}” from ${at.toFixed(1)} s`);
-      this.load(this.index, { autoplay: play, startAt: at, reportPrev: false, resume: true });
+      debugLog('player', `the connection’s back: “${track.title}” from ${hold.at.toFixed(1)} s`);
+      this.load(this.index, { autoplay: play, startAt: hold.at, reportPrev: false, resume: true });
     };
     window.addEventListener('online', hold.again);
     connection.addEventListener('back', hold.again);
@@ -1772,6 +1782,8 @@ class Player extends EventTarget {
     if (remote === this.remote) return;
     if (remote && this.cast) this.cast.stop({ here: false }); // a session plays here
     this.cancelTransition();
+    // (A track waiting for the connection: the session's to play now.)
+    this.cancelHold();
     this.remote = remote;
     this.failedQid = null;
     if (remote) {
@@ -2225,7 +2237,10 @@ class Player extends EventTarget {
     if (c === this.cast) return;
     this.cancelTransition();
     if (c) {
+      // (A track waiting for the connection: the Plex player's now, from
+      // where it was waiting, as time has it.)
       this.restoredAt = this.time;
+      this.cancelHold();
       this.setPendingSeek(null);
       this.cancelRescue();
       this.resumeAs = null;
@@ -2316,11 +2331,19 @@ class Player extends EventTarget {
     const sent = app.server.timeline(track, state, time * 1000, playback);
     // A track's last report (played to its end from what was loaded ahead,
     // say) that couldn't get there as the connection's gone: kept, and sent
-    // once it's back (outbox.js), so the play counts as it would have.
+    // once it's back (outbox.js), so the play counts as it would have. If
+    // the server answers again already (it was gone a moment), it's sent
+    // again now instead, the once.
     if (state !== 'stopped') return;
     const s = app.server;
     sent.then(async (ok) => {
-      if (ok || app.server !== s || (await serverAnswers())) return;
+      if (ok || app.server !== s) return;
+      const answers = await serverAnswers();
+      if (app.server !== s) return;
+      if (answers) {
+        s.timeline(track, state, time * 1000, playback);
+        return;
+      }
       keepPlayed(track, time * 1000, playback);
       connectionLost();
     });

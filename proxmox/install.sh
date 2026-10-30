@@ -226,17 +226,20 @@ fi
 renames=()
 for pair in OFFLINE_KEY:OFFLINE_PWD OFFLINE_FROM:OFFLINE_NETWORKS; do
     old="${pair%%:*}" new="${pair#*:}"
-    # (Not where the new name's there too: the start-up script then says
-    # which to keep.)
-    if grep -q "^$old=" "$ENV_FILE" && ! grep -q "^$new=" "$ENV_FILE"; then renames+=(-e "s/^$old=/$new=/"); fi
+    # (As systemd reads the file: spaces before a name don't count. And not
+    # where the new name's there too: the start-up script then says which
+    # to keep.)
+    if grep -Eq "^[[:space:]]*$old=" "$ENV_FILE" && ! grep -Eq "^[[:space:]]*$new=" "$ENV_FILE"; then
+        renames+=(-e "s/^([[:space:]]*)$old=/\\1$new=/")
+    fi
 done
 if [ "${#renames[@]}" -gt 0 ]; then
-    renamed="$(sed -E "${renames[@]}" \
+    # (sed -i writes a new file beside it, with its owner and permissions,
+    # and only then puts it in its place: never a file half written.)
+    sed -E -i "${renames[@]}" \
         -e 's/^# player can be signed in to with this key, as your Plex server lets it in$/# player can be signed in to with this password, as your Plex server lets it in/' \
         -e 's/^# Where the offline key can be used from: private \(your own networks\), any,$/# Where the offline password can be used from: private (your own networks), any,/' \
-        "$ENV_FILE")"
-    # (In place, so the file keeps its owner and permissions.)
-    printf '%s\n' "$renamed" >"$ENV_FILE"
+        "$ENV_FILE"
     say "Settings: OFFLINE_KEY and OFFLINE_FROM are called OFFLINE_PWD and OFFLINE_NETWORKS now, so they've been renamed, keeping their values"
 fi
 chmod 600 "$ENV_FILE"

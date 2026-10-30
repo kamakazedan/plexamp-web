@@ -9,7 +9,7 @@
 // and one the server refuses is let go (ratings.js says so).
 import { app, on } from './state.js';
 import { store } from './plex.js';
-import { connection, connectionLost, connectionBack } from './connection.js';
+import { connection, connectionLost, connectionBack, unreachable } from './connection.js';
 import { debugLog } from './debug.js';
 
 const KEY = 'outbox';
@@ -44,6 +44,13 @@ export function keep(item) {
   const x = { ...item, id: String(item.id), server: app.source.serverId, at: Date.now() };
   save([...load().filter((y) => y.key !== x.key || y.server !== x.server), x]);
   debugLog('offline', `kept for when the connection's back: ${x.kind} (${load().length} kept)`);
+  later();
+}
+
+// One taken out (forget), put back as it was.
+export function restore(item) {
+  if (!item || !fresh(item)) return;
+  save([...load().filter((y) => y.key !== item.key || y.server !== item.server), item]);
   later();
 }
 
@@ -103,7 +110,7 @@ async function send() {
     try {
       sent = await senders.get(next.kind)(next);
     } catch (err) {
-      if (err?.network) {
+      if (unreachable(err)) {
         connectionLost();
         later();
         return;
@@ -119,8 +126,10 @@ async function send() {
 }
 
 // A track's last report, played to its end, say ('stopped': see plex.js
-// timeline).
+// timeline). Not once Sync recent plays is off (here, or on another device:
+// it follows the account), as it would have been then.
 sendsWith('played', async (x) => {
+  if (app.settings.reportPlays === false) return false;
   const ok = await app.server.timeline({ id: x.id, duration: x.duration || undefined }, 'stopped', x.time, x.playback || undefined);
   if (!ok) throw Object.assign(new Error('network'), { network: true });
   return true;
