@@ -2104,7 +2104,7 @@ test('the owner\'s sign-ins: fingerprints only, for 30 days since last used, the
   }
 });
 
-test('offline mode: where the key can be used from (OFFLINE_FROM)', () => {
+test('offline mode: where the password can be used from (OFFLINE_NETWORKS)', () => {
   assert.equal(parseFrom('any'), null);
   assert.equal(parseFrom('ANY'), null);
   const at = (from) => new Offline({ key: 'twelve chars!', from, auth: {} });
@@ -2116,7 +2116,7 @@ test('offline mode: where the key can be used from (OFFLINE_FROM)', () => {
   for (const ip of ['192.168.1.200', '2001:db8:5::1', '10.9.9.9']) assert.equal(list.allowedFrom(ip), true, ip);
   for (const ip of ['192.168.2.1', '10.9.9.8', '127.0.0.1']) assert.equal(list.allowedFrom(ip), false, ip);
   assert.equal(at('any').allowedFrom('203.0.113.9'), true);
-  for (const bad of ['192.168.1.0/33', 'example.com', '10.0.0.1/', '1.2.3.4/8/9', 'privat', '10.0.0.0/0x8', '::/129']) assert.throws(() => parseFrom(bad), /OFFLINE_FROM/, bad);
+  for (const bad of ['192.168.1.0/33', 'example.com', '10.0.0.1/', '1.2.3.4/8/9', 'privat', '10.0.0.0/0x8', '::/129']) assert.throws(() => parseFrom(bad), /OFFLINE_NETWORKS/, bad);
 });
 
 // Offline mode with plex.tv as `tv` says, and a server that lets this
@@ -2135,7 +2135,7 @@ function offlineSetup({ key = 'correct horse battery', open = true } = {}) {
   return { off, tv, key, tick: (ms) => (now += ms), at: () => now };
 }
 
-test('offline mode: the key only once plex.tv hasn\'t answered for a while, where the server lets this player in, from where it may be used', async () => {
+test('offline mode: the password only once plex.tv hasn\'t answered for a while, where the server lets this player in, from where it may be used', async () => {
   const { off, tv, key, tick, at } = offlineSetup();
   tv.down = false;
   await assert.rejects(off.signIn(key, '192.168.1.5'), (e) => e.status === 409 && e.reason === 'plex-tv');
@@ -2166,16 +2166,16 @@ test('offline mode: the key only once plex.tv hasn\'t answered for a while, wher
   tick(OFFLINE_LIMITS.sessionMs + 1);
   assert.equal(off.valid(later.token), false);
   off.end(later.token);
-  // Nothing to play: the key isn't taken
+  // Nothing to play: the password isn't taken
   const shut = offlineSetup({ open: false });
   await assert.rejects(shut.off.signIn(shut.key, '10.0.0.2'), (e) => e.status === 409 && e.reason === 'server');
-  // No key: no offline mode
+  // No password: no offline mode
   const none = offlineSetup({ key: '' });
   await assert.rejects(none.off.signIn('', '10.0.0.2'), (e) => e.status === 404);
   assert.equal((await none.off.state('10.0.0.2')).on, false);
 });
 
-test('offline mode: a few tries a minute from an address, and once too many wrong keys have come from anywhere, none for the rest of the hour from where one came', async () => {
+test('offline mode: a few tries a minute from an address, and once too many wrong passwords have come from anywhere, none for the rest of the hour from where one came', async () => {
   const { off, key, tick } = offlineSetup();
   for (let i = 0; i < OFFLINE_LIMITS.triesPerMinute; i++) await assert.rejects(off.signIn('wrong', '10.0.0.1'), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.0.1'), (e) => e.status === 429); // (the right one too)
@@ -2184,7 +2184,7 @@ test('offline mode: a few tries a minute from an address, and once too many wron
   assert.ok((await off.signIn(key, '10.0.0.1')).token);
   for (let i = OFFLINE_LIMITS.triesPerMinute; i < OFFLINE_LIMITS.wrongPerHour; i++) await assert.rejects(off.signIn('wrong', `10.0.1.${i}`), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.1.9'), (e) => e.status === 429 && /hour/.test(e.message));
-  // ...but from anywhere else, the right key: nobody else's wrong ones keep it out
+  // ...but from anywhere else, the right password: nobody else's wrong ones keep it out
   assert.ok((await off.signIn(key, '10.0.2.1')).token);
   await assert.rejects(off.signIn('wrong', '10.0.2.2'), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.2.2'), (e) => e.status === 429 && /hour/.test(e.message));
@@ -2438,10 +2438,10 @@ async function startService(env, dir) {
   };
 }
 
-test('/pms/, end to end: the owner, friends the server knows as themselves, made-up sign-ins, the notification stream, plex.tv not answering, and the offline key', async () => {
+test('/pms/, end to end: the owner, friends the server knows as themselves, made-up sign-ins, the notification stream, plex.tv not answering, and the offline password', async () => {
   const p = await fakePlex();
   const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
-  const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_OFFLINE_KEY: 'the offline key', PW_SERVICE_OFFLINE_TIMING: '400,1500,100,100' };
+  const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_OFFLINE_PWD: 'the offline password', PW_SERVICE_OFFLINE_TIMING: '400,1500,100,100' };
   let svc = await startService(env, dir);
   // nginx's check of a request to /pms/: its token (from the query string, or the header), where it came from, how often a
   // token's name is in it (`seen`, as nginx counts: one in the query string, to begin with), whether it's to
@@ -2458,7 +2458,7 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
       },
     });
   const check = (token, opts) => checked(token, opts).then((r) => r.status);
-  // (What the check tells nginx: an offline-key session's request goes without its sign-in.)
+  // (What the check tells nginx: an offline-password session's request goes without its sign-in.)
   const offlineSaid = (token, opts) => checked(token, opts).then((r) => r.headers.get('x-pw-pms-offline'));
   try {
     // A server that doesn't let this container in: everything goes through, as Plex checks it.
@@ -2497,14 +2497,14 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     assert.equal(await check('sam-token', { also: { 'X-PW-Plex-Token': 'sam%2Dtoken' } }), 403);
     assert.equal(await check('sam-token'), 204);
     assert.equal(await offlineSaid('owner-token'), null);
-    // The offline key, while plex.tv is answering: no
+    // The offline password, while plex.tv is answering: no
     const signIn = (key, ip = '192.168.1.20') =>
       fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': ip, 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
-    let r = await signIn('the offline key');
+    let r = await signIn('the offline password');
     assert.equal(r.status, 409);
     assert.equal((await r.json()).reason, 'plex-tv');
     // (Only as JSON: another site's page can't have a browser send that without asking first.)
-    r = await fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': '192.168.1.20', 'Content-Type': 'text/plain' }, body: JSON.stringify({ key: 'the offline key' }) });
+    r = await fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': '192.168.1.20', 'Content-Type': 'text/plain' }, body: JSON.stringify({ key: 'the offline password' }) });
     assert.equal(r.status, 415);
     // plex.tv stops answering, and the service restarts meanwhile (nothing in memory): the owner's sign-in is known, as a fingerprint
     await svc.stop();
@@ -2517,13 +2517,13 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     p.state.honour = false;
     assert.equal(await check('sam-token'), 503);
     p.state.honour = true;
-    // The offline key: once plex.tv hasn't answered for a while, from where it may be used
+    // The offline password: once plex.tv hasn't answered for a while, from where it may be used
     await sleep(450);
-    r = await signIn('not the offline key');
+    r = await signIn('not the offline password');
     assert.equal(r.status, 401);
-    r = await signIn('the offline key', '203.0.113.7');
+    r = await signIn('the offline password', '203.0.113.7');
     assert.equal(r.status, 403);
-    r = await signIn('the offline key');
+    r = await signIn('the offline password');
     assert.equal(r.status, 200);
     const { token } = await r.json();
     assert.equal(await check(token), 204);

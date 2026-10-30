@@ -1,6 +1,6 @@
-// Offline mode (OFFLINE_KEY on the container, with PLEX_SERVER_URL): while
+// Offline mode (OFFLINE_PWD on the container, with PLEX_SERVER_URL): while
 // plex.tv isn't answering the player, nobody can sign in with Plex. Then,
-// and only then, this player can be signed in to with its offline key (see
+// and only then, this player can be signed in to with its offline password (see
 // server/offline.js): its Plex server, as the server lets the player's
 // container in without signing in, which is as the server's owner. Signed
 // in so, the app asks every so often whether that's still on; once plex.tv
@@ -15,7 +15,7 @@ import { debugLog } from './debug.js';
 const WATCH_EVERY = 15000;
 
 // Whether the player has a /pms/ proxy, whose service says how plex.tv is
-// (and, with OFFLINE_KEY, takes the key).
+// (and, with OFFLINE_PWD, takes the password).
 export const offlineAsked = () => !!app.config.serverProxy;
 
 async function api(path, { method = 'GET', body, token } = {}) {
@@ -37,16 +37,16 @@ async function api(path, { method = 'GET', body, token } = {}) {
   return data;
 }
 
-// How plex.tv is, as the player sees it, and whether the key can be used:
+// How plex.tv is, as the player sees it, and whether the password can be used:
 // { configured, on, plexTv: 'up' | 'down', why, session }.
 export function offlineState(token = null) {
   return api('', { token });
 }
 
-// The offline key: signed in with it, on the player's Plex server (its
+// The offline password: signed in with it, on the player's Plex server (its
 // first music library: the Home screen's switcher has the others).
-export async function signInOffline(key) {
-  const { token } = await api('/session', { method: 'POST', body: { key } });
+export async function signInOffline(password) {
+  const { token } = await api('/session', { method: 'POST', body: { key: password } });
   const uri = proxyUri();
   const ps = new PlexServer({ uri, token });
   let root;
@@ -61,7 +61,7 @@ export async function signInOffline(key) {
     api('/session', { method: 'DELETE', token }).catch(() => {});
     throw err;
   }
-  setAuth({ token, username: 'Offline key', thumb: null, manual: true, offline: true });
+  setAuth({ token, username: 'Offline mode', thumb: null, manual: true, offline: true });
   setSource({
     serverId: root.machineIdentifier || uri,
     serverName: root.friendlyName || 'Plex',
@@ -74,7 +74,7 @@ export async function signInOffline(key) {
   });
 }
 
-// Signed in with the key: whether that's still on, every so often, and as
+// Signed in with the password: whether that's still on, every so often, and as
 // the app's shown again. Once it isn't, signed out, to the sign-in page,
 // which says why.
 let watching = null;
@@ -94,7 +94,7 @@ export function watchOffline() {
     // (`gone`: plex.tv still isn't answering, so it ended otherwise: the
     // player restarted, or it was 14 days.)
     const why = state.plexTv === 'down' ? 'gone' : 'ended';
-    debugLog('offline', why === 'ended' ? 'plex.tv is answering again, so the offline key’s session has ended: signing out' : 'the offline key’s session has ended: signing out');
+    debugLog('offline', why === 'ended' ? 'plex.tv is answering again, so the offline password’s session has ended: signing out' : 'the offline password’s session has ended: signing out');
     stopWatching();
     history.replaceState(null, '', `${location.pathname}${location.search}#/login?offline=${why}`);
     signOut();
@@ -112,7 +112,7 @@ function stopWatching() {
   watching = null;
 }
 
-// Signing out of the key's session ends it on the player too.
+// Signing out of the password's session ends it on the player too.
 on('signing-out', () => {
   stopWatching();
   if (!app.auth?.offline) return;

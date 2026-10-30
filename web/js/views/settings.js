@@ -25,7 +25,7 @@ function badge(text) {
 }
 
 const avatar = (url, name) => personAvatar(url, name);
-// Who's signed in: their Plex picture, or the offline key's lock.
+// Who's signed in: their Plex picture, or the offline password's lock.
 const authAvatar = (auth, size = 24) => (auth.offline ? h('span.badge-circle', { 'aria-hidden': 'true' }, icon('lock', size)) : avatar(auth.thumb, auth.username));
 
 export async function settingsView({ el }) {
@@ -41,7 +41,7 @@ export async function settingsView({ el }) {
         href: '/settings/account',
         lead: lead(auth.offline ? 'lock' : 'user'),
         title: 'Account',
-        subtitle: auth.offline ? 'The offline key, while plex.tv isn’t answering' : auth.username || 'Signed in',
+        subtitle: auth.offline ? 'The offline password, while plex.tv isn’t answering' : auth.username || 'Signed in',
         right: authAvatar(auth),
       }),
       row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: badge(src?.serverName) }),
@@ -98,7 +98,7 @@ function accountView({ el }) {
         'div.account-sub',
         null,
         auth.offline
-          ? 'plex.tv isn’t answering this player, so it’s signed in to with its offline key. That plays the library as your Plex server lets this player in: as the server’s owner. Play Together, your devices, shared playlists and settings that follow an account wait for a Plex sign-in. Once plex.tv is answering again, you’re signed out, to sign in with Plex.'
+          ? 'plex.tv isn’t answering this player, so it’s signed in to with its offline password. That plays the library as your Plex server lets this player in: as the server’s owner. Play Together, your devices, shared playlists and settings that follow an account wait for a Plex sign-in. Once plex.tv is answering again, you’re signed out, to sign in with Plex.'
           : auth.manual
             ? 'Connected with a server token'
             : 'Signed in with your Plex account',
@@ -137,7 +137,7 @@ function confirmSignOut() {
     title: 'Sign out?',
     subtitle: `Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays.${
       app.auth?.offline
-        ? ' The offline key’s session ends.'
+        ? ' The offline password’s session ends.'
         : app.config.settingsSync && app.config.missingSync
         ? ' Settings and missing tracks kept for your account stay with it, for when you sign in again.'
         : app.config.settingsSync
@@ -169,7 +169,7 @@ function accountSyncRows() {
     rows.append(
       row({
         title: 'Kept on this device',
-        subtitle: app.auth?.offline ? 'Signed in with the offline key, nothing’s kept for an account: settings are this browser’s own.' : 'This player doesn’t keep settings for each Plex account, so they’re this browser’s own.',
+        subtitle: app.auth?.offline ? 'Signed in with the offline password, nothing’s kept for an account: settings are this browser’s own.' : 'This player doesn’t keep settings for each Plex account, so they’re this browser’s own.',
       }),
     );
     return rows;

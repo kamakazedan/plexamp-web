@@ -79,7 +79,7 @@ testing, these endpoints need no token:
     /__mock/seen[?reset=1]        the server's last 200 requests: path, the
                                   value of a pwtest= in it (to find one), where
                                   its token was (header, query, both or none),
-                                  whether it was an offline-key session's, and
+                                  whether it was an offline-password session's, and
                                   which headers saying where it came from it had
     /__mock/home[?reset=1]        the switches made in Dan's Plex Home: who
                                   from, to whom, and the PIN given

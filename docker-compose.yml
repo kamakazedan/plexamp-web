@@ -54,17 +54,17 @@
 #                       page for the playlist (the first 100 tracks), which
 #                       Spotify's terms don't allow, and which can stop
 #                       working. (SPOTIFY_IMPORT, its old name, still works.)
-#   OFFLINE_KEY         Offline mode, with PLEX_SERVER_URL: while plex.tv isn't
+#   OFFLINE_PWD         Offline mode, with PLEX_SERVER_URL: while plex.tv isn't
 #                       answering (your internet's down, say), the player can
-#                       be signed in to with this key, as your Plex server's
-#                       owner, till plex.tv is back. Needs your server to let
-#                       the player in without signing in: see
+#                       be signed in to with this password, as your Plex
+#                       server's owner, till plex.tv is back. Needs your
+#                       server to let the player in without signing in: see
 #                       docs/configuration.md. 12 to 200 letters, digits and
 #                       . _ ~ + / = : , @ - (openssl rand -base64 24 makes
 #                       one; a # or $ would be read otherwise here).
-#   OFFLINE_FROM        Where the key can be used from: "private" (the
-#                       default: your own networks), "any", or addresses and
-#                       networks, such as 192.168.1.0/24.
+#   OFFLINE_NETWORKS    Where the offline password can be used from:
+#                       "private" (the default: your own networks), "any",
+#                       or addresses and networks, such as 192.168.1.0/24.
 #   DEBUG               "true" writes extra detail to the log, with tokens and
 #                       keys removed. Turn it off when you're done.
 #
@@ -95,8 +95,8 @@ services:
       SYNC_MISSING_TRACKS: "true"
       SPOTIFY_FILE_IMPORT: ""
       SPOTIFY_LINK_IMPORT: ""
-      # OFFLINE_KEY: "a long random key of your own"
-      # OFFLINE_FROM: "private"
+      # OFFLINE_PWD: "a long random password of your own"
+      # OFFLINE_NETWORKS: "private"
       DEBUG: ""
     volumes:
       - plexamp-web-data:/data

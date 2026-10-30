@@ -1,9 +1,9 @@
-// Offline mode (OFFLINE_KEY): while plex.tv isn't answering this container,
+// Offline mode (OFFLINE_PWD): while plex.tv isn't answering this container,
 // nobody can sign in with Plex. Then, and only then, this player can be
-// signed in to with its offline key, set by whoever runs it. What that gives
+// signed in to with its offline password, set by whoever runs it. What that gives
 // is the Plex server at PLEX_SERVER_URL as it lets this container in without
 // signing in, which is as its owner (their playlists, ratings and history):
-// the key is the owner's, for them and whoever they'd let use their Plex
+// the password is the owner's, for them and whoever they'd let use their Plex
 // account. Sessions are kept in memory only, and all of them end once
 // plex.tv has been answering again for two minutes (or after 14 days).
 //
@@ -14,14 +14,14 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
 
 export const OFFLINE_LIMITS = {
-  downForMs: 20000, // plex.tv hasn't answered for this long: the key can be used
+  downForMs: 20000, // plex.tv hasn't answered for this long: the password can be used
   endsUpForMs: 120000, // plex.tv has answered again for this long: every session ends
   sessionMs: 14 * 24 * 3600 * 1000,
   sessions: 50, // at most (the oldest go first)
   triesPerMinute: 5, // from one address
-  wrongPerHour: 30, // wrong keys from one address, or from everywhere together: then none is tried, for the rest of the hour, from there (or where one came)
-  wrongCapPerHour: 200, // ...and none from anywhere at all (but where the key signed in from lately)
-  knownForMs: 14 * 24 * 3600 * 1000, // where the key signed in from: tried whatever else has come, for this long
+  wrongPerHour: 30, // wrong passwords from one address, or from everywhere together: then none is tried, for the rest of the hour, from there (or where one came)
+  wrongCapPerHour: 200, // ...and none from anywhere at all (but where the password signed in from lately)
+  knownForMs: 14 * 24 * 3600 * 1000, // where the password signed in from: tried whatever else has come, for this long
 };
 
 const TOKEN = /^pwoff-[0-9a-f]{48}$/;
@@ -37,8 +37,8 @@ export class OfflineError extends Error {
   }
 }
 
-// Private networks: where OFFLINE_FROM=private (the default) lets the key be
-// used from. (An address as this container sees it: behind another proxy,
+// Private networks: where OFFLINE_NETWORKS=private (the default) lets the
+// password be used from. (An address as this container sees it: behind another proxy,
 // that proxy's.)
 const PRIVATE = [
   ['10.0.0.0', 8, 'ipv4'],
@@ -52,7 +52,7 @@ const PRIVATE = [
   ['fe80::', 10, 'ipv6'],
 ];
 
-// OFFLINE_FROM: "private", "any", or addresses and networks (a.b.c.d/n, an
+// OFFLINE_NETWORKS: "private", "any", or addresses and networks (a.b.c.d/n, an
 // IPv6 one), separated by commas. null: anywhere. Throws for anything else.
 export function parseFrom(spec) {
   const text = String(spec ?? '').trim().toLowerCase() || 'private';
@@ -67,7 +67,7 @@ export function parseFrom(spec) {
     const type = isIP(addr) === 4 ? 'ipv4' : isIP(addr) === 6 ? 'ipv6' : null;
     const max = type === 'ipv4' ? 32 : 128;
     const n = bits === undefined ? max : /^\d{1,3}$/.test(bits) ? Number(bits) : NaN;
-    if (!type || more !== undefined || !(n >= 0 && n <= max)) throw new Error(`OFFLINE_FROM: ${part} isn't an address or a network`);
+    if (!type || more !== undefined || !(n >= 0 && n <= max)) throw new Error(`OFFLINE_NETWORKS: ${part} isn't an address or a network`);
     list.addSubnet(addr, n, type);
   }
   return list;
@@ -76,15 +76,15 @@ export function parseFrom(spec) {
 export class Offline {
   constructor({ key = '', from = 'private', auth, log = null, now = () => Date.now() } = {}) {
     this.key = key ? digest(key) : null;
-    // (Without a key there's nothing for it to say: not even read.)
+    // (Without a password there's nothing for it to say: not even read.)
     this.from = key ? parseFrom(from) : null;
     this.auth = auth;
     this.log = log;
     this.now = now;
     this.sessions = new Map(); // token hash -> { at, until }, oldest first
-    this.wrong = []; // when wrong keys were tried, this last hour
+    this.wrong = []; // when wrong passwords were tried, this last hour
     this.wrongFrom = new Map(); // address -> when wrong ones were tried from it, this last hour (oldest first)
-    this.signedInFrom = new Map(); // address -> when the key last signed in from it, oldest first
+    this.signedInFrom = new Map(); // address -> when the password last signed in from it, oldest first
     this.tries = new Map(); // address -> { at, n }
     this.lockedSaid = false;
   }
@@ -93,7 +93,8 @@ export class Offline {
     return !!this.key;
   }
 
-  // Whether the key may be tried from this address (see OFFLINE_FROM).
+  // Whether the password may be tried from this address (see
+  // OFFLINE_NETWORKS).
   allowedFrom(ip) {
     if (!this.from) return true;
     let addr = String(ip || '');
@@ -103,12 +104,12 @@ export class Offline {
     return !!type && this.from.check(addr, type);
   }
 
-  // Can the key be used now, from this address? { on, plexTv, why }: why
+  // Can the password be used now, from this address? { on, plexTv, why }: why
   // not, where it can't ('plex-tv': plex.tv is answering, so sign in with
   // Plex; 'server': the Plex server doesn't let this container in without
   // signing in, so nothing could be played; 'server-down': it isn't
   // answering, or can't be told; 'network': not from here; 'off': there's no
-  // key). The server's asked right then (see openNow in plex.js).
+  // password). The server's asked right then (see openNow in plex.js).
   async state(addr) {
     const down = await this.auth.plexTvDown({ forMs: OFFLINE_LIMITS.downForMs, fresh: true });
     const plexTv = this.auth.tv.down ? 'down' : 'up';
@@ -125,11 +126,11 @@ export class Offline {
     return { on: true, plexTv, why: '' };
   }
 
-  // The key, from this address (`limitKey`: what it's counted as, for the
+  // The password, from this address (`limitKey`: what it's counted as, for the
   // limit on tries): a session's sign-in, or an OfflineError.
   async signIn(key, addr, limitKey = addr) {
     if (!this.configured) throw new OfflineError(404, 'This player has no offline mode.');
-    if (!this.allowedFrom(addr)) throw new OfflineError(403, 'The offline key can’t be used from your network.', 'network');
+    if (!this.allowedFrom(addr)) throw new OfflineError(403, 'The offline password can’t be used from your network.', 'network');
     const now = this.now();
     let t = this.tries.get(limitKey);
     if (!t || now - t.at > 60000) {
@@ -146,12 +147,13 @@ export class Offline {
       if (left.length) this.wrongFrom.set(from, left);
       else this.wrongFrom.delete(from);
     }
-    // After too many wrong keys from an address, none is tried from it for the
-    // rest of the hour, whoever's there. After too many from anywhere, none
-    // from where a wrong one came; after many more, from nowhere at all. But
-    // where the key signed in from lately (the owner's own devices), only its
-    // own wrong keys count, so nobody else's can keep it out there. (Behind a
-    // reverse proxy, everyone's there: see SECURITY.md.)
+    // After too many wrong passwords from an address, none is tried from it
+    // for the rest of the hour, whoever's there. After too many from
+    // anywhere, none from where a wrong one came; after many more, from
+    // nowhere at all. But where the password signed in from lately (the
+    // owner's own devices), only its own wrong ones count, so nobody else's
+    // can keep it out there. (Behind a reverse proxy, everyone's there: see
+    // SECURITY.md.)
     const mine = this.wrongFrom.get(limitKey)?.length || 0;
     const known = now - (this.signedInFrom.get(limitKey) ?? -Infinity) < OFFLINE_LIMITS.knownForMs;
     const locked =
@@ -161,11 +163,11 @@ export class Offline {
         this.lockedSaid = true;
         this.log?.warn(
           mine >= OFFLINE_LIMITS.wrongPerHour && this.wrong.length < OFFLINE_LIMITS.wrongPerHour
-            ? `offline mode: ${mine} wrong offline keys tried from ${addr || 'an unknown address'} in the last hour, so no more are tried from there until it's over`
-            : `offline mode: ${this.wrong.length} wrong offline keys tried in the last hour, so no more are tried until it's over from where one came${this.wrong.length >= OFFLINE_LIMITS.wrongCapPerHour ? ', nor from anywhere the key hasn\'t signed in from lately' : ''}`,
+            ? `offline mode: ${mine} wrong offline passwords tried from ${addr || 'an unknown address'} in the last hour, so no more are tried from there until it's over`
+            : `offline mode: ${this.wrong.length} wrong offline passwords tried in the last hour, so no more are tried until it's over from where one came${this.wrong.length >= OFFLINE_LIMITS.wrongCapPerHour ? ', nor from anywhere the password hasn\'t signed in from lately' : ''}`,
         );
       }
-      throw new OfflineError(429, 'Too many wrong keys have been tried here. Try again in an hour.');
+      throw new OfflineError(429, 'Too many wrong passwords have been tried here. Try again in an hour.');
     }
     this.lockedSaid = false;
     const state = await this.state(addr);
@@ -174,7 +176,7 @@ export class Offline {
         'plex-tv': 'plex.tv is answering, so sign in with Plex.',
         server: 'Your Plex server doesn’t let this player in without signing in, so nothing could be played offline.',
         'server-down': 'Your Plex server isn’t answering this player.',
-        network: 'The offline key can’t be used from your network.',
+        network: 'The offline password can’t be used from your network.',
       };
       throw new OfflineError(409, said[state.why] || 'Offline mode isn’t on.', state.why);
     }
@@ -185,8 +187,8 @@ export class Offline {
       this.wrongFrom.delete(limitKey);
       this.wrongFrom.set(limitKey, [...times.slice(-OFFLINE_LIMITS.wrongPerHour), now]);
       if (this.wrongFrom.size > 5000) this.wrongFrom.delete(this.wrongFrom.keys().next().value);
-      this.log?.warn(`offline mode: a wrong offline key was tried from ${addr || 'an unknown address'}`);
-      throw new OfflineError(401, 'That isn’t this player’s offline key.');
+      this.log?.warn(`offline mode: a wrong offline password was tried from ${addr || 'an unknown address'}`);
+      throw new OfflineError(401, 'That isn’t this player’s offline password.');
     }
     const token = `pwoff-${randomBytes(24).toString('hex')}`;
     this.sessions.set(hash(token), { at: now, until: now + OFFLINE_LIMITS.sessionMs });
@@ -194,7 +196,7 @@ export class Offline {
     this.signedInFrom.set(limitKey, now);
     if (this.signedInFrom.size > 1000) this.signedInFrom.delete(this.signedInFrom.keys().next().value);
     while (this.sessions.size > OFFLINE_LIMITS.sessions) this.sessions.delete(this.sessions.keys().next().value);
-    this.log?.info(`offline mode: signed in with the offline key from ${addr || 'an unknown address'} (${this.sessions.size} signed in with it now)`);
+    this.log?.info(`offline mode: signed in with the offline password from ${addr || 'an unknown address'} (${this.sessions.size} signed in with it now)`);
     return { token, until: now + OFFLINE_LIMITS.sessionMs };
   }
 
@@ -205,7 +207,7 @@ export class Offline {
     if (!isOfflineToken(token) || !this.sessions.size) return false;
     this.auth.nudgePlexTv();
     if (this.auth.plexTvUpFor(OFFLINE_LIMITS.endsUpForMs)) {
-      this.log?.info(`offline mode: plex.tv is answering again, so the ${this.sessions.size} signed in with the offline key are signed out`);
+      this.log?.info(`offline mode: plex.tv is answering again, so the ${this.sessions.size} signed in with the offline password are signed out`);
       this.sessions.clear();
       return false;
     }

@@ -47,15 +47,18 @@
 #                       playlist's link, read from Spotify's public page for
 #                       it (off by default: see server/spotify.js).
 #                       (SPOTIFY_IMPORT, its name before 0.22.0, still works.)
-#   OFFLINE_KEY         offline mode, with PLEX_SERVER_URL: while plex.tv isn't
+#   OFFLINE_PWD         offline mode, with PLEX_SERVER_URL: while plex.tv isn't
 #                       answering, this player can be signed in to with this
-#                       key (12 to 200 characters, no spaces), as the Plex
-#                       server lets this container in without signing in:
-#                       as its owner (see server/offline.js). Not set: no
-#                       offline mode
-#   OFFLINE_FROM        where the offline key can be used from: "private"
-#                       (default: private networks), "any", or addresses and
-#                       networks (192.168.1.0/24, say), separated by commas
+#                       password (12 to 200 characters, no spaces), as the
+#                       Plex server lets this container in without signing
+#                       in: as its owner (see server/offline.js). Not set:
+#                       no offline mode. (OFFLINE_KEY, its name in 0.30.0,
+#                       stops the container, saying so.)
+#   OFFLINE_NETWORKS    where the offline password can be used from:
+#                       "private" (default: private networks), "any", or
+#                       addresses and networks (192.168.1.0/24, say),
+#                       separated by commas. (OFFLINE_FROM, its name in
+#                       0.30.0, stops the container, saying so.)
 #   DATA_DIR            where shared playlists, each account's settings and
 #                       Missing tracks, what the MusicBrainz features look
 #                       up, and the fingerprints of the Plex server owner's
@@ -368,7 +371,9 @@ fi
 # artists and albums, so they're the host's to turn on, with MUSICBRAINZ_URL.
 MB_ADV=false
 if truthy MUSICBRAINZ_ADVANCED "${MUSICBRAINZ_ADVANCED:-}"; then
-    if [ "$MB" = true ]; then MB_ADV=true; else say "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL (the MusicBrainz to ask), so the MusicBrainz features are off"; fi
+    # (Not off unseen: the container stops, so it's set right.)
+    [ "$MB" = true ] || fail "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL (the MusicBrainz to ask): set MUSICBRAINZ_URL too, or take MUSICBRAINZ_ADVANCED out"
+    MB_ADV=true
 fi
 
 PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
@@ -436,7 +441,7 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
     # server would take for its owner's, unless it's theirs (see pmsAuth in
     # server/index.js). The server's notification streams are checked as
     # such: they stay open for hours. ($pms_offline: the check says a
-    # request is an offline-key session's, which goes without its sign-in:
+    # request is an offline-password session's, which goes without its sign-in:
     # see nginx.conf.)
     PMS_AUTH="auth_request /_pms_auth;
     auth_request_set \$pms_offline \$upstream_http_x_pw_pms_offline;"
@@ -516,7 +521,7 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
     # Nothing that could carry a sign-in but what was checked: no
     # Authorization, and no Content-Type for Plex to read a form by (the
     # app's uploads, pictures, go without one). The token in the header as
-    # it came (but an offline-key session's: see nginx.conf).
+    # it came (but an offline-password session's: see nginx.conf).
     proxy_set_header Authorization \"\";
     proxy_set_header Content-Type \"\";
     proxy_set_header X-Plex-Token \$pms_token_header;
@@ -624,41 +629,51 @@ fi
 
 # ---------- offline mode ----------
 
-# OFFLINE_KEY: while plex.tv isn't answering this container, this player can
-# be signed in to with the key, and plays the Plex server at PLEX_SERVER_URL
-# as that server lets this container in without signing in (as its owner:
-# see server/offline.js). Checked here, so a mistake stops the container
-# rather than turning it off unseen.
+# OFFLINE_PWD: while plex.tv isn't answering this container, this player can
+# be signed in to with the password, and plays the Plex server at
+# PLEX_SERVER_URL as that server lets this container in without signing in
+# (as its owner: see server/offline.js). Checked here, so a mistake stops
+# the container rather than turning it off unseen.
+#
+# Their names in 0.30.0 stop it too, saying what they're called now, so
+# offline mode isn't off unseen after an update (an update on Proxmox VE
+# renames them in its settings: see proxmox/install.sh).
+renamed() { # OLD NEW NEW_VALUE: the setting's old name is set
+    [ -z "$3" ] || fail "$1 is called $2 since 0.31.0, and both are set: take $1 out of your settings"
+    fail "$1 is called $2 since 0.31.0: rename it in your settings (its value stays as it is)"
+}
+[ -z "${OFFLINE_KEY:-}" ] || renamed OFFLINE_KEY OFFLINE_PWD "${OFFLINE_PWD:-}"
+[ -z "${OFFLINE_FROM:-}" ] || renamed OFFLINE_FROM OFFLINE_NETWORKS "${OFFLINE_NETWORKS:-}"
 OFFLINE=false
-OFFLINE_KEY_SET="${OFFLINE_KEY:-}"
-OFFLINE_FROM_SET="$(lower "${OFFLINE_FROM:-private}")"
-if [ -n "$OFFLINE_KEY_SET" ]; then
-    # (Its length isn't said either: nothing of the key goes in the log.)
-    # Only characters that settings files keep as they are: a # or a $, say,
-    # can cut it short or change it there (in docker-compose.yml, or the
-    # Proxmox VE settings), and the key would be another.
-    whole "$OFFLINE_KEY_SET" '^[A-Za-z0-9._~+/=:,@-]{12,200}$' ||
-        fail "OFFLINE_KEY must be 12 to 200 characters long, of letters, digits and . _ ~ + / = : , @ - only (settings files can change others, such as # \$ or quotes): openssl rand -base64 24 makes one"
+OFFLINE_PWD_SET="${OFFLINE_PWD:-}"
+OFFLINE_NETWORKS_SET="$(lower "${OFFLINE_NETWORKS:-private}")"
+if [ -n "$OFFLINE_PWD_SET" ]; then
+    # (Its length isn't said either: nothing of the password goes in the
+    # log.) Only characters that settings files keep as they are: a # or a
+    # $, say, can cut it short or change it there (in docker-compose.yml, or
+    # the Proxmox VE settings), and the password would be another.
+    whole "$OFFLINE_PWD_SET" '^[A-Za-z0-9._~+/=:,@-]{12,200}$' ||
+        fail "OFFLINE_PWD must be 12 to 200 characters long, of letters, digits and . _ ~ + / = : , @ - only (settings files can change others, such as # \$ or quotes): openssl rand -base64 24 makes one"
     if [ "$SERVICE" != true ]; then
         say "offline mode needs Node.js, which isn't installed here, so it's off"
     elif [ -z "$PMS_URL" ]; then
-        say "offline mode needs PLEX_SERVER_URL (it's the Plex server there that's played offline), so it's off"
+        fail "OFFLINE_PWD needs PLEX_SERVER_URL (offline mode plays the Plex server there): set PLEX_SERVER_URL too, or take OFFLINE_PWD out"
     else
-        why="$("$NODE_BIN" --input-type=module -e 'const { parseFrom } = await import(process.argv[1]); try { parseFrom(process.argv[2]); } catch (e) { console.log(e.message); }' "$SERVICE_DIR/offline.js" "$OFFLINE_FROM_SET" 2>&1)" ||
-            fail "OFFLINE_FROM couldn't be checked: $why"
+        why="$("$NODE_BIN" --input-type=module -e 'const { parseFrom } = await import(process.argv[1]); try { parseFrom(process.argv[2]); } catch (e) { console.log(e.message); }' "$SERVICE_DIR/offline.js" "$OFFLINE_NETWORKS_SET" 2>&1)" ||
+            fail "OFFLINE_NETWORKS couldn't be checked: $why"
         [ -z "$why" ] || fail "$why"
         OFFLINE=true
         add_config 'offline: true'
-        case "$OFFLINE_FROM_SET" in
+        case "$OFFLINE_NETWORKS_SET" in
             private) where="private networks" ;;
             any) where="anywhere" ;;
-            *) where="$OFFLINE_FROM_SET" ;;
+            *) where="$OFFLINE_NETWORKS_SET" ;;
         esac
-        say "offline mode is on: while plex.tv isn't answering, this player can be signed in to with OFFLINE_KEY, from $where, as your Plex server lets this container in without signing in (only if it does: see docs/configuration.md)"
+        say "offline mode is on: while plex.tv isn't answering, this player can be signed in to with OFFLINE_PWD, from $where, as your Plex server lets this container in without signing in (only if it does: see docs/configuration.md)"
     fi
-elif [ -n "${OFFLINE_FROM:-}" ] && [ "$OFFLINE_FROM_SET" != private ]; then
+elif [ -n "${OFFLINE_NETWORKS:-}" ] && [ "$OFFLINE_NETWORKS_SET" != private ]; then
     # (Not for the default, as Proxmox VE's settings have it.)
-    say "OFFLINE_FROM is set but OFFLINE_KEY isn't, so there's no offline mode"
+    fail "OFFLINE_NETWORKS is set but OFFLINE_PWD isn't, so there'd be no offline mode: set OFFLINE_PWD too, or take OFFLINE_NETWORKS out"
 fi
 
 # ---------- WebSockets ----------
@@ -761,6 +776,15 @@ CONF
         say "the shared AI model needs Node.js, which isn't installed here, so it's off" >&2
     fi
 else
+    # (Its settings without it: the container stops, so they're set right,
+    # rather than there being no shared model unseen. OLLAMA_AUTH=plex is
+    # the default, as Proxmox VE's settings have it.)
+    [ -z "${OLLAMA_MODEL:-}" ] || fail "OLLAMA_MODEL needs OLLAMA_URL (the AI server it's on): set OLLAMA_URL too, or take OLLAMA_MODEL out"
+    [ -z "${OLLAMA_API_KEY:-}" ] || fail "OLLAMA_API_KEY needs OLLAMA_URL (the AI server it's for): set OLLAMA_URL too, or take OLLAMA_API_KEY out"
+    case "$(lower "${OLLAMA_AUTH:-plex}")" in
+        plex | on | true | yes | 1) ;;
+        *) fail "OLLAMA_AUTH needs OLLAMA_URL (the AI server it's for): set OLLAMA_URL too, or take OLLAMA_AUTH out" ;;
+    esac
     echo 'location ^~ /ollama/ { return 404; }' >"$AI_CONF"
 fi
 
@@ -959,8 +983,8 @@ if [ "$SERVICE" = true ]; then
   "pmsResolver": "$(json "${PMS_NS:-}")",
   "plexTvUrl": "$(json "$PLEX_TV")",
   "ownersKeep": $OWNERS_KEEP,
-  "offlineKey": "$([ "$OFFLINE" = true ] && json "$OFFLINE_KEY_SET")",
-  "offlineFrom": "$(json "$OFFLINE_FROM_SET")",
+  "offlinePwd": "$([ "$OFFLINE" = true ] && json "$OFFLINE_PWD_SET")",
+  "offlineNetworks": "$(json "$OFFLINE_NETWORKS_SET")",
   "nginxLogPort": $NGINX_LOG_PORT,
   "user": "$(json "${SERVICE_USER:-nginx}")"
 }

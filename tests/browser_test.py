@@ -17,7 +17,7 @@ config.js. Settings come from the environment:
                      MusicBrainz, SYNC_SETTINGS=false and
                      SYNC_MISSING_TRACKS=false (the mb section is skipped
                      without it)
-    APP_URL_OFFLINE  app with OFFLINE_KEY=offline-key-for-tests and
+    APP_URL_OFFLINE  app with OFFLINE_PWD=offline-pwd-for-tests and
                      PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500, on a mock
                      Plex server started with --open --honour (one that
                      lets the app in without signing in, and knows its
@@ -181,7 +181,7 @@ def login(page, app, token='t', app_defaults=False):
         raise
     if LOGIN_URL:
         page.fill('.login-form input[type=url]', LOGIN_URL)
-    # (The token's field: with an offline key, its field is a password's too.)
+    # (The token's field: with an offline password, its field is a password's too.)
     page.fill('.login-form input[type=password]', token)
     page.click('button:has-text("Connect")')
     page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
@@ -7769,11 +7769,11 @@ with sync_playwright() as pw:
     # Waits here poll with evaluate() rather than using locators or
     # wait_for_selector: element handles Playwright keeps would themselves
     # hold pages in memory.
-    # ---------- offline: a Plex server that lets the player in, and the offline key ----------
+    # ---------- offline: a Plex server that lets the player in, and the offline password ----------
 
     if run('offline') and APP_OFFLINE and MOCK_OPEN:
         A = APP_OFFLINE
-        KEY = 'offline-key-for-tests'
+        KEY = 'offline-pwd-for-tests'
 
         def open_mock(q):
             with urllib.request.urlopen(f'{MOCK_OPEN}/__mock/config?{q}', timeout=20) as r:
@@ -7835,40 +7835,40 @@ with sync_playwright() as pw:
         dan_ctx.close()
 
         # Someone new can't sign in with Plex: the sign-in page says so, and
-        # takes the offline key once plex.tv hasn't answered for a while.
+        # takes the offline password once plex.tv hasn't answered for a while.
         ctx = browser.new_context(**MOBILE)
         page = ctx.new_page()
-        attach(page, 'offline-key', expected=('401', '403', '409', '500'))
+        attach(page, 'offline-password', expected=('401', '403', '409', '500'))
         urls = recording(page)
         page.goto(A + '#/login')
         page.wait_for_selector('.login-offline-form:not([hidden])', timeout=30000)
         shot(page, 'offline-login')
-        check('offline: the sign-in page says plex.tv isn\'t answering, and takes the offline key',
-              'offline key' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
-        page.fill('.login-offline-form input', 'not the key')
+        check('offline: the sign-in page says plex.tv isn\'t answering, and takes the offline password',
+              'offline password' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
+        page.fill('.login-offline-form input', 'not the password')
         page.click('.login-offline-form button')
         page.wait_for_function("() => document.querySelector('.login-offline-form .login-status').textContent.length > 0")
         said = page.inner_text('.login-offline-form .login-status')
-        check('offline: a wrong key is refused', 'isn’t this player’s offline key' in said, said)
+        check('offline: a wrong password is refused', 'isn’t this player’s offline password' in said, said)
         page.fill('.login-offline-form input', KEY)
         page.click('.login-offline-form button')
         page.wait_for_selector('.wide-card:not(.skeleton)', timeout=30000)
         shot(page, 'offline-home')
         auth = js(page, "() => import('./js/state.js').then(({ app }) => ({ offline: !!app.auth?.offline, token: app.auth?.token || '' }))")
-        check('offline: the offline key signs in, as the server lets the player in', auth['offline'] and auth['token'].startswith('pwoff-'), auth)
+        check('offline: the offline password signs in, as the server lets the player in', auth['offline'] and auth['token'].startswith('pwoff-'), auth)
         tabs = page.eval_on_selector_all('#tabs .tab', 'els => els.map((e) => e.dataset.tab)')
-        check('offline: no Play Together with the key', 'together' not in tabs, tabs)
+        check('offline: no Play Together with the password', 'together' not in tabs, tabs)
         theirs = playlist_titles(page)
-        check('offline: ...it plays the library as its owner (what the key is for)', 'Sunday morning' in theirs, theirs)
+        check('offline: ...it plays the library as its owner (what the password is for)', 'Sunday morning' in theirs, theirs)
         page.goto(A + '#/settings/account')
         page.wait_for_selector('.account-card')
         shot(page, 'offline-account')
         card = page.inner_text('.account-card')
-        check('offline: Settings › Account says it\'s the offline key, and that it\'s as the owner', 'offline key' in card and 'owner' in card, card)
+        check('offline: Settings › Account says it\'s the offline password, and that it\'s as the owner', 'offline password' in card and 'owner' in card, card)
         page.wait_for_timeout(1500)
         asked = [u for u in urls if re.search(r'/api/(settings|missing|together|devices|shares|cast)\b', u)]
-        check('offline: nothing that needs a Plex account is asked for with the key', not asked, asked[:5])
-        check('offline: ...and the key\'s sign-in never goes to plex.tv', not [u for u in urls if 'plex.tv' in u and 'pwoff-' in u])
+        check('offline: nothing that needs a Plex account is asked for with the password', not asked, asked[:5])
+        check('offline: ...and the password\'s sign-in never goes to plex.tv', not [u for u in urls if 'plex.tv' in u and 'pwoff-' in u])
         # plex.tv answering again: the session ends, and the app signs out.
         open_mock('tv=up')
         try:
@@ -7877,13 +7877,13 @@ with sync_playwright() as pw:
             ended = True
         except Exception:  # noqa: BLE001 - said below
             ended = False
-        check('offline: once plex.tv is answering again, the key\'s session ends and the app signs out', ended, page.url)
+        check('offline: once plex.tv is answering again, the password\'s session ends and the app signs out', ended, page.url)
         if ended:
             shot(page, 'offline-ended')
             check('offline: ...saying why', 'answering again' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
         left = js(page, "() => import('./js/state.js').then(({ app }) => !app.auth && !app.source)")
         check('offline: ...and nothing of the session is left', left)
-        check('offline: the key\'s session is refused at the server once it\'s over', pms_status(auth['token']) == 401, pms_status(auth['token']))
+        check('offline: the password\'s session is refused at the server once it\'s over', pms_status(auth['token']) == 401, pms_status(auth['token']))
         ctx.close()
         open_mock('open=1&honour=1&tv=up')
 

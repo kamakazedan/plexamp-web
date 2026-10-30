@@ -208,16 +208,36 @@ SPOTIFY_FILE_IMPORT=
 # read from Spotify's public page for it (see docs/configuration.md).
 SPOTIFY_LINK_IMPORT=
 # Offline mode, with PLEX_SERVER_URL: while plex.tv isn't answering, this
-# player can be signed in to with this key, as your Plex server lets it in
-# without signing in, which is as you, its owner (see docs/configuration.md):
-# 12 to 200 letters, digits and . _ ~ + / = : , @ - (openssl rand -base64 24
-# makes one). Empty: no offline mode.
-OFFLINE_KEY=
-# Where the offline key can be used from: private (your own networks), any,
-# or addresses and networks (192.168.1.0/24, say), separated by commas.
-OFFLINE_FROM=private
+# player can be signed in to with this password, as your Plex server lets it
+# in without signing in, which is as you, its owner (see
+# docs/configuration.md): 12 to 200 letters, digits and . _ ~ + / = : , @ -
+# (openssl rand -base64 24 makes one). Empty: no offline mode.
+OFFLINE_PWD=
+# Where the offline password can be used from: private (your own networks),
+# any, or addresses and networks (192.168.1.0/24, say), separated by commas.
+OFFLINE_NETWORKS=private
 DEBUG=
 ENV
+fi
+# Settings renamed since they were written: their names now, with their
+# values as they were (and 0.30.0's words about them, where they're as it
+# wrote them). The start-up script stops at the old names (see
+# docker/40-plexamp-web.sh), so an update mustn't leave them.
+renames=()
+for pair in OFFLINE_KEY:OFFLINE_PWD OFFLINE_FROM:OFFLINE_NETWORKS; do
+    old="${pair%%:*}" new="${pair#*:}"
+    # (Not where the new name's there too: the start-up script then says
+    # which to keep.)
+    if grep -q "^$old=" "$ENV_FILE" && ! grep -q "^$new=" "$ENV_FILE"; then renames+=(-e "s/^$old=/$new=/"); fi
+done
+if [ "${#renames[@]}" -gt 0 ]; then
+    renamed="$(sed -E "${renames[@]}" \
+        -e 's/^# player can be signed in to with this key, as your Plex server lets it in$/# player can be signed in to with this password, as your Plex server lets it in/' \
+        -e 's/^# Where the offline key can be used from: private \(your own networks\), any,$/# Where the offline password can be used from: private (your own networks), any,/' \
+        "$ENV_FILE")"
+    # (In place, so the file keeps its owner and permissions.)
+    printf '%s\n' "$renamed" >"$ENV_FILE"
+    say "Settings: OFFLINE_KEY and OFFLINE_FROM are called OFFLINE_PWD and OFFLINE_NETWORKS now, so they've been renamed, keeping their values"
 fi
 chmod 600 "$ENV_FILE"
 

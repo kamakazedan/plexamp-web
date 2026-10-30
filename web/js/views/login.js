@@ -6,7 +6,7 @@ import { offlineAsked, offlineState, signInOffline } from '../offline.js';
 
 const PIN_TTL = 15 * 60 * 1000;
 // How often the page asks whether plex.tv is answering (more often while it
-// isn't, till the offline key can be used).
+// isn't, till the offline password can be used).
 const OFFLINE_EVERY = 10000;
 const OFFLINE_SOON = 4000;
 const TOKEN_HELP = 'https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/';
@@ -57,13 +57,13 @@ export async function loginView({ el, query = {} }) {
 
 // While plex.tv isn't answering the player, nobody can sign in with Plex:
 // this says so (asked every few seconds while the page is open), and where
-// the player has an offline key (OFFLINE_KEY: see offline.js) that can be
+// the player has an offline password (OFFLINE_PWD: see offline.js) that can be
 // used now, takes it.
 function offlinePanel(query) {
   if (!offlineAsked()) return null;
   const text = h('p.login-offline-text');
-  const key = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Offline key', 'aria-label': 'Offline key', required: true, maxlength: 200 });
-  const submit = h('button.btn.btn-primary.btn-wide', { type: 'submit' }, icon('lock', 20), h('span', null, 'Use the offline key'));
+  const key = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Offline password', 'aria-label': 'Offline password', required: true, maxlength: 200 });
+  const submit = h('button.btn.btn-primary.btn-wide', { type: 'submit' }, icon('lock', 20), h('span', null, 'Use the offline password'));
   const said = h('p.login-status', { role: 'status' });
   const form = h(
     'form.login-offline-form',
@@ -75,7 +75,7 @@ function offlinePanel(query) {
         said.textContent = 'Signing in…';
         try {
           await signInOffline(key.value);
-          // The app afresh, as it is with the key (no Together tab, say).
+          // The app afresh, as it is with the password (no Together tab, say).
           history.replaceState(null, '', `${location.pathname}${location.search}#/`);
           location.reload();
         } catch (err) {
@@ -97,14 +97,14 @@ function offlinePanel(query) {
     form.hidden = !withKey;
     el.hidden = false;
   };
-  if (query.offline === 'ended') show('plex.tv is answering again, so the offline key’s session has ended. Sign in with Plex.');
-  if (query.offline === 'gone') show('The offline key’s session has ended (the player restarted, say). Use the key again.');
+  if (query.offline === 'ended') show('plex.tv is answering again, so the offline password’s session has ended. Sign in with Plex.');
+  if (query.offline === 'gone') show('The offline password’s session has ended (the player restarted, say). Use the password again.');
   const why = {
     off: '',
-    'plex-tv': ' If it stays that way, this player’s offline key can be used here in a moment.',
-    server: ' Nor can the offline key be used: your Plex server doesn’t let this player in without signing in.',
+    'plex-tv': ' If it stays that way, this player’s offline password can be used here in a moment.',
+    server: ' Nor can the offline password be used: your Plex server doesn’t let this player in without signing in.',
     'server-down': ' Your Plex server isn’t answering this player either.',
-    network: ' Nor can the offline key be used from your network.',
+    network: ' Nor can the offline password be used from your network.',
   };
   // (Till the page goes: it's on screen, then not.)
   let timer = null;
@@ -132,7 +132,7 @@ function offlinePanel(query) {
     }
     if (state.on) {
       const first = form.hidden;
-      show('plex.tv isn’t answering this player, so you can’t sign in with Plex right now. This player is in offline mode: its offline key plays its library until plex.tv is back.', { withKey: true });
+      show('plex.tv isn’t answering this player, so you can’t sign in with Plex right now. This player is in offline mode: its offline password plays its library until plex.tv is back.', { withKey: true });
       if (first) key.focus();
       return again(OFFLINE_EVERY);
     }

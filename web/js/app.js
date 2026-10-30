@@ -36,7 +36,7 @@ const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
   { id: 'playlists', label: 'Playlists', icon: 'list' },
   { id: 'search', label: 'Search', icon: 'search' },
-  // (Not with the offline key: Play Together is for Plex accounts.)
+  // (Not with the offline password: Play Together is for Plex accounts.)
   app.config.together && !app.auth?.offline && { id: 'together', label: 'Together', icon: 'together' },
   { id: 'settings', label: 'Settings', icon: 'settings' },
 ].filter(Boolean);
@@ -310,7 +310,7 @@ function boot() {
   startRouter({ mainEl: document.getElementById('main'), changed: onRouteChange });
 
   if (app.server) {
-    // Signed in with the offline key: till plex.tv answers again (offline.js).
+    // Signed in with the offline password: till plex.tv answers again (offline.js).
     watchOffline();
     // Settings that follow your account (sync.js), as early as can be, and
     // Missing tracks (missingsync.js).

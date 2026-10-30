@@ -105,12 +105,12 @@ expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'
     '# true: Search › From Spotify makes a playlist from a Spotify playlist'"'"'s link,' \
     '# read from Spotify'"'"'s public page for it (see docs/configuration.md).' 'SPOTIFY_LINK_IMPORT=' \
     '# Offline mode, with PLEX_SERVER_URL: while plex.tv isn'"'"'t answering, this' \
-    '# player can be signed in to with this key, as your Plex server lets it in' \
-    '# without signing in, which is as you, its owner (see docs/configuration.md):' \
-    '# 12 to 200 letters, digits and . _ ~ + / = : , @ - (openssl rand -base64 24' \
-    '# makes one). Empty: no offline mode.' 'OFFLINE_KEY=' \
-    '# Where the offline key can be used from: private (your own networks), any,' \
-    '# or addresses and networks (192.168.1.0/24, say), separated by commas.' 'OFFLINE_FROM=private' 'DEBUG=')"
+    '# player can be signed in to with this password, as your Plex server lets it' \
+    '# in without signing in, which is as you, its owner (see' \
+    '# docs/configuration.md): 12 to 200 letters, digits and . _ ~ + / = : , @ -' \
+    '# (openssl rand -base64 24 makes one). Empty: no offline mode.' 'OFFLINE_PWD=' \
+    '# Where the offline password can be used from: private (your own networks),' \
+    '# any, or addresses and networks (192.168.1.0/24, say), separated by commas.' 'OFFLINE_NETWORKS=private' 'DEBUG=')"
 [ "$(cat "$T/pushed/plexamp-web.env" 2>/dev/null)" = "$expected" ] && pass "writes the settings" || fail "settings: $(cat "$T/pushed/plexamp-web.env" 2>/dev/null)"
 calls | grep -q -- '^pct push 123 .*/plexamp-web.env /etc/plexamp-web/plexamp-web.env --perms 600$' && pass "settings readable by root only" || fail "settings permissions: $(calls | grep push)"
 cmp -s "$T/pushed/install-plexamp-web.sh" "$ROOT/proxmox/install.sh" && pass "copies in the installer" || fail "the installer wasn't copied in"
