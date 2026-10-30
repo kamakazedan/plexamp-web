@@ -3,6 +3,40 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.32.0 - 2026-10-30
+
+### Changed
+
+- **A track whose connection keeps dropping is never converted for you**
+  (Streaming quality is yours to change): it's loaded again as it is, from
+  where it got to, at once the first time, then a while later each time
+  it drops again (as the first time again, once it's played on a minute).
+  The player says so, and suggests a lower Streaming quality, a tap away.
+  Before (since 0.18.3), it was converted after the second drop, till
+  Streaming quality changed. And a file the browser says it can't play is
+  converted only if your server hands it over and it still doesn't play,
+  loaded again as it is: one that didn't come (as browsers say of one that
+  doesn't) is a drop. (One that came but couldn't be decoded is converted,
+  as before; one your server keeps failing, half a minute or more, is skipped.)
+- **Artists to merge, several at once**: those MusicBrainz plainly has as
+  one artist are chosen to begin with, and one OK merges all you've chosen,
+  one after another (those of one name first). The page then shows what's
+  left as it is, without reading your library again (**Look again** does),
+  and a name of several in one that was waiting for its artist's merge
+  ("Alphabeat;FORCE", while Plex had two Alphabeats) is looked at straight
+  away. Names are looked up several at a time on a MusicBrainz of your own.
+- **Artists to merge: those left as they are are yours to choose too**,
+  each saying why, album by album (how many albums each has, and how many
+  MusicBrainz has as theirs), and the OK saying how many of those you've
+  chosen MusicBrainz can't say are one artist, or has as different ones.
+- **Titles as stores give them** ("Shadows - EP", "Heat - Single") match
+  MusicBrainz's, for artists to merge and the other MusicBrainz features.
+
+### Fixed
+
+- **A name ending in a full stop** ("goddard.") no longer ends a sentence
+  on the merge page with two.
+
 ## 0.31.0 - 2026-10-30
 
 ### New

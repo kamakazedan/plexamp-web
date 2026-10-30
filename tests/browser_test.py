@@ -4000,29 +4000,92 @@ with sync_playwright() as pw:
         check('stream: ...and left for another track while it waits so, its playback ends there', len(ended) == 1 and now()['id'] != tr['id'], f'{ended} {now()}')
         settings(page, {'quality': '320'})
 
-        # A file whose connection drops, and drops again once loaded again,
-        # is converted (at 320 kbps, as for Original) only until Streaming
-        # quality changes.
+        # A file whose connection drops (the server answering otherwise) is
+        # loaded again as it is, at once; and as it drops again, a while
+        # later, still as it is: never converted, as Streaming quality is the
+        # listener's to change. The player says so, suggesting a lower one.
         settings(page, {'quality': 'original'})
         play_track(4, 3)
         tr = now()
         wait_for(lambda: now()['t'] > 1, 10, 0.2)
         player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_NETWORK }) }), p.onError(), true)")
-        wait_for(lambda: player(page, "p.directRetry === p.current?.qid && p.state === 'playing' && p.deck.hasSource() && !p.deck.isHls"), 10, 0.2)
+        wait_for(lambda: player(page, "p.drops?.qid === p.current?.qid && p.drops.n === 1 && p.state === 'playing' && p.deck.hasSource() && !p.deck.isHls"), 10, 0.2)
         again = rate()
-        player(page, '(p.onError(), true)')
-        wait_for(lambda: rate()['isHls'] and rate()['state'] == 'playing', 10, 0.2)
-        fell = rate()
+        # Loaded again, it doesn't come either: the browser says the format's
+        # wrong (as Chromium does of a file that doesn't come at all), and
+        # that's a drop too.
+        player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED }) }), p.onError(), true)")
+        waits = wait_for(lambda: player(page, '!!p.held && p.drops?.n === 2 && !p.deck.isHls'), 10, 0.2)
+        said = wait_for(lambda: page.locator('.toast:has-text("keeps dropping")').count() > 0, 5, 0.2)
+        told = page.locator('.toast').inner_text() if said else ''
         player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
-        settings(page, {'quality': '128'})
-        wait_for(lambda: rate()['kbps'] == 128 and rate()['state'] == 'playing', 10, 0.2)
-        lower = rate()
-        settings(page, {'quality': 'original'})
-        wait_for(lambda: not rate()['isHls'] and rate()['state'] == 'playing', 10, 0.2)
-        back = rate()
-        check('stream: a file whose connection keeps dropping is converted, until Streaming quality changes',
-              not again['isHls'] and fell['isHls'] and fell['forced'] == 'network' and fell['kbps'] == 320 and lower['kbps'] == 128
-              and lower['forced'] is False and not back['isHls'] and back['id'] == tr['id'] and not play_errors(), f'{again} {fell} {lower} {back}')
+        back = wait_for(lambda: player(page, '!p.held') and rate()['state'] == 'playing' and rate()['t'] > 1, 15, 0.25)
+        after = rate()
+        check('stream: a file whose connection keeps dropping is loaded again as it is, a while later each time (never converted), the player saying so',
+              not again['isHls'] and waits and back and not after['isHls'] and after['forced'] is False and after['id'] == tr['id'] and not play_errors(), f'{again} {waits} {after}')
+        if said:
+            page.locator('.toast-action', has_text='Streaming quality').click()
+        check('stream: ...and suggesting a lower Streaming quality, a tap away (never changed for the listener)',
+              said and 'lower Streaming quality' in told and wait_for(lambda: page.url.endswith('/settings/playback'), 5, 0.2)
+              and js(page, "() => import('./js/state.js').then((m) => m.app.settings.quality)") == 'original', f'{told!r} {page.url}')
+
+        # A file that doesn't play the first time it's loaded, the browser
+        # saying the format's wrong (as Chromium says of a file that didn't
+        # come, too): where it doesn't come (a weak signal, say), a drop,
+        # never converted.
+        not_supported = "Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED }) })"
+        first_load = 'p.asIs = null, p.drops = null, p.asIsAgain = null, p.fileFails = null'
+        play_track(4, 2)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        page.route('**/library/parts/**', lambda route: route.abort('connectionreset'))
+        player(page, f"({not_supported}, {first_load}, p.onError(), true)")
+        kept_as_is = wait_for(lambda: player(page, 'p.drops?.qid === p.current?.qid && p.drops.n >= 2 && !p.deck.forced && !p.deck.isHls'), 20, 0.2)
+        page.unroute('**/library/parts/**')
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        on_as_is = wait_for(lambda: rate()['state'] == 'playing' and not rate()['isHls'] and rate()['t'] > 1, 30, 0.25)
+        as_is = rate()
+        check('stream: a file the browser says it can\'t play, that doesn\'t come (no answer to it), is a drop: loaded again as it is, never converted',
+              kept_as_is and on_as_is and not as_is['isHls'] and as_is['forced'] is False and not play_errors(), f'{kept_as_is} {as_is}')
+        # One that came but couldn't be decoded: converted (as before).
+        player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_DECODE }) }), p.onError(), true)")
+        decoded = wait_for(lambda: rate()['isHls'] and rate()['forced'] is True and rate()['state'] == 'playing', 20, 0.25)
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        check('stream: ...one that came but couldn\'t be decoded is converted, as before', decoded and not play_errors(), str(rate()))
+        # One the server hands over (asked for it, without a range: the
+        # player's own request) but that still doesn't play: as it is once
+        # more (the connection may have been gone a moment), then converted.
+        play_track(4, 3)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        asked = {'probe': 0, 'media': 0}
+
+        def media_fails(route):
+            if 'range' in {k.lower() for k in route.request.headers}:
+                asked['media'] += 1
+                return route.abort('connectionreset')
+            asked['probe'] += 1
+            return route.continue_()
+        page.route('**/library/parts/**', media_fails)
+        player(page, f"({not_supported}, {first_load}, p.onError(), true)")
+        converted = wait_for(lambda: rate()['isHls'] and rate()['forced'] is True and rate()['state'] == 'playing', 25, 0.25)
+        page.unroute('**/library/parts/**')
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        check('stream: ...whereas one the server hands over, that still doesn\'t play once loaded again as it is, is converted (as a format the browser can\'t play is)',
+              converted and asked['probe'] >= 2 and asked['media'] >= 1 and not play_errors(), f'{rate()} {asked}')
+        # One the server keeps failing (an answer of 500, asked for it three
+        # times at least, over half a minute at least): a track that won't
+        # play here, skipped, saying so.
+        play_track(4, 2)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        failing = now()['id']
+        page.route('**/library/parts/**', lambda route: route.fulfill(status=500, body=''))
+        player(page, f"({not_supported}, {first_load}, p.onError(), true)")
+        said_so = wait_for(lambda: len(play_errors()) >= 1, 75, 0.2)
+        page.unroute('**/library/parts/**')
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        skipped = wait_for(lambda: now()['id'] != failing and now()['state'] == 'playing', 20, 0.25)
+        check('stream: ...and one the server keeps failing (500, asked three times or more over half a minute) won\'t play here: skipped, saying so (not held for ever)',
+              said_so and skipped and len(play_errors()) == 1, f'{now()} {play_errors()}')
+        js(page, '() => { window.__playErrors = []; }')
 
         # ...whereas one that doesn't play as it is here stays converted, at
         # the bitrate asked for (paused when it's changed, too).
@@ -7862,59 +7925,80 @@ with sync_playwright() as pw:
             mock('/__mock/config?nogenre=')
 
         # For the server's owner: the artists Plex has more than once, merged
-        # in Plex with an OK where MusicBrainz plainly has them as one. Here
-        # a second Glass Harbour (an album MusicBrainz has as theirs), a
-        # second Northbound Static (an album it has as another artist's of
-        # the name), a second Juniper & Ash (an album it hasn't at all), and
-        # "Glass Harbour;Kilo Meridian", a name of several artists' in one,
-        # as files can be tagged. (Not known to the mock's MusicBrainz, nor
-        # their albums, but for what it has of the names.)
+        # in Plex, as many as are chosen with one OK: those MusicBrainz
+        # plainly has as one chosen to begin with, the rest left as they
+        # are, saying why, for the owner to choose too. Here a second Glass
+        # Harbour (an album MusicBrainz has as theirs), a second Northbound
+        # Static (an album it has as another artist's of the name), a second
+        # Juniper & Ash (an album it hasn't at all), and "Glass
+        # Harbour;Kilo Meridian", a name of several artists' in one, as files
+        # can be tagged. (Not known to the mock's MusicBrainz, nor their
+        # albums, but for what it has of the names.)
         merges = lambda: mock('/__mock/merges')['MediaContainer']['merges']
         mock('/__mock/merges?reset=1')
         added = [mock(f'/__mock/add-artist?name={urllib.parse.quote(n)}&albums={urllib.parse.quote(a)}&mb=0')['MediaContainer']['Metadata'][0]
                  for n, a in [('Glass Harbour', 'Sea Glass:2016'), ('Northbound Static', 'Frost Engine:2019'), ('Juniper & Ash', 'Unknown Rooms:2022'),
                               ('Glass Harbour;Kilo Meridian', 'Harbour Remixes:2021')]]
+        reads = []  # the library's artists, read from Plex
+        page.on('request', lambda r: reads.append(r.url) if '/all?' in r.url and 'type=8' in r.url else None)
 
-        def merge_page():
-            page.wait_for_function("() => /^Looked through/.test(document.querySelector('.mb-merge-status')?.textContent || '')", timeout=60000)
-            rows = lambda cls: {page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(): page.locator(f'.{cls}').nth(i).inner_text()
-                                for i in range(page.locator(f'.{cls}').count())}
+        def merge_page(status=r'^Looked through'):
+            page.wait_for_function("(re) => new RegExp(re).test(document.querySelector('.mb-merge-status')?.textContent || '')", arg=status, timeout=60000)
+            rows = lambda cls: {page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(): {
+                'text': page.locator(f'.{cls}').nth(i).inner_text(),
+                'checked': page.locator(f'.{cls}').nth(i).locator('input.mb-merge-check').is_checked() if page.locator(f'.{cls}').nth(i).locator('input.mb-merge-check').count() else None}
+                for i in range(page.locator(f'.{cls}').count())}
             return rows('mb-merge-twice'), rows('mb-merge-joined'), rows('mb-merge-left')
         try:
             page.goto(APP_MB + '#/settings/musicbrainz')
             page.locator('a.row[href="#/settings/mbmerge"]').click()
             twice, joined, left = merge_page()
             shot(page, 'mb-05-merge')
-            check('mb: artists to merge: two of one name MusicBrainz plainly has as one (Glass Harbour) are offered, saying why',
-                  list(twice) == ['Glass Harbour'] and 'MusicBrainz has albums of each of them as Glass Harbour’s' in twice['Glass Harbour'], f'{twice} {joined} {left}')
-            check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash), saying so',
-                  'different artists of one name' in left.get('Northbound Static', '') and 'can’t say' in left.get('Juniper & Ash', ''), str(left))
-            check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first)',
-                  not joined and 'those first' in left.get('Glass Harbour;Kilo Meridian', ''), f'{joined} {left}')
+            gh = twice.get('Glass Harbour', {})
+            check('mb: artists to merge: two of one name MusicBrainz plainly has as one (Glass Harbour) are offered, chosen to begin with, saying why',
+                  list(twice) == ['Glass Harbour'] and gh['checked'] is True and 'MusicBrainz has albums of each of them as Glass Harbour’s' in gh['text'], f'{twice} {joined} {left}')
+            ns, ja = left.get('Northbound Static', {}), left.get('Juniper & Ash', {})
+            check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash): left as they are, saying why album by album, for you to choose',
+                  'different artists of one name' in ns.get('text', '') and '“Frost Engine”' in ns.get('text', '') and ns.get('checked') is False
+                  and 'none MusicBrainz has as theirs' in ja.get('text', '') and 'Not enough to say' in ja.get('text', '') and ja.get('checked') is False, str(left))
+            first = left.get('Glass Harbour;Kilo Meridian', {})
+            check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first, not to choose yet)',
+                  not joined and 'those first' in first.get('text', '') and first.get('checked') is None, f'{joined} {left}')
+            go = page.locator('.mb-merge-actions:not([hidden]) .mb-merge-go').first
+            check('mb: ...one button merges all that are chosen', go.inner_text() == 'Merge 1 in Plex', go.inner_text())
             # An OK first, then Plex's own merge, into the one Plex has
-            # MusicBrainz's id for.
-            page.locator('.mb-merge-twice button').click()
+            # MusicBrainz's id for; and the page as it is then, without
+            # reading the library again.
+            before = len(reads)
+            go.click()
             asked_ok = page.locator('.sheet.open').inner_text()
             page.locator('.sheet.open button', has_text='Merge in Plex').click()
             wait_for(lambda: merges(), 10, 0.3)
             check('mb: ...merged in Plex with the owner\'s OK (Plex\'s own merge, which the player can\'t undo), into the one Plex has MusicBrainz\'s id for',
                   merges() == [{'into': named['Glass Harbour']['ratingKey'], 'ids': [added[0]['ratingKey']]}] and 'can’t undo' in asked_ok, f'{merges()} {asked_ok!r}')
-            # Looked through again: the name of several in one, now, into the
-            # artist of its first name, as MusicBrainz knows only one of it.
-            page.wait_for_selector('.mb-merge-joined', timeout=30000)
-            twice, joined, left = merge_page()
-            row_text = joined.get('Glass Harbour;Kilo Meridian', '')
-            check('mb: ...then the name of several artists\' in one, into the artist of its first name (MusicBrainz knows only one of it)',
-                  not twice and 'with Kilo Meridian' in row_text and 'Merge into Glass Harbour' in row_text and 'knows only one Glass Harbour' in row_text, f'{twice} {joined}')
-            page.locator('.mb-merge-joined button').click()
+            twice, joined, left = merge_page(r'^Merged 1\.')
+            row_text = joined.get('Glass Harbour;Kilo Meridian', {}).get('text', '')
+            check('mb: ...then the name of several artists\' in one is looked at, into the artist of its first name (MusicBrainz knows only one of it), without reading the library again',
+                  not twice and 'with Kilo Meridian' in row_text and 'into your Glass Harbour' in row_text and 'knows only one Glass Harbour' in row_text
+                  and joined['Glass Harbour;Kilo Meridian']['checked'] is True and len(reads) == before, f'{twice} {joined} {len(reads) - before}')
+            # Several at once: that one, and one left as it is, chosen too
+            # (MusicBrainz can't say: merged as chosen, the OK saying so).
+            page.locator('.mb-merge-left', has_text='Juniper & Ash').locator('input.mb-merge-check').check()
+            check('mb: ...and those left as they are can be chosen too', go.inner_text() == 'Merge 2 in Plex', go.inner_text())
+            go.click()
+            asked_ok = page.locator('.sheet.open').inner_text()
             page.locator('.sheet.open button', has_text='Merge in Plex').click()
-            wait_for(lambda: len(merges()) == 2, 10, 0.3)
+            wait_for(lambda: len(merges()) == 3, 15, 0.3)
+            twice, joined, left = merge_page(r'^Merged 2\.')
+            check('mb: ...merged with one OK, saying which MusicBrainz can\'t say are one artist (those of one name first)',
+                  merges()[1] == {'into': named['Juniper & Ash']['ratingKey'], 'ids': [added[2]['ratingKey']]}
+                  and merges()[2] == {'into': named['Glass Harbour']['ratingKey'], 'ids': [added[3]['ratingKey']]}
+                  and '1 MusicBrainz can’t say are one artist' in asked_ok and not joined and 'Juniper & Ash' not in left and len(reads) == before, f'{merges()} {asked_ok!r} {left}')
             artist_page('Glass Harbour', until='.view .hero')
             page.wait_for_selector('.view .card-title:has-text("Harbour Remixes")', timeout=20000)
             on_page = page.locator('.view .card-title').all_inner_texts()
             check('mb: ...so Glass Harbour\'s page has their albums (Sea Glass, Harbour Remixes), as Plex does',
-                  merges()[1] == {'into': named['Glass Harbour']['ratingKey'], 'ids': [added[3]['ratingKey']]} and 'Sea Glass' in on_page and 'Harbour Remixes' in on_page,
-                  f'{merges()} {on_page}')
+                  'Sea Glass' in on_page and 'Harbour Remixes' in on_page, f'{merges()} {on_page}')
         finally:
             mock('/__mock/merges?reset=1')
             for a in added:

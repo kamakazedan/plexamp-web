@@ -111,8 +111,9 @@ export const firstYear = (g) => (/^\d{4}/.test(g?.date || '') ? Number(g.date.sl
 
 // An album's title as it's matched: as norm has it (without what's in
 // brackets), and without what says which edition it is after a dash
-// ("Rumours - 35th Anniversary Edition", "Abbey Road - Remastered 2009").
-const EDITION = /\b(remaster(ed)?|deluxe|edition|expanded|anniversary|bonus|version|reissue|mono|stereo|special|legacy|\d{4} mix)\b/;
+// ("Rumours - 35th Anniversary Edition", "Abbey Road - Remastered 2009"),
+// or what kind ("Shadows - EP", "Heat - Single", as stores title them).
+const EDITION = /\b(remaster(ed)?|deluxe|edition|expanded|anniversary|bonus|version|reissue|mono|stereo|special|legacy|\d{4} mix|ep|single)\b/;
 export function albumKey(title) {
   const raw = String(title || '');
   const parts = raw.split(/\s+[-–—:]\s+/);
@@ -278,23 +279,44 @@ export function genericTitle(key, self = '') {
 // the names Plex has an id for can't be told), or an album of one is
 // plainly another's of the name and not this one's (by a title few others
 // have). Anything else: 'unknown', and they're left as they are.
+// What there is of each of `entries` (as for sameArtist) to tell who they
+// are, album by album: [{ albums (how many Plex has), plain (titles of
+// those plainly the artist's, by `groups`, and not another's of the name,
+// of a title few others have: see genericTitle), weak (...of a title plenty
+// of others have), apart (titles of those plainly another's, by
+// `namesakes`, and not the artist's, of a title few others have), apartWeak
+// (...plenty have) }]: one title for each album, as albumKey has it.
+export function evidenceOf(entries, { name = '', groups = [], namesakes = [] } = {}) {
+  const self = albumKey(name);
+  const others = Array.isArray(namesakes) ? namesakes : [];
+  return (Array.isArray(entries) ? entries : []).map((e) => {
+    const albums = Array.isArray(e?.albums) ? e.albums : [];
+    const out = { albums: albums.length, plain: new Map(), weak: new Map(), apart: new Map(), apartWeak: new Map() };
+    for (const it of albums) {
+      const key = albumKey(it?.title);
+      const theirs = plainly(groups, it, self);
+      const another = others.some((n) => plainly(n?.groups, it, self));
+      const few = !genericTitle(key, self);
+      const into = theirs && !another ? (few ? out.plain : out.weak) : another && !theirs ? (few ? out.apart : out.apartWeak) : null;
+      if (into && !into.has(key)) into.set(key, String(it.title));
+    }
+    return { albums: out.albums, plain: [...out.plain.values()], weak: [...out.weak.values()], apart: [...out.apart.values()], apartWeak: [...out.apartWeak.values()] };
+  });
+}
+
+// Plain evidence that one of evidenceOf's is the artist's: two albums, or
+// one of a title few others have.
+const plainlyTheirs = (x) => x.plain.length > 0 || x.plain.length + x.weak.length >= 2;
+
 export function sameArtist(entries, { name = '', artist = null, groups = [], capped = false, namesakes = [], moreNamesakes = false, joined = false } = {}) {
   if (!Array.isArray(entries) || entries.length < 2) return 'unknown';
   const ids = [...new Set(entries.map((e) => e?.mbid).filter(Boolean))];
   if (ids.length > 1) return joined ? 'unknown' : 'different';
   if (!artist?.id || (ids.length === 1 && artist.id !== ids[0]) || capped) return 'unknown';
   const others = Array.isArray(namesakes) ? namesakes : [];
-  const self = albumKey(name);
-  const albumsOf = (e) => (Array.isArray(e?.albums) ? e.albums : []);
-  const theirs = (it) => plainly(groups, it, self);
-  const another = (it) => others.some((n) => plainly(n?.groups, it, self));
-  const apart = entries.flatMap((e) => albumsOf(e).filter((it) => another(it) && !theirs(it)));
-  if (apart.some((it) => !genericTitle(albumKey(it.title), self))) return 'different';
-  if (apart.length || moreNamesakes || others.some((n) => n?.capped)) return 'unknown';
-  const plain = (e) => {
-    const keys = new Set(albumsOf(e).filter((it) => theirs(it) && !another(it)).map((it) => albumKey(it.title)));
-    return keys.size >= 2 || [...keys].some((k) => !genericTitle(k, self));
-  };
-  if (joined) return plain(entries[0]) && (plain(entries[1]) || !others.length) ? 'same' : 'unknown';
-  return entries.every(plain) ? 'same' : 'unknown';
+  const ev = evidenceOf(entries, { name, groups, namesakes: others });
+  if (ev.some((x) => x.apart.length)) return 'different';
+  if (ev.some((x) => x.apartWeak.length) || moreNamesakes || others.some((n) => n?.capped)) return 'unknown';
+  if (joined) return plainlyTheirs(ev[0]) && (plainlyTheirs(ev[1]) || !others.length) ? 'same' : 'unknown';
+  return ev.every(plainlyTheirs) ? 'same' : 'unknown';
 }

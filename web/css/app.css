@@ -2979,6 +2979,32 @@ body.np-open #toasts {
   color: #ffb4a8;
 }
 
+/* Settings › MusicBrainz › Artists to merge: rows to choose, and what
+   to do with those chosen. */
+label.mb-merge-row {
+  cursor: pointer;
+}
+
+label.mb-merge-row:hover {
+  background: var(--hover);
+}
+
+.mb-merge-check,
+.mb-merge-check-none {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--tint-hi);
+}
+
+.mb-merge-actions {
+  margin-top: 8px;
+}
+
+.mb-merge-actions[hidden] {
+  display: none;
+}
+
 .import-choices {
   display: flex;
   flex-direction: column;
