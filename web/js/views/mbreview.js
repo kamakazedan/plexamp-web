@@ -344,7 +344,8 @@ export async function mbReviewView({ el, onDispose }) {
   // (This page carries on by itself, so not "Try again…".)
   const say = (err) => {
     if (!err) return;
-    const what = String(err.message || describeError(err)).replace(/\s*Try again[^.]*\.\s*$/, '');
+    const said = String(err.message || describeError(err));
+    const what = said.replace(/\s*[^.]*\btry again\b[^.]*\.\s*$/i, '') || said;
     status.replaceChildren(`${what} Carrying on ${inTime(waitAfter(err))}.`);
     status.classList.add('warn');
   };

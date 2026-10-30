@@ -241,7 +241,7 @@ export async function mbMergeView({ el, onDispose }) {
     if (g.verdict === 'error') return 'Couldn’t check just now. Try Look again.';
     if (g.verdict === 'different') {
       if (g.idsDiffer) return 'Plex links them to different artists on MusicBrainz.';
-      const apart = g.evidence?.flatMap((x) => x.apart) || [];
+      const apart = [...new Set(g.evidence?.flatMap((x) => x.apart) || [])];
       return end(`MusicBrainz says ${apart.length ? quoted(apart) : g.kind === 'joined' ? 'its albums' : 'their albums'} ${apart.length === 1 ? 'is' : 'are'} by a different ${g.name}`);
     }
     if (g.mb && !g.mb.artist) return end(`MusicBrainz doesn’t know ${g.name}`);
@@ -249,7 +249,7 @@ export async function mbMergeView({ el, onDispose }) {
     if (g.mb?.moreNamesakes) return end(`Not sure: MusicBrainz has too many artists called ${g.name} to tell`);
     if (g.mb?.capped || g.mb?.namesakes?.some((n) => n?.capped)) return end(`Not sure: ${g.name} has too many releases on MusicBrainz to tell`);
     const ev = g.evidence || [];
-    const weakApart = ev.flatMap((x) => x.apartWeak);
+    const weakApart = [...new Set(ev.flatMap((x) => x.apartWeak))];
     if (weakApart.length) return end(`Not sure: MusicBrainz says ${quoted(weakApart)} ${weakApart.length === 1 ? 'is' : 'are'} by a different ${g.name}, but ${weakApart.length === 1 ? 'it’s a common title' : 'they’re common titles'}`);
     const none = ev.every((x) => !x?.plain?.length && !x?.weak?.length);
     if (g.kind === 'joined') return none ? 'Not sure: MusicBrainz can’t match any of the albums.' : `Not sure: MusicBrainz matches too few of the albums (your ${g.name}: ${known(ev[0])}; this one: ${known(ev[1])}).`;

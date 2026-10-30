@@ -173,10 +173,12 @@ export class MusicBrainz {
         const took = Date.now() - started;
         if (took > MB_LIMITS.slowMs) this.nextAt = Math.max(this.nextAt, Date.now() + Math.min(MB_LIMITS.slowWaitMaxMs, took));
         // (musicbrainz.org says it's busy with a 503; a server of your own,
-        // with a 429, or a 503 that says when to come back: its search
-        // indexes not there, a 503 without.)
+        // with a 429, or a 503 that says when to come back, or one to
+        // anything but a search, as a rate limit in front of it does. A
+        // search's 503 without: its search indexes not there.)
         const retry = res.headers?.get?.('retry-after');
-        if (res.status === 429 || (res.status === 503 && (this.public || retry))) {
+        const search = Object.hasOwn(params || {}, 'query');
+        if (res.status === 429 || (res.status === 503 && (this.public || retry || !search))) {
           const ms = retryAfterMs(retry);
           this.unwell(ms);
           this.quietUntil = Math.max(this.quietUntil, Date.now() + ms);

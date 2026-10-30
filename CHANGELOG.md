@@ -15,9 +15,10 @@ you're running is shown in **Settings › About**.
 - **Gentler on a MusicBrainz mirror of your own**, for every MusicBrainz
   feature: the player asks it one thing at a time, ten a second at most
   (before, as fast as it answered), and less often while it's slow to
-  answer. One that says it's busy (a 429, or a 503 with Retry-After) is
-  asked nothing at all, by any feature, for as long as it says (a minute
-  if it doesn't). The app asks the player 90 times a minute at most, and
+  answer. One that says it's busy (a 429, a 503 with Retry-After, or a 503
+  to anything but a search, as a rate limit in front of it gives) is asked
+  nothing at all, by any feature, for as long as it says (a minute if it
+  doesn't). The app asks the player 90 times a minute at most, and
   pages looking through your library 60, so what you're waiting on always
   has room (a shuffle's or a radio's live tracks and demos never wait: with
   no room, they go by their titles that time). When the player's busy, the

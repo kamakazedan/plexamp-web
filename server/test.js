@@ -768,6 +768,14 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   await assert.rejects(busy.check([{ kind: 'artist', artist: 'Someone' }, { kind: 'track', artist: 'Someone', title: 'A Song' }]), (e) => e instanceof MusicBrainzError && e.status === 503 && e.retryAfter > 40);
   await assert.rejects(busy.ask('/ws/2/recording', { query: 'x' }), (e) => e.status === 503 && /in a minute/.test(e.message));
   assert.equal(n, 1);
+  // A 503 to a lookup that isn't a search (as a rate limit in front of a
+  // server of your own answers) is it being busy too; a search's is its
+  // search indexes (above).
+  let m = 0;
+  const limited = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (m++, { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) }) });
+  await assert.rejects(limited.ask('/ws/2/artist/0383dadf-2a4e-4d10-a46a-e9e041da8eb3', { inc: 'aliases' }), (e) => e.status === 503 && /busy/.test(e.message) && e.retryAfter === 60);
+  await assert.rejects(limited.ask('/ws/2/release-group', { artist: '0383dadf-2a4e-4d10-a46a-e9e041da8eb3' }), (e) => e.status === 503 && /busy/.test(e.message));
+  assert.equal(m, 1);
   // A longer wait is said in minutes.
   const later = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => ({ ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '240' : null) }, json: async () => ({}) }) });
   await assert.rejects(later.ask('/ws/2/artist', { query: 'x' }), (e) => /in 4 minutes/.test(e.message) && e.retryAfter === 240);

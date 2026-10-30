@@ -122,7 +122,10 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false, 
   const byId = MBID.test(String(id)) ? id : null;
   const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${byId || norm(name)}`;
   if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], capped: false, namesakes: [], moreNamesakes: false });
-  if (!artists.has(key)) {
+  // (One a page looking through the library is still waiting on isn't
+  // shared with someone waiting themselves: they ask for it on their own.)
+  const had = artists.get(key);
+  if (!had || (had.background && !background && !had.done)) {
     const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}) }, { background, now }).then(
       (r) => ({
         artist: r.artist || null,
@@ -132,9 +135,14 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false, 
         moreNamesakes: r.moreNamesakes === true,
       }),
       (err) => {
-        artists.delete(key);
+        if (artists.get(key) === job) artists.delete(key);
         throw err;
       },
+    );
+    job.background = background;
+    job.then(
+      () => (job.done = true),
+      () => {},
     );
     artists.set(key, job);
     while (artists.size > 200) artists.delete(artists.keys().next().value);
