@@ -289,23 +289,23 @@ export async function mbMergeView({ el, onDispose }) {
       );
     });
 
-  // "All" and "None" for a section's rows.
+  // "Choose all" or "Choose none" for a section's rows, as they're chosen
+  // now (see paintButtons).
+  let allButtons = [];
   const allOrNone = (list) => {
     const choosable = list.filter(canChoose);
     if (!choosable.length) return null;
-    const every = choosable.every(chosen);
-    return h(
-      'button.link-btn.mb-merge-all',
-      {
-        type: 'button',
-        disabled: busyNow,
-        onclick: () => {
-          for (const g of choosable) choice.set(g.key, !every);
-          render();
-        },
+    const btn = h('button.link-btn.mb-merge-all', {
+      type: 'button',
+      disabled: busyNow,
+      onclick: () => {
+        const every = choosable.every(chosen);
+        for (const g of choosable) choice.set(g.key, !every);
+        render();
       },
-      every ? 'Choose none' : 'Choose all',
-    );
+    });
+    allButtons.push({ btn, choosable });
+    return btn;
   };
 
   function paintButtons() {
@@ -322,11 +322,15 @@ export async function mbMergeView({ el, onDispose }) {
     }
     bottom.hidden = groups.length < 8;
     for (const box of lists.querySelectorAll('input.mb-merge-check')) box.disabled = busyNow;
-    for (const b of lists.querySelectorAll('button.mb-merge-all')) b.disabled = busyNow;
+    for (const { btn, choosable } of allButtons) {
+      btn.disabled = busyNow;
+      btn.textContent = choosable.every(chosen) ? 'Choose none' : 'Choose all';
+    }
   }
 
   function render() {
     if (gone) return;
+    allButtons = [];
     const twice = groups.filter((g) => g.kind === 'twice' && g.verdict === 'same');
     const joined = groups.filter((g) => g.kind === 'joined' && g.verdict === 'same');
     const left = groups.filter((g) => g.verdict !== 'same');
@@ -363,20 +367,22 @@ export async function mbMergeView({ el, onDispose }) {
     if (!sure || gone) return;
     busyNow = true;
     paintButtons();
+    // (All of them, the page left meanwhile or not: they're OK'd.)
     let done = 0;
     const failed = [];
     for (const g of list) {
-      if (gone) return;
       busy(`Merging in Plex… ${fmt.number(done + failed.length + 1)} of ${fmt.number(list.length)}`);
-      // (A name of several in one whose first name's artists were merged
-      // just now: into the one left of them.)
-      const target = g.kind === 'joined' ? artists.get(String(g.members.find((a) => artists.has(String(a.ratingKey)))?.ratingKey)) : g.target;
+      const title = g.kind === 'joined' ? g.joined.title : g.name;
+      const target = g.target;
       const others = g.kind === 'joined' ? [g.joined] : g.members.filter((a) => a !== g.target);
-      if (!target || !others.length || others.some((a) => !artists.has(String(a.ratingKey)))) continue;
+      if (!target || !others.length || [target, ...others].some((a) => !artists.has(String(a.ratingKey)))) {
+        failed.push(`${title} (merged already)`);
+        continue;
+      }
       try {
         await s.mergeInto(target.ratingKey, others.map((a) => a.ratingKey));
       } catch (err) {
-        failed.push(`${g.kind === 'joined' ? g.joined.title : g.name} (${describeError(err)})`);
+        failed.push(`${title} (${describeError(err)})`);
         continue;
       }
       done += 1;
@@ -390,13 +396,13 @@ export async function mbMergeView({ el, onDispose }) {
       }
       albums.set(target.ratingKey, into);
     }
-    if (gone) return;
     toast(
       `Merged ${fmt.number(done)} in Plex${failed.length ? `; ${fmt.number(failed.length)} couldn’t be: ${failed.slice(0, 2).join(', ')}${failed.length > 2 ? '…' : ''}` : ''}`,
       { timeout: failed.length ? 9000 : 4000 },
     );
     // (Pages showing them as they were go.)
     if (done) dropCached((p) => p !== '/settings/mbmerge');
+    if (gone) return;
     await lookUpAll(groupsNow());
     if (gone) return;
     busyNow = false;

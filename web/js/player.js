@@ -79,6 +79,10 @@ const END_SLACK = 5;
 // to after `reload` ms with nothing more come in, once a track. One fading
 // out as the next track fades in: on to that one after `fade` ms.
 const STALL = { say: 8000, reload: 30000, fade: 3000 };
+// A track whose connection drops again, after playing on this many seconds
+// since it last did, is as one whose connection drops the first time (see
+// dropped).
+const DROPS_FORGOTTEN_S = 60;
 const RESCUE_TRIES = 3;
 const RESCUE_PROGRESS = 20;
 const RESCUE_WAITS = [250, 3000, 6000];
@@ -815,6 +819,8 @@ class Player extends EventTarget {
       return;
     }
     this.qualityLater = false;
+    // (A stream that kept dropping is a new one now: see dropped.)
+    this.drops = null;
     const ni = this.nextIndex();
     const next = ni === -1 ? null : this.queue[ni];
     const spare = this.spare;
@@ -1527,33 +1533,78 @@ class Player extends EventTarget {
   // to play (see onError).
   couldntPlay(track, err, media, { at = this.time, autoplay = this.isPlaying } = {}) {
     const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? this.time : at;
-    if (media?.code === MediaError.MEDIA_ERR_NETWORK && track.partKey) {
+    if (track.partKey && (media?.code === MediaError.MEDIA_ERR_NETWORK || (!this.triedTranscode && this.drops?.qid === track.qid))) {
       // The connection to its stream dropped (the server answering
-      // otherwise): the same stream again, from where it got to: at once the
-      // first time, then a while later each time it drops again. Never
-      // another quality instead (Streaming quality is the listener's to
-      // say): once it keeps dropping, the player suggests a lower one
-      // ('dropping': see nowplaying.js). In Play Together, which carries on
-      // without this device, only a few times, then as a track that won't
-      // play here.
-      const n = (this.drops?.qid === track.qid ? this.drops.n : 0) + 1;
-      this.drops = { qid: track.qid, n };
-      if (n >= 2) this.emit('dropping', { track });
-      const again = { startAt, transcode: this.deck.forced || false, reportPrev: false, resume: true };
-      if (n === 1 || (this.remote && n <= 3)) {
-        this.load(this.index, again);
-        return;
-      }
-      if (!this.remote) {
-        this.holdFor(track, at, autoplay, { delay: Math.min(30000, 2000 * 2 ** (n - 2)), gone: false, transcode: again.transcode });
-        return;
-      }
-    } else if (!this.triedTranscode && track.partKey) {
-      // The browser couldn't play the file as it is: the server converts it
-      // (as it does a file of a format this browser can't play).
-      this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
+      // otherwise), or, loaded again after it did, it didn't come (the
+      // browser says the format's wrong, then, as it does for a file that
+      // didn't come at all: see fileComes).
+      this.dropped(track, { at, autoplay, startAt });
       return;
     }
+    if (!this.triedTranscode && track.partKey) {
+      // The browser couldn't play the file as it is, it says: but it says
+      // so too of a file that didn't come at all (no answer to it, or the
+      // server failing it: a weak signal, say). So it's converted (as a file
+      // of a format this browser can't play is) only once the server's
+      // handed it over; otherwise it's a drop, as above.
+      const token = this.loadToken;
+      this.fileComes(track).then((comes) => {
+        if (this.current !== track || this.loadToken !== token || this.held) return;
+        if (comes) this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
+        else this.dropped(track, { at, autoplay, startAt });
+      });
+      return;
+    }
+    this.couldntPlayHere(track, err);
+  }
+
+  // The connection to a track's stream dropped, or it didn't come: the same
+  // stream again, from where it got to, at once the first time, then a
+  // while later each time it drops again (but as the first, once it's
+  // played on a minute since: DROPS_FORGOTTEN_S). Never another quality
+  // instead (Streaming quality is the listener's to say): once it keeps
+  // dropping, the player suggests a lower one ('dropping': see
+  // nowplaying.js). In Play Together, which carries on without this device,
+  // only a few times, then as a track that won't play here.
+  dropped(track, { at, autoplay, startAt }) {
+    const recent = this.drops?.qid === track.qid && at - this.drops.at < DROPS_FORGOTTEN_S;
+    const n = (recent ? this.drops.n : 0) + 1;
+    this.drops = { qid: track.qid, n, at };
+    if (n >= 2) this.emit('dropping', { track });
+    const again = { startAt, transcode: this.deck.forced || false, reportPrev: false, resume: true };
+    if (n === 1 || (this.remote && n <= 3)) {
+      this.load(this.index, again);
+      return;
+    }
+    if (this.remote) {
+      this.couldntPlayHere(track, null);
+      return;
+    }
+    this.holdFor(track, at, autoplay, { delay: Math.min(30000, 2000 * 2 ** (n - 2)), gone: false, transcode: again.transcode });
+  }
+
+  // Whether the server hands over a track's file as it is: false for no
+  // answer, or an answer of 500 or more (the connection dropping, the
+  // server failing), which a media element's error can't be told from
+  // (Chromium's says the format's wrong either way). Only the answer's
+  // start is read: the rest is let go.
+  async fileComes(track) {
+    if (!app.server || navigator.onLine === false) return false;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(this.sourceFor(track, false).url, { cache: 'no-store', signal: ctrl.signal });
+      return res.status < 500;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+      ctrl.abort();
+    }
+  }
+
+  // A track that won't play on this device: the next one, as it can.
+  couldntPlayHere(track, err) {
     this.errorsInRow += 1;
     if (this.remote) {
       // Only this device can't play it; the session carries on, and this
@@ -1705,7 +1756,7 @@ class Player extends EventTarget {
   holdFor(track, at, autoplay, { delay = 2500, gone = true, transcode = false } = {}) {
     this.cancelHold();
     const qid = track.qid;
-    const hold = { qid, at, tries: 0, timer: 0 };
+    const hold = { qid, at, gone, tries: 0, timer: 0 };
     this.held = hold;
     this.loadAutoplay = autoplay;
     this.setState(autoplay ? 'loading' : 'paused');
@@ -1725,6 +1776,12 @@ class Player extends EventTarget {
       hold.asking = false;
       if (!still()) return;
       if (!answers) {
+        // (Waiting for a stream that kept dropping, and now the server's
+        // not answering either: the connection's gone.)
+        if (!hold.gone) {
+          hold.gone = true;
+          connectionLost();
+        }
         hold.tries += 1;
         hold.timer = setTimeout(hold.again, Math.min(30000, 2500 * 2 ** Math.min(hold.tries, 4)));
         return;
@@ -1732,7 +1789,7 @@ class Player extends EventTarget {
       const play = this.loadAutoplay && this.state !== 'paused';
       this.cancelHold();
       connectionBack();
-      debugLog('player', `${gone ? 'the connection’s back' : 'again'}: “${track.title}” from ${hold.at.toFixed(1)} s`);
+      debugLog('player', `${hold.gone ? 'the connection’s back' : 'again'}: “${track.title}” from ${hold.at.toFixed(1)} s`);
       this.load(this.index, { autoplay: play, startAt: hold.at, transcode, reportPrev: false, resume: true });
     };
     window.addEventListener('online', hold.again);

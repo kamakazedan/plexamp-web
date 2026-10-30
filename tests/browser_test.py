@@ -4011,7 +4011,10 @@ with sync_playwright() as pw:
         player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_NETWORK }) }), p.onError(), true)")
         wait_for(lambda: player(page, "p.drops?.qid === p.current?.qid && p.drops.n === 1 && p.state === 'playing' && p.deck.hasSource() && !p.deck.isHls"), 10, 0.2)
         again = rate()
-        player(page, '(p.onError(), true)')
+        # Loaded again, it doesn't come either: the browser says the format's
+        # wrong (as Chromium does of a file that doesn't come at all), and
+        # that's a drop too.
+        player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED }) }), p.onError(), true)")
         waits = wait_for(lambda: player(page, '!!p.held && p.drops?.n === 2 && !p.deck.isHls'), 10, 0.2)
         said = wait_for(lambda: page.locator('.toast:has-text("keeps dropping")').count() > 0, 5, 0.2)
         told = page.locator('.toast').inner_text() if said else ''
@@ -4025,6 +4028,27 @@ with sync_playwright() as pw:
         check('stream: ...and suggesting a lower Streaming quality, a tap away (never changed for the listener)',
               said and 'lower Streaming quality' in told and wait_for(lambda: page.url.endswith('/settings/playback'), 5, 0.2)
               and js(page, "() => import('./js/state.js').then((m) => m.app.settings.quality)") == 'original', f'{told!r} {page.url}')
+
+        # A file that doesn't play the first time it's loaded, the browser
+        # saying the format's wrong: converted only once the server's handed
+        # it over (asked for it again); where it doesn't come (a weak signal,
+        # say), it's a drop, never converted.
+        play_track(4, 2)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        page.route('**/library/parts/**', lambda route: route.abort('connectionreset'))
+        player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED }) }), p.drops = null, p.onError(), true)")
+        kept_as_is = wait_for(lambda: player(page, 'p.drops?.qid === p.current?.qid && !p.deck.forced && !p.deck.isHls'), 15, 0.2)
+        page.unroute('**/library/parts/**')
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        on_as_is = wait_for(lambda: rate()['state'] == 'playing' and not rate()['isHls'] and rate()['t'] > 1, 30, 0.25)
+        as_is = rate()
+        check('stream: a file the browser says it can\'t play, that doesn\'t come (no answer to it), is a drop: loaded again as it is, never converted',
+              kept_as_is and on_as_is and not as_is['isHls'] and as_is['forced'] is False and not play_errors(), f'{kept_as_is} {as_is}')
+        player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED }) }), p.drops = null, p.onError(), true)")
+        converted = wait_for(lambda: rate()['isHls'] and rate()['forced'] is True and rate()['state'] == 'playing', 20, 0.25)
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        check('stream: ...whereas one the server hands over, that the browser still can\'t play, is converted (as a format it can\'t play is)',
+              converted and not play_errors(), str(rate()))
 
         # ...whereas one that doesn't play as it is here stays converted, at
         # the bitrate asked for (paused when it's changed, too).
