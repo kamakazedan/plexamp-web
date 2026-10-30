@@ -2190,6 +2190,17 @@ test('offline mode: a few tries a minute from an address, and once too many wron
   await assert.rejects(off.signIn(key, '10.0.2.2'), (e) => e.status === 429 && /hour/.test(e.message));
   // ...nor where it signed in from lately (10.0.0.1, 10.0.0.2), whatever came from there since
   assert.ok((await off.signIn(key, '10.0.0.1')).token);
+  // ...but too many wrong ones from one address lock it there for the hour, whoever's there
+  const known = offlineSetup();
+  assert.ok((await known.off.signIn(known.key, '10.0.9.9')).token);
+  known.tick(60001);
+  for (let i = 0; i < OFFLINE_LIMITS.wrongPerHour; i++) {
+    await assert.rejects(known.off.signIn('wrong', '10.0.9.9'), (e) => e.status === 401);
+    if (i % OFFLINE_LIMITS.triesPerMinute === OFFLINE_LIMITS.triesPerMinute - 1) known.tick(60001);
+  }
+  known.tick(60001);
+  await assert.rejects(known.off.signIn(known.key, '10.0.9.9'), (e) => e.status === 429 && /hour/.test(e.message));
+  assert.ok((await known.off.signIn(known.key, '10.0.9.8')).token); // (only there: 30 from it, but from nowhere else)
   // After many more, from nowhere at all (each address one try), but where it signed in from lately
   let n = off.wrong.length;
   for (let i = 0; n < OFFLINE_LIMITS.wrongCapPerHour; i++, n++) await assert.rejects(off.signIn('wrong', `10.1.${i >> 8}.${i & 255}`), (e) => e.status === 401);

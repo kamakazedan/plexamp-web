@@ -22,9 +22,10 @@ you're running is shown in **Settings › About**.
   without signing in (add the player's own address to Plex's "List of IP
   addresses and networks that are allowed without auth"), works only from
   your own networks unless `OFFLINE_FROM` says otherwise, and takes five
-  tries a minute from an address; after 30 wrong keys from anywhere, none
-  for the rest of the hour from wherever a wrong one came, and after 200,
-  none from anywhere the key hasn't signed in from in the last 14 days.
+  tries a minute from an address, and none for the rest of the hour from
+  an address that's sent 30 wrong ones, or (after 30 from anywhere) one
+  wrong one, or (after 200) from anywhere the key hasn't signed in from in
+  the last 14 days.
   The key's sessions never leave the player: their requests go to your
   server without them, as the player's own do. On Proxmox VE, an update
   keeps your settings file as it was, so add `OFFLINE_KEY` there with
