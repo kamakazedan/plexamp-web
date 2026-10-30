@@ -3458,7 +3458,7 @@ with sync_playwright() as pw:
         shot(page, 'routes-03-routes')
         check('routes: opening the Connection page tries no routes; testing the connection does', quiet == ([], 0) and len(routes) == 3, f'{quiet} {routes}')
         check('routes: through this container when its address on the network doesn\'t answer, saying why',
-              'Through this app' in conn and 'set up to talk directly to Mock Plex' in conn and 'fastest route' in conn and [k for k, _ in routes] == ['local', 'proxy', 'remote']
+              'Through this app' in conn and 'set up to talk directly to Mock Plex' in conn and 'best route that answers' in conn and [k for k, _ in routes] == ['local', 'proxy', 'remote']
               and '(in use)' in routes[1][1] and 'No answer' in routes[0][1] and ' ms' in routes[2][1] and 'Chrome asks first' in hint,
               f'{conn!r} {routes} {hint!r}')
         page.click('.radio-row:has(.row-title:text-is("Straight to the server"))')
@@ -3466,7 +3466,7 @@ with sync_playwright() as pw:
         page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Over the internet")', timeout=15000)
         direct = (js(page, "() => import('./js/state.js').then((m) => [m.app.source.kind, m.app.settings.route])"), page.locator('.kv', has_text='Connection').first.inner_text())
         check('routes: "Straight to the server" goes there, over the internet here', direct[0] == ['remote', 'direct'] and 'Over the internet' in direct[1] and page.locator('.route-row').count() == 0, str(direct))
-        page.click('.radio-row:has(.row-title:text-is("Fastest that works"))')
+        page.click('.radio-row:has(.row-title:text-is("Best that works"))')
         page.wait_for_selector('.toast:has-text("Now connected through this app")')
         page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Through this app")', timeout=15000)
         # The test of the connection: through this container, which part
@@ -7250,7 +7250,7 @@ with sync_playwright() as pw:
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
         check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that switching keeps nothing of yours for them',
-              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'Switching clears yours from this device' in said, f'{rows} {said!r}')
+              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'Switching clears all of yours from this device' in said, f'{rows} {said!r}')
 
         # Dan's: settings (some kept for his account), a search, what's
         # playing, a missing track an AI playlist of his suggested (with what
@@ -7536,7 +7536,7 @@ with sync_playwright() as pw:
         check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
         check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
         check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (with no switch of any kind)',
-              'yours and your friends' in lede and 'Saved to your Plex account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
+              'yours and your friends' in lede and 'Kept by this player for your Plex account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
 
         # Noted on one device, on the other once it's read again; counted again.
         note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')

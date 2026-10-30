@@ -763,6 +763,14 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   await assert.rejects(busy.artistInfo('Somebody'), (e) => e instanceof MusicBrainzError && e.status === 503 && /busy/.test(e.message));
   await assert.rejects(busy.artistInfo('Somebody Else'), (e) => e instanceof MusicBrainzError && e.status === 503 && e.retryAfter > 40 && e.retryAfter <= 45);
   assert.equal(n, 1);
+  // ...nor by anything else meanwhile: an AI playlist's check, or what
+  // was waiting its turn (turned away at once, saying how long).
+  await assert.rejects(busy.check([{ kind: 'artist', artist: 'Someone' }, { kind: 'track', artist: 'Someone', title: 'A Song' }]), (e) => e instanceof MusicBrainzError && e.status === 503 && e.retryAfter > 40);
+  await assert.rejects(busy.ask('/ws/2/recording', { query: 'x' }), (e) => e.status === 503 && /in a minute/.test(e.message));
+  assert.equal(n, 1);
+  // A longer wait is said in minutes.
+  const later = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => ({ ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '240' : null) }, json: async () => ({}) }) });
+  await assert.rejects(later.ask('/ws/2/artist', { query: 'x' }), (e) => /in 4 minutes/.test(e.message) && e.retryAfter === 240);
 });
 
 test('MusicBrainz: a check stops when whoever asked has gone, or its time is up', async () => {

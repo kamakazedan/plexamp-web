@@ -98,7 +98,7 @@ export async function mbReviewView({ el, onDispose }) {
       const these = indexes.filter((j) => !genresOf(albums[j]).length === withGenres);
       for (let i = 0; i < these.length && !gone; i += ASK) {
         const part = these.slice(i, i + ASK);
-        const got = await albumsOnMB(part.map((j) => ({ artist: albums[j].parentTitle, title: albums[j].title, year: plexYear(albums[j]) })), { genres: withGenres });
+        const got = await albumsOnMB(part.map((j) => ({ artist: albums[j].parentTitle, title: albums[j].title, year: plexYear(albums[j]) })), { genres: withGenres, background: true });
         part.forEach((j, k) => (found[j] = got[k] ?? null));
       }
     }
@@ -337,9 +337,15 @@ export async function mbReviewView({ el, onDispose }) {
     trouble = err;
   }
   render();
+  const inTime = (ms) => {
+    const s = Math.round(ms / 1000);
+    return s < 90 ? `in ${fmt.count(s, 'second', 'seconds')}` : `in ${fmt.count(Math.round(s / 60), 'minute', 'minutes')}`;
+  };
+  // (This page carries on by itself, so not "Try again…".)
   const say = (err) => {
     if (!err) return;
-    status.replaceChildren(`${err.message || describeError(err)} Carrying on in ${fmt.count(Math.round(waitAfter(err) / 1000), 'second', 'seconds')}.`);
+    const what = String(err.message || describeError(err)).replace(/\s*Try again[^.]*\.\s*$/, '');
+    status.replaceChildren(`${what} Carrying on ${inTime(waitAfter(err))}.`);
     status.classList.add('warn');
   };
   say(trouble);

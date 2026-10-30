@@ -146,7 +146,7 @@ export async function mbMergeView({ el, onDispose }) {
       const withAlbums = [];
       for (const a of entries) withAlbums.push({ artist: a, mbid: mbidOf(a), albums: await albumsOf(a) });
       const id = (g.kind === 'joined' ? withAlbums[0].mbid : withAlbums.map((e) => e.mbid).find(Boolean)) || null;
-      const mb = await artistOnMB(g.name, { id, namesakes: true });
+      const mb = await artistOnMB(g.name, { id, namesakes: true, background: true });
       g.mb = mb;
       g.entries = withAlbums;
       g.verdict = sameArtist(withAlbums, { name: g.name, ...mb, joined: g.kind === 'joined' });
@@ -240,7 +240,7 @@ export async function mbMergeView({ el, onDispose }) {
     if (g.verdict === 'first') return end(`Merge the ${fmt.number(g.members.length)} called ${g.name} first`);
     if (g.verdict === 'error') return 'Couldn’t check just now. Try Look again.';
     if (g.verdict === 'different') {
-      if (g.idsDiffer) return 'Plex has them as different artists.';
+      if (g.idsDiffer) return 'Plex links them to different artists on MusicBrainz.';
       const apart = g.evidence?.flatMap((x) => x.apart) || [];
       return end(`MusicBrainz says ${apart.length ? quoted(apart) : g.kind === 'joined' ? 'its albums' : 'their albums'} ${apart.length === 1 ? 'is' : 'are'} by a different ${g.name}`);
     }
@@ -250,7 +250,7 @@ export async function mbMergeView({ el, onDispose }) {
     if (g.mb?.capped || g.mb?.namesakes?.some((n) => n?.capped)) return end(`Not sure: ${g.name} has too many releases on MusicBrainz to tell`);
     const ev = g.evidence || [];
     const weakApart = ev.flatMap((x) => x.apartWeak);
-    if (weakApart.length) return end(`Not sure: MusicBrainz says ${quoted(weakApart)} is by a different ${g.name}, but it’s a common title`);
+    if (weakApart.length) return end(`Not sure: MusicBrainz says ${quoted(weakApart)} ${weakApart.length === 1 ? 'is' : 'are'} by a different ${g.name}, but ${weakApart.length === 1 ? 'it’s a common title' : 'they’re common titles'}`);
     const none = ev.every((x) => !x?.plain?.length && !x?.weak?.length);
     if (g.kind === 'joined') return none ? 'Not sure: MusicBrainz can’t match any of the albums.' : `Not sure: MusicBrainz matches too few of the albums (your ${g.name}: ${known(ev[0])}; this one: ${known(ev[1])}).`;
     return none ? 'Not sure: MusicBrainz can’t match any of their albums.' : `Not sure: MusicBrainz matches too few of their albums (${ev.map(known).join('; ')}).`;

@@ -95,7 +95,7 @@ export function experienceView({ el }) {
       toggleRow({ title: 'Ratings in track lists', subtitle: 'Rate tracks right in album, playlist and other track lists.', checked: s.listRatings, onChange: set('listRatings') }),
       toggleRow({
         title: 'Keep ❤️ Tracks up to date',
-        subtitle: 'Tracks you favourite (five stars or a thumbs up) go in your ❤️ Tracks playlist, and come out if you take the rating off.',
+        subtitle: 'Tracks you favourite (five stars or a thumbs up) go in your ❤️ Tracks playlist, and leave it if you change that rating.',
         checked: s.lovedPlaylist,
         onChange: set('lovedPlaylist'),
       }),

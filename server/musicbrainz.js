@@ -125,6 +125,7 @@ export class MusicBrainz {
     this.queuedBy = new Map(); // who -> how many of theirs are waiting
     this.working = false;
     this.downUntil = 0; // MusicBrainz didn't answer: the features don't ask it again until then
+    this.quietUntil = 0; // MusicBrainz said it's busy: nothing at all is asked of it until then
   }
 
   // One request to MusicBrainz, one at a time, gapMs after the one before
@@ -150,9 +151,13 @@ export class MusicBrainz {
   asked(path, params, signal) {
     const run = async () => {
       if (signal?.aborted) throw new Gone();
+      // (Busy: whatever's asking, and whatever was waiting its turn, is
+      // turned away until it said to come back.)
+      if (Date.now() < this.quietUntil) throw this.busy(this.quietUntil - Date.now());
       const wait = this.nextAt - Date.now();
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       if (signal?.aborted) throw new Gone();
+      if (Date.now() < this.quietUntil) throw this.busy(this.quietUntil - Date.now());
       const started = Date.now();
       this.nextAt = started + this.gapMs;
       const url = `${this.base}${path}?${new URLSearchParams({ ...params, fmt: 'json' })}`;
@@ -172,8 +177,10 @@ export class MusicBrainz {
         // indexes not there, a 503 without.)
         const retry = res.headers?.get?.('retry-after');
         if (res.status === 429 || (res.status === 503 && (this.public || retry))) {
-          this.unwell(retryAfterMs(retry));
-          throw new MusicBrainzError(503, this.public ? 'MusicBrainz is busy right now. Try again in a minute.' : 'The player’s MusicBrainz server is busy. Try again in a minute.');
+          const ms = retryAfterMs(retry);
+          this.unwell(ms);
+          this.quietUntil = Math.max(this.quietUntil, Date.now() + ms);
+          throw this.busy(ms);
         }
         if (res.status >= 500) this.unwell();
         // (A server of your own needs its search indexes for these.)
@@ -294,7 +301,18 @@ export class MusicBrainz {
     return Date.now() < this.downUntil;
   }
 
+  // MusicBrainz said it's busy, to come back in `ms`: what's said, and the
+  // Retry-After for it.
+  busy(ms) {
+    const mins = Math.max(1, Math.round(ms / 60000));
+    const when = mins === 1 ? 'in a minute' : `in ${mins} minutes`;
+    return Object.assign(new MusicBrainzError(503, this.public ? `MusicBrainz is busy right now. Try again ${when}.` : `The player’s MusicBrainz server is busy. Try again ${when}.`), {
+      retryAfter: Math.max(1, Math.ceil(ms / 1000)),
+    });
+  }
+
   resting() {
+    if (Date.now() < this.quietUntil) throw this.busy(this.quietUntil - Date.now());
     if (this.down()) throw Object.assign(new MusicBrainzError(503, 'MusicBrainz isn’t answering this player just now. Try again in a minute.'), { retryAfter: Math.max(1, Math.ceil((this.downUntil - Date.now()) / 1000)) });
   }
 

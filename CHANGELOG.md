@@ -16,10 +16,13 @@ you're running is shown in **Settings › About**.
   feature: the player asks it one thing at a time, ten a second at most
   (before, as fast as it answered), and less often while it's slow to
   answer. One that says it's busy (a 429, or a 503 with Retry-After) is
-  left alone for as long as it says (a minute if it doesn't). The app asks
-  the player 90 times a minute at most, and when the player's busy it
-  waits as it's told and carries on (Years and genres to fix said "429"
-  and stopped).
+  asked nothing at all, by any feature, for as long as it says (a minute
+  if it doesn't). The app asks the player 90 times a minute at most, and
+  pages looking through your library 60, so what you're waiting on always
+  has room (a shuffle's or a radio's live tracks and demos never wait: with
+  no room, they go by their titles that time). When the player's busy, the
+  app waits as it's told and carries on (Years and genres to fix said
+  "429" and stopped).
 - **Plainer settings**: every setting says what it does in a line or two,
   without the technical words (no "container", nor the player's settings'
   names): "Through this app" for the route through the player, and

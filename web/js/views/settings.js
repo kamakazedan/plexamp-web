@@ -144,11 +144,11 @@ function confirmSignOut() {
       app.auth?.offline
         ? ' The offline password session ends.'
         : app.config.settingsSync && app.config.missingSync
-        ? ' Your settings and missing tracks stay saved to your account.'
+        ? ' This player keeps your settings and missing tracks for your account, for next time.'
         : app.config.settingsSync
-          ? ' Your settings stay saved to your account.'
+          ? ' This player keeps your settings for your account, for next time.'
           : app.config.missingSync
-            ? ' Your missing tracks stay saved to your account.'
+            ? ' This player keeps your missing tracks for your account, for next time.'
             : ''
     }`,
     actions: [
@@ -169,7 +169,7 @@ function confirmSignOut() {
 // Whether settings follow the account (sync.js), with a switch for it.
 function accountSyncRows() {
   const rows = h('div.rows');
-  const mine = 'Some stay on each device: streaming quality, connection, device name, sharing with your devices, playback speed, Load ahead and your own AI server.';
+  const mine = 'Some stay on each device: streaming quality, connection, device name, sharing with your devices, playback speed, Load ahead, Keep played tracks and AI settings.';
   if (!app.config.settingsSync || app.auth?.offline) {
     rows.append(
       row({
@@ -239,7 +239,7 @@ function chooseHomeUser(users, mine) {
       h(
         'p.home-users-note',
         null,
-        'Everyone has their own playlists, ratings and settings. Switching clears yours from this device, like signing out.',
+        'Everyone has their own playlists, ratings and settings. Switching clears all of yours from this device, settings too.',
       ),
     ),
   });
@@ -507,7 +507,7 @@ const FADES = [
   [
     'smart',
     'Smart',
-    'Fades where the music really ends, so there’s no silent gap. Tracks next to each other on an album play gaplessly. Works best with Plex’s loudness analysis.',
+    'Fades where the music really ends, so there’s no silent gap. Tracks next to each other on an album play gaplessly. Needs Plex’s loudness analysis, or it fades at the very end.',
   ],
   ['always', 'Always', 'Fades between every track, albums included.'],
   ['off', 'Off', 'No fades.'],
@@ -710,7 +710,7 @@ function radioRows(label, options, current, onChange) {
 // names them.
 const ROUTE_NAMES = { local: 'On your network', proxy: 'Through this app', remote: 'Over the internet', relay: 'Plex relay (slow)' };
 const ROUTE_CHOICES = [
-  ['best', 'Fastest that works', 'Your network first, then through this app, then the internet, then Plex’s relay.'],
+  ['best', 'Best that works', 'Your network first, then through this app, then the internet, then Plex’s relay.'],
   ['container', 'Through this app', 'Always through this app, while it can reach the server.'],
   ['direct', 'Straight to the server', 'Straight to the server when possible. Through this app only if that fails.'],
 ];
@@ -721,7 +721,7 @@ function routeNote(src) {
     if (!src.connections?.length) return 'You chose the server this app is set up for, so it always goes through this app.';
     if (app.settings.route === 'container') return `Plexamp-web is set up to talk directly to ${src.serverName}, and you chose to always go through it.`;
     if (app.settings.route === 'direct') return `The server didn’t answer directly, so this goes through Plexamp-web, which is set up to talk to ${src.serverName}.`;
-    return `Plexamp-web is set up to talk directly to ${src.serverName}. It’s the fastest route right now (Test connection compares them).`;
+    return `Plexamp-web is set up to talk directly to ${src.serverName}. It’s the best route that answers right now (Test connection shows how fast each is).`;
   }
   if (src.kind === 'local') return 'Straight to the server, on your network.';
   if (src.kind === 'remote') return 'Straight to the server, over the internet.';
@@ -733,7 +733,7 @@ function routeResult(r) {
   if (r.ok) return `${fmt.number(r.ms)} ms`;
   return {
     http: 'Can’t be used from this secure (https) page',
-    insecure: 'Not used: it isn’t encrypted',
+    insecure: 'Not used: unencrypted over the internet',
     timeout: 'No answer within 6 seconds',
     network: 'No answer',
     status: `Answered with an error (${r.status})`,
@@ -803,7 +803,7 @@ function debugView({ el, onDispose }) {
     const local = tried.filter((r) => r.kind === 'local');
     routeHint.textContent =
       local.length && local.every((r) => !r.ok && r.why !== 'http') && tried.some((r) => r.ok && r.kind !== 'local')
-        ? 'Its address on your network didn’t answer. Your browser or router may block it (Chrome asks first). The app uses the fastest route that works.'
+        ? 'Its address on your network didn’t answer. Your browser or router may block it (Chrome asks first). The app uses the best route that works.'
         : '';
   };
   // Another route preference: the best route for it, now.
@@ -859,7 +859,7 @@ function debugView({ el, onDispose }) {
       h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
       kv('Play Together', !app.config.together ? 'Off on this player' : together.active ? `In a session (${together.status === 'live' ? 'connected' : 'reconnecting'})` : 'On'),
-      kv('Debug mode', app.config.debug ? 'On: problems are written to Plexamp-web’s log (never sign-ins)' : 'Off'),
+      kv('Debug mode', app.config.debug ? 'On: problems are written to Plexamp-web’s log (no sign-in details)' : 'Off'),
       kv('Client ID', clientId()),
       kv('App version', APP_INFO.version),
     ),
@@ -991,7 +991,7 @@ function aiView({ el, onDispose }) {
   const shared = sharedAI();
   const options = [
     ...(shared ? [['auto', 'This player’s model', 'The AI model this player provides.']] : []),
-    ['custom', 'My own Ollama server', 'An Ollama server you run, like one on this computer. Its address stays on this device.'],
+    ['custom', 'My own Ollama server', 'An Ollama server you run, like one on this computer. Its address and key stay on this device.'],
     ['off', 'Off', 'Hide AI features on this device.'],
   ];
   const chosen = () => {
