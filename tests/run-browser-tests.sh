@@ -13,7 +13,7 @@
 # 8083), one on a second mock server with a big library, for the memory
 # tests (port 8084), one with the MusicBrainz features
 # (MUSICBRAINZ_ADVANCED=true, on the mock's MusicBrainz: port 8086), and one
-# with an offline key, on a third mock server that lets it in without
+# with an offline password, on a third mock server that lets it in without
 # signing in (port 8087). All reach their mock Plex server through their
 # /pms proxy, and their service uses the mock for plex.tv too (its accounts
 # are needed for Play Together).
@@ -84,7 +84,7 @@ docker run -d --name pwb-web5 --network "$NET" -p 127.0.0.1:8086:80 -e "$TV" -e 
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e MUSICBRAINZ_ADVANCED=true "$IMAGE" >/dev/null
 # (Offline mode's times shortened, for the tests: see server/index.js.)
 docker run -d --name pwb-web6 --network "$NET" -p 127.0.0.1:8087:80 -e PLEX_TV_URL=http://pwb-plex-open:32402 \
-    -e PLEX_SERVER_URL=http://pwb-plex-open:32402 -e OFFLINE_KEY=offline-key-for-tests -e PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500 "$IMAGE" >/dev/null
+    -e PLEX_SERVER_URL=http://pwb-plex-open:32402 -e OFFLINE_PWD=offline-pwd-for-tests -e PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500 "$IMAGE" >/dev/null
 
 for url in "http://127.0.0.1:32400/identity" "http://127.0.0.1:32401/identity" "http://127.0.0.1:32402/identity" http://127.0.0.1:11434/api/version \
     http://127.0.0.1:11435/api/version http://127.0.0.1:8081/api/health http://127.0.0.1:8082/api/health \

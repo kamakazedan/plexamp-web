@@ -2,7 +2,8 @@
 // (mb.js): each on or off (for you, on all your devices where settings
 // follow your account), which kinds of an artist's missing albums are
 // shown, and for the server's owner, a look through the library for the
-// years and genres to fix in Plex (mbreview.js). (Skip live tracks and
+// years and genres to fix in Plex (mbreview.js), and the artists Plex has
+// more than once, to merge there (mbmerge.js). (Skip live tracks and
 // demos, which these add to, is in Settings › Playback, for everyone.)
 import { app, saveSettings } from '../state.js';
 import { dropCached } from '../router.js';
@@ -101,6 +102,11 @@ export async function musicbrainzSettingsView({ el }) {
               href: '/settings/mbreview',
               title: 'Years and genres to fix',
               subtitle: 'Your albums whose year in Plex isn’t the year they first came out, and those without a genre that MusicBrainz has genres for: fixed in Plex for everyone, or downloaded for MusicBrainz Picard or beets to fix the files.',
+            }),
+            row({
+              href: '/settings/mbmerge',
+              title: 'Artists to merge',
+              subtitle: 'Artists Plex has more than once (the same name twice, or in a name of several artists’, as “Alphabeat;FORCE”), merged in Plex with your OK where MusicBrainz plainly has them as one.',
             }),
           ),
         )

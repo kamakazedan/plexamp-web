@@ -11,7 +11,7 @@ import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
-import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes } from './releases.js';
+import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, sameArtist, genericTitle } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
@@ -2104,7 +2104,7 @@ test('the owner\'s sign-ins: fingerprints only, for 30 days since last used, the
   }
 });
 
-test('offline mode: where the key can be used from (OFFLINE_FROM)', () => {
+test('offline mode: where the password can be used from (OFFLINE_NETWORKS)', () => {
   assert.equal(parseFrom('any'), null);
   assert.equal(parseFrom('ANY'), null);
   const at = (from) => new Offline({ key: 'twelve chars!', from, auth: {} });
@@ -2116,7 +2116,7 @@ test('offline mode: where the key can be used from (OFFLINE_FROM)', () => {
   for (const ip of ['192.168.1.200', '2001:db8:5::1', '10.9.9.9']) assert.equal(list.allowedFrom(ip), true, ip);
   for (const ip of ['192.168.2.1', '10.9.9.8', '127.0.0.1']) assert.equal(list.allowedFrom(ip), false, ip);
   assert.equal(at('any').allowedFrom('203.0.113.9'), true);
-  for (const bad of ['192.168.1.0/33', 'example.com', '10.0.0.1/', '1.2.3.4/8/9', 'privat', '10.0.0.0/0x8', '::/129']) assert.throws(() => parseFrom(bad), /OFFLINE_FROM/, bad);
+  for (const bad of ['192.168.1.0/33', 'example.com', '10.0.0.1/', '1.2.3.4/8/9', 'privat', '10.0.0.0/0x8', '::/129']) assert.throws(() => parseFrom(bad), /OFFLINE_NETWORKS/, bad);
 });
 
 // Offline mode with plex.tv as `tv` says, and a server that lets this
@@ -2135,7 +2135,7 @@ function offlineSetup({ key = 'correct horse battery', open = true } = {}) {
   return { off, tv, key, tick: (ms) => (now += ms), at: () => now };
 }
 
-test('offline mode: the key only once plex.tv hasn\'t answered for a while, where the server lets this player in, from where it may be used', async () => {
+test('offline mode: the password only once plex.tv hasn\'t answered for a while, where the server lets this player in, from where it may be used', async () => {
   const { off, tv, key, tick, at } = offlineSetup();
   tv.down = false;
   await assert.rejects(off.signIn(key, '192.168.1.5'), (e) => e.status === 409 && e.reason === 'plex-tv');
@@ -2166,16 +2166,16 @@ test('offline mode: the key only once plex.tv hasn\'t answered for a while, wher
   tick(OFFLINE_LIMITS.sessionMs + 1);
   assert.equal(off.valid(later.token), false);
   off.end(later.token);
-  // Nothing to play: the key isn't taken
+  // Nothing to play: the password isn't taken
   const shut = offlineSetup({ open: false });
   await assert.rejects(shut.off.signIn(shut.key, '10.0.0.2'), (e) => e.status === 409 && e.reason === 'server');
-  // No key: no offline mode
+  // No password: no offline mode
   const none = offlineSetup({ key: '' });
   await assert.rejects(none.off.signIn('', '10.0.0.2'), (e) => e.status === 404);
   assert.equal((await none.off.state('10.0.0.2')).on, false);
 });
 
-test('offline mode: a few tries a minute from an address, and once too many wrong keys have come from anywhere, none for the rest of the hour from where one came', async () => {
+test('offline mode: a few tries a minute from an address, and once too many wrong passwords have come from anywhere, none for the rest of the hour from where one came', async () => {
   const { off, key, tick } = offlineSetup();
   for (let i = 0; i < OFFLINE_LIMITS.triesPerMinute; i++) await assert.rejects(off.signIn('wrong', '10.0.0.1'), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.0.1'), (e) => e.status === 429); // (the right one too)
@@ -2184,7 +2184,7 @@ test('offline mode: a few tries a minute from an address, and once too many wron
   assert.ok((await off.signIn(key, '10.0.0.1')).token);
   for (let i = OFFLINE_LIMITS.triesPerMinute; i < OFFLINE_LIMITS.wrongPerHour; i++) await assert.rejects(off.signIn('wrong', `10.0.1.${i}`), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.1.9'), (e) => e.status === 429 && /hour/.test(e.message));
-  // ...but from anywhere else, the right key: nobody else's wrong ones keep it out
+  // ...but from anywhere else, the right password: nobody else's wrong ones keep it out
   assert.ok((await off.signIn(key, '10.0.2.1')).token);
   await assert.rejects(off.signIn('wrong', '10.0.2.2'), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.2.2'), (e) => e.status === 429 && /hour/.test(e.message));
@@ -2438,10 +2438,10 @@ async function startService(env, dir) {
   };
 }
 
-test('/pms/, end to end: the owner, friends the server knows as themselves, made-up sign-ins, the notification stream, plex.tv not answering, and the offline key', async () => {
+test('/pms/, end to end: the owner, friends the server knows as themselves, made-up sign-ins, the notification stream, plex.tv not answering, and the offline password', async () => {
   const p = await fakePlex();
   const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
-  const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_OFFLINE_KEY: 'the offline key', PW_SERVICE_OFFLINE_TIMING: '400,1500,100,100' };
+  const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_OFFLINE_PWD: 'the offline password', PW_SERVICE_OFFLINE_TIMING: '400,1500,100,100' };
   let svc = await startService(env, dir);
   // nginx's check of a request to /pms/: its token (from the query string, or the header), where it came from, how often a
   // token's name is in it (`seen`, as nginx counts: one in the query string, to begin with), whether it's to
@@ -2458,7 +2458,7 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
       },
     });
   const check = (token, opts) => checked(token, opts).then((r) => r.status);
-  // (What the check tells nginx: an offline-key session's request goes without its sign-in.)
+  // (What the check tells nginx: an offline-password session's request goes without its sign-in.)
   const offlineSaid = (token, opts) => checked(token, opts).then((r) => r.headers.get('x-pw-pms-offline'));
   try {
     // A server that doesn't let this container in: everything goes through, as Plex checks it.
@@ -2497,14 +2497,14 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     assert.equal(await check('sam-token', { also: { 'X-PW-Plex-Token': 'sam%2Dtoken' } }), 403);
     assert.equal(await check('sam-token'), 204);
     assert.equal(await offlineSaid('owner-token'), null);
-    // The offline key, while plex.tv is answering: no
+    // The offline password, while plex.tv is answering: no
     const signIn = (key, ip = '192.168.1.20') =>
       fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': ip, 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
-    let r = await signIn('the offline key');
+    let r = await signIn('the offline password');
     assert.equal(r.status, 409);
     assert.equal((await r.json()).reason, 'plex-tv');
     // (Only as JSON: another site's page can't have a browser send that without asking first.)
-    r = await fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': '192.168.1.20', 'Content-Type': 'text/plain' }, body: JSON.stringify({ key: 'the offline key' }) });
+    r = await fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': '192.168.1.20', 'Content-Type': 'text/plain' }, body: JSON.stringify({ key: 'the offline password' }) });
     assert.equal(r.status, 415);
     // plex.tv stops answering, and the service restarts meanwhile (nothing in memory): the owner's sign-in is known, as a fingerprint
     await svc.stop();
@@ -2517,13 +2517,13 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     p.state.honour = false;
     assert.equal(await check('sam-token'), 503);
     p.state.honour = true;
-    // The offline key: once plex.tv hasn't answered for a while, from where it may be used
+    // The offline password: once plex.tv hasn't answered for a while, from where it may be used
     await sleep(450);
-    r = await signIn('not the offline key');
+    r = await signIn('not the offline password');
     assert.equal(r.status, 401);
-    r = await signIn('the offline key', '203.0.113.7');
+    r = await signIn('the offline password', '203.0.113.7');
     assert.equal(r.status, 403);
-    r = await signIn('the offline key');
+    r = await signIn('the offline password');
     assert.equal(r.status, 200);
     const { token } = await r.json();
     assert.equal(await check(token), 204);
@@ -2657,6 +2657,93 @@ test('MusicBrainz features: an artist\'s albums told from those of another artis
   assert.deepEqual(ids(apartFromNamesakes(page, { name: 'Maduk', groups: producer, byId: true, namesakes: [rapper] })), ['4', '5', '6']);
 });
 
+test('MusicBrainz features: artists Plex has more than once, merged only on plain evidence that they\'re one', () => {
+  let n = 0;
+  const g = (title, date, primary = 'Album') => ({ id: `00000000-0000-4000-8000-${String((n += 1)).padStart(12, '0')}`, title, primary, secondary: [], date });
+  const id = '11111111-1111-4111-8111-111111111111';
+  const other = '22222222-2222-4222-8222-222222222222';
+  const band = { id, name: 'Alphabeat' };
+  const groups = [g('This Is Alphabeat', '2007-01-01'), g('The Beat Is...', '2009-11-02'), g('Express Non-Stop', '2012-09-24'), g('Alphabeat', '2007-03-01'),
+    g('Live', '2010-05-05'), g('Greatest Hits', '2015-01-01'), g('The Best of Alphabeat', '2016-01-01')];
+  const namesake = { id: other, name: 'Alphabeat', groups: [g('Night Shift', '2021-05-05'), g('Demos', '2020-01-01')] };
+  const old = { mbid: id, albums: [{ title: 'This Is Alphabeat', year: 2007 }, { title: 'The Beat Is...', year: 2009 }] };
+  const fresh = { mbid: null, albums: [{ title: 'Express Non-Stop (Deluxe)', year: 2012 }] };
+  const only = (...albums) => ({ mbid: null, albums });
+  const mb = { name: 'Alphabeat', artist: band, groups, namesakes: [] };
+
+  // Names of several artists in one, joined by ";" (and only by that)
+  assert.deepEqual(joinedParts('Alphabeat;Blondee;FORCE'), ['Alphabeat', 'Blondee', 'FORCE']);
+  assert.deepEqual(joinedParts(' Alphabeat ; FORCE '), ['Alphabeat', 'FORCE']);
+  for (const one of ['Alphabeat', 'Simon & Garfunkel', 'Earth, Wind & Fire', 'AC/DC', 'Alphabeat;', ';', '']) assert.equal(joinedParts(one), null, one);
+
+  // Album titles plenty of artists have
+  const generic = (title, name = '') => genericTitle(albumKey(title), albumKey(name));
+  for (const [title, name] of [['Live'], ['Greatest Hits, Vol. 2'], ['The Very Best Of'], ['Demos'], ['B-Sides'], ['Remixes'], ['EP 1'], ['II'], ['1999'], ['Up'], ['Live 2009'],
+    ['Christmas'], ['Christmas Album'], ['Greatest Hits Live'], ['Live Hits'], ['Hits & Rarities'], ['BBC Sessions'], ['Peel Sessions'], ['MTV Unplugged'], ['Live in Tokyo'],
+    ['The Complete Recordings'], ['Best of the Best'], ['Second Album'], ['Bonus Tracks'], ['Remastered'], ['Deluxe'], ['Ballads'], ['Love Songs'], ['Love'], ['Home'], ['Blue'],
+    ['The Ultimate Collection'], ['The Definitive Collection'], ['Original Album Classics'], ['Original Album Series'], ['20th Century Masters: The Millennium Collection'],
+    ['Super Hits'], ['All the Hits'], ['Number Ones'], ['In Concert'], ['Christmas Classics'], ['Ultimate Hits'], ['Original Soundtrack'], ['John Peel Sessions'], ['The Lost Tapes'],
+    ['The Best of Alphabeat', 'Alphabeat'], ['Alphabeat Live', 'Alphabeat'], ['Led Zeppelin IV', 'Led Zeppelin']]) {
+    assert.equal(generic(title, name), true, title);
+  }
+  for (const title of ['This Is Alphabeat', 'The Beat Is...', 'Express Non-Stop', 'Civil War', 'Night Shift', 'Songs from the Big Chair']) assert.equal(generic(title, 'Alphabeat'), false, title);
+
+  // An album of each that's plainly theirs on MusicBrainz (by its title, within a year), none another's
+  assert.equal(sameArtist([old, fresh], mb), 'same');
+  assert.equal(sameArtist([fresh, { ...fresh }], mb), 'same');
+  // ...even where Plex has the very same MusicBrainz id for each (it can have taken an artist MusicBrainz doesn't know for the one it does)
+  assert.equal(sameArtist([old, { ...fresh, mbid: id }], mb), 'same');
+  assert.equal(sameArtist([old, { mbid: id, albums: [{ title: 'Unreleased', year: 2020 }] }], mb), 'unknown');
+  assert.equal(sameArtist([old, { ...fresh, mbid: id }], { name: 'Alphabeat' }), 'unknown');
+  // ...different ids: different artists
+  assert.equal(sameArtist([old, { ...fresh, mbid: other }], mb), 'different');
+  // ...not by a self-titled album (artists of one name have those by construction)
+  assert.equal(sameArtist([old, only({ title: 'Alphabeat', year: 2007 })], mb), 'unknown');
+  // ...nor another year, a title only near theirs, or no year
+  for (const it of [{ title: 'Express Non-Stop', year: 2015 }, { title: 'Express Non-Stops', year: 2012 }, { title: 'Express Non-Stop', year: null }]) {
+    assert.equal(sameArtist([old, only(it)], mb), 'unknown', JSON.stringify(it));
+  }
+  // ...nor one of a title plenty have (two of those, though, are plain enough; one in two editions isn't two)
+  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 })], mb), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'The Best of Alphabeat', year: 2016 })], mb), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 }, { title: 'Live (Deluxe)', year: 2010 })], mb), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 }, { title: 'Greatest Hits', year: 2015 })], mb), 'same');
+  // ...nor with nothing of theirs on MusicBrainz for one of them
+  assert.equal(sameArtist([old, only({ title: 'Unreleased', year: 2020 })], mb), 'unknown');
+  // An album plainly another's of the name: different (but one of a title plenty have only says it can't be told)
+  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake] }), 'different');
+  assert.equal(sameArtist([old, only({ title: 'Demos', year: 2020 })], { ...mb, namesakes: [namesake] }), 'unknown');
+  assert.equal(sameArtist([old, { ...fresh, albums: [...fresh.albums, { title: 'Demos', year: 2020 }] }], { ...mb, namesakes: [namesake] }), 'unknown');
+  // ...but one theirs and another's both proves nothing either way
+  const both = { ...namesake, groups: [...namesake.groups, g('The Beat Is...', '2009-01-01')] };
+  assert.equal(sameArtist([old, only({ title: 'The Beat Is...', year: 2009 })], { ...mb, namesakes: [both] }), 'unknown');
+  // MusicBrainz's artist isn't the one Plex has the id of, or isn't known: can't tell
+  assert.equal(sameArtist([old, fresh], { ...mb, artist: { id: other } }), 'unknown');
+  assert.equal(sameArtist([old, fresh], { ...mb, artist: null }), 'unknown');
+  // ...nor where what's listed of either isn't all they have, nor where there are more of the name than are listed
+  assert.equal(sameArtist([old, fresh], { ...mb, capped: true }), 'unknown');
+  assert.equal(sameArtist([old, fresh], { ...mb, namesakes: [{ ...namesake, capped: true }] }), 'unknown');
+  assert.equal(sameArtist([old, fresh], { ...mb, namesakes: [namesake], moreNamesakes: true }), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake], moreNamesakes: true }), 'different');
+  // One alone isn't more than once
+  assert.equal(sameArtist([old], mb), 'unknown');
+
+  // A name of several in one, as theirs: the artist of the plain name is MusicBrainz's, plainly, and it knows no other of the name
+  const joined = { mbid: null, albums: [{ title: 'Shadows (FORCE Remix)', year: 2023 }] };
+  assert.equal(sameArtist([old, joined], { ...mb, joined: true }), 'same');
+  assert.equal(sameArtist([only({ title: 'Unreleased', year: 2020 }), joined], { ...mb, joined: true }), 'unknown');
+  assert.equal(sameArtist([only({ title: 'Live', year: 2010 }), joined], { ...mb, joined: true }), 'unknown');
+  // ...where it knows another of the name, only on an album plainly theirs
+  assert.equal(sameArtist([old, joined], { ...mb, namesakes: [namesake], joined: true }), 'unknown');
+  assert.equal(sameArtist([old, only({ title: 'Express Non-Stop', year: 2012 })], { ...mb, namesakes: [namesake], joined: true }), 'same');
+  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake], joined: true }), 'different');
+  // ...an id Plex has for it that isn't the artist's: which of the names it's for can't be told
+  assert.equal(sameArtist([old, { ...joined, mbid: other }], { ...mb, joined: true }), 'unknown');
+  assert.equal(sameArtist([old, { ...joined, mbid: id }], { ...mb, joined: true }), 'same');
+  // ...and never where MusicBrainz doesn't know the artist at all
+  assert.equal(sameArtist([old, joined], { ...mb, artist: null, joined: true }), 'unknown');
+});
+
 test('MusicBrainz features: other artists of a name, and their release groups, looked up once and kept', async () => {
   const asked = [];
   const ids = { a: '11111111-1111-4111-8111-111111111111', b: '22222222-2222-4222-8222-222222222222', c: '33333333-3333-4333-8333-333333333333' };
@@ -2664,7 +2751,9 @@ test('MusicBrainz features: other artists of a name, and their release groups, l
     const u = new URL(url);
     asked.push(`${u.pathname}?${u.searchParams.get('query') || u.searchParams.get('artist') || ''}`);
     let body = {};
-    if (u.pathname === '/ws/2/artist') {
+    if (u.pathname === '/ws/2/artist' && /Phoenix/.test(u.searchParams.get('query'))) {
+      body = { artists: [1, 2, 3, 4, 5].map((i) => ({ id: `55555555-5555-4555-8555-55555555555${i}`, name: 'Phoenix', score: 100 - i })) };
+    } else if (u.pathname === '/ws/2/artist') {
       body = { artists: [
         { id: ids.a, name: 'Maduk', disambiguation: 'Dutch drum & bass producer', score: 100 },
         { id: ids.b, name: 'Maduk', disambiguation: 'Brazilian rapper', score: 100 },
@@ -2679,9 +2768,14 @@ test('MusicBrainz features: other artists of a name, and their release groups, l
   const mb = new MusicBrainz({ base: 'http://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const others = await mb.namesakes('Maduk', { but: ids.a });
   assert.deepEqual(others.map((a) => [a.id, a.name, a.note, a.groups.map((x) => x.title)]), [[ids.b, 'Maduk', 'Brazilian rapper', ['Cocaine']]]);
+  assert.equal(others.more, undefined);
   assert.match(asked[0], /^\/ws\/2\/artist\?artist:"Maduk" OR sortname:"Maduk"$/);
   const n = asked.length;
   await mb.namesakes('Maduk', { but: ids.b });
   assert.equal(asked.length, n + 1); // (the search kept: only the other's release groups asked for)
   assert.deepEqual(await mb.namesakes('Various Artists'), []);
+  // More of the name than are looked at: said so
+  const many = await mb.namesakes('Phoenix', { but: '55555555-5555-4555-8555-555555555551' });
+  assert.deepEqual(many.map((a) => a.id.slice(-1)), ['2', '3', '4']);
+  assert.equal(many.more, true);
 });

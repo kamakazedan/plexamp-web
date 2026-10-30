@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.30.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.31.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -157,7 +157,8 @@ const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 // hundreds of changes).
 // `body`: bytes to send (a picture); they go without a Content-Type, as
 // Plex works out what they are, so the request needs no CORS preflight.
-async function request(url, { method = 'GET', timeout = 20000, signal, discard = false, body } = {}) {
+// `cache`: the browser's cache mode for it ('no-store': never from there).
+async function request(url, { method = 'GET', timeout = 20000, signal, discard = false, body, cache } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const onAbort = () => ctrl.abort();
@@ -165,7 +166,7 @@ async function request(url, { method = 'GET', timeout = 20000, signal, discard =
   try {
     let res;
     try {
-      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal, credentials: 'omit', ...(body ? { body } : {}) });
+      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal, credentials: 'omit', ...(body ? { body } : {}), ...(cache ? { cache } : {}) });
     } catch (cause) {
       const err = new Error(signal?.aborted ? 'aborted' : 'network');
       err.network = !signal?.aborted;
@@ -929,6 +930,16 @@ export class PlexServer {
     this.forgetCollections();
   }
 
+  // Plex's own merge (for artists: views/mbmerge.js): the others' albums,
+  // and their tracks, are the first's, and the others are gone, in Plex
+  // itself, for everyone and every app. Plex lets only its owner do it.
+  async mergeInto(id, others) {
+    const ids = [...new Set(others.map(String))].filter((x) => /^\d+$/.test(x) && x !== String(id));
+    if (!/^\d+$/.test(String(id)) || !ids.length) throw new Error('Nothing to merge.');
+    await this.send('PUT', `/library/metadata/${id}/merge`, { ids: ids.join(',') }, { discard: true });
+    this.cache.clear();
+  }
+
   // An album's year (`year`, and the day it came out: `date`, YYYY-MM-DD)
   // or genres (`genres`: all it's to have; `removeGenres`: those it's not
   // to have any more) changed, each locked so Plex's next refresh of its
@@ -1026,6 +1037,9 @@ export class PlexServer {
   // Tell the server what is playing. This drives play counts, "recent plays"
   // and the Now Playing view on the Plex dashboard. `playback`: the
   // track's playback (see playbackId), as its stream was started with.
+  // The HTTP status of the server's answer, or 0 for none (see the
+  // player's report, which keeps a track's last for when it can get there:
+  // an answer under 500 says it got there).
   timeline(track, state, timeMs, playback) {
     const url = this.url('/:/timeline', {
       ratingKey: track.id,
@@ -1036,7 +1050,11 @@ export class PlexServer {
       duration: track.duration || undefined,
       'X-Plex-Session-Identifier': playback || undefined,
     });
-    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true }).catch(() => {});
+    // (Not waited on for ever: see outbox.js.)
+    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true, signal: AbortSignal.timeout(15000) }).then(
+      (res) => res.status,
+      () => 0,
+    );
   }
 
   // Artwork, always through the server's image transcoder, including images

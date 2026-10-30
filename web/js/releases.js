@@ -192,3 +192,109 @@ export function apartFromNamesakes(items, { name = '', groups = [], capped = fal
   }
   return out;
 }
+
+// ---------- artists Plex has more than once ----------
+
+// A name that's several in one, as a tag can be ("Alphabeat;FORCE":
+// several artists joined by ";", which Plex takes for one artist's name):
+// its names, or null where it's one. (Only ";": "&", "," and "and" are in
+// plenty of one artist's name.)
+export function joinedParts(name) {
+  const parts = String(name || '')
+    .split(';')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts.length > 1 ? parts : null;
+}
+
+// An album that's this release group's, plainly: by its very title (as
+// albumKey has it), first out within a year of the year Plex has for it,
+// and not titled as the artist is (artists of one name have self-titled
+// albums by construction).
+function plainly(groups, it, self) {
+  const key = albumKey(it?.title);
+  const y = Number(it?.year) || null;
+  if (!key || !y || key === self) return false;
+  return (Array.isArray(groups) ? groups : []).some((g) => albumKey(g.title) === key && firstYear(g) && Math.abs(firstYear(g) - y) <= 1);
+}
+
+// Album titles plenty of artists have: of one word ("Live", "Christmas",
+// "Love", "Home"), of three letters or fewer ("Up"), live at somewhere
+// ("Live in Tokyo"), or of stock words and numbers alone ("Greatest Hits
+// Vol. 2", "BBC Sessions", "The Complete Recordings", "Second Album",
+// "II", "The Ultimate Collection", "20th Century Masters"), the artist's
+// own name aside ("The Best of Alphabeat", "Alphabeat
+// Live"). `key`: the title as albumKey has it; `self`: the artist's name,
+// as albumKey has it. An album of one such title that's an artist's, by its
+// title and year, isn't plain evidence on its own that it's that artist's
+// rather than another's of the name.
+const STOCK = new Set(
+  `a an and the of in at on from to for with by
+  best very greatest hits hit essential essentials singles single b side sides rarities rare
+  remix remixes remixed mix mixes collection collected complete recordings recorded anthology
+  demo demos live unplugged acoustic instrumental instrumentals untitled unreleased ep lp album albums
+  mixtape sampler compilation retrospective gold platinum covers cover sessions session debut
+  christmas xmas holiday holidays songs song love ballads bbc peel mtv radio tracks bonus
+  remastered remaster deluxe edition expanded version versions vol volume part pt no chapter book
+  first second third new early years favourites favorites selected works anniversary special
+  ultimate definitive original classics classic series masters millennium century playlist super all
+  number ones concert soundtrack tapes lost john
+  one two three four five six seven eight nine ten`.split(/\s+/),
+);
+const ROMAN = /^(?=[mdclxvi])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$/;
+export function genericTitle(key, self = '') {
+  let k = String(key || '');
+  if (self && k !== self) k = ` ${k} `.replace(` ${self} `, ' ').trim();
+  const words = k.split(' ').filter(Boolean);
+  if (k.length < 4 || words.length < 2 || /^live (?:in|at|from|on) /.test(k)) return true;
+  return words.every((w) => STOCK.has(w) || /^\d+(?:st|nd|rd|th)?$/.test(w) || ROMAN.test(w));
+}
+
+// Whether library artists are one artist, the artist of `name`, to merge
+// them in Plex (its owner's to do): those of that very name (Plex makes two
+// of one from files tagged otherwise), or with that name among several in
+// theirs (`joined`: see joinedParts), and the artist of that name. `entries`:
+// [{ mbid, albums: [{ title, year }] }] (`mbid`: the MusicBrainz id Plex
+// has, where it has one; `joined`, the first is the artist of the plain
+// name, the second the one of several names in one); and what MusicBrainz
+// has of the name (`artist`, `groups`, `capped`, `namesakes` and
+// `moreNamesakes`, as mb.js artistOnMB gives them: asked by the id Plex has
+// for one of them, if it has one). 'same' only on plain evidence, album by
+// album (even where Plex has the same MusicBrainz id for each: Plex can
+// have taken an artist MusicBrainz doesn't know for the one of the name it
+// does):
+//   - MusicBrainz has the artist (by that id, where Plex has one, and Plex
+//     has no other), and what's listed of them is all they have (not
+//     `capped`), and of the others of the name too (nor more of those than
+//     are listed: `moreNamesakes`);
+//   - none of them has an album that's plainly another artist's of the name
+//     (`namesakes`) and not this one's;
+//   - and each has albums that are plainly that artist's (see plainly) and
+//     not another's: two at least, or one of a title few others have (see
+//     genericTitle). `joined`: the artist of the plain name does, and the
+//     one of several names does too, unless MusicBrainz has no other artist
+//     of the name at all (the name the tag gives is theirs, then).
+// 'different': Plex has different ids for them (but `joined`: which of
+// the names Plex has an id for can't be told), or an album of one is
+// plainly another's of the name and not this one's (by a title few others
+// have). Anything else: 'unknown', and they're left as they are.
+export function sameArtist(entries, { name = '', artist = null, groups = [], capped = false, namesakes = [], moreNamesakes = false, joined = false } = {}) {
+  if (!Array.isArray(entries) || entries.length < 2) return 'unknown';
+  const ids = [...new Set(entries.map((e) => e?.mbid).filter(Boolean))];
+  if (ids.length > 1) return joined ? 'unknown' : 'different';
+  if (!artist?.id || (ids.length === 1 && artist.id !== ids[0]) || capped) return 'unknown';
+  const others = Array.isArray(namesakes) ? namesakes : [];
+  const self = albumKey(name);
+  const albumsOf = (e) => (Array.isArray(e?.albums) ? e.albums : []);
+  const theirs = (it) => plainly(groups, it, self);
+  const another = (it) => others.some((n) => plainly(n?.groups, it, self));
+  const apart = entries.flatMap((e) => albumsOf(e).filter((it) => another(it) && !theirs(it)));
+  if (apart.some((it) => !genericTitle(albumKey(it.title), self))) return 'different';
+  if (apart.length || moreNamesakes || others.some((n) => n?.capped)) return 'unknown';
+  const plain = (e) => {
+    const keys = new Set(albumsOf(e).filter((it) => theirs(it) && !another(it)).map((it) => albumKey(it.title)));
+    return keys.size >= 2 || [...keys].some((k) => !genericTitle(k, self));
+  };
+  if (joined) return plain(entries[0]) && (plain(entries[1]) || !others.length) ? 'same' : 'unknown';
+  return entries.every(plain) ? 'same' : 'unknown';
+}

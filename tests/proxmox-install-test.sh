@@ -131,6 +131,23 @@ STUB
         expect "update-plexamp-web as it is now finishes cleanly too" update update-plexamp-web
         expect "...leaving nothing behind next to it" sh -c "! ls /usr/local/bin/update-plexamp-web.?????? 2>/dev/null"
         expect "an update keeps the settings" grep -q "^DISABLE_WEBSOCKETS=true$" /etc/plexamp-web/plexamp-web.env
+        # Offline mode'"'"'s settings as 0.30.0 named them: an update renames
+        # them, keeping their values (the start-up script stops at the old
+        # names), and 0.30.0'"'"'s words about them. (One with spaces before
+        # it, which systemd doesn'"'"'t mind.)
+        printf "%s\n" "# Where the offline key can be used from: private (your own networks), any," "OFFLINE_KEY=offline-pwd-for-tests" "  OFFLINE_FROM=private" >>/etc/plexamp-web/plexamp-web.env
+        expect "an update renames 0.30.0'"'"'s OFFLINE_KEY and OFFLINE_FROM" update update-plexamp-web
+        expect "...saying so" grep -q "OFFLINE_KEY and OFFLINE_FROM are called OFFLINE_PWD and OFFLINE_NETWORKS now" /tmp/update.log
+        expect "...to OFFLINE_PWD, with its value" grep -qx "OFFLINE_PWD=offline-pwd-for-tests" /etc/plexamp-web/plexamp-web.env
+        expect "...and OFFLINE_NETWORKS, with its value (spaces before it and all)" grep -qx "  OFFLINE_NETWORKS=private" /etc/plexamp-web/plexamp-web.env
+        expect "...leaving neither old name" sh -c "! grep -qE \"^[[:space:]]*OFFLINE_(KEY|FROM)=\" /etc/plexamp-web/plexamp-web.env"
+        expect "...with the words about them as they are now" grep -qx "# Where the offline password can be used from: private (your own networks), any," /etc/plexamp-web/plexamp-web.env
+        expect "...keeping the rest as it was" grep -q "^DISABLE_WEBSOCKETS=true$" /etc/plexamp-web/plexamp-web.env
+        expect "...and readable by root only" test "$(stat -c %a /etc/plexamp-web/plexamp-web.env)" = 600
+        expect "...and the app starts with them" configure PLEX_SERVER_URL=http://127.0.0.1:32400
+        expect "an update after that changes nothing more" sh -c "cp /etc/plexamp-web/plexamp-web.env /tmp/settings.before && env PATH=\"/tmp/stub:\$PATH\" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1 && cmp -s /tmp/settings.before /etc/plexamp-web/plexamp-web.env && ! grep -q \"are called OFFLINE_PWD\" /tmp/update.log"
+        sed -i -e "/^# Where the offline password can be used from:/d" -e "/^OFFLINE_PWD=/d" -e "/^[[:space:]]*OFFLINE_NETWORKS=/d" /etc/plexamp-web/plexamp-web.env
+        configure >/dev/null
         # Every step in detail: --verbose, or PW_VERBOSE=1 (which commands
         # from before --verbose pass on to the installer too).
         expect "update-plexamp-web --help says how to use it" sh -c "update-plexamp-web --help | grep -q \"^Usage: update-plexamp-web \\[--verbose\\]\""

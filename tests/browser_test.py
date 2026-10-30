@@ -17,7 +17,7 @@ config.js. Settings come from the environment:
                      MusicBrainz, SYNC_SETTINGS=false and
                      SYNC_MISSING_TRACKS=false (the mb section is skipped
                      without it)
-    APP_URL_OFFLINE  app with OFFLINE_KEY=offline-key-for-tests and
+    APP_URL_OFFLINE  app with OFFLINE_PWD=offline-pwd-for-tests and
                      PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500, on a mock
                      Plex server started with --open --honour (one that
                      lets the app in without signing in, and knows its
@@ -38,7 +38,7 @@ Plex Home (plexhome sends the browser's plex.tv calls to the mock too).
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
 Sections: core ws ai dj djs nows blocked poll wsonly custom desktop nav library edit
-lists pictures missing files sharing routes privacy np stream cast ratings
+lists pictures missing files sharing routes privacy np stream signal cast ratings
 devices fades together settings home formats select spotify debug sync
 plexhome missingsync mb offline memory (default: all).
 """
@@ -181,7 +181,7 @@ def login(page, app, token='t', app_defaults=False):
         raise
     if LOGIN_URL:
         page.fill('.login-form input[type=url]', LOGIN_URL)
-    # (The token's field: with an offline key, its field is a password's too.)
+    # (The token's field: with an offline password, its field is a password's too.)
     page.fill('.login-form input[type=password]', token)
     page.click('button:has-text("Connect")')
     page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
@@ -4485,6 +4485,123 @@ with sync_playwright() as pw:
         player(page, 'p.pause()')
         ctx.close()
 
+    # ---------- signal: the connection gone part-way (a phone losing its signal) ----------
+    # What's loaded plays on; a track that can't load waits for the
+    # connection (never skipped, nor converted); plays and ratings are kept
+    # on the device and sent once it's back; the banner says so meanwhile.
+    if run('signal'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'signal', expected=('ERR_INTERNET_DISCONNECTED', 'Failed to fetch', 'NetworkError'))
+        login(page, APP)
+        settings(page, {'quality': 'original', 'loadAhead': 1, 'gapless': False, 'fades': 'off', 'keepPlayed': 0, 'reportPlays': True})
+        js(page, "() => import('./js/player.js').then(({ player }) => player.addEventListener('playerror', (e) => (window.__playErrors ||= []).push(e.detail.track.title)))")
+
+        def snow():
+            return player(page, "({ id: String(p.current?.id), index: p.index, t: p.time, state: p.state, held: !!p.held, hls: !!p.deck.hls })")
+
+        def track_meta(tid):
+            return mock(f'/library/metadata/{tid}?X-Plex-Token=t')['MediaContainer']['Metadata'][0]
+
+        def outbox():
+            return js(page, "() => JSON.parse(localStorage.getItem('pw.outbox') || '[]').map((x) => ({ kind: x.kind, id: x.id, value: x.value ?? null }))")
+
+        def play_errors_now(pg):
+            return js(pg, '() => window.__playErrors || []')
+
+        play_first_album_track(page, APP, album=1, track=0)
+        first = snow()
+        q = player(page, 'p.queue.slice(p.index + 1, p.index + 3).map((t) => String(t.id))')
+        ready = wait_for(lambda: any(str(e['id']) == q[0] and e['state'] == 'done' for e in player(page, 'p.ahead.summary()')), 30, 0.3)
+        whole = wait_for(lambda: player(page, '(() => { const el = p.audio; return el.buffered.length > 0 && el.buffered.end(el.buffered.length - 1) >= p.duration - 0.5; })()'), 20, 0.3)
+        mock('/__mock/hls?reset=1')
+        was = {tid: (track_meta(tid).get('viewCount', 0), track_meta(tid).get('userRating')) for tid in (first['id'], q[0])}
+        ctx.set_offline(True)
+        said = wait_for(lambda: page.locator('#banner:not([hidden])').count() == 1 and 'offline' in page.inner_text('#banner'), 10, 0.3)
+        shot(page, 'signal-01-offline')
+        check('signal: offline, the banner says so, and that what\'s loaded plays on, with plays and ratings kept',
+              said and 'plays on' in page.inner_text('#banner') and 'kept' in page.inner_text('#banner'), page.inner_text('#banner') if said else '')
+        # A rating, offline: shown at once, kept, and Plex hasn't it yet.
+        rated = js(page, "() => Promise.all([import('./js/player.js'), import('./js/ratings.js')]).then(([{ player: p }, r]) => r.rateTrack(p.current, 6).then((x) => ({ ...x, shown: r.ratingOf(p.current) })))")
+        page.wait_for_selector('.toast:has-text("once the connection")', timeout=5000)
+        check('signal: a rating made offline is shown, and kept to send (Plex hasn\'t it yet)',
+              rated == {'kept': True, 'shown': 6} and track_meta(first['id']).get('userRating') == was[first['id']][1]
+              and {'kind': 'rated', 'id': first['id'], 'value': 6} in outbox(), f'{rated} {outbox()}')
+        # The track ends: the next one, loaded ahead, plays from memory.
+        player(page, '(p.seek(p.duration - 1.5), true)')
+        on = wait_for(lambda: snow()['id'] == q[0] and snow()['state'] == 'playing' and snow()['t'] > 1, 20, 0.25)
+        kept_play = wait_for(lambda: any(x['kind'] == 'played' and x['id'] == first['id'] for x in outbox()), 10, 0.3)
+        check('signal: ...the next track, loaded ahead, plays on from memory',
+              on and player(page, "(p.audio.getAttribute('src') || '').startsWith('blob:')") and not play_errors_now(page), f'{snow()} {player(page, "p.ahead.summary()")}')
+        check('signal: ...and the first one\'s play is kept to report (Plex hasn\'t it yet)',
+              kept_play and track_meta(first['id']).get('viewCount', 0) == was[first['id']][0], f'{outbox()} {track_meta(first["id"]).get("viewCount")}')
+        # The one after can't load: it waits for the connection, where it is,
+        # rather than being skipped or converted.
+        player(page, '(p.seek(p.duration - 1.5), true)')
+        waits = wait_for(lambda: snow()['id'] == q[1] and snow()['held'], 20, 0.25)
+        page.wait_for_timeout(6000)
+        held = snow()
+        shot(page, 'signal-02-waiting')
+        check('signal: a track that can\'t load offline waits for the connection (not skipped, nor converted)',
+              waits and held['id'] == q[1] and held['held'] and held['state'] == 'loading' and not held['hls'] and not play_errors_now(page), f'{held} {play_errors_now(page)}')
+        # Back online: the track plays, and what was kept is sent.
+        ctx.set_offline(False)
+        back = wait_for(lambda: snow()['id'] == q[1] and snow()['state'] == 'playing' and snow()['t'] > 1, 30, 0.3)
+        sent = wait_for(lambda: outbox() == [], 30, 0.5)
+        check('signal: back online, the waiting track plays (from the top, as it is)', back and not snow()['hls'] and not play_errors_now(page), str(snow()))
+        check('signal: ...the rating made offline reaches Plex', track_meta(first['id']).get('userRating') == 6, str(track_meta(first['id']).get('userRating')))
+        check('signal: ...and so do the plays: both tracks count as played',
+              sent and track_meta(first['id']).get('viewCount', 0) == was[first['id']][0] + 1 and track_meta(q[0]).get('viewCount', 0) == was[q[0]][0] + 1,
+              f'{outbox()} {[track_meta(t).get("viewCount") for t in (first["id"], q[0])]} {was}')
+        gone = wait_for(lambda: page.locator('#banner:not([hidden])').count() == 0, 10, 0.3)
+        check('signal: ...and the banner goes', gone, page.inner_text('#banner') if not gone else '')
+        # A kept rating Plex refuses when it's sent is let go, saying so.
+        page.route('**/:/rate?**', lambda route: route.fulfill(status=403, body=''))
+        js(page, """() => import('./js/outbox.js').then((o) => { o.keep({ kind: 'rated', key: 'rated|999999', id: '999999', value: 4, title: 'Gone Track', loved: false }); return o.flush(); })""")
+        refused = wait_for(lambda: page.locator('.toast:has-text("Gone Track")').count() > 0, 8, 0.25)
+        page.unroute('**/:/rate?**')
+        check('signal: a kept rating Plex refuses is let go, saying so', refused and outbox() == [], str(outbox()))
+        # A kept rating of a track rated since on another device (Plex's
+        # lastRatedAt after it was kept) is let go too, leaving the newer
+        # one, in Plex and here.
+        mock(f'/:/rate?key={first["id"]}&rating=8&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        page.evaluate("""(id) => Promise.all([import('./js/outbox.js'), import('./js/state.js')]).then(([o, { app }]) => {
+            o.restore({ kind: 'rated', key: `rated|${id}`, id, value: 2, title: 'Rated since', loved: false, server: app.source.serverId, at: Date.now() - 600000 });
+            return o.flush();
+        })""", first['id'])
+        let_go = wait_for(lambda: outbox() == [], 10, 0.3)
+        shown_now = page.evaluate("(id) => import('./js/ratings.js').then((r) => r.ratingOf({ id }))", first['id'])
+        check('signal: ...as is one of a track rated since on another device, leaving the newer rating (in Plex and here)',
+              let_go and track_meta(first['id']).get('userRating') == 8 and shown_now == 8, f'{outbox()} {track_meta(first["id"]).get("userRating")} {shown_now}')
+        player(page, 'p.pause()')
+        mock(f'/:/rate?key={first["id"]}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        # A kept play Plex fails (a 500) while it answers otherwise: tried
+        # again in a while, not over and over, and the connection isn't
+        # taken for gone.
+        failed = []
+
+        def fail_timeline(route):
+            if 'pw-test-500' in route.request.url:
+                failed.append(route.request.url)
+            route.fulfill(status=500, body='')
+        page.route('**/:/timeline?**', fail_timeline)
+        page.evaluate("""(id) => import('./js/outbox.js').then((o) => { o.keepPlayed({ id, duration: 200000 }, 199000, 'pw-test-500'); return o.flush(); })""", q[1])
+        page.wait_for_timeout(8000)
+        lost = js(page, "() => import('./js/connection.js').then((c) => c.connection.lost)")
+        still = outbox()
+        page.unroute('**/:/timeline?**')
+        check('signal: a kept play Plex fails while it answers otherwise is tried again in a while, not over and over (nor the connection taken for gone)',
+              len(failed) == 1 and not lost and page.locator('#banner:not([hidden])').count() == 0 and any(x['kind'] == 'played' and x['id'] == q[1] for x in still),
+              f'{len(failed)} {lost} {still}')
+        js(page, "() => import('./js/outbox.js').then((o) => o.keptOf('played').forEach((x) => o.forget(x.key)))")
+        # What's kept is the account's: signing out clears it, unsent.
+        js(page, """() => import('./js/outbox.js').then((o) => o.keep({ kind: 'rated', key: 'rated|1', id: '1', value: 4, title: 'Kept', loved: false }))""")
+        before = outbox()
+        js(page, "() => import('./js/state.js').then((m) => m.signOut())")
+        page.wait_for_selector('text=Use a server address and token instead', timeout=20000)
+        check('signal: signing out clears what\'s kept to send, unsent', before and js(page, "() => localStorage.getItem('pw.outbox')") is None, str(before))
+        ctx.close()
+
     # ---------- cast: playing on another Plex player, and AirPlay/Cast ----------
     # The mock runs a Plex player ("Living Room", like Plexamp on a Pi) that
     # Dan has on his account; /__mock/player shows what it's doing.
@@ -7744,6 +7861,65 @@ with sync_playwright() as pw:
         finally:
             mock('/__mock/config?nogenre=')
 
+        # For the server's owner: the artists Plex has more than once, merged
+        # in Plex with an OK where MusicBrainz plainly has them as one. Here
+        # a second Glass Harbour (an album MusicBrainz has as theirs), a
+        # second Northbound Static (an album it has as another artist's of
+        # the name), a second Juniper & Ash (an album it hasn't at all), and
+        # "Glass Harbour;Kilo Meridian", a name of several artists' in one,
+        # as files can be tagged. (Not known to the mock's MusicBrainz, nor
+        # their albums, but for what it has of the names.)
+        merges = lambda: mock('/__mock/merges')['MediaContainer']['merges']
+        mock('/__mock/merges?reset=1')
+        added = [mock(f'/__mock/add-artist?name={urllib.parse.quote(n)}&albums={urllib.parse.quote(a)}&mb=0')['MediaContainer']['Metadata'][0]
+                 for n, a in [('Glass Harbour', 'Sea Glass:2016'), ('Northbound Static', 'Frost Engine:2019'), ('Juniper & Ash', 'Unknown Rooms:2022'),
+                              ('Glass Harbour;Kilo Meridian', 'Harbour Remixes:2021')]]
+
+        def merge_page():
+            page.wait_for_function("() => /^Looked through/.test(document.querySelector('.mb-merge-status')?.textContent || '')", timeout=60000)
+            rows = lambda cls: {page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(): page.locator(f'.{cls}').nth(i).inner_text()
+                                for i in range(page.locator(f'.{cls}').count())}
+            return rows('mb-merge-twice'), rows('mb-merge-joined'), rows('mb-merge-left')
+        try:
+            page.goto(APP_MB + '#/settings/musicbrainz')
+            page.locator('a.row[href="#/settings/mbmerge"]').click()
+            twice, joined, left = merge_page()
+            shot(page, 'mb-05-merge')
+            check('mb: artists to merge: two of one name MusicBrainz plainly has as one (Glass Harbour) are offered, saying why',
+                  list(twice) == ['Glass Harbour'] and 'MusicBrainz has albums of each of them as Glass Harbour’s' in twice['Glass Harbour'], f'{twice} {joined} {left}')
+            check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash), saying so',
+                  'different artists of one name' in left.get('Northbound Static', '') and 'can’t say' in left.get('Juniper & Ash', ''), str(left))
+            check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first)',
+                  not joined and 'those first' in left.get('Glass Harbour;Kilo Meridian', ''), f'{joined} {left}')
+            # An OK first, then Plex's own merge, into the one Plex has
+            # MusicBrainz's id for.
+            page.locator('.mb-merge-twice button').click()
+            asked_ok = page.locator('.sheet.open').inner_text()
+            page.locator('.sheet.open button', has_text='Merge in Plex').click()
+            wait_for(lambda: merges(), 10, 0.3)
+            check('mb: ...merged in Plex with the owner\'s OK (Plex\'s own merge, which the player can\'t undo), into the one Plex has MusicBrainz\'s id for',
+                  merges() == [{'into': named['Glass Harbour']['ratingKey'], 'ids': [added[0]['ratingKey']]}] and 'can’t undo' in asked_ok, f'{merges()} {asked_ok!r}')
+            # Looked through again: the name of several in one, now, into the
+            # artist of its first name, as MusicBrainz knows only one of it.
+            page.wait_for_selector('.mb-merge-joined', timeout=30000)
+            twice, joined, left = merge_page()
+            row_text = joined.get('Glass Harbour;Kilo Meridian', '')
+            check('mb: ...then the name of several artists\' in one, into the artist of its first name (MusicBrainz knows only one of it)',
+                  not twice and 'with Kilo Meridian' in row_text and 'Merge into Glass Harbour' in row_text and 'knows only one Glass Harbour' in row_text, f'{twice} {joined}')
+            page.locator('.mb-merge-joined button').click()
+            page.locator('.sheet.open button', has_text='Merge in Plex').click()
+            wait_for(lambda: len(merges()) == 2, 10, 0.3)
+            artist_page('Glass Harbour', until='.view .hero')
+            page.wait_for_selector('.view .card-title:has-text("Harbour Remixes")', timeout=20000)
+            on_page = page.locator('.view .card-title').all_inner_texts()
+            check('mb: ...so Glass Harbour\'s page has their albums (Sea Glass, Harbour Remixes), as Plex does',
+                  merges()[1] == {'into': named['Glass Harbour']['ratingKey'], 'ids': [added[3]['ratingKey']]} and 'Sea Glass' in on_page and 'Harbour Remixes' in on_page,
+                  f'{merges()} {on_page}')
+        finally:
+            mock('/__mock/merges?reset=1')
+            for a in added:
+                mock(f"/__mock/add-artist?remove={a['ratingKey']}")
+
         # A friend: the features, but not the years and genres to fix.
         friend = browser.new_context(**MOBILE)
         fpage = friend.new_page()
@@ -7752,10 +7928,15 @@ with sync_playwright() as pw:
         fpage.goto(APP_MB + '#/settings/musicbrainz')
         fpage.wait_for_selector('label.toggle-row:has-text("Missing albums on artist pages")')
         no_row = fpage.locator('a.row[href="#/settings/mbreview"]').count() == 0
+        no_merge_row = fpage.locator('a.row[href="#/settings/mbmerge"]').count() == 0
         fpage.goto(APP_MB + '#/settings/mbreview')
         fpage.wait_for_selector('.view .empty-state', timeout=10000)
         told = fpage.locator('.view .empty-state').inner_text()
         check('mb: a friend has the features but not the years and genres to fix (that\'s for the server\'s owner)', no_row and 'owner' in told, told)
+        fpage.goto(APP_MB + '#/settings/mbmerge')
+        fpage.wait_for_selector('.view .empty-state', timeout=10000)
+        told = fpage.locator('.view .empty-state').inner_text()
+        check('mb: ...nor the artists to merge (merging in Plex is the owner\'s too)', no_merge_row and 'owner' in told, told)
         friend.close()
 
         # What went to MusicBrainz: artists' names, never an album's title.
@@ -7769,11 +7950,11 @@ with sync_playwright() as pw:
     # Waits here poll with evaluate() rather than using locators or
     # wait_for_selector: element handles Playwright keeps would themselves
     # hold pages in memory.
-    # ---------- offline: a Plex server that lets the player in, and the offline key ----------
+    # ---------- offline: a Plex server that lets the player in, and the offline password ----------
 
     if run('offline') and APP_OFFLINE and MOCK_OPEN:
         A = APP_OFFLINE
-        KEY = 'offline-key-for-tests'
+        KEY = 'offline-pwd-for-tests'
 
         def open_mock(q):
             with urllib.request.urlopen(f'{MOCK_OPEN}/__mock/config?{q}', timeout=20) as r:
@@ -7835,40 +8016,40 @@ with sync_playwright() as pw:
         dan_ctx.close()
 
         # Someone new can't sign in with Plex: the sign-in page says so, and
-        # takes the offline key once plex.tv hasn't answered for a while.
+        # takes the offline password once plex.tv hasn't answered for a while.
         ctx = browser.new_context(**MOBILE)
         page = ctx.new_page()
-        attach(page, 'offline-key', expected=('401', '403', '409', '500'))
+        attach(page, 'offline-password', expected=('401', '403', '409', '500'))
         urls = recording(page)
         page.goto(A + '#/login')
         page.wait_for_selector('.login-offline-form:not([hidden])', timeout=30000)
         shot(page, 'offline-login')
-        check('offline: the sign-in page says plex.tv isn\'t answering, and takes the offline key',
-              'offline key' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
-        page.fill('.login-offline-form input', 'not the key')
+        check('offline: the sign-in page says plex.tv isn\'t answering, and takes the offline password',
+              'offline password' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
+        page.fill('.login-offline-form input', 'not the password')
         page.click('.login-offline-form button')
         page.wait_for_function("() => document.querySelector('.login-offline-form .login-status').textContent.length > 0")
         said = page.inner_text('.login-offline-form .login-status')
-        check('offline: a wrong key is refused', 'isn’t this player’s offline key' in said, said)
+        check('offline: a wrong password is refused', 'isn’t this player’s offline password' in said, said)
         page.fill('.login-offline-form input', KEY)
         page.click('.login-offline-form button')
         page.wait_for_selector('.wide-card:not(.skeleton)', timeout=30000)
         shot(page, 'offline-home')
         auth = js(page, "() => import('./js/state.js').then(({ app }) => ({ offline: !!app.auth?.offline, token: app.auth?.token || '' }))")
-        check('offline: the offline key signs in, as the server lets the player in', auth['offline'] and auth['token'].startswith('pwoff-'), auth)
+        check('offline: the offline password signs in, as the server lets the player in', auth['offline'] and auth['token'].startswith('pwoff-'), auth)
         tabs = page.eval_on_selector_all('#tabs .tab', 'els => els.map((e) => e.dataset.tab)')
-        check('offline: no Play Together with the key', 'together' not in tabs, tabs)
+        check('offline: no Play Together with the password', 'together' not in tabs, tabs)
         theirs = playlist_titles(page)
-        check('offline: ...it plays the library as its owner (what the key is for)', 'Sunday morning' in theirs, theirs)
+        check('offline: ...it plays the library as its owner (what the password is for)', 'Sunday morning' in theirs, theirs)
         page.goto(A + '#/settings/account')
         page.wait_for_selector('.account-card')
         shot(page, 'offline-account')
         card = page.inner_text('.account-card')
-        check('offline: Settings › Account says it\'s the offline key, and that it\'s as the owner', 'offline key' in card and 'owner' in card, card)
+        check('offline: Settings › Account says it\'s the offline password, and that it\'s as the owner', 'offline password' in card and 'owner' in card, card)
         page.wait_for_timeout(1500)
         asked = [u for u in urls if re.search(r'/api/(settings|missing|together|devices|shares|cast)\b', u)]
-        check('offline: nothing that needs a Plex account is asked for with the key', not asked, asked[:5])
-        check('offline: ...and the key\'s sign-in never goes to plex.tv', not [u for u in urls if 'plex.tv' in u and 'pwoff-' in u])
+        check('offline: nothing that needs a Plex account is asked for with the password', not asked, asked[:5])
+        check('offline: ...and the password\'s sign-in never goes to plex.tv', not [u for u in urls if 'plex.tv' in u and 'pwoff-' in u])
         # plex.tv answering again: the session ends, and the app signs out.
         open_mock('tv=up')
         try:
@@ -7877,13 +8058,13 @@ with sync_playwright() as pw:
             ended = True
         except Exception:  # noqa: BLE001 - said below
             ended = False
-        check('offline: once plex.tv is answering again, the key\'s session ends and the app signs out', ended, page.url)
+        check('offline: once plex.tv is answering again, the password\'s session ends and the app signs out', ended, page.url)
         if ended:
             shot(page, 'offline-ended')
             check('offline: ...saying why', 'answering again' in page.inner_text('.login-offline'), page.inner_text('.login-offline'))
         left = js(page, "() => import('./js/state.js').then(({ app }) => !app.auth && !app.source)")
         check('offline: ...and nothing of the session is left', left)
-        check('offline: the key\'s session is refused at the server once it\'s over', pms_status(auth['token']) == 401, pms_status(auth['token']))
+        check('offline: the password\'s session is refused at the server once it\'s over', pms_status(auth['token']) == 401, pms_status(auth['token']))
         ctx.close()
         open_mock('open=1&honour=1&tv=up')
 

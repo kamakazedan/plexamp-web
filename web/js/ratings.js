@@ -10,6 +10,8 @@ import { describeError } from './router.js';
 import { h, toast } from './ui.js';
 import { refreshLists } from './editing.js';
 import { live } from './live.js';
+import { offlineFor, unreachable } from './connection.js';
+import { keep, forget, restore, kept, keptOf, sendsWith, stillOn, CLOCKS_APART_MS } from './outbox.js';
 
 export const LOVED = 10;
 export const LOVED_TITLE = '❤️ Tracks';
@@ -24,13 +26,22 @@ export const ratingEvents = new EventTarget();
 // ❤️ Tracks needs. And ratings being saved, shown straight away.
 const known = new Map();
 const pending = new Map();
+// Ratings kept while the connection was gone (see rateTrack), as rated
+// here till they're sent, the page loaded afresh meanwhile too.
+const seedKept = () => keptOf('rated').forEach((x) => known.set(String(x.id), x.value ?? null));
+seedKept();
 // (Another server's tracks have other ids.)
-on('source', ({ serverChanged } = {}) => serverChanged && known.clear());
+on('source', ({ serverChanged } = {}) => {
+  if (!serverChanged) return;
+  known.clear();
+  seedKept();
+});
 // A track rated here that Plex says has changed since (rated again in
 // another Plex app, say): what Plex has for it now, so what's picked for
 // you (picks.js) and what's shown go by that.
 live.addEventListener('items', (e) => {
-  const ids = (e.detail?.ids || []).map(String).filter((id) => known.has(id) && !pending.has(id));
+  // (Not one kept to send, as the connection was gone: that's how it's to be.)
+  const ids = (e.detail?.ids || []).map(String).filter((id) => known.has(id) && !pending.has(id) && !kept(`rated|${id}`));
   for (const id of ids.slice(0, 50)) {
     app.server
       ?.metadata(id)
@@ -61,18 +72,77 @@ export const DISLIKED_AT_MOST = 2;
 export const isDownRating = (v) => Number.isFinite(Number(v)) && Number(v) > 0 && Number(v) <= DISLIKED_AT_MOST;
 export const isDisliked = (t) => isDownRating(ratingOf(t));
 
+// { kept }: kept on this device, as the connection's gone, and sent once
+// it's back (see outbox.js); shown as rated meanwhile, everywhere here.
 export async function rateTrack(track, rating) {
   const id = String(track.id);
   const value = rating ? Math.max(1, Math.min(10, Math.round(rating))) : null;
   const before = knownRating(track);
-  await app.server.rate(id, value);
+  const lovedChanged = (before === LOVED) !== (value === LOVED) && app.settings.lovedPlaylist !== false;
+  let held = false;
+  // (One kept from before, while the connection was gone, is out of date
+  // now, so it's taken out first, not to be sent after this one: ❤️ Tracks
+  // as this one has it, if that one was to change it.)
+  const earlier = forget(`rated|${id}`);
+  try {
+    await app.server.rate(id, value);
+  } catch (err) {
+    if (!(await offlineFor(err))) {
+      restore(earlier);
+      throw err;
+    }
+    // (❤️ Tracks to change once it's sent: whether it's to change from how
+    // it was before the first one kept.)
+    keep({ kind: 'rated', key: `rated|${id}`, id, value, title: String(track.title || '').slice(0, 200), loved: lovedChanged !== !!earlier?.loved });
+    held = true;
+  }
   track.userRating = value;
   known.set(id, value);
   if (known.size > 2000) known.delete(known.keys().next().value);
   ratingEvents.dispatchEvent(new CustomEvent('rated', { detail: { id, rating: value } }));
   paintRows(id, value);
-  if ((before === LOVED) !== (value === LOVED) && app.settings.lovedPlaylist !== false) keepLoved(track);
+  if (held) toast('Rated here. It goes to Plex once the connection’s back.');
+  else if (lovedChanged || earlier?.loved) keepLoved(track);
+  return { kept: held };
 }
+
+// A rating kept while the connection was gone (rateTrack), sent now (to
+// `s`, its server): ❤️ Tracks then, as it changed it. Not one rated again
+// since, in another Plex app or on another device (Plex's lastRatedAt for
+// it is later, by more than this device's clock and the server's could be
+// apart): that one stands, and shows here. One Plex refuses is let go,
+// saying so.
+sendsWith(
+  'rated',
+  async (x, s) => {
+    try {
+      const now = await s.metadata(x.id);
+      stillOn(s);
+      if (Number(now?.lastRatedAt) * 1000 > x.at + CLOCKS_APART_MS) {
+        const value = now.userRating ?? null;
+        known.set(String(x.id), value);
+        ratingEvents.dispatchEvent(new CustomEvent('rated', { detail: { id: String(x.id), rating: value } }));
+        paintRows(String(x.id), value);
+        return false;
+      }
+      // (Not one rated again here meanwhile, in this tab or another: that
+      // one's sent itself, or kept in its place.)
+      if (kept(x.key)?.at !== x.at) return false;
+      await s.rate(x.id, x.value);
+    } catch (err) {
+      if (err?.switched || unreachable(err)) throw err;
+      toast(`Couldn’t save your rating of “${x.title || 'a track'}” from while the connection was gone. ${describeError(err)}`, { timeout: 6000 });
+      return false;
+    }
+    // (❤️ Tracks is the server's: not another's, chosen meanwhile.)
+    if (x.loved && app.settings.lovedPlaylist !== false && app.server === s) keepLoved({ id: x.id, title: x.title, userRating: x.value });
+    return true;
+  },
+  {
+    letGo: (x) =>
+      toast(`Couldn’t save your rating of “${x.title || 'a track'}” from while the connection was gone: ${app.source?.serverName || 'your server'} kept failing it.`, { timeout: 6000 }),
+  },
+);
 
 // ---------- ❤️ Tracks ----------
 

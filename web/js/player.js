@@ -16,6 +16,8 @@ import { shuffleArray } from './ui.js';
 import { debugLog, debugOn } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
 import { Prefetcher, cachedLoader, recordingLoader } from './prefetch.js';
+import { connection, connectionLost, connectionBack, serverAnswers } from './connection.js';
+import { keepPlayed, flush } from './outbox.js';
 
 const PRELOAD_AT = 25; // seconds before the next track starts
 // ...once this one has loaded to its end, or has this much buffered (and,
@@ -377,6 +379,7 @@ class Player extends EventTarget {
     this.mediaToken = null; // { value, key }: the server's temporary token, for one server and account
     this.useMediaToken = false;
     this.failedQid = null; // a session track this device couldn't play
+    this.held = null; // a track waiting for the connection (see holdFor)
     this.driftHold = 0;
     this.aheadOf = null;
 
@@ -450,6 +453,8 @@ class Player extends EventTarget {
   }
   get time() {
     if (this.cast) return this.cast.time();
+    // Waiting for the connection (see holdFor): where it goes on from.
+    if (this.held && this.held.qid === this.current?.qid) return this.held.at;
     // Starting part-way (a stream started again, say): there until it's
     // ready to be moved there.
     if (this.startingAt != null && (!this.deck.hasSource() || this.audio.readyState < 1)) return this.startingAt;
@@ -663,6 +668,9 @@ class Player extends EventTarget {
     if (reportPrev) this.endHere(prev);
     this.resumeAs = null;
     this.saveProgress(true);
+    // (Only now: a track waiting for the connection was where its hold has
+    // it, for the two above: see time.)
+    this.cancelHold();
     this.index = index;
     const track = this.current;
     if (!track || !app.server) return this.reset();
@@ -1272,6 +1280,13 @@ class Player extends EventTarget {
   _play() {
     if (!this.current || this.cast) return;
     this.unlock();
+    // (Waiting for the connection: tried again now, playing once it's back.)
+    if (this.held?.qid === this.current.qid) {
+      this.loadAutoplay = true;
+      this.setState('loading');
+      this.held.again();
+      return;
+    }
     if (!this.deck.hasSource()) {
       const held = this.resumeAs?.qid === this.current.qid ? this.resumeAs : null;
       this.load(this.index, { startAt: this.restoredAt || 0, reportPrev: false, transcode: held?.forced || false, resume: !!held });
@@ -1356,6 +1371,13 @@ class Player extends EventTarget {
     this.cancelTransition();
     const d = this.duration;
     const t = Math.max(0, Math.min(sec, d ? d - 0.25 : sec));
+    // (Waiting for the connection: from there once it's back.)
+    if (this.held?.qid === this.current.qid) {
+      this.held.at = t;
+      this.restoredAt = t;
+      this.queueTime();
+      return;
+    }
     if (!this.deck.hasSource()) {
       this.restoredAt = t;
     } else {
@@ -1468,7 +1490,11 @@ class Player extends EventTarget {
       this.setState('paused');
       // The browser wants a tap before it plays sound (e.g. after a reload).
       this.remote?.blocked();
-    } else if (err?.name !== 'AbortError') console.warn('play() failed', err);
+    } else if (err?.name !== 'AbortError' && navigator.onLine !== false) {
+      // (Offline, a source that can't load is the element's error, which
+      // waits for the connection: see onError.)
+      console.warn('play() failed', err);
+    }
   }
 
   onError(err) {
@@ -1480,6 +1506,25 @@ class Player extends EventTarget {
       `couldn’t play “${track.title}” (${track.codec || 'unknown format'}, ${this.transcoding ? 'converted by the server' : 'original file'}): ${err?.message || (media ? `media error ${media.code}${media.message ? `, ${media.message}` : ''}` : 'stream error')}`,
       'warn',
     );
+    // The connection gone (the browser offline, or the server not
+    // answering): the track waits for it, where it got to, rather than
+    // being converted or skipped as one that won't play is (holdFor). Not
+    // in Play Together, which carries on without this device, as below.
+    if (!this.remote && !this.cast) {
+      const at = this.time;
+      const token = this.loadToken;
+      const autoplay = this.loadAutoplay || this.state === 'playing' || this.state === 'loading';
+      serverAnswers().then((answers) => {
+        if (this.current !== track || this.loadToken !== token || this.held) return;
+        if (answers || this.remote || this.cast) this.couldntPlay(track, err, media);
+        else this.holdFor(track, at, autoplay);
+      });
+      return;
+    }
+    this.couldntPlay(track, err, media);
+  }
+
+  couldntPlay(track, err, media) {
     if (!this.triedTranscode && track.partKey) {
       const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? this.time : this.time;
       const network = media?.code === MediaError.MEDIA_ERR_NETWORK;
@@ -1630,6 +1675,60 @@ class Player extends EventTarget {
     this.rescueGo = null;
   }
 
+  // ---------- the connection gone ----------
+
+  // A track that couldn't load, or stopped coming, as the connection's gone
+  // (see onError): it waits for it, at `at` (or where it's moved to
+  // meanwhile: see _seek), and once the server answers again loads from
+  // there (playing, if it was to play and hasn't been paused since), as the
+  // same playback. Asked again as the browser says it's online, or the app
+  // finds the connection's back (connection.js), and every so often anyway
+  // (a phone that loses its signal doesn't always say it's offline). What's
+  // loaded already, and changing to it, needs no connection: Next and the
+  // rest still work meanwhile.
+  holdFor(track, at, autoplay) {
+    this.cancelHold();
+    const qid = track.qid;
+    const hold = { qid, at, tries: 0, timer: 0 };
+    this.held = hold;
+    this.loadAutoplay = autoplay;
+    this.setState(autoplay ? 'loading' : 'paused');
+    debugLog('player', `the connection’s gone: “${track.title}” waits for it, at ${at.toFixed(1)} s`, 'warn');
+    connectionLost();
+    // (Not once another device or a Plex player plays: that's theirs.)
+    const still = () => this.held === hold && this.current?.qid === qid && !this.cast && !this.remote;
+    hold.again = async () => {
+      if (!still() || hold.asking) return;
+      clearTimeout(hold.timer);
+      hold.asking = true;
+      const answers = await serverAnswers();
+      hold.asking = false;
+      if (!still()) return;
+      if (!answers) {
+        hold.tries += 1;
+        hold.timer = setTimeout(hold.again, Math.min(30000, 2500 * 2 ** Math.min(hold.tries, 4)));
+        return;
+      }
+      const play = this.loadAutoplay && this.state !== 'paused';
+      this.cancelHold();
+      connectionBack();
+      debugLog('player', `the connection’s back: “${track.title}” from ${hold.at.toFixed(1)} s`);
+      this.load(this.index, { autoplay: play, startAt: hold.at, reportPrev: false, resume: true });
+    };
+    window.addEventListener('online', hold.again);
+    connection.addEventListener('back', hold.again);
+    hold.timer = setTimeout(hold.again, 2500);
+  }
+
+  cancelHold() {
+    const hold = this.held;
+    if (!hold) return;
+    clearTimeout(hold.timer);
+    window.removeEventListener('online', hold.again);
+    connection.removeEventListener('back', hold.again);
+    this.held = null;
+  }
+
   // A stream that stopped short (see onStreamError): once it's played to
   // where what's buffered ends, the track has ended. `slack`: how close
   // counts.
@@ -1685,6 +1784,8 @@ class Player extends EventTarget {
     if (remote === this.remote) return;
     if (remote && this.cast) this.cast.stop({ here: false }); // a session plays here
     this.cancelTransition();
+    // (A track waiting for the connection: the session's to play now.)
+    this.cancelHold();
     this.remote = remote;
     this.failedQid = null;
     if (remote) {
@@ -2138,7 +2239,10 @@ class Player extends EventTarget {
     if (c === this.cast) return;
     this.cancelTransition();
     if (c) {
+      // (A track waiting for the connection: the Plex player's now, from
+      // where it was waiting, as time has it.)
       this.restoredAt = this.time;
+      this.cancelHold();
       this.setPendingSeek(null);
       this.cancelRescue();
       this.resumeAs = null;
@@ -2226,7 +2330,25 @@ class Player extends EventTarget {
     // playing one's, if both have it: a queue of one track, repeated).
     const deck = this.deck.qid === track.qid ? this.deck : this.decks.find((d) => d.qid != null && d.qid === track.qid);
     const playback = deck?.playback || (this.resumeAs?.qid === track.qid ? this.resumeAs.playback : null);
-    app.server.timeline(track, state, time * 1000, playback);
+    // (Whether it may get there: not while the browser's offline.)
+    const sentAt = navigator.onLine === false ? null : Date.now();
+    const sent = app.server.timeline(track, state, time * 1000, playback);
+    // A track's last report (played to its end from what was loaded ahead,
+    // say) that couldn't get there (no answer of the server's under 500):
+    // kept, and sent from there (outbox.js), so the play counts as it would
+    // have (but not twice: not if Plex has it as played already, as it may
+    // from this one, its answer lost), once the connection's back, or in a
+    // while, if the server answers again already.
+    if (state !== 'stopped') return;
+    const s = app.server;
+    sent.then(async (status) => {
+      if ((status > 0 && status < 500) || app.server !== s) return;
+      keepPlayed(track, time * 1000, playback, sentAt);
+      const answers = await serverAnswers();
+      if (app.server !== s) return;
+      if (answers) flush();
+      else connectionLost();
+    });
   }
 
   // ---------- lock screen / media keys ----------
@@ -2351,6 +2473,7 @@ class Player extends EventTarget {
   reset() {
     this.cancelTransition();
     this.cancelRescue();
+    this.cancelHold();
     this.qualityLater = false;
     this.resumeAs = null;
     this.loadToken += 1;

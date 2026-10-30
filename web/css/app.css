@@ -1715,7 +1715,7 @@ a.hero-link:hover {
   text-align: left;
 }
 
-/* plex.tv not answering, and the offline key (see views/login.js). */
+/* plex.tv not answering, and the offline password (see views/login.js). */
 .login-offline {
   display: flex;
   flex-direction: column;

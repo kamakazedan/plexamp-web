@@ -83,9 +83,9 @@ function loadConfig() {
     // ...and the name server nginx asks for its name, where it looks it up
     // for each request (see oneAddress there).
     pmsResolver: env.PW_SERVICE_PMS_RESOLVER ?? cfg.pmsResolver ?? '',
-    // Offline mode (OFFLINE_KEY, OFFLINE_FROM): see offline.js.
-    offlineKey: env.PW_SERVICE_OFFLINE_KEY ?? cfg.offlineKey ?? '',
-    offlineFrom: env.PW_SERVICE_OFFLINE_FROM ?? cfg.offlineFrom ?? 'private',
+    // Offline mode (OFFLINE_PWD, OFFLINE_NETWORKS): see offline.js.
+    offlinePwd: env.PW_SERVICE_OFFLINE_PWD ?? cfg.offlinePwd ?? '',
+    offlineNetworks: env.PW_SERVICE_OFFLINE_NETWORKS ?? cfg.offlineNetworks ?? 'private',
     // (false: the start-up script found the data folder wasn't one to keep
     // the owner's sign-ins in, so they're known in memory only.)
     ownersKeep: cfg.ownersKeep !== false,
@@ -128,7 +128,7 @@ if (config.offlineTiming) {
 let offline;
 try {
   // (Only with the /pms/ proxy: it's the Plex server there that's played offline.)
-  offline = new Offline({ key: config.plexServerUrl ? config.offlineKey : '', from: config.offlineFrom, auth, log });
+  offline = new Offline({ key: config.plexServerUrl ? config.offlinePwd : '', from: config.offlineNetworks, auth, log });
 } catch (err) {
   log.error(`couldn't start: ${err.message}`);
   process.exit(1);
@@ -179,7 +179,7 @@ const TOO_MANY_SIGN_INS = 'Too many sign-ins checked from your network in a shor
 class TooManySignIns extends Error {}
 // identify, counted (unless it's said otherwise): throws TooManySignIns past
 // the limit. (Not while plex.tv isn't answering: nothing's asked of it then,
-// but now and then to hear whether it's back. An offline-key session's
+// but now and then to hear whether it's back. An offline-password session's
 // sign-in isn't a Plex one, and never goes to plex.tv.)
 function identifyFor(req, token, { counted = true } = {}) {
   if (isOfflineToken(token)) return Promise.reject(new AuthError(401, 'Plex didn’t accept this sign-in.'));
@@ -250,7 +250,7 @@ function readAnswer(res, limit) {
 async function signedIn(req) {
   const token = req.headers['x-plex-token'];
   if (!validToken(token)) throw new HttpError(401, 'Sign in to Plex first.');
-  if (isOfflineToken(token)) throw new HttpError(403, 'That needs a Plex sign-in, and this player is signed in to with its offline key.');
+  if (isOfflineToken(token)) throw new HttpError(403, 'That needs a Plex sign-in, and this player is signed in to with its offline password.');
   try {
     return { user: await identifyFor(req, token), token };
   } catch (err) {
@@ -279,13 +279,13 @@ async function plexAllowed(req, { what, signIn, noAccess, refused = () => {} }) 
     refused('a request without a Plex sign-in');
     throw new HttpError(401, signIn);
   }
-  // Signed in with the offline key (see offline.js): as the server's owner,
+  // Signed in with the offline password (see offline.js): as the server's owner,
   // while it lasts.
   const offlineToken = [token, serverToken].find(isOfflineToken);
   if (offlineToken) {
     if (offline.valid(offlineToken)) return { key: `offline|${fingerprintOf(offlineToken).slice(0, 16)}` };
-    refused('an offline-key session that has ended');
-    throw new HttpError(401, 'You were signed in with this player’s offline key, and plex.tv is answering again. Sign in with Plex.');
+    refused('an offline-password session that has ended');
+    throw new HttpError(401, 'You were signed in with this player’s offline password, and plex.tv is answering again. Sign in with Plex.');
   }
   let verdict;
   try {
@@ -541,11 +541,13 @@ async function musicbrainzRoute(req, res, parts) {
 // MusicBrainz checks are for:
 //   POST /api/musicbrainz/artist { name, id, groups, namesakes } -> {
 //     artist: { id, name, aliases, genres } | null, groups: [{ id, title,
-//     primary, secondary, date }], namesakes? }: an artist's other names
-//     and genres, and (unless `groups` is false) their release groups; by
-//     their MusicBrainz id (`id`), where Plex has it, else by name. With
-//     `namesakes`, other artists of that name too, with theirs ([{ id,
-//     name, note, groups }]: see MusicBrainz.namesakes).
+//     primary, secondary, date }], namesakes?, moreNamesakes? }: an
+//     artist's other names and genres, and (unless `groups` is false) their
+//     release groups; by their MusicBrainz id (`id`), where Plex has it,
+//     else by name. With `namesakes`, other artists of that name too, with
+//     theirs ([{ id, name, note, groups }]: see MusicBrainz.namesakes), and
+//     `moreNamesakes` (true) where MusicBrainz has more of the name than
+//     those.
 //   POST /api/musicbrainz/albums { items: [{ artist, title, year }], genres,
 //     wait } -> { results: [{ id, title, primary, secondary, date, genres? }
 //     | null | 'pending'] }: albums' release groups as far as they're known
@@ -577,10 +579,11 @@ async function musicbrainzFeatures(req, res, what) {
       const artist = await musicbrainz.artistInfo(name(body.name), { id: mbid(body.id), signal: ctrl.signal });
       const groups = artist && body.groups !== false ? await musicbrainz.releaseGroups(artist.id, { signal: ctrl.signal }) : [];
       // (`capped`: they have more than are listed. `namesakes`: other artists of the name too, with their release
-      // groups.)
+      // groups; `moreNamesakes`: there are more of those than are listed.)
       const capped = !!groups.capped;
       if (body.namesakes !== true) return send(res, 200, { artist, groups, capped });
-      return send(res, 200, { artist, groups, capped, namesakes: await musicbrainz.namesakes(name(body.name), { but: artist?.id, signal: ctrl.signal }) });
+      const namesakes = await musicbrainz.namesakes(name(body.name), { but: artist?.id, signal: ctrl.signal });
+      return send(res, 200, { artist, groups, capped, namesakes, ...(namesakes.more ? { moreNamesakes: true } : {}) });
     } catch (err) {
       if (ctrl.signal.aborted && !res.writableEnded) throw new HttpError(504, 'MusicBrainz took too long to answer. Try again later.');
       throw err;
@@ -735,7 +738,7 @@ function pmsToken(req) {
 //     and nothing Plex might read as another (see pmsToken). Not for a
 //     stream (`stream`, the server's notifications): that stays open for
 //     hours, and is the owner's;
-//   - a session of the offline key's (see offlinePass).
+//   - a session of the offline password's (see offlinePass).
 // Anything that can't be told is refused (503), never let through.
 async function pmsAuth(req, res, { stream = false } = {}) {
   const { token, single, tokenPath } = pmsToken(req);
@@ -789,11 +792,11 @@ async function pmsAuth(req, res, { stream = false } = {}) {
 }
 let takenSaidUntil = 0;
 
-// A session of the offline key's (see offline.js). Its requests go to the
+// A session of the offline password's (see offline.js). Its requests go to the
 // server without its sign-in (nginx leaves it out, as this says: see
 // 40-plexamp-web.sh), so the server takes them as it takes this container's
 // own without one, for its owner's, as openNow found it does: that's what
-// the key is for. And the session's sign-in never leaves this container.
+// the password is for. And the session's sign-in never leaves this container.
 // Only for what the app does with it: not the notification stream (it stays
 // open for hours, past the session's end), nor Plex's own sign-ins
 // (/security/token: they'd last past it too), and only with that one
@@ -871,12 +874,12 @@ async function findOwner(req, token, fp, counted) {
   }
 }
 
-// ---------- offline mode (OFFLINE_KEY: see offline.js) ----------
+// ---------- offline mode (OFFLINE_PWD: see offline.js) ----------
 
-// GET /api/offline: whether the offline key can be used now (and whether
-// plex.tv is answering this container), and, with an offline-key session's
-// sign-in, whether it's still on. POST /api/offline/session { key }: signs in
-// with it. DELETE /api/offline/session: signs that session out.
+// GET /api/offline: whether the offline password can be used now (and
+// whether plex.tv is answering this container), and, with an
+// offline-password session's sign-in, whether it's still on. POST
+// /api/offline/session { key } (the password): signs in with it. DELETE /api/offline/session: signs that session out.
 async function offlineRoute(req, res, parts) {
   if (!config.plexServerUrl) throw new HttpError(404, 'Not found.');
   const addr = String(req.headers['x-real-ip'] || '');
@@ -892,8 +895,8 @@ async function offlineRoute(req, res, parts) {
     }
     if (parts[0] === 'session' && parts.length === 1 && req.method === 'POST') {
       // (As JSON only, so another site's page can't have a browser try
-      // keys: that would need the browser to ask this player first.)
-      if (!/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] || ''))) throw new HttpError(415, 'Send the key as JSON.');
+      // passwords: that would need the browser to ask this player first.)
+      if (!/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] || ''))) throw new HttpError(415, 'Send the password as JSON.');
       const body = await readBody(req, 4096);
       return send(res, 200, await offline.signIn(body.key, addr, ip));
     }

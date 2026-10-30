@@ -477,24 +477,24 @@ wait_service pw-web5d
 expect "open server: the service asks the server only through nginx (given a socket that isn't there, nothing gets through)" 500 "$(c "http://pw-web5d/pms/library/sections?X-Plex-Token=t")"
 docker rm -f pw-web5d >/dev/null
 
-# ---------- 5b. Offline mode: the offline key, while plex.tv isn't answering ----------
+# ---------- 5b. Offline mode: the offline password, while plex.tv isn't answering ----------
 # (Its times shortened, for the test: see server/index.js.)
 docker run -d --name pw-web5b --network "$NET" -e "$TV" -e PLEX_SERVER_URL=http://pw-plex:32400 \
-    -e OFFLINE_KEY=offline-key-for-tests -e PW_SERVICE_OFFLINE_TIMING=500,2000,200,200 "$IMAGE" >/dev/null
+    -e OFFLINE_PWD=offline-pwd-for-tests -e PW_SERVICE_OFFLINE_TIMING=500,2000,200,200 "$IMAGE" >/dev/null
 wait_http pw-web5b http://pw-web5b/
 wait_service pw-web5b
 contains "offline mode: config.js says so" "offline: true" "$(cb http://pw-web5b/config.js)"
-lacks "offline mode: the key isn't in config.js" "offline-key-for-tests" "$(cb http://pw-web5b/config.js)"
-lacks "offline mode: ...nor in the log" "offline-key-for-tests" "$(docker logs pw-web5b 2>&1)"
-offline_key() { c -H 'Content-Type: application/json' -X POST -d "{\"key\":\"$1\"}" http://pw-web5b/api/offline/session; }
-expect "offline mode: not while plex.tv is answering" 409 "$(offline_key offline-key-for-tests)"
+lacks "offline mode: the password isn't in config.js" "offline-pwd-for-tests" "$(cb http://pw-web5b/config.js)"
+lacks "offline mode: ...nor in the log" "offline-pwd-for-tests" "$(docker logs pw-web5b 2>&1)"
+offline_pwd() { c -H 'Content-Type: application/json' -X POST -d "{\"key\":\"$1\"}" http://pw-web5b/api/offline/session; }
+expect "offline mode: not while plex.tv is answering" 409 "$(offline_pwd offline-pwd-for-tests)"
 c "http://pw-plex:32400/__mock/config?tv=down" >/dev/null
 c http://pw-web5b/api/offline >/dev/null
 sleep 1
 contains "offline mode: on, once plex.tv hasn't answered for a while" '"on":true' "$(cb http://pw-web5b/api/offline)"
-expect "offline mode: a wrong key refused" 401 "$(offline_key not-the-offline-key)"
-session="$(cb -H 'Content-Type: application/json' -X POST -d '{"key":"offline-key-for-tests"}' http://pw-web5b/api/offline/session | sed -n 's/.*"token":"\(pwoff-[0-9a-f]*\)".*/\1/p')"
-expect "offline mode: the key signs in" yes "$([ -n "$session" ] && echo yes || echo no)"
+expect "offline mode: a wrong password refused" 401 "$(offline_pwd not-the-offline-password)"
+session="$(cb -H 'Content-Type: application/json' -X POST -d '{"key":"offline-pwd-for-tests"}' http://pw-web5b/api/offline/session | sed -n 's/.*"token":"\(pwoff-[0-9a-f]*\)".*/\1/p')"
+expect "offline mode: the password signs in" yes "$([ -n "$session" ] && echo yes || echo no)"
 c "http://pw-plex:32400/__mock/seen?reset=1" >/dev/null
 expect "offline mode: ...and plays the server, as it lets the player in" 200 "$(c "http://pw-web5b/pms/library/sections?X-Plex-Token=$session&pwtest=off1")"
 expect "offline mode: ...with its sign-in in the header too" 200 "$(c -H "X-Plex-Token: $session" "http://pw-web5b/pms/library/sections?pwtest=off2")"
@@ -553,12 +553,15 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 
 # ---------- 7. Play Together off ----------
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true -e SPOTIFY_IMPORT=true -e SPOTIFY_LINK_IMPORT=false \
-    -e OFFLINE_KEY=offline-key-for-tests "$IMAGE" >/dev/null
+    -e OFFLINE_NETWORKS=private -e OLLAMA_AUTH=plex "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
 expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
-contains "OFFLINE_KEY without PLEX_SERVER_URL: off, saying why" "offline mode needs PLEX_SERVER_URL" "$(docker logs pw-web7 2>&1)"
+# (OFFLINE_NETWORKS=private and OLLAMA_AUTH=plex alone, as Proxmox VE's
+# settings have them: the defaults, so the container starts, as it has.)
+lacks "OFFLINE_NETWORKS=private alone (the default): nothing said of it" "OFFLINE_NETWORKS" "$(docker logs pw-web7 2>&1)"
+lacks "...nor of OLLAMA_AUTH=plex alone" "OLLAMA_AUTH" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 
 # ---------- 7a. Without Node.js: no Plex proxy (nothing would check what goes through it) ----------
@@ -570,7 +573,7 @@ contains "...saying why" "the Plex proxy (/pms/, for PLEX_SERVER_URL) needs Node
 docker rm -f pw-web11 >/dev/null
 
 # ---------- 7b. Playing on other Plex players off ----------
-docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e MUSICBRAINZ_ADVANCED=true -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
+docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
     -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true -e WEBSOCKETS=on -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
@@ -580,7 +583,6 @@ contains "...and that DISABLE_WEBSOCKETS=true is left aside" "DISABLE_WEBSOCKETS
 expect "SYNC_MISSING_TRACKS=false: no missing tracks kept for each account" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/missing?server=mock-server-1')"
 expect "CASTING=false: no players" 404 "$(c -H 'X-Plex-Token: t' http://pw-web8/api/cast/players)"
 expect "MUSICBRAINZ=false: no checks" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web8/api/musicbrainz/check)"
-contains "MUSICBRAINZ_ADVANCED without a MusicBrainz to ask: off, saying why" "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL" "$(docker logs pw-web8 2>&1)"
 expect "PLAYLIST_SHARING=false: no shared playlists" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/shares?server=mock-server-1')"
 expect "without PLEX_SERVER_URL, anyone signed in to Plex can use the service, on a server of their own" 200 "$(c -H 'X-Plex-Token: t3' "http://pw-web8/api/devices?device=chk-device-9&name=Check&server=mock-server-2&wait=0")"
 
@@ -689,10 +691,28 @@ bad "rejects a SPOTIFY_IMPORT that isn't true or false" "SPOTIFY_IMPORT: expecte
 bad "rejects a SPOTIFY_LINK_IMPORT that isn't true or false" "SPOTIFY_LINK_IMPORT: expected true or false" -e SPOTIFY_LINK_IMPORT=sometimes
 bad "rejects a SPOTIFY_FILE_IMPORT that isn't true or false" "SPOTIFY_FILE_IMPORT: expected true or false" -e SPOTIFY_FILE_IMPORT=sometimes
 bad "rejects a SPOTIFY_URL with a path in it" "SPOTIFY_URL isn't a plain address" -e SPOTIFY_IMPORT=true -e 'SPOTIFY_URL=http://spotify.box/x'
-bad "rejects an OFFLINE_KEY that's too short" "OFFLINE_KEY must be 12 to 200 characters long" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=short
-bad "rejects an OFFLINE_KEY with a space in it" "OFFLINE_KEY must be 12 to 200 characters long" -e PLEX_SERVER_URL=http://plex.box:32400 -e 'OFFLINE_KEY=a key with spaces'
-bad "...or with a # in it (a settings file could cut it short there)" "openssl rand -base64 24 makes one" -e PLEX_SERVER_URL=http://plex.box:32400 -e 'OFFLINE_KEY=offline-key#for-tests'
-bad "rejects an OFFLINE_FROM that isn't addresses" "OFFLINE_FROM: home isn't an address or a network" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=offline-key-for-tests -e OFFLINE_FROM=home
+bad "rejects an OFFLINE_PWD that's too short" "OFFLINE_PWD must be 12 to 200 characters long" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_PWD=short
+bad "rejects an OFFLINE_PWD with a space in it" "OFFLINE_PWD must be 12 to 200 characters long" -e PLEX_SERVER_URL=http://plex.box:32400 -e 'OFFLINE_PWD=a password with spaces'
+bad "...or with a # in it (a settings file could cut it short there)" "openssl rand -base64 24 makes one" -e PLEX_SERVER_URL=http://plex.box:32400 -e 'OFFLINE_PWD=offline-pwd#for-tests'
+bad "rejects an OFFLINE_NETWORKS that isn't addresses" "OFFLINE_NETWORKS: home isn't an address or a network" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_PWD=offline-pwd-for-tests -e OFFLINE_NETWORKS=home
+# Settings that would do nothing, as another they need isn't set: the
+# container stops, saying so, rather than leaving them off unseen.
+bad "OFFLINE_PWD without PLEX_SERVER_URL stops the container" "OFFLINE_PWD needs PLEX_SERVER_URL" -e OFFLINE_PWD=offline-pwd-for-tests
+bad "OFFLINE_NETWORKS without OFFLINE_PWD stops it" "OFFLINE_NETWORKS is set but OFFLINE_PWD isn't" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_NETWORKS=any
+bad "MUSICBRAINZ_ADVANCED without a MusicBrainz to ask stops it" "MUSICBRAINZ_ADVANCED needs MUSICBRAINZ_URL" -e MUSICBRAINZ_ADVANCED=true
+bad "...nor with MUSICBRAINZ=false, which turns MUSICBRAINZ_URL off" "MUSICBRAINZ_ADVANCED needs MusicBrainz, which MUSICBRAINZ=false turns off" -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e MUSICBRAINZ_ADVANCED=true
+bad "OLLAMA_MODEL without OLLAMA_URL stops it" "OLLAMA_MODEL needs OLLAMA_URL" -e OLLAMA_MODEL=llama3.1:8b
+bad "OLLAMA_API_KEY without OLLAMA_URL stops it" "OLLAMA_API_KEY needs OLLAMA_URL" -e OLLAMA_API_KEY=sk-not-printed-123
+docker run -d --name pw-bad -e OLLAMA_API_KEY=sk-not-printed-123 "$IMAGE" >/dev/null
+sleep 3
+lacks "...without printing the key" "sk-not-printed-123" "$(docker logs pw-bad 2>&1 || true)"
+docker rm -f pw-bad >/dev/null 2>&1 || true
+bad "OLLAMA_AUTH=off without OLLAMA_URL stops it" "OLLAMA_AUTH needs OLLAMA_URL" -e OLLAMA_AUTH=off
+bad "...and one that's neither plex nor off says so first" "OLLAMA_AUTH must be plex or off (got: sometimes)" -e OLLAMA_AUTH=sometimes
+# Their names in 0.30.0: the container stops, saying what they're called now.
+bad "OFFLINE_KEY (0.30.0's name) stops the container, saying what it's called now" "OFFLINE_KEY is called OFFLINE_PWD since 0.31.0: rename it" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=offline-pwd-for-tests
+bad "...and where both are set, which to take out" "OFFLINE_KEY is called OFFLINE_PWD since 0.31.0, and both are set: take OFFLINE_KEY out" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=offline-pwd-for-tests -e OFFLINE_PWD=offline-pwd-for-tests
+bad "OFFLINE_FROM (0.30.0's name) stops it too" "OFFLINE_FROM is called OFFLINE_NETWORKS since 0.31.0: rename it" -e OFFLINE_FROM=private
 docker rm -f pw-bad >/dev/null 2>&1 || true
 docker run -d --name pw-bad -e 'PLEX_SERVER_URL=http://user:hunter2@plex.box:32400' "$IMAGE" >/dev/null
 sleep 3

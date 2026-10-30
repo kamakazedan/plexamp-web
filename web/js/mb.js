@@ -65,19 +65,27 @@ async function call(path, body, { signal } = {}) {
 
 // An artist on MusicBrainz, by name (or by their MusicBrainz id, `id`,
 // where Plex has it): { artist: { id, name, aliases, genres } | null,
-// groups: [{ id, title, primary, secondary, date }], namesakes } (`groups`:
-// false, without those; `namesakes`: true, with the other artists of the
-// name too, [{ id, name, note, groups }]: see apartFromNamesakes), kept
-// while the app's open (a failure isn't, to be asked again).
+// groups: [{ id, title, primary, secondary, date }], capped, namesakes,
+// moreNamesakes } (`groups`: false, without those; `namesakes`: true, with
+// the other artists of the name too, [{ id, name, note, groups }]: see
+// apartFromNamesakes, and `moreNamesakes` where MusicBrainz has more of the
+// name than those), kept while the app's open (a failure isn't, to be
+// asked again).
 const artists = new Map();
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export function artistOnMB(name, { groups = true, id = null, namesakes = false } = {}) {
   const byId = MBID.test(String(id)) ? id : null;
   const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${byId || norm(name)}`;
-  if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], capped: false, namesakes: [] });
+  if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], capped: false, namesakes: [], moreNamesakes: false });
   if (!artists.has(key)) {
     const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}) }).then(
-      (r) => ({ artist: r.artist || null, groups: Array.isArray(r.groups) ? r.groups : [], capped: r.capped === true, namesakes: Array.isArray(r.namesakes) ? r.namesakes : [] }),
+      (r) => ({
+        artist: r.artist || null,
+        groups: Array.isArray(r.groups) ? r.groups : [],
+        capped: r.capped === true,
+        namesakes: Array.isArray(r.namesakes) ? r.namesakes : [],
+        moreNamesakes: r.moreNamesakes === true,
+      }),
       (err) => {
         artists.delete(key);
         throw err;

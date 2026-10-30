@@ -206,7 +206,7 @@ export const SYNC_REV = 'syncRev';
 export const MISSING_OVER = 'aiMissingOver';
 
 // Signed in with a Plex account (or a server token): not with the player's
-// offline key (see offline.js), which is no Plex account, so nothing that
+// offline password (see offline.js), which is no Plex account, so nothing that
 // needs one is used then.
 export const plexAccount = () => !!app.auth?.token && !app.auth.offline;
 

@@ -66,11 +66,19 @@ testing, these endpoints need no token:
         server);
         smartcollection=1|0: a smart collection (Electronic picks) listed,
         whose items carry no tag for it, or not
-    /__mock/add-artist?name=...[&eps=N][&noalbum=1]
+    /__mock/add-artist?name=...[&eps=N][&noalbum=1][&albums=T:Y,...][&mb=0]
                                   adds an artist with an album and a track of
                                   their own (and N EPs, a track on each;
-                                  noalbum: no album, only those);
-                                  ?remove=ID takes them away again
+                                  noalbum: no album, only those; albums:
+                                  albums of these titles and years instead,
+                                  as a second artist of a name Plex made
+                                  from files tagged otherwise), without a
+                                  MusicBrainz id (mb=0: and the mock's
+                                  MusicBrainz doesn't have them, nor their
+                                  albums); ?remove=ID takes them away again
+                                  (and what was merged from them)
+    /__mock/merges[?reset=1]      the merges made (PUT /library/metadata/ID/
+                                  merge?ids=...: the server's admin's only)
     /__mock/add-album?title=...[&untyped=1]
                                   adds an album and announces it (untyped:
                                   without a Format or Subformat, as an album
@@ -79,7 +87,7 @@ testing, these endpoints need no token:
     /__mock/seen[?reset=1]        the server's last 200 requests: path, the
                                   value of a pwtest= in it (to find one), where
                                   its token was (header, query, both or none),
-                                  whether it was an offline-key session's, and
+                                  whether it was an offline-password session's, and
                                   which headers saying where it came from it had
     /__mock/home[?reset=1]        the switches made in Dan's Plex Home: who
                                   from, to whom, and the PIN given
@@ -881,6 +889,8 @@ def mb_namesakes():
 def mb_artists():
     out = []
     for a in artists:
+        if a.get('_noMB'):
+            continue
         out.append({'id': mb_id('artist|' + a['title']), 'name': a['title'], 'sort-name': a['title'],
                     'aliases': [{'name': x, 'sort-name': x} for x in MB_ALIASES.get(a['title'], [])],
                     'genres': [{'name': g, 'count': n} for g, n in MB_GENRES.get(a['title'], [])]})
@@ -893,8 +903,9 @@ def mb_groups(artist_name):
     # (Not those of another artist of the name: see MB_NAMESAKES.)
     others = {t for o in MB_NAMESAKES.get(artist_name, []) for t, *_ in o['groups']}
     for al in albums:
-        # (One added to the library that MusicBrainz has anyway is as it has it.)
-        if al['parentTitle'] != artist_name or al['title'] in more or al['title'] in others:
+        # (One added to the library that MusicBrainz has anyway is as it has
+        # it; nor one it hasn't: see /__mock/add-artist's mb=0.)
+        if al['parentTitle'] != artist_name or al['title'] in more or al['title'] in others or al.get('_noMB'):
             continue
         sub = [t['tag'] for t in al.get('Subformat', [])]
         fmt = (al.get('Format') or [{'tag': 'Album'}])[0]['tag']
@@ -1103,6 +1114,26 @@ def hls_playlist(seconds):
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'honour': '--honour' in sys.argv, 'tv': 'down' if '--tv-down' in sys.argv else 'up',
         'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums'}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
+MERGES = []  # artists merged (PUT /library/metadata/ID/merge?ids=...)
+MERGED = {}  # ratingKey -> an artist merged into another, gone from the library (for undo_merges)
+
+
+def undo_merges():
+    """Every merge undone: the artists merged into others back, with their
+    albums and tracks, where they were."""
+    for rk, (o, at) in list(MERGED.items()):
+        items[rk] = o
+        if o not in artists:
+            artists.insert(min(at, len(artists)), o)
+        for al in albums:
+            if al.get('_mergedFrom') == rk:
+                al.update(parentRatingKey=rk, parentTitle=o['title'], parentThumb=o['thumb'])
+                al.pop('_mergedFrom', None)
+                for tr in tracks:
+                    if tr['parentRatingKey'] == al['ratingKey']:
+                        tr.update(grandparentRatingKey=rk, grandparentTitle=o['title'], grandparentThumb=o['thumb'])
+    MERGED.clear()
+    MERGES.clear()
 NO_GENRE = {}  # album id -> its genres, taken away (/__mock/config?nogenre=)
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
 # The server's requests, lately (/__mock/seen): what a proxy in front of it
@@ -2076,15 +2107,18 @@ class Handler(BaseHTTPRequestHandler):
             al = add_album(q.get('title', ['Fresh Arrival'])[0], untyped=q.get('untyped', ['0'])[0] == '1')
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
         if p == '/__mock/add-artist':  # name=...: an artist with an album of their own; remove=ID: gone again
-            gone = items.get(q.get('remove', [''])[0])
+            rid = q.get('remove', [''])[0]
+            gone = items.get(rid) or (MERGED.pop(rid)[0] if rid in MERGED else None)
             if gone and gone.get('type') == 'artist':
-                for al in [a for a in albums if a['parentRatingKey'] == gone['ratingKey']]:
+                # (And the albums merged from it into another: see merge.)
+                for al in [a for a in albums if a['parentRatingKey'] == gone['ratingKey'] or a.get('_mergedFrom') == gone['ratingKey']]:
                     for tr in [x for x in tracks if x['parentRatingKey'] == al['ratingKey']]:
                         tracks.remove(tr)
                         items.pop(tr['ratingKey'], None)
                     albums.remove(al)
                     items.pop(al['ratingKey'], None)
-                artists.remove(gone)
+                if gone in artists:
+                    artists.remove(gone)
                 items.pop(gone['ratingKey'], None)
                 return self.send_json({'size': 0})
             name = q.get('name', ['Ash'])[0]
@@ -2093,16 +2127,23 @@ class Handler(BaseHTTPRequestHandler):
                      thumb=f'/library/metadata/{k}/thumb/1', art=f'/library/metadata/{k}/art/1', summary='')
             for f in ('Guid', 'Similar', 'Style'):
                 a.pop(f, None)
+            no_mb = q.get('mb', ['1'])[0] == '0'
+            if no_mb:
+                a['_noMB'] = True
             items[k] = a
             artists.append(a)
             eps = max(0, min(10, int(q.get('eps', ['0'])[0] or 0)))
-            made = [] if q.get('noalbum', [''])[0] in ('1', 'true') else [(f'{name} Alone', 'Album')]
-            made += [(f'{name} EP {n}', 'EP') for n in range(1, eps + 1)]
-            for n, (title, fmt) in enumerate(made):
+            made = [] if q.get('noalbum', [''])[0] in ('1', 'true') else [(f'{name} Alone', 'Album', None)]
+            made += [(f'{name} EP {n}', 'EP', None) for n in range(1, eps + 1)]
+            if q.get('albums'):
+                made = [(t.rsplit(':', 1)[0], 'Album', int(t.rsplit(':', 1)[1])) for t in q['albums'][0].split(',') if ':' in t]
+            for n, (title, fmt, year) in enumerate(made):
                 ak = key()
                 al = dict(albums[0], ratingKey=ak, key=f'/library/metadata/{ak}/children', title=title, titleSort=title.lower(),
                           parentRatingKey=k, parentTitle=name, parentThumb=a['thumb'], thumb=f'/library/metadata/{ak}/thumb/1', leafCount=1,
-                          year=2020 + n, Format=[{'tag': fmt}], Subformat=[])
+                          year=year or 2020 + n, originallyAvailableAt=f'{year or 2020 + n}-05-01', Format=[{'tag': fmt}], Subformat=[])
+                if no_mb:
+                    al['_noMB'] = True
                 items[ak] = al
                 albums.append(al)
                 tk = key()
@@ -2146,6 +2187,10 @@ class Handler(BaseHTTPRequestHandler):
             if q.get('reset', ['0'])[0] == '1':
                 EDITS.clear()
             return self.send_json({'edits': EDITS})
+        if p == '/__mock/merges':
+            if q.get('reset', ['0'])[0] == '1':
+                undo_merges()
+            return self.send_json({'merges': MERGES})
         if p == '/__mock/home':
             if q.get('reset', ['0'])[0] == '1':
                 HOME_SWITCHES.clear()
@@ -2326,6 +2371,26 @@ class Handler(BaseHTTPRequestHandler):
             if not it or (it['type'] == 'track' and not can_have(parts[2], token)):
                 return self.not_found()
             sub = parts[3] if len(parts) > 3 else ''
+            if sub == 'merge' and self.command == 'PUT':
+                # Plex's merge: those of ids= into this one, of its type (an
+                # artist: their albums and tracks are its now, and they're
+                # gone). The server's admin's only.
+                if not is_admin(token):
+                    return self.send_json({'error': 'Forbidden'}, 403)
+                others = [items.get(i) for i in q.get('ids', [''])[0].split(',') if i and i != it['ratingKey']]
+                if it['type'] != 'artist' or not others or any(o is None or o.get('type') != 'artist' for o in others):
+                    return self.send_json({'error': 'Bad request'}, 400)
+                for o in others:
+                    for al in [a for a in albums if a['parentRatingKey'] == o['ratingKey']]:
+                        al.update(parentRatingKey=it['ratingKey'], parentTitle=it['title'], parentThumb=it['thumb'], _mergedFrom=o['ratingKey'])
+                        for tr in [x for x in tracks if x['parentRatingKey'] == al['ratingKey']]:
+                            tr.update(grandparentRatingKey=it['ratingKey'], grandparentTitle=it['title'], grandparentThumb=it['thumb'])
+                    MERGED[o['ratingKey']] = (o, artists.index(o))
+                    artists.remove(o)
+                    items.pop(o['ratingKey'], None)
+                MERGES.append({'into': it['ratingKey'], 'ids': [o['ratingKey'] for o in others]})
+                timeline(it['ratingKey'], 8, 5)
+                return self.send_json({})
             if sub in ('posters', 'poster') or (sub == 'thumb' and self.command == 'DELETE'):
                 return self.pictures(it, sub, q, token)
             if sub == 'children':
@@ -2462,6 +2527,7 @@ class Handler(BaseHTTPRequestHandler):
                     t.pop('userRating', None)
                 else:
                     t['userRating'] = rating
+                t['lastRatedAt'] = int(time.time())
             sys.stderr.write(f'  rate {q.get("key", [""])[0]} -> {rating}\n')
             if t is not None:
                 timeline(t['ratingKey'], 10, 5)

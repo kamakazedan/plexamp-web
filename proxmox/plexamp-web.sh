@@ -342,14 +342,14 @@ SPOTIFY_FILE_IMPORT=
 # read from Spotify's public page for it (see docs/configuration.md).
 SPOTIFY_LINK_IMPORT=
 # Offline mode, with PLEX_SERVER_URL: while plex.tv isn't answering, this
-# player can be signed in to with this key, as your Plex server lets it in
-# without signing in, which is as you, its owner (see docs/configuration.md):
-# 12 to 200 letters, digits and . _ ~ + / = : , @ - (openssl rand -base64 24
-# makes one). Empty: no offline mode.
-OFFLINE_KEY=
-# Where the offline key can be used from: private (your own networks), any,
-# or addresses and networks (192.168.1.0/24, say), separated by commas.
-OFFLINE_FROM=private
+# player can be signed in to with this password, as your Plex server lets it
+# in without signing in, which is as you, its owner (see
+# docs/configuration.md): 12 to 200 letters, digits and . _ ~ + / = : , @ -
+# (openssl rand -base64 24 makes one). Empty: no offline mode.
+OFFLINE_PWD=
+# Where the offline password can be used from: private (your own networks),
+# any, or addresses and networks (192.168.1.0/24, say), separated by commas.
+OFFLINE_NETWORKS=private
 DEBUG=
 ENV
 pct exec "$CTID" -- mkdir -p /etc/plexamp-web
