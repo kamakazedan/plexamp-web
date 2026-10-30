@@ -11,7 +11,7 @@ import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
-import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, sameArtist, genericTitle } from './releases.js';
+import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, sameArtist, genericTitle, evidenceOf } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
@@ -2727,6 +2727,20 @@ test('MusicBrainz features: artists Plex has more than once, merged only on plai
   assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake], moreNamesakes: true }), 'different');
   // One alone isn't more than once
   assert.equal(sameArtist([old], mb), 'unknown');
+  // Titles as stores give them ("Shadows - EP", "Heat - Single"): as MusicBrainz has them
+  assert.equal(albumKey('Shadows - EP'), albumKey('Shadows'));
+  assert.equal(albumKey('Heat - Single'), albumKey('Heat'));
+  assert.equal(sameArtist([old, only({ title: 'Express Non-Stop - EP', year: 2012 })], mb), 'same');
+  // What there is of each, album by album (said for those left as they are)
+  const ev = evidenceOf([old, only({ title: 'Live', year: 2010 }), only({ title: 'Night Shift', year: 2021 }, { title: 'Unreleased', year: 2020 }, { title: 'Demos', year: 2020 })], { ...mb, namesakes: [namesake] });
+  assert.deepEqual(
+    ev.map((x) => [x.albums, x.plain, x.weak, x.apart, x.apartWeak]),
+    [
+      [2, ['This Is Alphabeat', 'The Beat Is...'], [], [], []],
+      [1, [], ['Live'], [], []],
+      [3, [], [], ['Night Shift'], ['Demos']],
+    ],
+  );
 
   // A name of several in one, as theirs: the artist of the plain name is MusicBrainz's, plainly, and it knows no other of the name
   const joined = { mbid: null, albums: [{ title: 'Shadows (FORCE Remix)', year: 2023 }] };

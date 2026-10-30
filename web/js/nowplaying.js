@@ -2,7 +2,7 @@
 // full-screen Now Playing view with its "Up next" queue.
 import { app, on } from './state.js';
 import { player } from './player.js';
-import { pushOverlay, popOverlay, describeError, navigate } from './router.js';
+import { pushOverlay, popOverlay, closeOverlays, describeError, navigate } from './router.js';
 import { canPlayCodec } from './plex.js';
 import { h, icon, iconButton, art, avatar, skipIcon, fmt, toast, sheet } from './ui.js';
 import { trackMenu, queueMenu } from './actions.js';
@@ -275,6 +275,21 @@ export function initPlayerBar(root) {
   player.addEventListener('mode', onMode);
   cast.addEventListener('change', onMode);
   devices.addEventListener('change', onMode);
+  // The connection to a track's stream keeps dropping (player.js
+  // couldntPlay): it's loaded again as it is, and the player says so, at
+  // most every ten minutes, with what a lower Streaming quality would do
+  // (never changed but by the listener).
+  let droppingSaid = 0;
+  player.addEventListener('dropping', (e) => {
+    const q = String(app.settings.quality || 'original');
+    if (Date.now() - droppingSaid < 10 * 60000) return;
+    droppingSaid = Date.now();
+    const lower = q !== '128' ? ' A lower Streaming quality uses less data, and may keep it playing.' : '';
+    toast(`The connection to ${app.source?.serverName || 'your server'} keeps dropping, so “${e.detail.track.title}” keeps stopping. It carries on as soon as it can.${lower}`, {
+      timeout: 12000,
+      ...(lower ? { action: 'Streaming quality', onAction: () => closeOverlays().then(() => navigate('/settings/playback')) } : {}),
+    });
+  });
   player.addEventListener('playerror', (e) => {
     const { track, remote } = e.detail;
     if (remote) {

@@ -233,9 +233,8 @@ export class Deck {
     this.kbps = null; // a converted stream's bitrate
     this.endsAt = null; // a stream that stopped short: where its sound ends (see onStreamError)
     this.played = false; // has played since it was loaded
-    // Converted whatever Streaming quality says: true as the file doesn't
-    // play as it is here, 'network' as its connection kept dropping (see
-    // onError).
+    // Converted whatever Streaming quality says, as the file doesn't play
+    // as it is here (see couldntPlay).
     this.forced = false;
     this.stall = null; // debug mode: playback waiting for data, since when
     this.prefetched = null; // what was loaded ahead for its track, played from memory (see prefetch.js)
@@ -349,7 +348,7 @@ class Player extends EventTarget {
     this.rescueTimer = null;
     this.rescueOnline = null;
     this.rescueGo = null;
-    this.directRetry = null; // the track whose original file was loaded again after its connection dropped
+    this.drops = null; // { qid, n }: how many times the connection to a track's stream has dropped (see couldntPlay)
     this.stallRetry = null; // the one loaded again after waiting for data too long (see watchStall)
     this.stallLimits = { ...STALL };
     this.restoredAt = 0;
@@ -658,7 +657,7 @@ class Player extends EventTarget {
     this.qualityLater = false; // (it loads as Streaming quality now says)
     if (!resume) {
       this.rescue = null;
-      this.directRetry = null;
+      this.drops = null;
       this.stallRetry = null;
     }
     const prev = this.current;
@@ -1516,7 +1515,7 @@ class Player extends EventTarget {
       const autoplay = this.loadAutoplay || this.state === 'playing' || this.state === 'loading';
       serverAnswers().then((answers) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
-        if (answers || this.remote || this.cast) this.couldntPlay(track, err, media);
+        if (answers || this.remote || this.cast) this.couldntPlay(track, err, media, { at, autoplay });
         else this.holdFor(track, at, autoplay);
       });
       return;
@@ -1524,21 +1523,35 @@ class Player extends EventTarget {
     this.couldntPlay(track, err, media);
   }
 
-  couldntPlay(track, err, media) {
-    if (!this.triedTranscode && track.partKey) {
-      const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? this.time : this.time;
-      const network = media?.code === MediaError.MEDIA_ERR_NETWORK;
-      if (network && this.directRetry !== track.qid) {
-        // The connection to the original file dropped: the file again,
-        // from there, once.
-        this.directRetry = track.qid;
-        this.load(this.index, { startAt, reportPrev: false, resume: true });
+  // `at`, `autoplay`: where it had got to as it failed, and whether it was
+  // to play (see onError).
+  couldntPlay(track, err, media, { at = this.time, autoplay = this.isPlaying } = {}) {
+    const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? this.time : at;
+    if (media?.code === MediaError.MEDIA_ERR_NETWORK && track.partKey) {
+      // The connection to its stream dropped (the server answering
+      // otherwise): the same stream again, from where it got to: at once the
+      // first time, then a while later each time it drops again. Never
+      // another quality instead (Streaming quality is the listener's to
+      // say): once it keeps dropping, the player suggests a lower one
+      // ('dropping': see nowplaying.js). In Play Together, which carries on
+      // without this device, only a few times, then as a track that won't
+      // play here.
+      const n = (this.drops?.qid === track.qid ? this.drops.n : 0) + 1;
+      this.drops = { qid: track.qid, n };
+      if (n >= 2) this.emit('dropping', { track });
+      const again = { startAt, transcode: this.deck.forced || false, reportPrev: false, resume: true };
+      if (n === 1 || (this.remote && n <= 3)) {
+        this.load(this.index, again);
         return;
       }
-      // The browser couldn't decode the original file, or its connection
-      // dropped again: ask the server to convert it (for the second, only
-      // until Streaming quality changes).
-      this.load(this.index, { startAt, transcode: network ? 'network' : true, reportPrev: false, resume: true });
+      if (!this.remote) {
+        this.holdFor(track, at, autoplay, { delay: Math.min(30000, 2000 * 2 ** (n - 2)), gone: false, transcode: again.transcode });
+        return;
+      }
+    } else if (!this.triedTranscode && track.partKey) {
+      // The browser couldn't play the file as it is: the server converts it
+      // (as it does a file of a format this browser can't play).
+      this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
       return;
     }
     this.errorsInRow += 1;
@@ -1685,16 +1698,23 @@ class Player extends EventTarget {
   // finds the connection's back (connection.js), and every so often anyway
   // (a phone that loses its signal doesn't always say it's offline). What's
   // loaded already, and changing to it, needs no connection: Next and the
-  // rest still work meanwhile.
-  holdFor(track, at, autoplay) {
+  // rest still work meanwhile. `gone`: false for a stream whose connection
+  // keeps dropping, the server answering otherwise (see couldntPlay): it
+  // waits `delay` ms, then loads again (as it was: `transcode`), as long as
+  // the server answers then.
+  holdFor(track, at, autoplay, { delay = 2500, gone = true, transcode = false } = {}) {
     this.cancelHold();
     const qid = track.qid;
     const hold = { qid, at, tries: 0, timer: 0 };
     this.held = hold;
     this.loadAutoplay = autoplay;
     this.setState(autoplay ? 'loading' : 'paused');
-    debugLog('player', `the connection’s gone: “${track.title}” waits for it, at ${at.toFixed(1)} s`, 'warn');
-    connectionLost();
+    if (gone) {
+      debugLog('player', `the connection’s gone: “${track.title}” waits for it, at ${at.toFixed(1)} s`, 'warn');
+      connectionLost();
+    } else {
+      debugLog('player', `the connection to “${track.title}” keeps dropping: loaded again in ${Math.round(delay / 1000)} s, from ${at.toFixed(1)} s`, 'warn');
+    }
     // (Not once another device or a Plex player plays: that's theirs.)
     const still = () => this.held === hold && this.current?.qid === qid && !this.cast && !this.remote;
     hold.again = async () => {
@@ -1712,12 +1732,12 @@ class Player extends EventTarget {
       const play = this.loadAutoplay && this.state !== 'paused';
       this.cancelHold();
       connectionBack();
-      debugLog('player', `the connection’s back: “${track.title}” from ${hold.at.toFixed(1)} s`);
-      this.load(this.index, { autoplay: play, startAt: hold.at, reportPrev: false, resume: true });
+      debugLog('player', `${gone ? 'the connection’s back' : 'again'}: “${track.title}” from ${hold.at.toFixed(1)} s`);
+      this.load(this.index, { autoplay: play, startAt: hold.at, transcode, reportPrev: false, resume: true });
     };
     window.addEventListener('online', hold.again);
     connection.addEventListener('back', hold.again);
-    hold.timer = setTimeout(hold.again, 2500);
+    hold.timer = setTimeout(hold.again, delay);
   }
 
   cancelHold() {
