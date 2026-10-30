@@ -7899,7 +7899,7 @@ with sync_playwright() as pw:
             ns, ja = left.get('Northbound Static', {}), left.get('Juniper & Ash', {})
             check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash): left as they are, saying why album by album, for you to choose',
                   'different artists of one name' in ns.get('text', '') and '“Frost Engine”' in ns.get('text', '') and ns.get('checked') is False
-                  and 'none as theirs' in ja.get('text', '') and 'Not enough to say' in ja.get('text', '') and ja.get('checked') is False, str(left))
+                  and 'none MusicBrainz has as theirs' in ja.get('text', '') and 'Not enough to say' in ja.get('text', '') and ja.get('checked') is False, str(left))
             first = left.get('Glass Harbour;Kilo Meridian', {})
             check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first, not to choose yet)',
                   not joined and 'those first' in first.get('text', '') and first.get('checked') is None, f'{joined} {left}')

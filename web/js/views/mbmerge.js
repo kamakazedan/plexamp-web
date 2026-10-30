@@ -235,9 +235,9 @@ export async function mbMergeView({ el, onDispose }) {
   // What MusicBrainz has of one's albums, said.
   const albumsSaid = (x, name) => {
     const n = fmt.count(x.albums, 'album', 'albums');
-    if (x.plain.length) return `${n}, ${x.plain.length === x.albums ? (x.albums === 1 ? 'it' : 'all') : fmt.number(x.plain.length)} as ${name}’s`;
-    if (x.weak.length) return `${n}, only ${quoted(x.weak)} as ${name}’s, a title plenty of artists have`;
-    return `${n}, none as theirs (by title and year)`;
+    if (x.plain.length) return `${n}, ${x.plain.length === x.albums ? (x.albums === 1 ? 'which' : 'all of which') : fmt.number(x.plain.length)} MusicBrainz has as ${name}’s`;
+    if (x.weak.length) return `${n}, only ${quoted(x.weak)} as ${name}’s on MusicBrainz, a title plenty of artists have`;
+    return `${n}, none MusicBrainz has as theirs (by title and year)`;
   };
   const why = (g) => {
     const one = g.kind === 'joined' ? 'it’s theirs' : 'they’re one artist';
@@ -255,7 +255,7 @@ export async function mbMergeView({ el, onDispose }) {
     const ev = g.evidence || [];
     const weakApart = ev.flatMap((x) => x.apartWeak);
     if (weakApart.length) return `MusicBrainz has ${quoted(weakApart)} as another ${g.name}’s, a title plenty of artists have, so it can’t say whether ${one}.`;
-    const said = g.kind === 'joined' ? `Your ${g.name}: ${albumsSaid(ev[0], g.name)}; this one: ${albumsSaid(ev[1], g.name)}` : `On MusicBrainz, of Plex’s ${fmt.number(ev.length)}: ${ev.map((x) => albumsSaid(x, g.name)).join('; ')}`;
+    const said = g.kind === 'joined' ? `Your ${g.name}: ${albumsSaid(ev[0], g.name)}; this one: ${albumsSaid(ev[1], g.name)}` : `Plex’s ${fmt.number(ev.length)}: ${ev.map((x) => `one with ${albumsSaid(x, g.name)}`).join('; ')}`;
     return `${said}. Not enough to say whether ${one}.`;
   };
 
