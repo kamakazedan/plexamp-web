@@ -96,10 +96,16 @@ def annotate(title, message):
         print(f'::error title={title}::{text}', flush=True)
 
 
+# The section running, for saying where a test stopped.
+NOW = {'section': ''}
+
+
 def crashed(kind, value, tb):
-    """A test that stops with an error says where, as an annotation too."""
+    """A test that stops with an error says where, as an annotation too: its
+    section and its own lines (not Playwright's), then the error."""
     import traceback
-    annotate('Browser tests stopped', ''.join(traceback.format_exception(kind, value, tb))[-900:])
+    own = [f'{f.name}:{f.lineno}' for f in traceback.extract_tb(tb) if f.filename.endswith('browser_test.py')]
+    annotate('Browser tests stopped', f'in {NOW["section"] or "?"}, at {" > ".join(own[-6:])}: {kind.__name__}: {value}')
     sys.__excepthook__(kind, value, tb)
 
 
@@ -264,7 +270,10 @@ def play_first_album_track(page, app, album=0, track=0):
 
 
 def run(section):
-    return ONLY is None or section in ONLY
+    if ONLY is None or section in ONLY:
+        NOW['section'] = section
+        return True
+    return False
 
 
 with sync_playwright() as pw:
