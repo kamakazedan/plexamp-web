@@ -23,7 +23,7 @@ TV="PLEX_TV_URL=http://pw-plex:32400"
 CERTS=""
 
 cleanup() {
-    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-web11 pw-bad >/dev/null 2>&1 || true
+    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-plex-m1 pw-plex-m2 pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web5c pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-web11 pw-bad >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     docker volume rm "$DATA_VOLUME" "$LINK_VOLUME" >/dev/null 2>&1 || true
     if [ -n "$CERTS" ]; then rm -rf "$CERTS"; fi
@@ -507,6 +507,22 @@ sleep 3
 c http://pw-web5b/api/offline >/dev/null
 expect "offline mode: plex.tv answering again, the session ends" 401 "$(c "http://pw-web5b/pms/library/sections?X-Plex-Token=$session")"
 c "http://pw-plex:32400/__mock/config?open=0&honour=0&tv=up" >/dev/null
+
+# ---------- 5c. A Plex server's name with more than one address ----------
+# nginx takes turns between them, so the server can't be asked about each
+# request: only the owner gets through, and the log says why.
+for m in pw-plex-m1 pw-plex-m2; do
+    docker run -d --name "$m" --network "$NET" --network-alias pw-plex-multi -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --quiet >/dev/null
+done
+wait_http pw-plex-m1 "http://pw-plex-m1:32400/identity"
+wait_http pw-plex-m2 "http://pw-plex-m2:32400/identity"
+docker run -d --name pw-web5c --network "$NET" -e "$TV" -e PLEX_SERVER_URL=http://pw-plex-multi:32400 "$IMAGE" >/dev/null
+wait_http pw-web5c http://pw-web5c/
+wait_service pw-web5c
+expect "a server name with more than one address: the owner gets through" 200 "$(c "http://pw-web5c/pms/library/sections?X-Plex-Token=t")"
+expect "...and nobody else" 500 "$(c "http://pw-web5c/pms/library/sections?X-Plex-Token=t2")"
+contains "...saying why" "has more than one address" "$(docker logs pw-web5c 2>&1)"
+docker rm -f pw-web5c pw-plex-m1 pw-plex-m2 >/dev/null
 
 # ---------- 6. Debug mode ----------
 docker run -d --name pw-web6 --network "$NET" -e "$TV" -e DEBUG=true -e PLEX_SERVER_URL=http://pw-plex:32400 \

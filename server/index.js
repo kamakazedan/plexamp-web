@@ -80,6 +80,9 @@ function loadConfig() {
     // nginx's socket for the service's own requests to that server (see
     // pmsAnswer in plex.js): set by 40-plexamp-web.sh.
     pmsProbe: env.PW_SERVICE_PMS_PROBE ?? cfg.pmsProbe ?? '',
+    // ...and the name server nginx asks for its name, where it looks it up
+    // for each request (see oneAddress there).
+    pmsResolver: env.PW_SERVICE_PMS_RESOLVER ?? cfg.pmsResolver ?? '',
     // Offline mode (OFFLINE_KEY, OFFLINE_FROM): see offline.js.
     offlineKey: env.PW_SERVICE_OFFLINE_KEY ?? cfg.offlineKey ?? '',
     offlineFrom: env.PW_SERVICE_OFFLINE_FROM ?? cfg.offlineFrom ?? 'private',
@@ -102,7 +105,7 @@ function loadConfig() {
 const config = loadConfig();
 setDebug(config.debug);
 if (config.debug && config.nginxLogPort) listenForNginx(config.nginxLogPort);
-const auth = new PlexAuth({ plexTvUrl: config.plexTvUrl, plexServerUrl: config.plexServerUrl, pmsProbe: config.pmsProbe });
+const auth = new PlexAuth({ plexTvUrl: config.plexTvUrl, plexServerUrl: config.plexServerUrl, pmsProbe: config.pmsProbe, pmsResolver: config.pmsResolver });
 const together = new Together({
   onChange: (s) => log.debug(`together ${s.id.slice(0, 6)}: v${s.version}, ${s.members.size} listening, track ${s.index + 1}/${s.queue.length}, ${s.playing ? 'playing' : 'paused'}${s.ended ? ', ended' : ''}`),
 });

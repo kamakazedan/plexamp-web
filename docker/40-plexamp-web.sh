@@ -409,7 +409,8 @@ fi
 
 PMS_URL=""
 # The service's own requests to the Plex server go through nginx too, by a
-# socket of their own (see below), in a folder only the service can reach.
+# socket of their own (see below), in a folder only the service (and nginx,
+# and root) can go into.
 PMS_PROBE_DIR="$RUN_DIR/pms"
 PMS_PROBE_SOCKET="$PMS_PROBE_DIR/plex.sock"
 : >"$PMS_PROBE_CONF"
@@ -426,6 +427,11 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
     PMS_HOST="$UP_HOST"
     PMS_NAME="$UP_NAME"
     PMS_RESOLVER="$UP_RESOLVER"
+    # (For the service: where nginx looks up the server's name for each
+    # request, so it can tell when the name has more than one address: see
+    # oneAddress in server/plex.js.)
+    PMS_NS=""
+    if [ -n "$PMS_RESOLVER" ]; then PMS_NS="$(nameserver | tr -d '[]')"; fi
     # The service checks each request: nothing goes through that the Plex
     # server would take for its owner's, unless it's theirs (see pmsAuth in
     # server/index.js). The server's notification streams are checked as
@@ -571,7 +577,8 @@ CONF
     # judges by where a request comes from whether to let it in without
     # signing in, so a check that went any other way (over IPv6, say, where
     # nginx goes over IPv4) could be answered for somewhere else. Only the
-    # service (and root) can reach this socket: see "start the service".
+    # service (and nginx, and root) can reach this socket: see "start the
+    # service".
     cat >"$PMS_PROBE_CONF" <<CONF
 server {
     listen unix:${PMS_PROBE_SOCKET};
@@ -886,7 +893,8 @@ if [ "$SERVICE" = true ]; then
         chmod 750 "$SOCKET_DIR"
     fi
     # nginx's socket for the service's own requests to the Plex server (see
-    # "Plex"): root's folder, which only the service's group can go into.
+    # "Plex"): root's folder, which only the service's group (nginx's too) can
+    # go into.
     # nginx makes the socket as it starts (one left from before is gone first,
     # or nginx couldn't).
     if [ -n "$PMS_URL" ]; then
@@ -923,6 +931,7 @@ if [ "$SERVICE" = true ]; then
   "ollamaKey": "$([ "$AI_ON" = true ] && json "${OLLAMA_API_KEY:-}")",
   "plexServerUrl": "$(json "${PLEX_SERVER_URL:-}")",
   "pmsProbe": "$([ -n "$PMS_URL" ] && json "$PMS_PROBE_SOCKET")",
+  "pmsResolver": "$(json "${PMS_NS:-}")",
   "plexTvUrl": "$(json "$PLEX_TV")",
   "ownersKeep": $OWNERS_KEEP,
   "offlineKey": "$([ "$OFFLINE" = true ] && json "$OFFLINE_KEY_SET")",

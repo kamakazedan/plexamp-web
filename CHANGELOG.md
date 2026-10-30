@@ -71,6 +71,10 @@ you're running is shown in **Settings › About**.
   remote streams don't apply to them.
 - **Without Node.js in the container** (an image of your own without it),
   there's no `/pms/`: nothing would check what goes through it.
+- **`PLEX_SERVER_URL` as a name with more than one address**: nginx takes
+  turns between them, so the player can't ask your Plex server how it will
+  take each request, and only you get through `/pms/` (the log says so).
+  Use one address there.
 
 ### Fixed
 

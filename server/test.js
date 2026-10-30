@@ -2273,6 +2273,44 @@ async function socketProxy(dir, target) {
   return { path, close: () => srv.close() };
 }
 
+test('/pms/: a Plex server\'s name with more than one address can\'t be asked for each request, so only the owner gets through then', async () => {
+  const p = await fakePlex();
+  const sockets = mkdtempSync(join(tmpdir(), 'pw-nginx-'));
+  const nginx = await socketProxy(sockets, p.pms);
+  let addresses = ['10.0.0.5'];
+  let looked = 0;
+  const resolve4 = async (name) => {
+    looked += 1;
+    assert.equal(name, 'plex.test');
+    if (!addresses) throw Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
+    return addresses;
+  };
+  try {
+    const auth = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: 'http://plex.test:32400', pmsProbe: nginx.path, pmsResolver: '10.0.0.1', resolve4 });
+    assert.equal(await auth.openNow(), false);
+    assert.equal(await auth.openNow(), false);
+    assert.equal(looked, 1); // (looked up again a second later at most)
+    addresses = ['10.0.0.5', '10.0.0.6', '10.0.0.5'];
+    await sleep(1100);
+    await assert.rejects(auth.openNow(), /more than one address/);
+    addresses = ['10.0.0.6'];
+    await sleep(1100);
+    await assert.rejects(auth.openNow(), /more than one address/); // (for a while after, as nginx may still have both)
+    addresses = null;
+    const other = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: 'http://plex.test:32400', pmsProbe: nginx.path, pmsResolver: '10.0.0.1', resolve4 });
+    await assert.rejects(other.openNow(), /couldn't look up plex\.test/);
+    // (An address, or a name nginx isn't asked to look up: nothing to look up.)
+    const plain = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms, pmsResolver: '10.0.0.1', resolve4 });
+    looked = 0;
+    assert.equal(await plain.openNow(), false);
+    assert.equal(looked, 0);
+  } finally {
+    nginx.close();
+    p.close();
+    rmSync(sockets, { recursive: true, force: true });
+  }
+});
+
 test('/pms/: the Plex server is asked the way nginx reaches it, through nginx, never some other way', async () => {
   const there = await fakePlex(); // the server, as nginx reaches it: it lets this container in
   const elsewhere = await fakePlex(); // the same address, some other way (over IPv6, say): it doesn't

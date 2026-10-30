@@ -2,6 +2,7 @@
 // the account behind a token, the servers it can use, and its friends.
 // Tokens are only held as SHA-256 hashes, as cache keys.
 import { createHash, randomBytes } from 'node:crypto';
+import { Resolver } from 'node:dns/promises';
 import { request as httpRequest, Agent as HttpAgent } from 'node:http';
 import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import { isIP } from 'node:net';
@@ -170,7 +171,9 @@ const cleanName = (s) => String(s || '').replace(/[\u0000-\u001f]/g, '').slice(0
 export class PlexAuth {
   // pmsProbe: nginx's socket for the service's own requests to the Plex
   // server (see pmsAnswer); without it (in tests), they go straight there.
-  constructor({ plexTvUrl = 'https://plex.tv', plexServerUrl = '', pmsProbe = '' } = {}) {
+  // pmsResolver: the name server nginx asks for the server's name, where it
+  // looks it up for each request (see oneAddress). (`resolve4`: in tests.)
+  constructor({ plexTvUrl = 'https://plex.tv', plexServerUrl = '', pmsProbe = '', pmsResolver = '', resolve4 = null } = {}) {
     this.plexTv = plexTvUrl.replace(/\/+$/, '');
     this.pms = plexServerUrl.replace(/\/+$/, '');
     this.pmsProbe = pmsProbe;
@@ -185,6 +188,17 @@ export class PlexAuth {
     }
     this.pmsHost = at?.host || 'the Plex server';
     this.certHere = at?.protocol === 'https:' && isIP(at.hostname.replace(/^\[|\]$/g, '')) !== 0;
+    this.pmsName = pmsResolver && at && isIP(at.hostname.replace(/^\[|\]$/g, '')) === 0 ? at.hostname : '';
+    if (this.pmsName) {
+      const r = new Resolver({ timeout: 3000, tries: 2 });
+      try {
+        r.setServers([pmsResolver]);
+      } catch {
+        /* one Node can't ask (an address with a zone in it, say): the system's */
+      }
+      this.resolve4 = resolve4 || ((name) => r.resolve4(name));
+    }
+    this.addresses = { count: 0, at: 0, many: 0, error: null };
     this.users = new TTLCache();
     this.denied = new TTLCache();
     this.access = new TTLCache();
@@ -529,7 +543,8 @@ export class PlexAuth {
   // where the server didn't answer.
   async openNow() {
     if (!this.pms) return false;
-    this.openAsking ||= this.pmsStatus('/library/sections?X-Plex-Container-Size=0', null)
+    this.openAsking ||= this.oneAddress()
+      .then(() => this.pmsStatus('/library/sections?X-Plex-Container-Size=0', null))
       .then((status) => {
         if (status >= 200 && status < 300) {
           this.saidOpen();
@@ -542,6 +557,44 @@ export class PlexAuth {
         this.openAsking = null;
       });
     return this.openAsking;
+  }
+
+  // Where PLEX_SERVER_URL is a name nginx looks up for each request: that it
+  // has one address (IPv4: as nginx is told them, by the same name server).
+  // With more, nginx takes turns between them for each request, so a request
+  // could go another way than the server was asked by (from another of this
+  // container's addresses, say, as the server sees it), and so it can't be
+  // asked whether it lets this container in: that throws (and for a minute
+  // after: longer than nginx keeps what it was told), as where it can't be
+  // looked up. Looked up again every second at most.
+  async oneAddress() {
+    if (!this.pmsName) return;
+    if (Date.now() - this.addresses.at >= 1000) {
+      this.addressesAsking ||= this.resolve4(this.pmsName)
+        .then(
+          (list) => {
+            this.addresses = { ...this.addresses, count: new Set(list).size, at: Date.now(), error: null };
+            if (this.addresses.count > 1) this.addresses.many = Date.now() + 60000;
+          },
+          (err) => {
+            this.addresses = { ...this.addresses, at: Date.now(), error: Object.assign(new Error(`couldn't look up ${this.pmsName}: ${err.code || err.message}`), { network: true }) };
+          },
+        )
+        .finally(() => {
+          this.addressesAsking = null;
+        });
+      await this.addressesAsking;
+    }
+    if (this.addresses.error) throw this.addresses.error;
+    if (Date.now() >= this.addresses.many) return;
+    if (Date.now() >= (this.manySaidUntil || 0)) {
+      this.manySaidUntil = Date.now() + 6 * 3600000;
+      log.warn(
+        `PLEX_SERVER_URL's name (${this.pmsName}) has more than one address, and nginx takes turns between them: your Plex server judges by where a request comes from whether to let it in without signing in, so it can't be told from one request how it would take the next. ` +
+          'While that\'s so, only your own Plex sign-in gets through /pms/, and everyone else is refused. Use one address in PLEX_SERVER_URL (the server\'s own, as http://192.168.1.10:32400).',
+      );
+    }
+    throw Object.assign(new Error(`${this.pmsName} has more than one address`), { network: true });
   }
 
   // (Said now and then.)
