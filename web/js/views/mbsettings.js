@@ -37,7 +37,7 @@ export function chooseMissingKinds(after) {
   };
   sheet({
     title: 'Missing albums shown',
-    subtitle: 'Of an artist’s albums that MusicBrainz has and your library hasn’t, on their page',
+    subtitle: 'Which kinds of missing albums to show on artist pages',
     variant: 'dialog',
     content: h('div.rows.mb-kinds', null, RELEASE_KINDS.map(([id, name]) => toggleRow({ title: name, checked: missingKinds().includes(id), onChange: (v) => set(id, v) }))),
   });
@@ -63,33 +63,33 @@ export async function musicbrainzSettingsView({ el }) {
     h(
       'p.lede',
       null,
-      `This player looks your artists and albums up on ${mbWhere()} for these, and keeps what it says for a month. Only names go to it: artists’ (an album’s title is matched here, with what MusicBrainz says of its artist).`,
+      `These look your artists up on ${mbWhere()}. Only artist names are sent, and answers are kept for a month.`,
     ),
     h(
       'div.rows',
       null,
       toggleRow({
         title: 'Missing albums on artist pages',
-        subtitle: 'An artist’s albums, EPs and singles that MusicBrainz has and your library hasn’t, under Not in your library on their page, to download or copy.',
+        subtitle: 'Show an artist’s albums, EPs and singles you don’t have, on their page.',
         checked: s.mbMissingAlbums !== false,
         onChange: set('mbMissingAlbums'),
       }),
       kinds,
       toggleRow({
         title: 'Original release years',
-        subtitle: 'An artist’s albums in the order they first came out, with that year (a remaster’s or reissue’s is often the year it was reissued in Plex), and an album’s first year on its page.',
+        subtitle: 'Sort an artist’s albums by when they first came out, and show that year (Plex often has a reissue’s year).',
         checked: s.mbOriginalYears !== false,
         onChange: set('mbOriginalYears'),
       }),
       toggleRow({
         title: 'Artists of the same name',
-        subtitle: 'Where Plex has two artists of one name as one, the other’s albums kept apart on the artist’s page, under Another artist called…, and out of its Play, Shuffle and Popular tracks. Only where MusicBrainz plainly has each album as the other’s, by its title and year.',
+        subtitle: 'When Plex mixes up two artists with the same name, show the other one’s albums in their own section, left out of Play and Shuffle. Only when MusicBrainz is sure.',
         checked: s.mbNamesakes !== false,
         onChange: set('mbNamesakes'),
       }),
     ),
-    h('p.hint.pad', null, 'An artist who isn’t found by their name (importing a playlist, checking Missing tracks again) is looked for by the other names MusicBrainz has for them too: other spellings and scripts, what they were called before.'),
-    h('p.hint.pad', null, 'Skip live tracks and demos (in Settings › Playback) goes by MusicBrainz too, for an album Plex hasn’t said the kind of. What’s in your library is shown as Plex has it: MusicBrainz never changes which kind an album is.'),
+    h('p.hint.pad', null, 'Artists are also found by their other names (other spellings, old names) when importing playlists or checking missing tracks.'),
+    h('p.hint.pad', null, 'Skip live tracks and demos (Settings › Playback) also asks MusicBrainz about albums Plex hasn’t labelled. Nothing in your library is changed.'),
     admin
       ? h(
           'div',
@@ -101,12 +101,12 @@ export async function musicbrainzSettingsView({ el }) {
             row({
               href: '/settings/mbreview',
               title: 'Years and genres to fix',
-              subtitle: 'Your albums whose year in Plex isn’t the year they first came out, and those without a genre that MusicBrainz has genres for: fixed in Plex for everyone, or downloaded for MusicBrainz Picard or beets to fix the files.',
+              subtitle: 'Find albums with the wrong year or no genre, and fix them in Plex.',
             }),
             row({
               href: '/settings/mbmerge',
               title: 'Artists to merge',
-              subtitle: 'Artists Plex has more than once (the same name twice, or in a name of several artists’, as “Alphabeat;FORCE”), merged in Plex with your OK where MusicBrainz plainly has them as one.',
+              subtitle: 'Find artists Plex has more than once, and merge them.',
             }),
           ),
         )

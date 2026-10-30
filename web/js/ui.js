@@ -777,13 +777,17 @@ export function askText({ title, label, value = '', confirm = 'Save', maxLength 
 }
 
 // "Are you sure?": resolves to true only if the confirm button was pressed.
-export function confirmAction({ title, message, confirm, danger = true }) {
+// `details`: what's to be done, shown under `message` (a list, say);
+// `after`: a line under that.
+export function confirmAction({ title, message, details = null, after = null, confirm, danger = true }) {
   return new Promise((resolve) => {
     let yes = false;
     const content = h(
       'div.ask-form',
       null,
       message ? h('p.ask-message', null, message) : null,
+      details ? h('div.ask-details', null, details) : null,
+      after ? h('p.ask-message.ask-after', null, after) : null,
       h(
         `button.btn.${danger ? 'btn-danger' : 'btn-primary'}`,
         {

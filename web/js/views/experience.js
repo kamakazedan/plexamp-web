@@ -73,7 +73,7 @@ export function experienceView({ el }) {
         }),
         toggleRow({
           title: 'Playlists from all music libraries',
-          subtitle: `The Playlists tab shows playlists of music from ${list} too. Off: only those with music from ${here}.`,
+          subtitle: `Show playlists from ${list} too, not just ${here}.`,
           checked: s.playlistsAllLibraries,
           onChange: setAndRefresh('playlistsAllLibraries'),
         }),
@@ -95,20 +95,19 @@ export function experienceView({ el }) {
       toggleRow({ title: 'Ratings in track lists', subtitle: 'Rate tracks right in album, playlist and other track lists.', checked: s.listRatings, onChange: set('listRatings') }),
       toggleRow({
         title: 'Keep ❤️ Tracks up to date',
-        subtitle: 'Tracks you favourite, give five stars or a thumbs up go in your ❤️ Tracks playlist, and come out if they lose that rating.',
+        subtitle: 'Tracks you favourite (five stars or a thumbs up) go in your ❤️ Tracks playlist, and come out if you take the rating off.',
         checked: s.lovedPlaylist,
         onChange: set('lovedPlaylist'),
       }),
       toggleRow({
         title: 'Show codec information',
-        subtitle:
-          'Formats and quality everywhere in the app, like FLAC 24/96 or MP3 320: on album pages, over albums’ covers as you browse (your server is asked about each album as it comes into view), in search, and in the player.',
+        subtitle: 'Show formats and quality, like FLAC 24/96 or MP3 320, on albums, covers, search and the player.',
         checked: s.codecInfo !== false,
         onChange: setAndRefresh('codecInfo'),
       }),
       toggleRow({ title: 'Show popular tracks', subtitle: 'Mark an album’s best-known tracks.', checked: s.popularTracks, onChange: setAndRefresh('popularTracks') }),
       choiceRow({ title: 'Top plays list size', subtitle: 'How many items the Most played lists in Search show.', options: TOP_SIZES, value: Number(s.topListSize) || 25, onChange: setAndRefresh('topListSize') }),
-      toggleRow({ title: 'Show preview buttons', subtitle: 'A button on tracks for a 15-second listen, without changing what’s queued.', checked: s.previewButtons, onChange: setAndRefresh('previewButtons') }),
+      toggleRow({ title: 'Show preview buttons', subtitle: 'Add a button to tracks to hear 15 seconds, without changing what’s queued.', checked: s.previewButtons, onChange: setAndRefresh('previewButtons') }),
       libraries,
       toggleRow({
         title: '1-tap playback',
@@ -185,17 +184,17 @@ export function playerSettingsView({ el }) {
     h(
       'div.rows',
       null,
-      toggleRow({ title: 'Show rating', subtitle: 'Show your rating of the track under its title, to change it there.', checked: s.showRating !== false, onChange: set('showRating') }),
+      toggleRow({ title: 'Show rating', subtitle: 'Show and change your rating of the track, under its title.', checked: s.showRating !== false, onChange: set('showRating') }),
       toggleRow({ title: 'Show volume control', subtitle: 'Show the volume slider in the player.', checked: s.showVolume, onChange: set('showVolume') }),
       choiceRow({ title: 'Seekbar style', subtitle: 'How the playback position is drawn.', options: SEEKBARS, value: s.seekbarStyle, onChange: set('seekbarStyle') }),
       toggleRow({ title: 'Side by side layout', subtitle: 'On wide screens, show Up next beside the player.', checked: s.sideBySide, onChange: set('sideBySide') }),
       toggleRow({ title: 'Show album year', subtitle: 'Show the year after the album’s name.', checked: s.showAlbumYear, onChange: set('showAlbumYear') }),
       toggleRow({ title: 'Show full player', subtitle: 'Open the player when you start playing something.', checked: s.showFullPlayer, onChange: set('showFullPlayer') }),
       toggleRow({ title: 'Music playback speed', subtitle: 'Add a speed button to the player, from 0.5× to 2×.', checked: s.playbackSpeed, onChange: set('playbackSpeed') }),
-      toggleRow({ title: 'Sleep timer', subtitle: 'Add a sleep timer button to the player, to stop playing after a while or at the end of a track.', checked: s.sleepTimer, onChange: set('sleepTimer') }),
+      toggleRow({ title: 'Sleep timer', subtitle: 'Add a button to stop playing after a while, or at the end of a track.', checked: s.sleepTimer, onChange: set('sleepTimer') }),
       toggleRow({
         title: 'Use long-form controls',
-        subtitle: 'For tracks over 20 minutes, like DJ mixes and audiobooks: show skip buttons, and carry on where you stopped.',
+        subtitle: 'For tracks over 20 minutes, like DJ mixes and audiobooks: show skip buttons, and pick up where you stopped.',
         checked: s.longForm,
         onChange: set('longForm'),
       }),

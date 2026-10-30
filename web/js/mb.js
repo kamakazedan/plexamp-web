@@ -43,24 +43,59 @@ export const MISSING_KINDS = ['albums', 'singles', 'compilations', 'soundtracks'
 
 // ---------- with the player ----------
 
+// The player's MusicBrainz features are asked PER_MINUTE times a minute at
+// most from this tab (the player takes 120 a minute from each account: a
+// page looking through a big library asks well inside that), and, once the
+// player's said it's had too many (429), not again till it says (its
+// Retry-After), then asked again, twice at most.
+const PER_MINUTE = 90;
+const asked = []; // when the last ones were asked (performance.now()), oldest first
+let notBefore = 0;
+const sleep = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => (clearTimeout(t), reject(signal.reason)), { once: true });
+  });
+async function myTurn(signal) {
+  for (;;) {
+    const now = performance.now();
+    while (asked.length && now - asked[0] >= 60000) asked.shift();
+    const wait = Math.max(notBefore - now, asked.length >= PER_MINUTE ? asked[0] + 60000 - now : 0);
+    if (wait <= 0) {
+      asked.push(now);
+      return;
+    }
+    await sleep(Math.min(wait, 5000), signal);
+  }
+}
+
 async function call(path, body, { signal } = {}) {
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '' };
   if (app.source?.token && app.source.token !== app.auth?.token) headers['X-Plex-Server-Token'] = app.source.token;
-  let res;
-  try {
-    res = await fetch(`api/musicbrainz/${path}`, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'omit', signal: signal || AbortSignal.timeout(40000) });
-  } catch (err) {
-    if (signal?.aborted) throw err;
-    throw Object.assign(new Error('The player’s MusicBrainz features didn’t answer.'), { status: 0 });
+  for (let tries = 0; ; tries += 1) {
+    await myTurn(signal);
+    let res;
+    try {
+      res = await fetch(`api/musicbrainz/${path}`, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'omit', signal: signal || AbortSignal.timeout(40000) });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw Object.assign(new Error('The player’s MusicBrainz features didn’t answer.'), { status: 0 });
+    }
+    if (res.status === 429) {
+      const secs = Number(res.headers.get('retry-after')) || 30;
+      notBefore = Math.max(notBefore, performance.now() + Math.min(300, Math.max(1, secs)) * 1000);
+      if (tries < 2) continue;
+    }
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* empty or not JSON */
+    }
+    if (!res.ok) throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, mb: true, retryAfter: Number(res.headers.get('retry-after')) || null });
+    return data || {};
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* empty or not JSON */
-  }
-  if (!res.ok) throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status });
-  return data || {};
 }
 
 // An artist on MusicBrainz, by name (or by their MusicBrainz id, `id`,

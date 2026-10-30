@@ -16,7 +16,17 @@ import { norm } from './missinglist.js';
 import { albumKey, matchGroup } from './releases.js';
 
 export const MB_LIMITS = {
-  gapMs: 1100, // between requests to musicbrainz.org (your own: none)
+  gapMs: 1100, // between requests to musicbrainz.org
+  ownGapMs: 100, // ...and to a MusicBrainz of your own: ten a second at most
+  // An answer that took longer than slowMs: the next request waits as long
+  // again (slowWaitMaxMs at most), so a server that's struggling gets its
+  // breath back. One that says it has too much to do ("too many requests",
+  // 429, or "busy", 503): nothing asked of it for as long as it says
+  // (Retry-After), or busyMs, busyMaxMs at most.
+  slowMs: 2000,
+  slowWaitMaxMs: 10000,
+  busyMs: 60000,
+  busyMaxMs: 300000,
   keepMs: 7 * 24 * 3600 * 1000,
   kept: 5000, // answers kept
   perRequest: 10, // names checked in one request from the app
@@ -28,6 +38,16 @@ export const MB_LIMITS = {
 
 // Whoever asked has gone: what's left isn't checked.
 class Gone extends Error {}
+
+// How long a server that said it has too much to do (429, 503) asked to be
+// left (its Retry-After: seconds, or a date), within MB_LIMITS' busyMs and
+// busyMaxMs.
+export function retryAfterMs(header, now = Date.now()) {
+  const v = String(header || '').trim();
+  let ms = /^\d+$/.test(v) ? Number(v) * 1000 : v ? Date.parse(v) - now : NaN;
+  if (!Number.isFinite(ms) || ms <= 0) ms = MB_LIMITS.busyMs;
+  return Math.min(MB_LIMITS.busyMaxMs, Math.max(5000, ms));
+}
 
 export class MusicBrainzError extends Error {
   constructor(status, message) {
@@ -90,13 +110,13 @@ export class MusicBrainz {
     this.base = String(base).replace(/\/+$/, '');
     this.fetch = fetchImpl;
     this.public = isPublic(this.base);
-    this.gapMs = gapMs ?? (this.public ? MB_LIMITS.gapMs : 0);
+    this.gapMs = gapMs ?? (this.public ? MB_LIMITS.gapMs : MB_LIMITS.ownGapMs);
     this.agent = `plexamp-web${/^[0-9][0-9.]*$/.test(version) ? `/${version}` : ''} ( https://github.com/kamakazedan/plexamp-web )`;
     this.log = log;
     this.now = now;
     this.kept = new Map(); // key -> { answer, at }
     this.queue = Promise.resolve();
-    this.last = 0;
+    this.nextAt = 0; // when the next request may go (see asked)
     this.waiting = 0; // requests someone's waiting on (the background waits for them)
     // The advanced features (see advanced()): what's kept of them, and
     // what's waiting to be looked up in the background.
@@ -107,9 +127,10 @@ export class MusicBrainz {
     this.downUntil = 0; // MusicBrainz didn't answer: the features don't ask it again until then
   }
 
-  // One request to MusicBrainz, after the one before it by gapMs (skipped
-  // if `signal` says whoever wanted it has gone). In the background
-  // (`background`): once no one's waiting on one.
+  // One request to MusicBrainz, one at a time, gapMs after the one before
+  // it started at least (and after a slow answer, as long again: see
+  // MB_LIMITS), skipped if `signal` says whoever wanted it has gone. In the
+  // background (`background`): once no one's waiting on one.
   ask(path, params, signal, { background = false } = {}) {
     if (background) {
       return (async () => {
@@ -129,10 +150,11 @@ export class MusicBrainz {
   asked(path, params, signal) {
     const run = async () => {
       if (signal?.aborted) throw new Gone();
-      const wait = this.last + this.gapMs - Date.now();
+      const wait = this.nextAt - Date.now();
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       if (signal?.aborted) throw new Gone();
-      this.last = Date.now();
+      const started = Date.now();
+      this.nextAt = started + this.gapMs;
       const url = `${this.base}${path}?${new URLSearchParams({ ...params, fmt: 'json' })}`;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), MB_LIMITS.timeoutMs);
@@ -143,8 +165,17 @@ export class MusicBrainz {
           headers: { Accept: 'application/json', 'User-Agent': this.agent },
           signal: ctrl.signal,
         });
+        const took = Date.now() - started;
+        if (took > MB_LIMITS.slowMs) this.nextAt = Math.max(this.nextAt, Date.now() + Math.min(MB_LIMITS.slowWaitMaxMs, took));
+        // (musicbrainz.org says it's busy with a 503; a server of your own,
+        // with a 429, or a 503 that says when to come back: its search
+        // indexes not there, a 503 without.)
+        const retry = res.headers?.get?.('retry-after');
+        if (res.status === 429 || (res.status === 503 && (this.public || retry))) {
+          this.unwell(retryAfterMs(retry));
+          throw new MusicBrainzError(503, this.public ? 'MusicBrainz is busy right now. Try again in a minute.' : 'The player’s MusicBrainz server is busy. Try again in a minute.');
+        }
         if (res.status >= 500) this.unwell();
-        if (this.public && res.status === 503) throw new MusicBrainzError(503, 'MusicBrainz is busy right now. Try again in a minute.');
         // (A server of your own needs its search indexes for these.)
         if (!res.ok) throw Object.assign(new MusicBrainzError(502, this.public ? `MusicBrainz answered ${res.status}.` : `The player’s MusicBrainz server answered ${res.status}. Searching it needs its search indexes.`), { answered: res.status });
         return await res.json();
@@ -152,6 +183,8 @@ export class MusicBrainz {
         if (err instanceof MusicBrainzError) throw err;
         if (signal?.aborted) throw new Gone();
         this.unwell();
+        // (No answer in time: as for a slow one, its breath back.)
+        this.nextAt = Math.max(this.nextAt, Date.now() + MB_LIMITS.slowWaitMaxMs);
         throw new MusicBrainzError(502, this.public ? 'MusicBrainz couldn’t be reached from this player.' : 'The player’s MusicBrainz server couldn’t be reached.');
       } finally {
         clearTimeout(timer);
@@ -252,8 +285,9 @@ export class MusicBrainz {
   // a minute, the features answer with what's kept only, and ask it
   // nothing new, so no one waits on it again and again (AI playlists'
   // checks still try, as they're asked).
-  unwell() {
-    this.downUntil = Date.now() + MB_ADVANCED_LIMITS.downMs;
+  // (`ms`: as long as it said, where it said: see retryAfterMs.)
+  unwell(ms = MB_ADVANCED_LIMITS.downMs) {
+    this.downUntil = Math.max(this.downUntil, Date.now() + ms);
   }
 
   down() {
@@ -261,7 +295,7 @@ export class MusicBrainz {
   }
 
   resting() {
-    if (this.down()) throw new MusicBrainzError(503, 'MusicBrainz isn’t answering this player just now. Try again in a minute.');
+    if (this.down()) throw Object.assign(new MusicBrainzError(503, 'MusicBrainz isn’t answering this player just now. Try again in a minute.'), { retryAfter: Math.max(1, Math.ceil((this.downUntil - Date.now()) / 1000)) });
   }
 
   // An artist, by name (or one of their other names), or by their

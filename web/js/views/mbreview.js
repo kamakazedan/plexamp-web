@@ -28,11 +28,11 @@ const mbLink = (g) => `https://musicbrainz.org/release-group/${g.id}`;
 export async function mbReviewView({ el, onDispose }) {
   el.append(backHeader('Years and genres to fix', { fallback: '/settings/musicbrainz' }));
   if (!mbFeatures()) {
-    el.append(emptyState('This player’s MusicBrainz features are off (MUSICBRAINZ_ADVANCED).'));
+    el.append(emptyState('MusicBrainz features are turned off on this player.'));
     return;
   }
   if (!(await isAdmin().catch(() => false))) {
-    el.append(emptyState('This is for the server’s owner: changing albums in Plex is theirs to do.'));
+    el.append(emptyState('Only the server’s owner can change albums in Plex.'));
     return;
   }
   const s = app.server;
@@ -49,12 +49,12 @@ export async function mbReviewView({ el, onDispose }) {
   const years = h('div.mb-review-years');
   const genres = h('div.mb-review-genres');
   el.append(
-    h('p.lede', null, `Your albums, looked up on ${mbWhere()}: those whose year in Plex isn’t the year they first came out (a remaster’s or reissue’s is often the reissue’s), and those without a genre that MusicBrainz has genres for. A fix changes the album in Plex, for everyone, locked so Plex’s next refresh leaves it.`),
+    h('p.lede', null, `Albums whose year in Plex isn’t when they first came out (often a reissue’s year), and albums with no genre, checked on ${mbWhere()}. A fix changes the album in Plex for everyone, and Plex keeps it.`),
     status,
     actions,
     years,
     genres,
-    h('p.hint.pad', null, 'Plex never changes your files. To fix their tags too, download the list: it has each album’s MusicBrainz release group, to look up in MusicBrainz Picard, or for beets (beet import with --search-id, or beet mbsync for albums it has matched).'),
+    h('p.hint.pad', null, 'Plex never changes your files. To fix their tags too, download the list and use MusicBrainz Picard or beets: it has each album’s MusicBrainz ID.'),
   );
 
   // Every album in the library: what Plex has of it.
@@ -172,7 +172,7 @@ export async function mbReviewView({ el, onDispose }) {
   async function fixAll(list, fix, undo, what) {
     const sure = await confirmAction({
       title: `Fix ${fmt.count(list.length, 'album', 'albums')} in Plex?`,
-      message: `Each album’s ${what} is changed in Plex, for everyone, and locked so Plex’s next refresh leaves it. Undo, just after, puts them all back.`,
+      message: `Changes each album’s ${what} in Plex, for everyone. Undo, straight after, puts them back.`,
       confirm: 'Fix them',
       danger: false,
     });
@@ -299,7 +299,7 @@ export async function mbReviewView({ el, onDispose }) {
                 null,
                 ys.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: yearLine(x), right: fixButton(`Use ${firstYear(x.g)}`, () => fixYear(x)), cls: `mb-year-row${later(x) ? '.mb-later' : ''}` })),
               ),
-              ys.length > 300 ? h('p.hint.pad', null, `and ${fmt.number(ys.length - 300)} more (Fix all fixes them all, but those MusicBrainz has as later; the download has them all)`) : null,
+              ys.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(ys.length - 300)} more. Fix all fixes them too (but not those with a later year), and the download has them all.`) : null,
             ),
           ]
         : []),
@@ -316,17 +316,20 @@ export async function mbReviewView({ el, onDispose }) {
                 null,
                 gs.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: genreLine(x), right: fixButton('Add', () => fixGenres(x)), cls: 'mb-genre-row' })),
               ),
-              gs.length > 300 ? h('p.hint.pad', null, `and ${fmt.number(gs.length - 300)} more (Add all adds them all; the download has them all)`) : null,
+              gs.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(gs.length - 300)} more. Add all adds them too, and the download has them all.`) : null,
             ),
           ]
         : !pending && !ys.length
-          ? [emptyState('Nothing to fix: your albums’ years and genres are as MusicBrainz has them (or MusicBrainz hasn’t any).')]
+          ? [emptyState('Nothing to fix: years and genres match MusicBrainz.')]
           : []),
     );
   }
 
   // (Asked about again below where this couldn't: MusicBrainz not
   // answering for a while, or too many asked too quickly.)
+  // (After MusicBrainz didn't answer, or was busy: asked again only after as
+  // long as the player says, so it isn't asked again and again meanwhile.)
+  const waitAfter = (err) => Math.max(AGAIN_MS, (Number(err?.retryAfter) || 0) * 1000, err ? 30000 : 0);
   let trouble = null;
   try {
     await ask(albums.map((_, i) => i));
@@ -334,10 +337,12 @@ export async function mbReviewView({ el, onDispose }) {
     trouble = err;
   }
   render();
-  if (trouble) {
-    status.replaceChildren(`MusicBrainz couldn’t be asked about them all just now (${describeError(trouble)}): asked again in a moment.`);
+  const say = (err) => {
+    if (!err) return;
+    status.replaceChildren(`${err.message || describeError(err)} Carrying on in ${fmt.count(Math.round(waitAfter(err) / 1000), 'second', 'seconds')}.`);
     status.classList.add('warn');
-  }
+  };
+  say(trouble);
   // Those still being looked up, asked about again now and then (the first
   // in line first: the player looks them up in order).
   const again = async () => {
@@ -345,13 +350,15 @@ export async function mbReviewView({ el, onDispose }) {
     if (gone) return;
     const waiting = found.map((g, i) => (g === 'pending' ? i : -1)).filter((i) => i >= 0);
     if (!waiting.length) return;
+    let err = null;
     try {
       await ask(waiting.slice(0, AGAIN_AT_MOST));
-    } catch {
-      /* tried again next time */
+    } catch (e) {
+      err = e;
     }
     render();
-    if (!gone && found.includes('pending')) timer = setTimeout(again, AGAIN_MS);
+    say(err);
+    if (!gone && found.includes('pending')) timer = setTimeout(again, waitAfter(err));
   };
-  if (found.includes('pending')) timer = setTimeout(again, AGAIN_MS);
+  if (found.includes('pending')) timer = setTimeout(again, waitAfter(trouble));
 }

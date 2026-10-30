@@ -26,8 +26,8 @@ const EVENT_TYPES = ['timeline', 'activity', 'playing', 'status', 'progress', 'r
 
 export const LIVE_MODES = {
   connecting: 'Connecting…',
-  websocket: 'Instant, over a WebSocket',
-  eventsource: 'Instant, over an event stream (no WebSockets)',
+  websocket: 'Instant',
+  eventsource: 'Instant (backup route)',
   polling: 'Checking for changes every minute',
   off: 'Off',
 };
@@ -62,11 +62,11 @@ class LiveUpdates extends EventTarget {
   // Why the WebSocket is skipped, or null when it may be tried.
   websocketBlockReason() {
     const mode = this.wsMode();
-    if (mode === 'off') return 'WebSockets are turned off for this player (WEBSOCKETS=off).';
-    if (typeof WebSocket === 'undefined') return 'This browser has no WebSocket support.';
+    if (mode === 'off') return 'This player is set up not to use WebSockets.';
+    if (typeof WebSocket === 'undefined') return 'This browser can’t use WebSockets.';
     if (mode === 'on') return null; // (tried however often it's failed)
     const failedAt = store.get(this.blockKey());
-    if (failedAt && Date.now() - failedAt < WS_BLOCKED_FOR) return 'A WebSocket couldn’t connect from this network recently, so it isn’t being tried.';
+    if (failedAt && Date.now() - failedAt < WS_BLOCKED_FOR) return 'WebSockets didn’t work on this network recently, so a backup route is used.';
     return null;
   }
 
@@ -86,7 +86,7 @@ class LiveUpdates extends EventTarget {
     this.stop();
     const only = this.wsMode() === 'on';
     if (!app.server || !app.source || (only && typeof WebSocket === 'undefined')) {
-      this.note = app.server && app.source ? 'This browser has no WebSocket support, and this player uses WebSockets only (WEBSOCKETS=on).' : '';
+      this.note = app.server && app.source ? 'This browser can’t use WebSockets, and this player is set up to use WebSockets only.' : '';
       this.setMode('off');
       return;
     }
@@ -117,7 +117,7 @@ class LiveUpdates extends EventTarget {
     const blocked = this.websocketBlockReason();
     if (!blocked) chain.push('websocket');
     if (!only) chain.push('eventsource', 'polling');
-    let note = blocked || (only ? 'This player uses WebSockets only (WEBSOCKETS=on).' : '');
+    let note = blocked || (only ? 'This player is set up to use WebSockets only.' : '');
     this.note = note;
     this.setMode('connecting');
 
@@ -153,20 +153,20 @@ class LiveUpdates extends EventTarget {
         failures += 1;
         // (Said while it waits, not once it's connected again.)
         if (only) {
-          this.note = 'The WebSocket couldn’t connect from this network, so it’s tried again: this player uses WebSockets only (WEBSOCKETS=on).';
+          this.note = 'Couldn’t connect from this network, trying again. This player is set up to use WebSockets only.';
           this.emit('mode', { mode: this.mode, note: this.note });
           await this.sleep(Math.min(WS_ONLY_RETRY_MAX, 3000 * 2 ** Math.min(failures - 1, 5)), gen);
           continue;
         }
         if (kind === 'websocket' && (!opened || failures >= MAX_FAILURES)) {
           store.set(this.blockKey(), Date.now());
-          note = 'A WebSocket couldn’t stay connected from this network, so live updates use another route.';
+          note = 'WebSockets don’t work on this network, so live updates use a backup route.';
           break;
         }
         // A Plex event stream pings every 10 s, so one that stays silent is
         // being held back by a proxy: move on straight away.
         if (kind === 'eventsource' && (error?.silent || failures >= MAX_FAILURES)) {
-          note = `The event stream didn’t work either (${error?.message || 'it kept dropping'}), so the app checks for changes instead.`;
+          note = `The backup route didn’t work either (${error?.message || 'it kept dropping'}), so the app checks for changes every minute.`;
           break;
         }
         await this.sleep(3000 * failures, gen);
