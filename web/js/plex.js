@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.30.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.31.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -928,6 +928,16 @@ export class PlexServer {
   async deleteCollection(id) {
     await this.send('DELETE', `/library/collections/${id}`);
     this.forgetCollections();
+  }
+
+  // Plex's own merge (for artists: views/mbmerge.js): the others' albums,
+  // and their tracks, are the first's, and the others are gone, in Plex
+  // itself, for everyone and every app. Plex lets only its owner do it.
+  async mergeInto(id, others) {
+    const ids = [...new Set(others.map(String))].filter((x) => /^\d+$/.test(x) && x !== String(id));
+    if (!/^\d+$/.test(String(id)) || !ids.length) throw new Error('Nothing to merge.');
+    await this.send('PUT', `/library/metadata/${id}/merge`, { ids: ids.join(',') }, { discard: true });
+    this.cache.clear();
   }
 
   // An album's year (`year`, and the day it came out: `date`, YYYY-MM-DD)

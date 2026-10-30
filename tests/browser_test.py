@@ -7830,6 +7830,65 @@ with sync_playwright() as pw:
         finally:
             mock('/__mock/config?nogenre=')
 
+        # For the server's owner: the artists Plex has more than once, merged
+        # in Plex with an OK where MusicBrainz plainly has them as one. Here
+        # a second Glass Harbour (an album MusicBrainz has as theirs), a
+        # second Northbound Static (an album it has as another artist's of
+        # the name), a second Juniper & Ash (an album it hasn't at all), and
+        # "Glass Harbour;Kilo Meridian", a name of several artists' in one,
+        # as files can be tagged. (Not known to the mock's MusicBrainz, nor
+        # their albums, but for what it has of the names.)
+        merges = lambda: mock('/__mock/merges')['MediaContainer']['merges']
+        mock('/__mock/merges?reset=1')
+        added = [mock(f'/__mock/add-artist?name={urllib.parse.quote(n)}&albums={urllib.parse.quote(a)}&mb=0')['MediaContainer']['Metadata'][0]
+                 for n, a in [('Glass Harbour', 'Sea Glass:2016'), ('Northbound Static', 'Frost Engine:2019'), ('Juniper & Ash', 'Unknown Rooms:2022'),
+                              ('Glass Harbour;Kilo Meridian', 'Harbour Remixes:2021')]]
+
+        def merge_page():
+            page.wait_for_function("() => /^Looked through/.test(document.querySelector('.mb-merge-status')?.textContent || '')", timeout=60000)
+            rows = lambda cls: {page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(): page.locator(f'.{cls}').nth(i).inner_text()
+                                for i in range(page.locator(f'.{cls}').count())}
+            return rows('mb-merge-twice'), rows('mb-merge-joined'), rows('mb-merge-left')
+        try:
+            page.goto(APP_MB + '#/settings/musicbrainz')
+            page.locator('a.row[href="#/settings/mbmerge"]').click()
+            twice, joined, left = merge_page()
+            shot(page, 'mb-05-merge')
+            check('mb: artists to merge: two of one name MusicBrainz plainly has as one (Glass Harbour) are offered, saying why',
+                  list(twice) == ['Glass Harbour'] and 'MusicBrainz has albums of each of them as Glass Harbour’s' in twice['Glass Harbour'], f'{twice} {joined} {left}')
+            check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash), saying so',
+                  'different artists of one name' in left.get('Northbound Static', '') and 'can’t say' in left.get('Juniper & Ash', ''), str(left))
+            check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first)',
+                  not joined and 'those first' in left.get('Glass Harbour;Kilo Meridian', ''), f'{joined} {left}')
+            # An OK first, then Plex's own merge, into the one Plex has
+            # MusicBrainz's id for.
+            page.locator('.mb-merge-twice button').click()
+            asked_ok = page.locator('.sheet.open').inner_text()
+            page.locator('.sheet.open button', has_text='Merge in Plex').click()
+            wait_for(lambda: merges(), 10, 0.3)
+            check('mb: ...merged in Plex with the owner\'s OK (Plex\'s own merge, which the player can\'t undo), into the one Plex has MusicBrainz\'s id for',
+                  merges() == [{'into': named['Glass Harbour']['ratingKey'], 'ids': [added[0]['ratingKey']]}] and 'can’t undo' in asked_ok, f'{merges()} {asked_ok!r}')
+            # Looked through again: the name of several in one, now, into the
+            # artist of its first name, as MusicBrainz knows only one of it.
+            page.wait_for_selector('.mb-merge-joined', timeout=30000)
+            twice, joined, left = merge_page()
+            row_text = joined.get('Glass Harbour;Kilo Meridian', '')
+            check('mb: ...then the name of several artists\' in one, into the artist of its first name (MusicBrainz knows only one of it)',
+                  not twice and 'with Kilo Meridian' in row_text and 'Merge into Glass Harbour' in row_text and 'knows only one Glass Harbour' in row_text, f'{twice} {joined}')
+            page.locator('.mb-merge-joined button').click()
+            page.locator('.sheet.open button', has_text='Merge in Plex').click()
+            wait_for(lambda: len(merges()) == 2, 10, 0.3)
+            artist_page('Glass Harbour', until='.view .hero')
+            page.wait_for_selector('.view .card-title:has-text("Harbour Remixes")', timeout=20000)
+            on_page = page.locator('.view .card-title').all_inner_texts()
+            check('mb: ...so Glass Harbour\'s page has their albums (Sea Glass, Harbour Remixes), as Plex does',
+                  merges()[1] == {'into': named['Glass Harbour']['ratingKey'], 'ids': [added[3]['ratingKey']]} and 'Sea Glass' in on_page and 'Harbour Remixes' in on_page,
+                  f'{merges()} {on_page}')
+        finally:
+            mock('/__mock/merges?reset=1')
+            for a in added:
+                mock(f"/__mock/add-artist?remove={a['ratingKey']}")
+
         # A friend: the features, but not the years and genres to fix.
         friend = browser.new_context(**MOBILE)
         fpage = friend.new_page()
@@ -7838,10 +7897,15 @@ with sync_playwright() as pw:
         fpage.goto(APP_MB + '#/settings/musicbrainz')
         fpage.wait_for_selector('label.toggle-row:has-text("Missing albums on artist pages")')
         no_row = fpage.locator('a.row[href="#/settings/mbreview"]').count() == 0
+        no_merge_row = fpage.locator('a.row[href="#/settings/mbmerge"]').count() == 0
         fpage.goto(APP_MB + '#/settings/mbreview')
         fpage.wait_for_selector('.view .empty-state', timeout=10000)
         told = fpage.locator('.view .empty-state').inner_text()
         check('mb: a friend has the features but not the years and genres to fix (that\'s for the server\'s owner)', no_row and 'owner' in told, told)
+        fpage.goto(APP_MB + '#/settings/mbmerge')
+        fpage.wait_for_selector('.view .empty-state', timeout=10000)
+        told = fpage.locator('.view .empty-state').inner_text()
+        check('mb: ...nor the artists to merge (merging in Plex is the owner\'s too)', no_merge_row and 'owner' in told, told)
         friend.close()
 
         # What went to MusicBrainz: artists' names, never an album's title.

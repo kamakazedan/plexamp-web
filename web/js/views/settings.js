@@ -8,6 +8,7 @@ import { experienceView, appearanceView, playerSettingsView, skipTimesView, desk
 import { missingTracksView } from './missingtracks.js';
 import { musicbrainzSettingsView } from './mbsettings.js';
 import { mbReviewView } from './mbreview.js';
+import { mbMergeView } from './mbmerge.js';
 import { mbFeatures, skipLiveOn } from '../mb.js';
 import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
 import { together } from '../together.js';
@@ -76,6 +77,7 @@ export async function settingsPageView(ctx) {
     missing: missingTracksView,
     musicbrainz: musicbrainzSettingsView,
     mbreview: mbReviewView,
+    mbmerge: mbMergeView,
     debug: debugView,
     about: aboutView,
   };

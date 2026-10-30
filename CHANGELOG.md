@@ -3,6 +3,55 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.31.0 - 2026-10-30
+
+### New
+
+- **When the connection drops** (a phone losing its signal, say), what's
+  loaded already plays on (the track playing, and those **Load ahead** has
+  in memory), and a track that can't load waits where it is for the
+  connection, then plays from there once your server answers again: it's
+  never skipped, nor converted instead, for want of the connection (before,
+  up to three were skipped, then it stopped). Plays and ratings are kept on
+  the device meanwhile and sent to Plex once it's back, so the tracks played
+  count as they would have, and a rating shows at once. The banner says
+  what's happening till then, asking again every half a minute (and for
+  another way to your server). What's kept is your account's, on that
+  device: signing out clears it, and says so if any of it hasn't been sent.
+- **Artists to merge** (a MusicBrainz feature, with
+  `MUSICBRAINZ_ADVANCED`, for the server's owner: Settings › MusicBrainz ›
+  Artists to merge): artists Plex has more than once, merged in Plex with
+  your OK each time, by Plex's own merge (for everyone and every Plex app;
+  the player can't undo it). Artists of the very same name, and those whose
+  name is several artists' in one ("Alphabeat;FORCE", as files can be
+  tagged), into the artist of the first of those names. Only on plain
+  evidence: the same MusicBrainz id in Plex for them, or an album of each
+  that MusicBrainz has as that artist's (by its very title and year) and
+  none as another's of the name; for a name of several in one, MusicBrainz
+  knowing only one artist of the name the tag gives. What it has as
+  different artists, or can't tell apart, is left as it is, saying why.
+  Only the names Plex has more than once are looked up on MusicBrainz.
+
+### Changed
+
+- **Offline mode's settings are `OFFLINE_PWD` and `OFFLINE_NETWORKS`**
+  now (they were `OFFLINE_KEY` and `OFFLINE_FROM`), and the sign-in page
+  says "offline password". The old names stop the container, saying what
+  they're called now, so offline mode isn't off unseen after the update; on
+  Proxmox VE, the update renames them in the settings, keeping their values.
+- **A setting that would do nothing stops the container**, saying why, as
+  a value that doesn't make sense does, so nothing you've set is off
+  without you knowing: `OFFLINE_PWD` without `PLEX_SERVER_URL`,
+  `OFFLINE_NETWORKS` (but `private`, the default) without `OFFLINE_PWD`,
+  `MUSICBRAINZ_ADVANCED` without `MUSICBRAINZ_URL`, and `OLLAMA_MODEL`,
+  `OLLAMA_API_KEY` or `OLLAMA_AUTH=off` without `OLLAMA_URL`. Before, the
+  log said so and the feature was off. Check your settings before updating.
+
+### Fixed
+
+- **"Can't reach your server" stayed** once the connection was back, till
+  Try again: it goes once the server answers again.
+
 ## 0.30.0 - 2026-10-30
 
 ### New
