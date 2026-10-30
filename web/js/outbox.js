@@ -130,8 +130,10 @@ export function keepPlayed(track, timeMs, playback) {
   keep({ kind: 'played', key: `played|${track.id}|${playback || ''}|${Math.round(timeMs)}`, id: track.id, duration: Number(track.duration) || 0, time: Math.max(0, Math.round(timeMs)), playback: playback || null });
 }
 
-// Tried again as the connection comes back, the browser says it's online, or
-// a server's chosen (the app starting, say).
+// Tried again as the connection comes back, the browser says it's online,
+// or a server's chosen; and a few seconds after the app starts, for any kept
+// from before (the page closed while the connection was gone, say).
 connection.addEventListener('back', () => flush());
 window.addEventListener('online', () => flush());
 on('source', () => app.server && flush());
+if (load().length) timer = setTimeout(flush, 3000);

@@ -1683,7 +1683,8 @@ class Player extends EventTarget {
     this.setState(autoplay ? 'loading' : 'paused');
     debugLog('player', `the connection’s gone: “${track.title}” waits for it, at ${at.toFixed(1)} s`, 'warn');
     connectionLost();
-    const still = () => this.held === hold && this.current?.qid === qid;
+    // (Not once another device or a Plex player plays: that's theirs.)
+    const still = () => this.held === hold && this.current?.qid === qid && !this.cast && !this.remote;
     hold.again = async () => {
       if (!still() || hold.asking) return;
       clearTimeout(hold.timer);
