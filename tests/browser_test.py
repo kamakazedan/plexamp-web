@@ -96,10 +96,18 @@ def annotate(title, message):
         print(f'::error title={title}::{text}', flush=True)
 
 
+# The section running, for saying where a test stopped.
+NOW = {'section': ''}
+
+
 def crashed(kind, value, tb):
-    """A test that stops with an error says where, as an annotation too."""
+    """A test that stops with an error says where, as an annotation too: its
+    section and its own lines (not Playwright's), then the error."""
     import traceback
-    annotate('Browser tests stopped', ''.join(traceback.format_exception(kind, value, tb))[-900:])
+    own = [f'{f.name}:{f.lineno}' for f in traceback.extract_tb(tb) if f.filename.endswith('browser_test.py')]
+    annotate('Browser tests stopped', f'in {NOW["section"] or "the first sign-in"}, at {" > ".join(own[-6:])}: {kind.__name__}: {value}')
+    if errors:
+        annotate('Browser tests: what the pages said before that', ' | '.join(errors[-4:]))
     sys.__excepthook__(kind, value, tb)
 
 
@@ -157,7 +165,20 @@ def shot(page, name):
 
 def login(page, app, token='t', app_defaults=False):
     page.goto(app + '#/login')
-    page.click('text=Use a server address and token instead')
+    try:
+        page.click('text=Use a server address and token instead')
+    except Exception:
+        # (What showed instead, for CI's summary page: the address, and what's on it.)
+        try:
+            shown = page.evaluate('() => document.body.innerText.slice(0, 400)')
+        except Exception as e:  # noqa: BLE001 - said instead
+            shown = f'(couldn\'t be read: {e})'
+        annotate('Browser tests: no sign-in page', f'{page.url}: {shown!r}')
+        try:
+            page.screenshot(path=os.path.join(OUT, 'no-sign-in-page.png'))
+        except Exception:  # noqa: BLE001 - only for looking at
+            pass
+        raise
     if LOGIN_URL:
         page.fill('.login-form input[type=url]', LOGIN_URL)
     # (The token's field: with an offline key, its field is a password's too.)
@@ -264,7 +285,10 @@ def play_first_album_track(page, app, album=0, track=0):
 
 
 def run(section):
-    return ONLY is None or section in ONLY
+    if ONLY is None or section in ONLY:
+        NOW['section'] = section
+        return True
+    return False
 
 
 with sync_playwright() as pw:

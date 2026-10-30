@@ -118,5 +118,7 @@ if [ "$status" -ne 0 ]; then
         echo "--- $n log"
         docker logs "$n" 2>&1 | tail -40
     done
+    # (The first app's, on the summary page too.)
+    annotate "pwb-web's log ends: $(docker logs pwb-web 2>&1 | tail -12 | tr '\n' '|')"
 fi
 exit "$status"

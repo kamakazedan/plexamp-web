@@ -507,7 +507,14 @@ export class PlexAuth {
     if (token) headers['X-Plex-Token'] = token;
     const via = this.pmsProbe && !direct ? { socketPath: this.pmsProbe, path } : { url: `${this.pms}${path}` };
     try {
-      return await pmsGet(via, headers, timeout);
+      try {
+        return await pmsGet(via, headers, timeout);
+      } catch (err) {
+        // (A connection kept open from before that was closed just as it was
+        // used: asked again, once, on a new one. It's only ever a GET.)
+        if (err.code !== 'ECONNRESET' && err.code !== 'EPIPE') throw err;
+        return await pmsGet(via, headers, timeout);
+      }
     } catch (err) {
       const code = err.cause?.code || err.code || err.name || 'network error';
       const problem = certProblem(code);
