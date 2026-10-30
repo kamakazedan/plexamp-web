@@ -83,6 +83,10 @@ const STALL = { say: 8000, reload: 30000, fade: 3000 };
 // since it last did, is as one whose connection drops the first time (see
 // dropped).
 const DROPS_FORGOTTEN_S = 60;
+// A file the server fails (an answer of 500 or more) this many times, over
+// this long at least (riding out a moment's trouble: Plex starting up, say),
+// is a track that won't play here (see couldntPlay).
+const FILE_FAILS = { times: 3, overMs: 30000 };
 const RESCUE_TRIES = 3;
 const RESCUE_PROGRESS = 20;
 const RESCUE_WAITS = [250, 3000, 6000];
@@ -1564,9 +1568,9 @@ class Player extends EventTarget {
     // server hands over, is loaded as it is once more (the connection may
     // have been gone a moment), and only then, failing again so, converted
     // (as a file of a format this browser can't play is). A file the server
-    // fails (an answer of 500 or more), three times: a track that won't play
-    // here. Another error (it came, but couldn't be decoded): converted, as
-    // before.
+    // keeps failing (an answer of 500 or more: FILE_FAILS): a track that
+    // won't play here. Another error (it came, but couldn't be decoded):
+    // converted, as before.
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
       const asIs = this.asIs === track.qid;
       const dropping = this.drops?.qid === track.qid;
@@ -1578,9 +1582,9 @@ class Player extends EventTarget {
       this.fileComes(track).then((comes) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
         if (comes === 'failed') {
-          const n = (this.fileFails?.qid === track.qid ? this.fileFails.n : 0) + 1;
-          this.fileFails = { qid: track.qid, n };
-          if (n >= 3) {
+          const was = this.fileFails?.qid === track.qid ? this.fileFails : { n: 0, since: Date.now() };
+          this.fileFails = { qid: track.qid, n: was.n + 1, since: was.since };
+          if (this.fileFails.n >= FILE_FAILS.times && Date.now() - was.since >= FILE_FAILS.overMs) {
             this.couldntPlayHere(track, err);
             return;
           }

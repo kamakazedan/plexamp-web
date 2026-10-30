@@ -17,7 +17,7 @@ you're running is shown in **Settings › About**.
   converted only if your server hands it over and it still doesn't play,
   loaded again as it is: one that didn't come (as browsers say of one that
   doesn't) is a drop. (One that came but couldn't be decoded is converted,
-  as before; one your server keeps failing is skipped.)
+  as before; one your server keeps failing, half a minute or more, is skipped.)
 - **Artists to merge, several at once**: those MusicBrainz plainly has as
   one artist are chosen to begin with, and one OK merges all you've chosen,
   one after another (those of one name first). The page then shows what's
