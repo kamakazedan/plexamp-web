@@ -31,6 +31,8 @@ import { initSharing, invitations } from './sharing.js';
 import { startSync } from './sync.js';
 import { startMissingSync } from './missingsync.js';
 import { watchOffline } from './offline.js';
+import { connection, connectionLost, connectionBack } from './connection.js';
+import './outbox.js';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: 'home' },
@@ -162,12 +164,22 @@ const pinned = (src) => src.kind === 'proxy' && !src.connections?.length;
 // it (e.g. we left the house and the local address stopped working). And
 // when it answers only remotely, whether a better route works now (back
 // home, or this container's proxy).
-async function ensureConnection() {
+// (One at a time: asked again while it's asking, it's that one's answer.)
+let ensuring = null;
+function ensureConnection() {
+  ensuring ||= checkConnection().finally(() => {
+    ensuring = null;
+  });
+  return ensuring;
+}
+
+async function checkConnection() {
   const src = app.source;
   if (!src || !app.server) return;
   try {
-    await app.server.identity({ timeout: 5000 });
+    await app.server.identity({ timeout: 5000, cache: 'no-store' });
     debugLog('connection', `${src.serverName} answers at ${where(src.kind)}`);
+    connectionBack();
     // A better route may answer now (back home, say).
     if (pickable(src) && !pinned(src) && rank(src.kind) > 0) {
       bestRoute(src)
@@ -192,6 +204,7 @@ async function ensureConnection() {
       if (conn) {
         debugLog('connection', `switched ${src.serverName} to ${where(conn.kind)}`);
         setSource({ ...src, uri: conn.uri, kind: conn.kind, token: conn.srv.token, connections: conn.srv.connections });
+        connectionBack();
         refresh(); // re-render the current page against the new address
         return;
       }
@@ -199,20 +212,50 @@ async function ensureConnection() {
       /* fall through to the banner */
     }
   }
-  showBanner(`Can't reach ${src.serverName}.`, 'Try again', async () => {
-    hideBanner();
-    await ensureConnection();
-  });
+  if (app.source !== src) return;
+  connectionLost();
+  connectionBanner();
 }
 
-function showBanner(text, action, onAction) {
+// The connection gone (connection.js): the banner says so, and that what's
+// loaded plays on meanwhile (Load ahead), with plays and ratings kept for
+// when it's back (outbox.js); asked again every so often till it is (and
+// for another way to the server, as ensureConnection looks).
+function connectionBanner() {
+  const src = app.source;
+  if (!src || !connection.lost) return;
+  const text =
+    navigator.onLine === false
+      ? 'You’re offline. What’s loaded already plays on, and your plays and ratings are kept till you’re back.'
+      : `Can’t reach ${src.serverName}. What’s loaded already plays on, and your plays and ratings are kept till it’s back.`;
+  showBanner(text, 'Try again', () => ensureConnection(), 'connection');
+}
+
+let askAgain = 0;
+connection.addEventListener('lost', () => {
+  connectionBanner();
+  clearInterval(askAgain);
+  askAgain = setInterval(() => (app.server ? ensureConnection() : clearInterval(askAgain)), 30000);
+  // (Another way to it, it may be: off the home network, say.)
+  ensureConnection();
+});
+connection.addEventListener('back', () => {
+  clearInterval(askAgain);
+  if (bannerKind === 'connection') hideBanner();
+});
+window.addEventListener('offline', () => app.server && connectionLost());
+
+let bannerKind = '';
+function showBanner(text, action, onAction, kind = '') {
   const b = document.getElementById('banner');
   b.replaceChildren(h('span', null, text), h('button.banner-action', { type: 'button', onclick: onAction }, action));
   b.hidden = false;
+  bannerKind = kind;
 }
 
 function hideBanner() {
   document.getElementById('banner').hidden = true;
+  bannerKind = '';
 }
 
 // ---------- live updates ----------

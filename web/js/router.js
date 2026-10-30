@@ -647,6 +647,7 @@ async function render(k, useCache, { same = false } = {}) {
 }
 
 export function describeError(err) {
+  if (err?.network && navigator.onLine === false) return 'You’re offline. This needs your Plex server: it’ll be there once you’re back online.';
   if (err?.network) return "Can't reach your Plex server. Check that it's online and that this device can connect to it.";
   if (err?.status === 401) return 'Plex rejected this sign-in. Sign out and sign in again.';
   if (err?.status === 404) return 'This item no longer exists on your server.';

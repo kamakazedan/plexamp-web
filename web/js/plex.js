@@ -157,7 +157,8 @@ const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 // hundreds of changes).
 // `body`: bytes to send (a picture); they go without a Content-Type, as
 // Plex works out what they are, so the request needs no CORS preflight.
-async function request(url, { method = 'GET', timeout = 20000, signal, discard = false, body } = {}) {
+// `cache`: the browser's cache mode for it ('no-store': never from there).
+async function request(url, { method = 'GET', timeout = 20000, signal, discard = false, body, cache } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const onAbort = () => ctrl.abort();
@@ -165,7 +166,7 @@ async function request(url, { method = 'GET', timeout = 20000, signal, discard =
   try {
     let res;
     try {
-      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal, credentials: 'omit', ...(body ? { body } : {}) });
+      res = await fetch(url, { method, headers: { Accept: 'application/json' }, signal: ctrl.signal, credentials: 'omit', ...(body ? { body } : {}), ...(cache ? { cache } : {}) });
     } catch (cause) {
       const err = new Error(signal?.aborted ? 'aborted' : 'network');
       err.network = !signal?.aborted;
@@ -1026,6 +1027,8 @@ export class PlexServer {
   // Tell the server what is playing. This drives play counts, "recent plays"
   // and the Now Playing view on the Plex dashboard. `playback`: the
   // track's playback (see playbackId), as its stream was started with.
+  // Whether it got to the server (false: the connection's gone; see the
+  // player's report, which keeps a track's last for when it's back).
   timeline(track, state, timeMs, playback) {
     const url = this.url('/:/timeline', {
       ratingKey: track.id,
@@ -1036,7 +1039,10 @@ export class PlexServer {
       duration: track.duration || undefined,
       'X-Plex-Session-Identifier': playback || undefined,
     });
-    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true }).catch(() => {});
+    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true }).then(
+      () => true,
+      () => false,
+    );
   }
 
   // Artwork, always through the server's image transcoder, including images

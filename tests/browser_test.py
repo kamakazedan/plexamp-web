@@ -38,7 +38,7 @@ Plex Home (plexhome sends the browser's plex.tv calls to the mock too).
     python3 tests/browser_test.py [screenshot-dir] [section ...]
 
 Sections: core ws ai dj djs nows blocked poll wsonly custom desktop nav library edit
-lists pictures missing files sharing routes privacy np stream cast ratings
+lists pictures missing files sharing routes privacy np stream signal cast ratings
 devices fades together settings home formats select spotify debug sync
 plexhome missingsync mb offline memory (default: all).
 """
@@ -4483,6 +4483,92 @@ with sync_playwright() as pw:
         sctx.close()
         hls('?reset=1')
         player(page, 'p.pause()')
+        ctx.close()
+
+    # ---------- signal: the connection gone part-way (a phone losing its signal) ----------
+    # What's loaded plays on; a track that can't load waits for the
+    # connection (never skipped, nor converted); plays and ratings are kept
+    # on the device and sent once it's back; the banner says so meanwhile.
+    if run('signal'):
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'signal', expected=('ERR_INTERNET_DISCONNECTED', 'Failed to fetch', 'NetworkError'))
+        login(page, APP)
+        settings(page, {'quality': 'original', 'loadAhead': 1, 'gapless': False, 'fades': 'off', 'keepPlayed': 0, 'reportPlays': True})
+        js(page, "() => import('./js/player.js').then(({ player }) => player.addEventListener('playerror', (e) => (window.__playErrors ||= []).push(e.detail.track.title)))")
+
+        def snow():
+            return player(page, "({ id: String(p.current?.id), index: p.index, t: p.time, state: p.state, held: !!p.held, hls: !!p.deck.hls })")
+
+        def track_meta(tid):
+            return mock(f'/library/metadata/{tid}?X-Plex-Token=t')['MediaContainer']['Metadata'][0]
+
+        def outbox():
+            return js(page, "() => JSON.parse(localStorage.getItem('pw.outbox') || '[]').map((x) => ({ kind: x.kind, id: x.id, value: x.value ?? null }))")
+
+        def play_errors_now(pg):
+            return js(pg, '() => window.__playErrors || []')
+
+        play_first_album_track(page, APP, album=1, track=0)
+        first = snow()
+        q = player(page, 'p.queue.slice(p.index + 1, p.index + 3).map((t) => String(t.id))')
+        ready = wait_for(lambda: any(str(e['id']) == q[0] and e['state'] == 'done' for e in player(page, 'p.ahead.summary()')), 30, 0.3)
+        whole = wait_for(lambda: player(page, '(() => { const el = p.audio; return el.buffered.length > 0 && el.buffered.end(el.buffered.length - 1) >= p.duration - 0.5; })()'), 20, 0.3)
+        mock('/__mock/hls?reset=1')
+        was = {tid: (track_meta(tid).get('viewCount', 0), track_meta(tid).get('userRating')) for tid in (first['id'], q[0])}
+        ctx.set_offline(True)
+        said = wait_for(lambda: page.locator('#banner:not([hidden])').count() == 1 and 'offline' in page.inner_text('#banner'), 10, 0.3)
+        shot(page, 'signal-01-offline')
+        check('signal: offline, the banner says so, and that what\'s loaded plays on, with plays and ratings kept',
+              said and 'plays on' in page.inner_text('#banner') and 'kept' in page.inner_text('#banner'), page.inner_text('#banner') if said else '')
+        # A rating, offline: shown at once, kept, and Plex hasn't it yet.
+        rated = js(page, "() => Promise.all([import('./js/player.js'), import('./js/ratings.js')]).then(([{ player: p }, r]) => r.rateTrack(p.current, 6).then((x) => ({ ...x, shown: r.ratingOf(p.current) })))")
+        page.wait_for_selector('.toast:has-text("once the connection")', timeout=5000)
+        check('signal: a rating made offline is shown, and kept to send (Plex hasn\'t it yet)',
+              rated == {'kept': True, 'shown': 6} and track_meta(first['id']).get('userRating') == was[first['id']][1]
+              and {'kind': 'rated', 'id': first['id'], 'value': 6} in outbox(), f'{rated} {outbox()}')
+        # The track ends: the next one, loaded ahead, plays from memory.
+        player(page, '(p.seek(p.duration - 1.5), true)')
+        on = wait_for(lambda: snow()['id'] == q[0] and snow()['state'] == 'playing' and snow()['t'] > 1, 20, 0.25)
+        kept_play = wait_for(lambda: any(x['kind'] == 'played' and x['id'] == first['id'] for x in outbox()), 10, 0.3)
+        check('signal: ...the next track, loaded ahead, plays on from memory',
+              on and player(page, "(p.audio.getAttribute('src') || '').startsWith('blob:')") and not play_errors_now(page), f'{snow()} {player(page, "p.ahead.summary()")}')
+        check('signal: ...and the first one\'s play is kept to report (Plex hasn\'t it yet)',
+              kept_play and track_meta(first['id']).get('viewCount', 0) == was[first['id']][0], f'{outbox()} {track_meta(first["id"]).get("viewCount")}')
+        # The one after can't load: it waits for the connection, where it is,
+        # rather than being skipped or converted.
+        player(page, '(p.seek(p.duration - 1.5), true)')
+        waits = wait_for(lambda: snow()['id'] == q[1] and snow()['held'], 20, 0.25)
+        page.wait_for_timeout(6000)
+        held = snow()
+        shot(page, 'signal-02-waiting')
+        check('signal: a track that can\'t load offline waits for the connection (not skipped, nor converted)',
+              waits and held['id'] == q[1] and held['held'] and held['state'] == 'loading' and not held['hls'] and not play_errors_now(page), f'{held} {play_errors_now(page)}')
+        # Back online: the track plays, and what was kept is sent.
+        ctx.set_offline(False)
+        back = wait_for(lambda: snow()['id'] == q[1] and snow()['state'] == 'playing' and snow()['t'] > 1, 30, 0.3)
+        sent = wait_for(lambda: outbox() == [], 30, 0.5)
+        check('signal: back online, the waiting track plays (from the top, as it is)', back and not snow()['hls'] and not play_errors_now(page), str(snow()))
+        check('signal: ...the rating made offline reaches Plex', track_meta(first['id']).get('userRating') == 6, str(track_meta(first['id']).get('userRating')))
+        check('signal: ...and so do the plays: both tracks count as played',
+              sent and track_meta(first['id']).get('viewCount', 0) == was[first['id']][0] + 1 and track_meta(q[0]).get('viewCount', 0) == was[q[0]][0] + 1,
+              f'{outbox()} {[track_meta(t).get("viewCount") for t in (first["id"], q[0])]} {was}')
+        gone = wait_for(lambda: page.locator('#banner:not([hidden])').count() == 0, 10, 0.3)
+        check('signal: ...and the banner goes', gone, page.inner_text('#banner') if not gone else '')
+        # A kept rating Plex refuses when it's sent is let go, saying so.
+        page.route('**/:/rate?**', lambda route: route.fulfill(status=403, body=''))
+        js(page, """() => import('./js/outbox.js').then((o) => { o.keep({ kind: 'rated', key: 'rated|999999', id: '999999', value: 4, title: 'Gone Track', loved: false }); return o.flush(); })""")
+        refused = wait_for(lambda: page.locator('.toast:has-text("Gone Track")').count() > 0, 8, 0.25)
+        page.unroute('**/:/rate?**')
+        check('signal: a kept rating Plex refuses is let go, saying so', refused and outbox() == [], str(outbox()))
+        player(page, 'p.pause()')
+        mock(f'/:/rate?key={first["id"]}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        # What's kept is the account's: signing out clears it, unsent.
+        js(page, """() => import('./js/outbox.js').then((o) => o.keep({ kind: 'rated', key: 'rated|1', id: '1', value: 4, title: 'Kept', loved: false }))""")
+        before = outbox()
+        js(page, "() => import('./js/state.js').then((m) => m.signOut())")
+        page.wait_for_selector('text=Use a server address and token instead', timeout=20000)
+        check('signal: signing out clears what\'s kept to send, unsent', before and js(page, "() => localStorage.getItem('pw.outbox')") is None, str(before))
         ctx.close()
 
     # ---------- cast: playing on another Plex player, and AirPlay/Cast ----------

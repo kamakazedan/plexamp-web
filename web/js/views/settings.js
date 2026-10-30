@@ -15,6 +15,7 @@ import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
 import { player } from '../player.js';
 import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.js';
+import { keptCount } from '../outbox.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -136,6 +137,8 @@ function confirmSignOut() {
   sheet({
     title: 'Sign out?',
     subtitle: `Everything kept for you on this device is cleared: your queue and lists, your AI settings, this player’s name and Home layout. How the app looks and plays stays.${
+      keptCount() ? ` ${keptCount() === 1 ? 'A play or rating' : `${keptCount()} plays and ratings`} from while the connection was gone ${keptCount() === 1 ? 'hasn’t' : 'haven’t'} reached Plex yet, and won’t.` : ''
+    }${
       app.auth?.offline
         ? ' The offline password’s session ends.'
         : app.config.settingsSync && app.config.missingSync
