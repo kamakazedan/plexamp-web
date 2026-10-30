@@ -74,10 +74,10 @@ const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export function artistOnMB(name, { groups = true, id = null, namesakes = false } = {}) {
   const byId = MBID.test(String(id)) ? id : null;
   const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${byId || norm(name)}`;
-  if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], namesakes: [] });
+  if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], capped: false, namesakes: [] });
   if (!artists.has(key)) {
     const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}) }).then(
-      (r) => ({ artist: r.artist || null, groups: Array.isArray(r.groups) ? r.groups : [], namesakes: Array.isArray(r.namesakes) ? r.namesakes : [] }),
+      (r) => ({ artist: r.artist || null, groups: Array.isArray(r.groups) ? r.groups : [], capped: r.capped === true, namesakes: Array.isArray(r.namesakes) ? r.namesakes : [] }),
       (err) => {
         artists.delete(key);
         throw err;

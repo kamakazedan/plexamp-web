@@ -302,14 +302,17 @@ export class MusicBrainz {
   }
 
   // An artist's release groups, by their MusicBrainz id: [{ id, title,
-  // primary, secondary, date }] (those they're credited with, up to 500).
+  // primary, secondary, date }] (those they're credited with, up to 500:
+  // the list's `capped` where they have more, so it can't be told from it
+  // that they haven't one).
   async releaseGroups(artistId, { signal, background = false } = {}) {
     if (!this.adv || !MBID.test(String(artistId))) return [];
     const key = `groups|${artistId}`;
     const kept = this.had(key);
-    if (kept !== undefined) return kept;
+    if (kept !== undefined) return groupList(kept);
     this.resting();
     const out = [];
+    let capped = false;
     for (let page = 0; page < MB_ADVANCED_LIMITS.groupPages; page += 1) {
       const data = await this.ask('/ws/2/release-group', { artist: artistId, limit: '100', offset: String(page * 100) }, signal, { background });
       const list = Array.isArray(data['release-groups']) ? data['release-groups'] : [];
@@ -318,8 +321,9 @@ export class MusicBrainz {
         if (clean) out.push(clean);
       }
       if (list.length < 100 || (page + 1) * 100 >= (Number(data['release-group-count']) || 0)) break;
+      capped = page + 1 === MB_ADVANCED_LIMITS.groupPages;
     }
-    return this.adv.set(key, out);
+    return groupList(this.adv.set(key, capped ? { capped: true, groups: out } : out));
   }
 
   // Other artists MusicBrainz has of this very name (`but`: not this one,
@@ -340,7 +344,8 @@ export class MusicBrainz {
     }
     const out = [];
     for (const a of (list || []).filter((x) => x.id !== but).slice(0, MB_ADVANCED_LIMITS.namesakes)) {
-      out.push({ ...a, groups: await this.releaseGroups(a.id, { signal, background }) });
+      const groups = await this.releaseGroups(a.id, { signal, background });
+      out.push({ ...a, groups, capped: !!groups.capped });
     }
     return out;
   }
@@ -583,9 +588,22 @@ function topGenres(list) {
 }
 
 // A kept answer, checked as it's read back (undefined: it doesn't check out).
+// A list of release groups as it's kept: as it is, or (more than were
+// asked for) { capped: true, groups }. As releaseGroups gives it: the list,
+// `capped` where it is.
+function groupList(v) {
+  if (Array.isArray(v)) return v;
+  const list = Array.isArray(v?.groups) ? v.groups.slice() : [];
+  if (v?.capped === true) list.capped = true;
+  return list;
+}
+
 function cleanKept(key, v) {
   if (key.startsWith('artist|') || key.startsWith('artistid|')) return v === null ? null : cleanArtist(v) || undefined;
-  if (key.startsWith('groups|')) return Array.isArray(v) ? v.map(cleanGroup).filter(Boolean) : undefined;
+  if (key.startsWith('groups|')) {
+    if (Array.isArray(v)) return v.map(cleanGroup).filter(Boolean);
+    return v?.capped === true && Array.isArray(v.groups) ? { capped: true, groups: v.groups.map(cleanGroup).filter(Boolean) } : undefined;
+  }
   if (key.startsWith('genres|')) return Array.isArray(v) ? v.map((x) => text(x, 60)).filter(Boolean).slice(0, 5) : undefined;
   if (key.startsWith('namesakes|')) return Array.isArray(v) ? v.map(cleanNamesake).filter(Boolean).slice(0, 10) : undefined;
   return undefined;

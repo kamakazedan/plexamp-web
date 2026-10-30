@@ -90,6 +90,12 @@ for release in "${releases[@]}"; do
         configure DEBUG=true >/dev/null
         expect "debug mode logs to the journal" grep -q "access_log syslog:server=unix:/dev/log" /etc/nginx/conf.d/log.inc
         expect "nginx takes debug mode'"'"'s settings" nginx -t -q
+        # The Plex proxy, with nginx'"'"'s socket for the service'"'"'s own requests to the Plex server.
+        configure PLEX_SERVER_URL=http://127.0.0.1:32400 >/dev/null
+        expect "nginx takes the Plex proxy'"'"'s settings, and its socket for the service" nginx -t -q
+        expect "...in a folder of root'"'"'s that only the service'"'"'s group can go into" test "$(stat -c "%U:%G %a" /run/plexamp-web/pms)" = "root:www-data 750"
+        expect "...whose socket a stopped nginx left is gone before it starts" grep -q "^ExecStartPre=-/bin/rm -f /run/plexamp-web/pms/plex.sock$" /etc/systemd/system/nginx.service.d/plexamp-web.conf
+        configure >/dev/null
         # Updates, as update-plexamp-web runs them, with this checkout for the
         # installer it downloads: first from the command 0.15.0 put there.
         # The installer replaces that command while it runs, and until 0.16.1

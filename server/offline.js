@@ -19,7 +19,7 @@ export const OFFLINE_LIMITS = {
   sessionMs: 14 * 24 * 3600 * 1000,
   sessions: 50, // at most (the oldest go first)
   triesPerMinute: 5, // from one address
-  wrongPerHour: 30, // wrong keys from everywhere together: then none is tried for the rest of the hour
+  wrongPerHour: 30, // wrong keys from everywhere together: then none is tried, for the rest of the hour, from where one came
 };
 
 const TOKEN = /^pwoff-[0-9a-f]{48}$/;
@@ -81,6 +81,7 @@ export class Offline {
     this.now = now;
     this.sessions = new Map(); // token hash -> { at, until }, oldest first
     this.wrong = []; // when wrong keys were tried, this last hour
+    this.wrongFrom = new Map(); // address -> when one was last tried from it
     this.tries = new Map(); // address -> { at, n }
     this.lockedSaid = false;
   }
@@ -103,7 +104,8 @@ export class Offline {
   // not, where it can't ('plex-tv': plex.tv is answering, so sign in with
   // Plex; 'server': the Plex server doesn't let this container in without
   // signing in, so nothing could be played; 'server-down': it isn't
-  // answering; 'network': not from here; 'off': there's no key).
+  // answering, or can't be told; 'network': not from here; 'off': there's no
+  // key). The server's asked right then (see openNow in plex.js).
   async state(addr) {
     const down = await this.auth.plexTvDown({ forMs: OFFLINE_LIMITS.downForMs, fresh: true });
     const plexTv = this.auth.tv.down ? 'down' : 'up';
@@ -111,7 +113,7 @@ export class Offline {
     if (!down) return { on: false, plexTv, why: 'plex-tv' };
     let open = null;
     try {
-      open = (await this.auth.serverState()).open;
+      open = await this.auth.openNow();
     } catch {
       /* the server isn't answering either */
     }
@@ -136,7 +138,10 @@ export class Offline {
     t.n += 1;
     if (t.n > OFFLINE_LIMITS.triesPerMinute) throw new OfflineError(429, 'Too many tries. Wait a minute and try again.');
     this.wrong = this.wrong.filter((at) => now - at < 3600000);
-    if (this.wrong.length >= OFFLINE_LIMITS.wrongPerHour) {
+    for (const [from, at] of this.wrongFrom) if (now - at >= 3600000) this.wrongFrom.delete(from);
+    // (Only where a wrong one came from, so nobody else's wrong keys keep the
+    // right one out from anywhere they haven't tried from.)
+    if (this.wrong.length >= OFFLINE_LIMITS.wrongPerHour && this.wrongFrom.has(limitKey)) {
       if (!this.lockedSaid) {
         this.lockedSaid = true;
         this.log?.warn(`offline mode: ${this.wrong.length} wrong offline keys tried in the last hour, so no more are tried until it's over`);
@@ -157,6 +162,9 @@ export class Offline {
     const given = typeof key === 'string' && key.length <= 1000 ? digest(key) : null;
     if (!given || !timingSafeEqual(given, this.key)) {
       this.wrong.push(now);
+      this.wrongFrom.delete(limitKey);
+      this.wrongFrom.set(limitKey, now);
+      if (this.wrongFrom.size > 5000) this.wrongFrom.delete(this.wrongFrom.keys().next().value);
       this.log?.warn(`offline mode: a wrong offline key was tried from ${addr || 'an unknown address'}`);
       throw new OfflineError(401, 'That isn’t this player’s offline key.');
     }

@@ -76,6 +76,11 @@ testing, these endpoints need no token:
                                   without a Format or Subformat, as an album
                                   Plex hasn't matched)
     /__mock/edits[?reset=1]       the album edits made (year, date, genres)
+    /__mock/seen[?reset=1]        the server's last 200 requests: path, the
+                                  value of a pwtest= in it (to find one), where
+                                  its token was (header, query, both or none),
+                                  whether it was an offline-key session's, and
+                                  which headers saying where it came from it had
     /__mock/home[?reset=1]        the switches made in Dan's Plex Home: who
                                   from, to whom, and the PIN given
     /__mock/age?id=...&days=...   marks an album as last played that long ago
@@ -1100,6 +1105,11 @@ MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'ho
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 NO_GENRE = {}  # album id -> its genres, taken away (/__mock/config?nogenre=)
 LIBRARY_STATE = {'contentChangedAt': NOW, 'refreshing': False}
+# The server's requests, lately (/__mock/seen): what a proxy in front of it
+# passed on (a token, and where from).
+SEEN = []
+FORWARDED = ('x-forwarded-for', 'x-real-ip', 'forwarded', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-client-ip',
+             'true-client-ip', 'cf-connecting-ip', 'x-cluster-client-ip', 'fastly-client-ip', 'x-originating-ip')
 listeners = []  # {'kind': 'ws'|'sse', 'send': callable}
 listeners_lock = threading.Lock()
 
@@ -2121,6 +2131,17 @@ class Handler(BaseHTTPRequestHandler):
             if q.get('reset', ['0'])[0] == '1':
                 MB_SEEN['asked'] = []
             return self.send_json(dict(MB_SEEN))
+        if p == '/__mock/seen':
+            if q.get('reset'):
+                SEEN.clear()
+            return self.send_json({'seen': SEEN})
+        if not p.startswith('/__mock/') and not p.startswith('/api/'):
+            header = self.headers.get('X-Plex-Token', '')
+            query = q.get('X-Plex-Token', [''])[0]
+            SEEN.append({'path': p, 'mark': q.get('pwtest', [''])[0], 'token': 'both' if header and query else 'header' if header else 'query' if query else 'none',
+                         'offline': any(t.startswith('pwoff-') for t in (header, query)),
+                         'forwarded': sorted(h for h in FORWARDED if self.headers.get(h) is not None)})
+            del SEEN[:-200]
         if p == '/__mock/edits':
             if q.get('reset', ['0'])[0] == '1':
                 EDITS.clear()

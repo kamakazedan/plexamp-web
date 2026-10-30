@@ -18,11 +18,12 @@ config.js. Settings come from the environment:
                      SYNC_MISSING_TRACKS=false (the mb section is skipped
                      without it)
     APP_URL_OFFLINE  app with OFFLINE_KEY=offline-key-for-tests and
-                     PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500, on a
-    MOCK_PLEX_OPEN   mock Plex server started with --open --honour (that
+                     PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500, on a mock
+                     Plex server started with --open --honour (one that
                      lets the app in without signing in, and knows its
-                     people's sign-ins as theirs), its plex.tv too (the
-                     offline section is skipped without them)
+                     people's sign-ins as theirs), its plex.tv too, and
+    MOCK_PLEX_OPEN   that server (the offline section is skipped without
+                     them)
     MOCK_PLEX        mock Plex server, e.g. http://127.0.0.1:32400
     PLEX_LOGIN_URL   server address to sign in with; empty to use the
                      container's /pms proxy
@@ -7630,6 +7631,11 @@ with sync_playwright() as pw:
         shuffled = set(player(page, 'p.queue.map((t) => t.album)') or [])
         player(page, 'p.pause()')
         check('mb: ...and left out of the page\'s Shuffle', shuffled == {'Interference'}, shuffled)
+        before = player(page, 'p.queue.length')
+        sheet_action(page, '.back-head button[aria-label="More options"]', 'Add to queue')
+        wait_for(lambda: player(page, 'p.queue.length') > before, 5)
+        added = set(player(page, f'p.queue.slice({before}).map((t) => t.album)') or [])
+        check('mb: ...and out of what the page\'s menu adds to the queue', added == {'Interference'}, added)
         settings(page, {'mbNamesakes': False})
         artist_page('Northbound Static', '.view section[data-group="Albums"] .card')
         page.wait_for_timeout(1500)

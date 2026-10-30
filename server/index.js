@@ -77,6 +77,9 @@ function loadConfig() {
     ollamaModel: env.PW_SERVICE_OLLAMA_MODEL ?? cfg.ollamaModel ?? '',
     ollamaKey: env.PW_SERVICE_OLLAMA_KEY ?? cfg.ollamaKey ?? '',
     plexServerUrl: env.PW_SERVICE_PLEX_SERVER_URL ?? cfg.plexServerUrl ?? '',
+    // nginx's socket for the service's own requests to that server (see
+    // pmsAnswer in plex.js): set by 40-plexamp-web.sh.
+    pmsProbe: env.PW_SERVICE_PMS_PROBE ?? cfg.pmsProbe ?? '',
     // Offline mode (OFFLINE_KEY, OFFLINE_FROM): see offline.js.
     offlineKey: env.PW_SERVICE_OFFLINE_KEY ?? cfg.offlineKey ?? '',
     offlineFrom: env.PW_SERVICE_OFFLINE_FROM ?? cfg.offlineFrom ?? 'private',
@@ -99,7 +102,7 @@ function loadConfig() {
 const config = loadConfig();
 setDebug(config.debug);
 if (config.debug && config.nginxLogPort) listenForNginx(config.nginxLogPort);
-const auth = new PlexAuth({ plexTvUrl: config.plexTvUrl, plexServerUrl: config.plexServerUrl });
+const auth = new PlexAuth({ plexTvUrl: config.plexTvUrl, plexServerUrl: config.plexServerUrl, pmsProbe: config.pmsProbe });
 const together = new Together({
   onChange: (s) => log.debug(`together ${s.id.slice(0, 6)}: v${s.version}, ${s.members.size} listening, track ${s.index + 1}/${s.queue.length}, ${s.playing ? 'playing' : 'paused'}${s.ended ? ', ended' : ''}`),
 });
@@ -171,13 +174,13 @@ function checkable(req, token) {
 }
 const TOO_MANY_SIGN_INS = 'Too many sign-ins checked from your network in a short time. Wait a minute and try again.';
 class TooManySignIns extends Error {}
-// identify, counted: throws TooManySignIns past the limit. (Not while
-// plex.tv isn't answering: nothing's asked of it then, but now and then to
-// hear whether it's back. An offline-key session's sign-in isn't a Plex
-// one, and never goes to plex.tv.)
-function identifyFor(req, token) {
+// identify, counted (unless it's said otherwise): throws TooManySignIns past
+// the limit. (Not while plex.tv isn't answering: nothing's asked of it then,
+// but now and then to hear whether it's back. An offline-key session's
+// sign-in isn't a Plex one, and never goes to plex.tv.)
+function identifyFor(req, token, { counted = true } = {}) {
   if (isOfflineToken(token)) return Promise.reject(new AuthError(401, 'Plex didn’t accept this sign-in.'));
-  if (!auth.tv.down && !checkable(req, token)) throw new TooManySignIns(TOO_MANY_SIGN_INS);
+  if (counted && !auth.tv.down && !checkable(req, token)) throw new TooManySignIns(TOO_MANY_SIGN_INS);
   return auth.identify(token);
 }
 
@@ -190,13 +193,14 @@ class HttpError extends Error {
   }
 }
 
-function send(res, status, body) {
+function send(res, status, body, headers = {}) {
   const data = body === undefined ? '' : JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
     ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}),
+    ...headers,
   });
   res.end(data);
 }
@@ -569,9 +573,11 @@ async function musicbrainzFeatures(req, res, what) {
     try {
       const artist = await musicbrainz.artistInfo(name(body.name), { id: mbid(body.id), signal: ctrl.signal });
       const groups = artist && body.groups !== false ? await musicbrainz.releaseGroups(artist.id, { signal: ctrl.signal }) : [];
-      // (`namesakes`: other artists of the name too, with their release groups.)
-      if (body.namesakes !== true) return send(res, 200, { artist, groups });
-      return send(res, 200, { artist, groups, namesakes: await musicbrainz.namesakes(name(body.name), { but: artist?.id, signal: ctrl.signal }) });
+      // (`capped`: they have more than are listed. `namesakes`: other artists of the name too, with their release
+      // groups.)
+      const capped = !!groups.capped;
+      if (body.namesakes !== true) return send(res, 200, { artist, groups, capped });
+      return send(res, 200, { artist, groups, capped, namesakes: await musicbrainz.namesakes(name(body.name), { but: artist?.id, signal: ctrl.signal }) });
     } catch (err) {
       if (ctrl.signal.aborted && !res.writableEnded) throw new HttpError(504, 'MusicBrainz took too long to answer. Try again later.');
       throw err;
@@ -664,7 +670,7 @@ async function aiVerdict(req, token, serverToken) {
   let pmsSays = null;
   let pmsError = null;
   try {
-    if (!(await auth.serverIsOpen())) pmsSays = await auth.serverAccepts(serverToken || token);
+    if (!(await auth.openNow())) pmsSays = await auth.serverAccepts(serverToken || token);
   } catch (err) {
     pmsError = err;
   }
@@ -679,13 +685,14 @@ async function aiVerdict(req, token, serverToken) {
 // X-Plex-Token header, or from the original request's query string, which
 // nginx passes on alone (X-PW-Plex-Token: nothing else of the request comes
 // here, so what's searched for, or a playlist's name, doesn't either).
-// { token, single }: single, when nothing else in the request could be
-// read by Plex as another sign-in (no other X-Plex-Token header, nor one
-// that's different in the query string, and "token", in any case or with
-// %-escapes, nowhere else in it, as nginx counts: see nginx.conf). Plex
-// might read the other instead, and take one it doesn't know for its
-// owner's: so where the server lets this container in, anyone but its owner
-// gets through only with a single one.
+// { token, single, tokenPath }: single, when nothing else in the request
+// could be read by Plex as another sign-in (no other X-Plex-Token header, nor
+// one that's different in the query string, nor one written there with
+// %-escapes, and "token", in any case or with %-escapes, nowhere else in it,
+// as nginx counts: see nginx.conf). Plex might read the other instead, and
+// take one it doesn't know for its owner's: so where the server lets this
+// container in, anyone but its owner gets through only with a single one.
+// tokenPath: it's to Plex's own /security/token.
 function pmsToken(req) {
   const header = req.headers['x-plex-token'];
   let query = null;
@@ -697,10 +704,12 @@ function pmsToken(req) {
     /* not a token */
   }
   const token = validToken(header) ? header : query;
-  const [seen, tokenPath] = String(req.headers['x-pw-pms-tokens'] || '').split(' ');
-  const expected = (tokenPath === '1' ? 1 : 0) + (given ? 1 : 0);
-  const single = !!token && seen === String(expected) && (header === undefined || header === token) && (!given || query === token);
-  return { token, single };
+  const [seen, path] = String(req.headers['x-pw-pms-tokens'] || '').split(' ');
+  const tokenPath = path === '1';
+  const expected = (tokenPath ? 1 : 0) + (given ? 1 : 0);
+  // (In the query string, as it's written there too: Plex is given it so.)
+  const single = !!token && seen === String(expected) && (header === undefined || header === token) && (!given || (query === token && given === token));
+  return { token, single, tokenPath };
 }
 
 // Called by nginx (auth_request) for each request to /pms/, with its
@@ -710,89 +719,124 @@ function pmsToken(req) {
 // request from here for its owner's, whoever sends it: they could see and
 // change everything as the owner. So the server is asked, for each request,
 // whether it lets this container in right now (see openNow in plex.js:
-// the owner can change that at any moment). Where it doesn't, everything
-// goes through, as Plex checks it. Where it does, nothing goes through that
-// the server would take for its owner's, unless it's theirs:
+// the owner can change that at any moment), the way nginx reaches it (see
+// pmsAnswer there). Where it doesn't, everything goes through, as Plex
+// checks it. Where it does, nothing goes through that the server would take
+// for its owner's, unless it's theirs:
 //   - the owner's own sign-in, as plex.tv says it is (or, while plex.tv
 //     isn't answering, one it said was: see owners.js);
 //   - anyone else's once the server, asked with it there and then, has
-//     refused it what only its owner may see (see showsOwnersOnly): the
-//     server knows them as themselves. Only with that one sign-in in the
-//     request, and nothing Plex might read as another (see pmsToken). Not
-//     for a stream (`stream`, the server's notifications): that stays open
-//     for hours, and is the owner's;
-//   - a session of the offline key's (see offline.js), whose requests the
-//     server does take for its owner's: that's what the key is for.
+//     refused it what only its owner may see, while it showed that to a
+//     request it takes for its owner's (see askOwnersOnly): the server
+//     knows them as themselves. Only with that one sign-in in the request,
+//     and nothing Plex might read as another (see pmsToken). Not for a
+//     stream (`stream`, the server's notifications): that stays open for
+//     hours, and is the owner's;
+//   - a session of the offline key's (see offlinePass).
 // Anything that can't be told is refused (503), never let through.
 async function pmsAuth(req, res, { stream = false } = {}) {
-  const { token, single } = pmsToken(req);
+  const { token, single, tokenPath } = pmsToken(req);
   if (!token) return send(res, 401);
   // (A WebSocket, or an event stream, at any path: see nginx.conf.)
   if (req.headers['x-pw-pms-stream']) stream = true;
-  if (isOfflineToken(token)) return send(res, offline.valid(token) ? 204 : 401);
+  // Nothing at all till the server's known (and, at an https:// network
+  // address, its certificate checked: see loadServerId).
+  if (!(await auth.loadServerId())) return send(res, 503);
+  if (isOfflineToken(token)) return offlinePass(res, token, { stream, single, tokenPath });
+  const fp = fingerprintOf(token);
   if (auth.ownerLately(token)) {
-    owners?.add(fingerprintOf(token));
+    owners?.add(fp);
     return send(res, 204);
   }
-  let takenForOwner = false;
+  // One plex.tv said was the owner's (in the last 30 days: see owners.js):
+  // asked about again straight away, as below, and not counted, so nobody
+  // else's requests can keep the owner out (see pmsCheckable).
+  const theirs = !!owners?.has(fp);
+  let taken = false;
+  let told = true;
   try {
     if (!(await auth.openNow())) return send(res, 204);
-    // (Found again now if it was last found otherwise.)
-    let state = await auth.serverState();
-    if (!state.open) state = await auth.serverState({ fresh: true });
-    if (!stream && single && state.tells) {
+    if (!theirs && !stream && single) {
       if (!pmsCheckable(req, token)) return send(res, 503);
-      if (!(await auth.showsOwnersOnly(token))) {
-        refusedOwnersOnly(token);
-        return send(res, 204);
-      }
-      takenForOwner = true;
+      const said = await auth.askOwnersOnly(token);
+      askedAbout(token);
+      if (said === 'refused') return send(res, 204);
+      taken = said === 'shown';
     }
   } catch (err) {
+    // (It can't be told: only the owner, as plex.tv says below, and nobody
+    // else.)
     log.debug(`couldn't check a request to /pms/ with the Plex server: ${err.message}`);
-    return send(res, 503);
+    told = false;
   }
-  const owner = await ownerOf(req, token);
+  const owner = await ownerOf(req, token, { counted: !theirs });
   if (owner === 'owner') return send(res, 204);
-  // (Said now and then: why friends can't use the server through /pms/.)
-  if (owner === 'not' && takenForOwner && Date.now() > takenSaidUntil) {
+  if (!told) return send(res, 503);
+  // (Said now and then: why friends can't use the server through /pms/.
+  // Not for those who can't use it at all: a server that knows its people
+  // takes sign-ins it doesn't know for its owner's.)
+  if (owner === 'friend' && taken && Date.now() > takenSaidUntil) {
     takenSaidUntil = Date.now() + 6 * 3600000;
     log.warn(
-      'the Plex server at PLEX_SERVER_URL took someone else\'s Plex sign-in, from this container, for yours (it showed them what only you may see), so they were refused at /pms/, as everyone but you is while it lets this container in without signing in. ' +
+      'the Plex server at PLEX_SERVER_URL took someone else\'s Plex sign-in, from this container, for yours (a friend\'s, who can use the server: it showed them what only you may see), so they were refused at /pms/, as everyone but you is while it lets this container in without signing in. ' +
         'Some Plex servers do that for everyone from an address on their list of networks allowed without auth: see "Offline mode" in docs/configuration.md.',
     );
   }
-  return send(res, { not: 403, invalid: 401 }[owner] || 503);
+  return send(res, { friend: 403, not: 403, invalid: 401 }[owner] || 503);
 }
 let takenSaidUntil = 0;
 
+// A session of the offline key's (see offline.js). Its requests go to the
+// server without its sign-in (nginx leaves it out, as this says: see
+// 40-plexamp-web.sh), so the server takes them as it takes this container's
+// own without one, for its owner's, as openNow found it does: that's what
+// the key is for. And the session's sign-in never leaves this container.
+// Only for what the app does with it: not the notification stream (it stays
+// open for hours, past the session's end), nor Plex's own sign-ins
+// (/security/token: they'd last past it too), and only with that one
+// sign-in in the request (nothing Plex might read as one, and nginx leaves
+// out what's checked here).
+function offlinePass(res, token, { stream, single, tokenPath }) {
+  if (!offline.valid(token)) return send(res, 401);
+  if (stream || tokenPath || !single) return send(res, 403);
+  return send(res, 204, undefined, { 'X-PW-PMS-Offline': '1' });
+}
+
 // Where the Plex server lets this container in, it's asked about each
 // request to /pms/ that isn't its owner's (see pmsAuth). Sign-ins it hasn't
-// refused lately count for their address, a limited number a minute, so
-// made-up ones can't have it asked without end. (Those it has are still
-// asked each time: only not counted.)
+// been asked about lately count for their address, a limited number a
+// minute, so made-up ones can't have it asked without end. (Those it has are
+// still asked each time: only not counted. Nor is the owner's: see pmsAuth.)
 const PMS_NEW_CHECKS_PER_MINUTE = 60;
-const refusedLately = new Map(); // token hash -> until, oldest first
+const askedLately = new Map(); // token hash -> until, oldest first
 function pmsCheckable(req, token) {
   // (Nor while the server's being asked about it already: those wait for
   // that answer.)
-  if ((refusedLately.get(fingerprintOf(token)) || 0) > Date.now() || auth.askingAbout(token)) return true;
+  if ((askedLately.get(fingerprintOf(token)) || 0) > Date.now() || auth.askingAbout(token)) return true;
   return allow(`pms-checks|${clientIp(req)}`, PMS_NEW_CHECKS_PER_MINUTE);
 }
-function refusedOwnersOnly(token) {
+function askedAbout(token) {
   const key = fingerprintOf(token);
-  refusedLately.delete(key);
-  refusedLately.set(key, Date.now() + 10 * 60000);
-  if (refusedLately.size > 5000) refusedLately.delete(refusedLately.keys().next().value);
+  askedLately.delete(key);
+  askedLately.set(key, Date.now() + 10 * 60000);
+  if (askedLately.size > 5000) askedLately.delete(askedLately.keys().next().value);
 }
 
-// Is this the sign-in of the Plex server's owner? 'owner', 'not' (someone
-// else's), 'invalid' (plex.tv says it's no sign-in), or 'unknown' (it can't
-// be told just now). As plex.tv says; while plex.tv isn't answering, by the
+// Is this the sign-in of the Plex server's owner? 'owner', 'friend' (someone
+// else's, who can use the server), 'not' (someone else's, who can't),
+// 'invalid' (plex.tv says it's no sign-in), or 'unknown' (it can't be told
+// just now). As plex.tv says; while plex.tv isn't answering, by the
 // fingerprints of the owner's sign-ins it said were theirs (see owners.js),
-// and plex.tv is asked again now and then.
-async function ownerOf(req, token) {
+// and plex.tv is asked again now and then. Asked once for a sign-in, however
+// many requests wait for it. (`counted`: against the sign-ins checked a
+// minute from the address: see checkable.)
+const owning = new Map(); // fingerprint -> its check under way
+function ownerOf(req, token, { counted = true } = {}) {
   const fp = fingerprintOf(token);
+  if (!owning.has(fp)) owning.set(fp, findOwner(req, token, fp, counted).finally(() => owning.delete(fp)));
+  return owning.get(fp);
+}
+async function findOwner(req, token, fp, counted) {
   const remembered = () => {
     if (!owners?.has(fp)) return false;
     owners.add(fp);
@@ -803,15 +847,16 @@ async function ownerOf(req, token) {
     if (remembered()) return 'owner';
   }
   try {
-    await identifyFor(req, token);
+    await identifyFor(req, token, { counted });
     const serverId = await auth.loadServerId();
     if (!serverId) return 'unknown';
-    if ((await auth.serverAccess(token, serverId)).owned) {
+    const access = await auth.serverAccess(token, serverId);
+    if (access.owned) {
       owners?.add(fp);
       return 'owner';
     }
     owners?.drop(fp);
-    return 'not';
+    return access.ok ? 'friend' : 'not';
   } catch (err) {
     if (err instanceof AuthError) {
       owners?.drop(fp);

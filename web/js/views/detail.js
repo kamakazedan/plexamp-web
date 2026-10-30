@@ -470,7 +470,7 @@ export async function artistView({ el, params, onDispose }) {
   // (Missing albums on artist pages). (Not for Various Artists: theirs is
   // no one's discography.)
   const various = norm(artist.title) === 'various artists';
-  const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums')) && !various;
+  const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums') || mbOn('mbNamesakes')) && !various;
   const mbP = wantMB ? artistOnMB(artist.title, { id: mbidOf(artist) }).catch(() => null) : Promise.resolve(null);
   // Plex's rows for the page (hubs.js): which kind each of their albums is,
   // and what they appear on.
@@ -536,13 +536,14 @@ export async function artistView({ el, params, onDispose }) {
   // of the others of their name, once their albums and their own release
   // groups are in, and only where one of their albums isn't one MusicBrainz
   // has for them. Without Plex's word for who they are (their MusicBrainz
-  // id), they're the one of the name MusicBrainz has most of the page's
-  // albums for, if that's plain (two at least, and more than the one it
-  // found by name).
-  const byId = !!mbidOf(artist);
+  // id, and MusicBrainz found them by it: one it doesn't know has it look
+  // them up by name), they're the one of the name MusicBrainz has most of
+  // the page's albums for, if that's plain (two at least, and more than the
+  // one it found by name).
   let apartAsked = false;
   const lookApart = async () => {
     if (apartAsked || various || !mbOn('mbNamesakes') || !mb?.artist || !st.settled) return;
+    const byId = !!mbidOf(artist) && mb.artist.id === mbidOf(artist);
     const albums = albumsNow();
     const near = (gs, m) => (gs || []).some((g) => sameTitle(albumKey(g.title), albumKey(m.title)));
     if (albums.every((m) => near(mb.groups, m))) return;
@@ -557,15 +558,17 @@ export async function artistView({ el, params, onDispose }) {
     let others = (got?.namesakes || []).filter((n) => n?.id && n.id !== mb.artist.id && Array.isArray(n.groups));
     if (!others.length) return;
     const items = albums.map((m) => ({ id: idOf(m), title: m.title, year: Number(year(m)) || null }));
+    let capped = !!(got?.capped ?? mb.capped);
     if (!byId) {
       const count = (gs) => albums.filter((m) => near(gs, m)).length;
       const best = others.reduce((a, n) => (count(n.groups) > count(a.groups) ? n : a));
       if (count(best.groups) >= 2 && count(best.groups) > count(mb.groups)) {
-        others = [{ id: mb.artist.id, name: mb.artist.name, note: '', groups: mb.groups }, ...others.filter((n) => n !== best)];
-        mb = { ...mb, artist: { ...mb.artist, id: best.id, name: best.name }, groups: best.groups };
+        others = [{ id: mb.artist.id, name: mb.artist.name, note: '', groups: mb.groups, capped }, ...others.filter((n) => n !== best)];
+        mb = { ...mb, artist: { ...mb.artist, id: best.id, name: best.name }, groups: best.groups, capped: !!best.capped };
+        capped = !!best.capped;
       }
     }
-    apart = apartFromNamesakes(items, { groups: mb.groups, byId, namesakes: others });
+    apart = apartFromNamesakes(items, { name: artist.title, groups: mb.groups, capped, byId, namesakes: others });
     paintAlbums();
     paintPopular();
   };

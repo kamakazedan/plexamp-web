@@ -59,7 +59,9 @@
 #                       be signed in to with this key, as your Plex server's
 #                       owner, till plex.tv is back. Needs your server to let
 #                       the player in without signing in: see
-#                       docs/configuration.md. 12 to 200 characters, no spaces.
+#                       docs/configuration.md. 12 to 200 letters, digits and
+#                       . _ ~ + / = : , @ - (openssl rand -base64 24 makes
+#                       one; a # or $ would be read otherwise here).
 #   OFFLINE_FROM        Where the key can be used from: "private" (the
 #                       default: your own networks), "any", or addresses and
 #                       networks, such as 192.168.1.0/24.

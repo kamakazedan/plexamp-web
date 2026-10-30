@@ -23,7 +23,7 @@ TV="PLEX_TV_URL=http://pw-plex:32400"
 CERTS=""
 
 cleanup() {
-    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-bad >/dev/null 2>&1 || true
+    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-web11 pw-bad >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     docker volume rm "$DATA_VOLUME" "$LINK_VOLUME" >/dev/null 2>&1 || true
     if [ -n "$CERTS" ]; then rm -rf "$CERTS"; fi
@@ -123,6 +123,14 @@ expect "Plex proxy accepts the token as a header" 200 "$(c -H 'X-Plex-Token: t' 
 expect "converted streams' session files need no token" 200 "$(c "$W/pms/audio/:/transcode/universal/session/abc-1/base/index.m3u8")"
 expect "...but only real session paths" 401 "$(c --path-as-is "$W/pms/audio/:/transcode/universal/session/abc-1/../../../../../library/sections")"
 contains "Plex proxy keeps the query string" '"Music [Hi-Res]"' "$(cb "$W/pms/library/sections?X-Plex-Token=t")"
+# Nothing of where a request came from reaches Plex but its connection, from
+# this container: Plex judges by a request's address whether to let it in
+# without signing in (some versions by X-Forwarded-For), and the service's
+# checks reach it the same way.
+c "http://pw-plex:32400/__mock/seen?reset=1" >/dev/null
+c -H 'X-Forwarded-For: 10.66.66.66' -H 'X-Real-IP: 10.66.66.66' -H 'Forwarded: for=10.66.66.66' -H 'True-Client-IP: 10.66.66.66' -H 'X-Client-IP: 10.66.66.66' \
+    "$W/pms/library/sections?X-Plex-Token=t&pwtest=fwd" >/dev/null
+contains "Plex is told nothing of where a request came from (not the browser's address, nor what it says)" '"mark": "fwd", "token": "query", "offline": false, "forwarded": []' "$(cb "http://pw-plex:32400/__mock/seen")"
 headers() { docker run --rm --network "$NET" "$CURL" -sS -o /dev/null -D - --max-time 20 "$@" 2>/dev/null | tr -d '\r' || true; }
 contains "artwork can be kept by the browser for a day" "Cache-Control: private, max-age=86400" \
     "$(headers "$W/pms/photo/:/transcode?url=/library/metadata/120/thumb/1&width=100&height=100&X-Plex-Token=t")"
@@ -398,6 +406,7 @@ docker run -d --name pw-web5 --network "$NET" -e "$TV" -e PLEX_SERVER_URL=http:/
     -e OLLAMA_URL=http://pw-ollama:11434 "$IMAGE" >/dev/null
 wait_http pw-web5 http://pw-web5/
 wait_service pw-web5
+expect "open server: the service asks the server through nginx, by a socket in a folder of the service's alone" "root:nginx 750" "$(docker exec pw-web5 stat -c '%U:%G %a' /run/plexamp-web/pms 2>&1)"
 expect "open server: made-up tokens refused at /pms/" 401 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=made-up-token")"
 expect "open server: accounts without access refused at /pms/" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t3")"
 expect "open server: the owner still gets in" 200 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t")"
@@ -434,6 +443,7 @@ expect "open server: ...or tucked in another value" 403 "$(c "http://pw-web5/pms
 expect "open server: ...or after a semicolon" 403 "$(c "http://pw-web5/pms/library/sections?a=1;X-Plex-Token=made-up-token&X-Plex-Token=t2")"
 expect "open server: a header token other than the query string's is the one checked (made up here)" 401 "$(c -H 'X-Plex-Token: made-up-token' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
 expect "open server: the same token in both goes through" 200 "$(c -H 'X-Plex-Token: t2' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
+expect "open server: ...but not a friend's written with %-escapes (Plex is given it so)" 403 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t%32")"
 expect "open server: Plex's own /security/token, for a friend" 200 "$(c "http://pw-web5/pms/security/token?X-Plex-Token=t2")"
 expect "open server: a friend's WebSocket, at any path, is refused" 403 "$(c --max-time 3 -H 'Connection: Upgrade' -H 'Upgrade: websocket' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
 expect "open server: ...and an event stream" 403 "$(c --max-time 3 -H 'Accept: text/event-stream' "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
@@ -458,6 +468,10 @@ owners="$(docker exec pw-web5 cat /data/owners.json 2>/dev/null || true)"
 contains "the owner's sign-ins are kept in /data" '"owners":{"' "$owners"
 lacks "...as fingerprints, never as they are" '"t"' "$owners"
 c "http://pw-plex:32400/__mock/config?tv=up" >/dev/null
+# The service asks the server only the way nginx reaches it: without nginx's
+# socket it can't, and nothing that needs asking gets through.
+docker exec pw-web5 rm -f /run/plexamp-web/pms/plex.sock
+expect "open server: the service's checks go only through nginx (without its socket, a friend is refused)" 500 "$(c "http://pw-web5/pms/library/sections?X-Plex-Token=t2")"
 
 # ---------- 5b. Offline mode: the offline key, while plex.tv isn't answering ----------
 # (Its times shortened, for the test: see server/index.js.)
@@ -477,7 +491,15 @@ contains "offline mode: on, once plex.tv hasn't answered for a while" '"on":true
 expect "offline mode: a wrong key refused" 401 "$(offline_key not-the-offline-key)"
 session="$(cb -H 'Content-Type: application/json' -X POST -d '{"key":"offline-key-for-tests"}' http://pw-web5b/api/offline/session | sed -n 's/.*"token":"\(pwoff-[0-9a-f]*\)".*/\1/p')"
 expect "offline mode: the key signs in" yes "$([ -n "$session" ] && echo yes || echo no)"
-expect "offline mode: ...and plays the server, as it lets the player in" 200 "$(c "http://pw-web5b/pms/library/sections?X-Plex-Token=$session")"
+c "http://pw-plex:32400/__mock/seen?reset=1" >/dev/null
+expect "offline mode: ...and plays the server, as it lets the player in" 200 "$(c "http://pw-web5b/pms/library/sections?X-Plex-Token=$session&pwtest=off1")"
+expect "offline mode: ...with its sign-in in the header too" 200 "$(c -H "X-Plex-Token: $session" "http://pw-web5b/pms/library/sections?pwtest=off2")"
+seen="$(cb "http://pw-plex:32400/__mock/seen")"
+contains "offline mode: its requests reach the server without its sign-in (that stays in the player)" '"mark": "off1", "token": "none"' "$seen"
+contains "offline mode: ...from the header too" '"mark": "off2", "token": "none"' "$seen"
+lacks "offline mode: ...never with it" '"offline": true' "$seen"
+expect "offline mode: not the notification stream (it would outlast the session)" 403 "$(c --max-time 3 "http://pw-web5b/pms/:/eventsource/notifications?X-Plex-Token=$session")"
+expect "offline mode: ...nor Plex's own sign-ins" 403 "$(c "http://pw-web5b/pms/security/token?X-Plex-Token=$session")"
 expect "offline mode: ...but isn't a Plex sign-in anywhere else" 403 "$(c -H "X-Plex-Token: $session" "http://pw-web5b/api/devices?device=chk-device-1&name=Check&server=mock-server-1&wait=0")"
 c "http://pw-plex:32400/__mock/config?tv=up" >/dev/null
 c http://pw-web5b/api/offline >/dev/null
@@ -518,6 +540,14 @@ expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: music
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 contains "OFFLINE_KEY without PLEX_SERVER_URL: off, saying why" "offline mode needs PLEX_SERVER_URL" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
+
+# ---------- 7a. Without Node.js: no Plex proxy (nothing would check what goes through it) ----------
+docker run -d --name pw-web11 --network "$NET" -e NODE_BIN=/no/node -e PLEX_SERVER_URL=http://pw-plex:32400 "$IMAGE" >/dev/null
+wait_http pw-web11 http://pw-web11/
+expect "without the service: /pms/ refused, as nothing would check what goes through it" 503 "$(c "http://pw-web11/pms/library/sections?X-Plex-Token=t")"
+lacks "...and the app isn't told of it" "serverProxy" "$(cb http://pw-web11/config.js)"
+contains "...saying why" "the Plex proxy (/pms/, for PLEX_SERVER_URL) needs Node.js" "$(docker logs pw-web11 2>&1)"
+docker rm -f pw-web11 >/dev/null
 
 # ---------- 7b. Playing on other Plex players off ----------
 docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e MUSICBRAINZ_ADVANCED=true -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
@@ -641,6 +671,7 @@ bad "rejects a SPOTIFY_FILE_IMPORT that isn't true or false" "SPOTIFY_FILE_IMPOR
 bad "rejects a SPOTIFY_URL with a path in it" "SPOTIFY_URL isn't a plain address" -e SPOTIFY_IMPORT=true -e 'SPOTIFY_URL=http://spotify.box/x'
 bad "rejects an OFFLINE_KEY that's too short" "OFFLINE_KEY must be 12 to 200 characters long" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=short
 bad "rejects an OFFLINE_KEY with a space in it" "OFFLINE_KEY must be 12 to 200 characters long" -e PLEX_SERVER_URL=http://plex.box:32400 -e 'OFFLINE_KEY=a key with spaces'
+bad "...or with a # in it (a settings file could cut it short there)" "openssl rand -base64 24 makes one" -e PLEX_SERVER_URL=http://plex.box:32400 -e 'OFFLINE_KEY=offline-key#for-tests'
 bad "rejects an OFFLINE_FROM that isn't addresses" "OFFLINE_FROM: home isn't an address or a network" -e PLEX_SERVER_URL=http://plex.box:32400 -e OFFLINE_KEY=offline-key-for-tests -e OFFLINE_FROM=home
 docker rm -f pw-bad >/dev/null 2>&1 || true
 docker run -d --name pw-bad -e 'PLEX_SERVER_URL=http://user:hunter2@plex.box:32400' "$IMAGE" >/dev/null

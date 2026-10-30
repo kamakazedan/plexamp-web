@@ -208,9 +208,10 @@ SPOTIFY_FILE_IMPORT=
 # read from Spotify's public page for it (see docs/configuration.md).
 SPOTIFY_LINK_IMPORT=
 # Offline mode, with PLEX_SERVER_URL: while plex.tv isn't answering, this
-# player can be signed in to with this key (12 to 200 characters, no spaces),
-# as your Plex server lets it in without signing in, which is as you, its
-# owner (see docs/configuration.md). Empty: no offline mode.
+# player can be signed in to with this key, as your Plex server lets it in
+# without signing in, which is as you, its owner (see docs/configuration.md):
+# 12 to 200 letters, digits and . _ ~ + / = : , @ - (openssl rand -base64 24
+# makes one). Empty: no offline mode.
 OFFLINE_KEY=
 # Where the offline key can be used from: private (your own networks), any,
 # or addresses and networks (192.168.1.0/24, say), separated by commas.
@@ -224,7 +225,7 @@ chmod 600 "$ENV_FILE"
 detail "nginx: /etc/nginx/conf.d/default.conf from the app's docker/nginx.conf, in place of Debian's default site"
 rm -f /etc/nginx/sites-enabled/default
 sed -e "s#root /usr/share/nginx/html;#root $BASE/html;#" "$BASE/app/docker/nginx.conf" >/etc/nginx/conf.d/default.conf
-for inc in pms-proxy ai-proxy api log; do touch "/etc/nginx/conf.d/$inc.inc"; done
+for inc in pms-proxy pms-probe ai-proxy api log; do touch "/etc/nginx/conf.d/$inc.inc"; done
 if [ -n "$was" ] && [ "$was" != "${version:-}" ]; then
     say "Updated plexamp-web from $was to ${version:-?} in $BASE"
 else
@@ -365,10 +366,16 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 UNIT
+# (nginx makes a socket for the service's requests to the Plex server as it
+# starts: one left by an nginx that stopped short would keep it from
+# starting again.)
 cat >/etc/systemd/system/nginx.service.d/plexamp-web.conf <<UNIT
 [Unit]
 Requires=plexamp-web-config.service
 After=plexamp-web-config.service
+
+[Service]
+ExecStartPre=-/bin/rm -f /run/plexamp-web/pms/plex.sock
 UNIT
 
 if [ "$systemd" = true ]; then

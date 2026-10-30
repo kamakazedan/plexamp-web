@@ -17,10 +17,10 @@ import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlay
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
 import { applyNote, applyMerge, applyRestore, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync, chownSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync, chownSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -994,6 +994,21 @@ test('MusicBrainz features: an artist\'s release groups (100 to a page) and an a
   assert.equal(mb.knownAlbum('Sigur Rós', 'Takk...', { genres: true }), undefined, 'its genres not asked about yet');
   assert.equal(mb.knownAlbum('Someone Never Asked About', 'X'), undefined);
   assert.equal(mb.knownAlbum('Nobody At All', 'Anything'), null);
+  assert.equal(groups.capped, undefined); // (all they have)
+});
+
+test('MusicBrainz features: an artist with more release groups than are asked for has a list that says so, as it\'s kept too', async () => {
+  const { asked, fetchImpl } = fakeMusicBrainz({ groups: 600 });
+  const kept = new MBKept();
+  const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(kept);
+  const info = await mb.artistInfo('Sigur Rós');
+  const groups = await mb.releaseGroups(info.id);
+  assert.equal(groups.length, MB_ADVANCED_LIMITS.groupPages * 100);
+  assert.equal(groups.capped, true);
+  assert.equal(asked.filter((x) => x.path === '/ws/2/release-group').length, MB_ADVANCED_LIMITS.groupPages);
+  const again = await new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(kept).releaseGroups(info.id);
+  assert.equal(again.capped, true);
+  assert.equal(again.length, groups.length);
 });
 
 test('MusicBrainz features: albums not known yet are looked up in the background, after anything someone\'s waiting on', async () => {
@@ -1984,15 +1999,24 @@ test('missing tracks: the app\'s rules note a playlist as before (applyNote)', (
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A Plex server and plex.tv, as the service sees them. Dan (owner-token)
-// owns the server, which Sam (sam-token) can use. state.open: the server
-// lets the service in without signing in, taking its requests for its
-// owner's: every one (honour false), or those without a sign-in it knows
-// (honour true: its people's are theirs). state.down: plex.tv answers 503.
+// owns the server, which Sam (sam-token) can use; Alex (alex-token) has a
+// Plex account, but can't. state.open: the server lets the service in
+// without signing in, taking its requests for its owner's: every one
+// (honour false), or those without a sign-in it knows (honour true: its
+// people's are theirs). state.nobody: it shows nobody what only its owner
+// may see (its settings, who's playing); state.tokenless: what it answers
+// a request for its library without a sign-in (0: as above). state.down:
+// plex.tv answers 503.
 async function fakePlex() {
-  const state = { open: false, honour: false, down: false, noSessions: false, broken: false };
-  const accounts = { 'owner-token': { id: 1, uuid: 'u1', username: 'dan', friendlyName: 'Dan' }, 'sam-token': { id: 2, uuid: 'u2', username: 'sam', friendlyName: 'Sam' } };
+  const state = { open: false, honour: false, down: false, noSessions: false, broken: false, nobody: false, tokenless: 0 };
+  const accounts = {
+    'owner-token': { id: 1, uuid: 'u1', username: 'dan', friendlyName: 'Dan' },
+    'sam-token': { id: 2, uuid: 'u2', username: 'sam', friendlyName: 'Sam' },
+    'alex-token': { id: 3, uuid: 'u3', username: 'alex', friendlyName: 'Alex' },
+  };
   const known = new Set(['owner-token', 'sam-token']); // the server's people's sign-ins
   const asked = []; // { path, token } the server was asked
+  const tvAsked = []; // { path, token } plex.tv was asked
   const tvTokens = [];
   const asOwner = (t) => t === 'owner-token' || (state.open && !(state.honour && known.has(t)));
   const json = (res, status, body) => {
@@ -2005,20 +2029,24 @@ async function fakePlex() {
     asked.push({ path: u.pathname, token: t });
     if (state.broken) return json(res, 503, {});
     if (u.pathname === '/identity') return json(res, 200, { MediaContainer: { machineIdentifier: 'srv-1' } });
-    if (u.pathname === '/library/sections') return json(res, known.has(t) || asOwner(t) ? 200 : 401, { MediaContainer: { size: 1 } });
-    if (u.pathname === '/:/prefs' || (u.pathname === '/status/sessions' && !state.noSessions)) return json(res, asOwner(t) ? 200 : 401, { MediaContainer: {} });
+    if (u.pathname === '/library/sections') {
+      if (!t && state.tokenless) return json(res, state.tokenless, {});
+      return json(res, known.has(t) || asOwner(t) ? 200 : 401, { MediaContainer: { size: 1 } });
+    }
+    if (u.pathname === '/:/prefs' || (u.pathname === '/status/sessions' && !state.noSessions)) return json(res, asOwner(t) && !state.nobody ? 200 : 401, { MediaContainer: {} });
     return json(res, 404, {});
   });
   const tv = createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     const t = req.headers['x-plex-token'] || '';
     if (t) tvTokens.push(t);
+    tvAsked.push({ path: u.pathname, token: t });
     if (state.down) return json(res, 503, {});
     if (u.pathname === '/api/v2/ping') return json(res, 200, { pong: true });
     const a = accounts[t];
     if (!a) return json(res, 401, {});
     if (u.pathname === '/api/v2/user') return json(res, 200, a);
-    if (u.pathname === '/api/v2/resources') return json(res, 200, [{ clientIdentifier: 'srv-1', provides: 'server', owned: t === 'owner-token' }]);
+    if (u.pathname === '/api/v2/resources') return json(res, 200, t === 'alex-token' ? [] : [{ clientIdentifier: 'srv-1', provides: 'server', owned: t === 'owner-token' }]);
     return json(res, 404, {});
   });
   await Promise.all([pms, tv].map((x) => new Promise((r) => x.listen(0, '127.0.0.1', r))));
@@ -2026,6 +2054,7 @@ async function fakePlex() {
     state,
     known,
     asked,
+    tvAsked,
     tvTokens,
     pms: `http://127.0.0.1:${pms.address().port}`,
     tv: `http://127.0.0.1:${tv.address().port}`,
@@ -2100,7 +2129,7 @@ function offlineSetup({ key = 'correct horse battery', open = true } = {}) {
     nudgePlexTv() {},
     plexTvDown: async ({ forMs = 0 } = {}) => tv.down && now - tv.since >= forMs,
     plexTvUpFor: (ms) => !tv.down && now - tv.since >= ms,
-    serverState: async () => ({ open, tells: true }),
+    openNow: async () => open,
   };
   const off = new Offline({ key, auth, now: () => now });
   return { off, tv, key, tick: (ms) => (now += ms), at: () => now };
@@ -2146,7 +2175,7 @@ test('offline mode: the key only once plex.tv hasn\'t answered for a while, wher
   assert.equal((await none.off.state('10.0.0.2')).on, false);
 });
 
-test('offline mode: a few tries a minute from an address, and none for the rest of the hour once too many wrong keys have come from anywhere', async () => {
+test('offline mode: a few tries a minute from an address, and once too many wrong keys have come from anywhere, none for the rest of the hour from where one came', async () => {
   const { off, key, tick } = offlineSetup();
   for (let i = 0; i < OFFLINE_LIMITS.triesPerMinute; i++) await assert.rejects(off.signIn('wrong', '10.0.0.1'), (e) => e.status === 401);
   await assert.rejects(off.signIn(key, '10.0.0.1'), (e) => e.status === 429); // (the right one too)
@@ -2154,47 +2183,120 @@ test('offline mode: a few tries a minute from an address, and none for the rest 
   tick(60001);
   assert.ok((await off.signIn(key, '10.0.0.1')).token);
   for (let i = OFFLINE_LIMITS.triesPerMinute; i < OFFLINE_LIMITS.wrongPerHour; i++) await assert.rejects(off.signIn('wrong', `10.0.1.${i}`), (e) => e.status === 401);
-  await assert.rejects(off.signIn(key, '10.0.2.1'), (e) => e.status === 429 && /hour/.test(e.message));
-  tick(3600001);
+  await assert.rejects(off.signIn(key, '10.0.1.9'), (e) => e.status === 429 && /hour/.test(e.message));
+  await assert.rejects(off.signIn(key, '10.0.0.1'), (e) => e.status === 429 && /hour/.test(e.message));
+  // ...but from anywhere else, the right key: nobody else's wrong ones keep it out
   assert.ok((await off.signIn(key, '10.0.2.1')).token);
+  await assert.rejects(off.signIn('wrong', '10.0.2.2'), (e) => e.status === 401);
+  await assert.rejects(off.signIn(key, '10.0.2.2'), (e) => e.status === 429 && /hour/.test(e.message));
+  tick(3600001);
+  assert.ok((await off.signIn(key, '10.0.1.9')).token);
 });
 
-test('/pms/: where the Plex server lets this container in, it\'s asked about each request with that sign-in, never from what it said before', async () => {
+test('/pms/: where the Plex server lets this container in, it\'s asked about each request with that sign-in, there and then, never from what it said before', async () => {
   const p = await fakePlex();
   try {
     const auth = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms });
     assert.equal(await auth.openNow(), false);
-    assert.deepEqual(await auth.serverState(), { open: false, tells: false });
     p.state.open = true;
     p.state.honour = true;
     assert.equal(await auth.openNow(), true);
-    assert.deepEqual(await auth.serverState({ fresh: true }), { open: true, tells: true });
     // (Asked without a sign-in, for the server to check nothing with plex.tv.)
     assert.ok(p.asked.filter((a) => a.path === '/library/sections').every((a) => a.token === ''));
     const asks = (t) => p.asked.filter((a) => a.token === t).length;
-    assert.equal(await auth.showsOwnersOnly('sam-token'), false); // refused both: Sam, as himself
-    assert.equal(await auth.showsOwnersOnly('sam-token'), false);
+    // Refused both, while it shows them to its owner (a request without a sign-in, asked along): Sam, as himself
+    assert.equal(await auth.askOwnersOnly('sam-token'), 'refused');
+    assert.equal(await auth.askOwnersOnly('sam-token'), 'refused');
     assert.equal(asks('sam-token'), 4); // (each time)
-    await Promise.all([1, 2, 3].map(() => auth.showsOwnersOnly('sam-token')));
+    const without = asks('');
+    await Promise.all([1, 2, 3].map(() => auth.askOwnersOnly('sam-token')));
     assert.equal(asks('sam-token'), 6); // (those at once share an answer)
-    assert.equal(await auth.showsOwnersOnly('owner-token'), true);
-    assert.equal(await auth.showsOwnersOnly('made-up-token'), true); // (a sign-in it doesn't know: taken for its owner's)
+    assert.equal(asks(''), without + 2); // (the server's own, asked along, too)
+    assert.equal(await auth.askOwnersOnly('owner-token'), 'shown');
+    assert.equal(await auth.askOwnersOnly('made-up-token'), 'shown'); // (a sign-in it doesn't know: taken for its owner's)
     p.known.delete('sam-token'); // his share taken away
-    assert.equal(await auth.showsOwnersOnly('sam-token'), true);
+    assert.equal(await auth.askOwnersOnly('sam-token'), 'shown');
     p.known.add('sam-token');
     p.state.honour = false; // a server that takes everyone here for its owner
-    assert.equal(await auth.showsOwnersOnly('sam-token'), true);
-    // One that can't be asked (what only its owner may see isn't all there)
+    assert.equal(await auth.askOwnersOnly('sam-token'), 'shown');
+    p.state.honour = true;
+    // One that starts showing nobody what only its owner may see: seen there and then, as it's asked along each time, so
+    // a refusal says nothing (only the owner gets through, for a while)
+    p.state.nobody = true;
+    assert.equal(await auth.askOwnersOnly('made-up-token'), 'cant-tell');
+    p.state.nobody = false;
+    assert.equal(await auth.askOwnersOnly('sam-token'), 'cant-tell');
+    // ...or one where some of that isn't there at all
+    const other = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms });
     p.state.noSessions = true;
-    assert.deepEqual(await auth.serverState({ fresh: true }), { open: true, tells: false });
-    // ...and one that doesn't answer: never a yes
+    assert.equal(await other.askOwnersOnly('sam-token'), 'cant-tell');
+    p.state.noSessions = false;
+    // Only Plex's own refusal of a request without a sign-in says the server doesn't let this container in (a 403 from
+    // something in front of it says nothing of that)
+    p.state.open = false;
+    assert.equal(await other.openNow(), false);
+    p.state.tokenless = 403;
+    await assert.rejects(other.openNow());
+    p.state.tokenless = 0;
+    p.state.open = true;
+    // ...and one that doesn't answer: never a yes (and not asked again for a while)
+    const third = new PlexAuth({ plexTvUrl: p.tv, plexServerUrl: p.pms });
     p.state.broken = true;
-    await assert.rejects(auth.showsOwnersOnly('sam-token'));
-    await assert.rejects(auth.openNow());
-    await assert.rejects(auth.serverState({ fresh: true }));
-    await assert.rejects(auth.serverState()); // (for a while)
+    await assert.rejects(third.showsOwnersOnly('sam-token'));
+    await assert.rejects(third.openNow());
+    await assert.rejects(third.askOwnersOnly('sam-token'));
+    p.state.broken = false;
+    await assert.rejects(third.askOwnersOnly('sam-token'));
   } finally {
     p.close();
+  }
+});
+
+// What nginx does for the service's own requests to the Plex server (see
+// pms-probe in 40-plexamp-web.sh): a socket that passes them on to `target`.
+async function socketProxy(dir, target) {
+  const path = join(dir, 'plex.sock');
+  const t = new URL(target);
+  const srv = createServer((req, res) => {
+    const up = httpRequest({ host: t.hostname, port: t.port, path: req.url, method: req.method, headers: req.headers }, (r) => {
+      res.writeHead(r.statusCode, r.headers);
+      r.pipe(res);
+    });
+    up.on('error', () => {
+      res.writeHead(502);
+      res.end();
+    });
+    req.pipe(up);
+  });
+  await new Promise((r) => srv.listen(path, r));
+  chmodSync(path, 0o666); // (as nginx makes it: its folder is what keeps others out)
+  return { path, close: () => srv.close() };
+}
+
+test('/pms/: the Plex server is asked the way nginx reaches it, through nginx, never some other way', async () => {
+  const there = await fakePlex(); // the server, as nginx reaches it: it lets this container in
+  const elsewhere = await fakePlex(); // the same address, some other way (over IPv6, say): it doesn't
+  there.state.open = true;
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const sockets = mkdtempSync(join(tmpdir(), 'pw-nginx-'));
+  chmodSync(sockets, 0o755);
+  const nginx = await socketProxy(sockets, there.pms);
+  const svc = await startService({ PW_SERVICE_PLEX_SERVER_URL: elsewhere.pms, PW_SERVICE_PMS_PROBE: nginx.path, PW_SERVICE_PLEX_TV_URL: there.tv }, dir);
+  const check = (token) =>
+    fetch(`${svc.url}/api/internal/pms-auth`, { headers: { 'X-PW-Route': 'internal', 'X-Real-IP': '192.168.1.20', 'X-PW-PMS-Tokens': '1 0', 'X-PW-Plex-Token': token } }).then((r) => r.status);
+  try {
+    assert.equal(await check('made-up-token'), 401); // (the server nginx reaches would take it for its owner's)
+    assert.equal(await check('sam-token'), 403);
+    assert.equal(await check('owner-token'), 204);
+    assert.equal(elsewhere.asked.length, 0);
+    assert.ok(there.asked.some((a) => a.path === '/identity'));
+  } finally {
+    await svc.stop();
+    nginx.close();
+    there.close();
+    elsewhere.close();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(sockets, { recursive: true, force: true });
   }
 });
 
@@ -2278,18 +2380,22 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
   const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_OFFLINE_KEY: 'the offline key', PW_SERVICE_OFFLINE_TIMING: '400,1500,100,100' };
   let svc = await startService(env, dir);
   // nginx's check of a request to /pms/: its token (from the query string, or the header), where it came from, how often a
-  // token's name is in it (`seen`, as nginx counts: one in the query string, to begin with), and whether it asks for a stream.
-  const check = (token, { stream = false, header = false, seen = header ? 0 : 1, also = {}, asks = '' } = {}) =>
+  // token's name is in it (`seen`, as nginx counts: one in the query string, to begin with), whether it's to
+  // /security/token (`path`), and whether it asks for a stream.
+  const checked = (token, { stream = false, header = false, seen = header ? 0 : 1, path = false, also = {}, asks = '' } = {}) =>
     fetch(`${svc.url}/api/internal/pms-auth${stream ? '/stream' : ''}`, {
       headers: {
         'X-PW-Route': 'internal',
         'X-Real-IP': '192.168.1.20',
-        'X-PW-PMS-Tokens': `${seen} 0`,
+        'X-PW-PMS-Tokens': `${seen} ${path ? 1 : 0}`,
         ...(asks ? { 'X-PW-PMS-Stream': asks } : {}),
         ...(header ? { 'X-Plex-Token': token } : { 'X-PW-Plex-Token': token }),
         ...also,
       },
-    }).then((r) => r.status);
+    });
+  const check = (token, opts) => checked(token, opts).then((r) => r.status);
+  // (What the check tells nginx: an offline-key session's request goes without its sign-in.)
+  const offlineSaid = (token, opts) => checked(token, opts).then((r) => r.headers.get('x-pw-pms-offline'));
   try {
     // A server that doesn't let this container in: everything goes through, as Plex checks it.
     assert.equal(await check('owner-token'), 204);
@@ -2323,6 +2429,10 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     assert.equal(await check('sam-token', { asks: 'events' }), 403);
     assert.equal(await check('owner-token', { seen: 2 }), 204); // (the owner's own: whatever else, it's theirs)
     assert.equal(await check('owner-token', { asks: 'websocket' }), 204);
+    // ...and as it's written in the query string, as Plex is given it: never with %-escapes
+    assert.equal(await check('sam-token', { also: { 'X-PW-Plex-Token': 'sam%2Dtoken' } }), 403);
+    assert.equal(await check('sam-token'), 204);
+    assert.equal(await offlineSaid('owner-token'), null);
     // The offline key, while plex.tv is answering: no
     const signIn = (key, ip = '192.168.1.20') =>
       fetch(`${svc.url}/api/offline/session`, { method: 'POST', headers: { 'X-Real-IP': ip, 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
@@ -2353,6 +2463,15 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     assert.equal(r.status, 200);
     const { token } = await r.json();
     assert.equal(await check(token), 204);
+    // ...its requests going to the server without its sign-in (nginx leaves it out, as the check says), and only as the
+    // app sends them: not the notification stream, nor Plex's own sign-ins (they'd outlast the session), and with
+    // nothing else in them Plex might read as a sign-in
+    assert.equal(await offlineSaid(token), '1');
+    assert.equal(await offlineSaid(token, { header: true }), '1');
+    assert.equal(await check(token, { stream: true }), 403);
+    assert.equal(await check(token, { asks: 'events' }), 403);
+    assert.equal(await check(token, { path: true, seen: 2 }), 403);
+    assert.equal(await check(token, { seen: 2 }), 403);
     const state = (t) => fetch(`${svc.url}/api/offline`, { headers: { 'X-Real-IP': '192.168.1.20', ...(t ? { 'X-Plex-Token': t } : {}) } }).then((x) => x.json());
     assert.deepEqual(await state(token), { configured: true, on: true, plexTv: 'down', why: '', session: 'on' });
     // ...never a Plex sign-in anywhere else, nor sent to plex.tv
@@ -2369,6 +2488,56 @@ test('/pms/, end to end: the owner, friends the server knows as themselves, made
     // Signed out: gone
     r = await fetch(`${svc.url}/api/offline/session`, { method: 'DELETE', headers: { 'X-Plex-Token': token } });
     assert.equal(r.status, 204);
+  } finally {
+    await svc.stop();
+    p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('/pms/: nobody else\'s requests keep the owner out, a sign-in\'s many requests at once ask plex.tv once, and friends are told from those who can\'t use the server', async () => {
+  const p = await fakePlex();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const env = { PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv };
+  let svc = await startService(env, dir);
+  const check = (token, ip = '192.168.1.20') =>
+    fetch(`${svc.url}/api/internal/pms-auth`, { headers: { 'X-PW-Route': 'internal', 'X-Real-IP': ip, 'X-PW-PMS-Tokens': '1 0', 'X-PW-Plex-Token': token } }).then((r) => r.status);
+  const resources = (t) => p.tvAsked.filter((a) => a.path === '/api/v2/resources' && a.token === t).length;
+  const taken = /took someone else's Plex sign-in, from this container, for yours/;
+  try {
+    p.state.open = true;
+    p.state.honour = true;
+    // A server that knows its people takes a sign-in it doesn't know for its owner's: one that can't use it is
+    // refused, and that's nothing to say in the log
+    assert.equal(await check('alex-token'), 403);
+    assert.doesNotMatch(svc.out(), taken);
+    // The owner's many requests at once (a page of pictures): plex.tv is asked once
+    const all = await Promise.all(Array.from({ length: 20 }, () => check('owner-token')));
+    assert.ok(all.every((x) => x === 204), all.join(' '));
+    assert.equal(resources('owner-token'), 1);
+    // Restarted (nothing in memory but what plex.tv said was the owner's sign-in, by its fingerprint), with a server
+    // that takes everyone here for its owner's
+    await svc.stop();
+    svc = await startService(env, dir);
+    p.state.honour = false;
+    // A friend's many requests are counted once: the address can still have new sign-ins checked
+    for (let i = 0; i < 70; i++) assert.equal(await check('sam-token', '192.168.1.30'), 403);
+    assert.equal(await check('made-up-token-0', '192.168.1.30'), 401);
+    assert.match(svc.out(), taken); // (why friends are refused, for the owner)
+    // Made-up sign-ins from the owner's address, as many as it takes to use up what it may have checked...
+    for (let i = 1; i <= 70; i++) await check(`made-up-token-${i}`);
+    assert.equal(await check('made-up-token-99'), 503);
+    // ...don't keep the owner out: asked about again (and plex.tv asked), but not counted
+    assert.equal(await check('owner-token'), 204);
+    assert.equal(resources('owner-token'), 2);
+    // A server whose answer to a request without a sign-in says nothing (a 403, from something in front of it): it
+    // can't be told whether it lets this container in, so the owner gets through, as plex.tv says, and nobody else
+    await svc.stop();
+    svc = await startService(env, dir);
+    p.state.tokenless = 403;
+    assert.equal(await check('sam-token'), 503);
+    assert.equal(await check('made-up-token-100'), 503);
+    assert.equal(await check('owner-token'), 204);
   } finally {
     await svc.stop();
     p.close();
@@ -2412,6 +2581,16 @@ test('MusicBrainz features: an artist\'s albums told from those of another artis
   // Two other artists of the name with the album: which it is can't be told
   const another = { id: 'x', name: 'Maduk', groups: [g('Cocaine', '2026-03-03')] };
   assert.deepEqual(ids(apartFromNamesakes(page, { groups: producer, byId: true, namesakes: [rapper, another] })), ['5', '6']);
+  // Never an album titled as the artist is (artists of one name have those by construction)
+  const selfTitled = { id: 's', name: 'Maduk', groups: [g('Maduk', '2019-01-01')] };
+  const withOwn = [...page, { id: 11, title: 'Maduk', year: 2020 }];
+  assert.deepEqual(ids(apartFromNamesakes(withOwn, { groups: producer, byId: true, namesakes: [selfTitled] })), ['11']); // (were the name not said)
+  assert.equal(apartFromNamesakes(withOwn, { name: 'Maduk', groups: producer, byId: true, namesakes: [selfTitled] }).size, 0);
+  assert.equal(apartFromNamesakes(withOwn, { name: 'MADUK', groups: producer, byId: true, namesakes: [selfTitled] }).size, 0);
+  // ...and nothing where what MusicBrainz lists of either isn't all they have
+  assert.equal(apartFromNamesakes(page, { name: 'Maduk', groups: producer, capped: true, byId: true, namesakes: [rapper] }).size, 0);
+  assert.equal(apartFromNamesakes(page, { name: 'Maduk', groups: producer, byId: true, namesakes: [{ ...rapper, capped: true }] }).size, 0);
+  assert.deepEqual(ids(apartFromNamesakes(page, { name: 'Maduk', groups: producer, byId: true, namesakes: [rapper] })), ['4', '5', '6']);
 });
 
 test('MusicBrainz features: other artists of a name, and their release groups, looked up once and kept', async () => {

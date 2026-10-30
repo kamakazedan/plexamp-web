@@ -49,9 +49,18 @@ export async function signInOffline(key) {
   const { token } = await api('/session', { method: 'POST', body: { key } });
   const uri = proxyUri();
   const ps = new PlexServer({ uri, token });
-  const root = await ps.get('/', null, { timeout: 8000 });
-  const sections = await ps.musicSections();
-  if (!sections.length) throw new Error('That server has no music libraries.');
+  let root;
+  let sections;
+  try {
+    root = await ps.get('/', null, { timeout: 8000 });
+    sections = await ps.musicSections();
+    if (!sections.length) throw new Error('That server has no music libraries.');
+  } catch (err) {
+    // (Not signed in after all: the session goes, rather than lasting on the
+    // player unused.)
+    api('/session', { method: 'DELETE', token }).catch(() => {});
+    throw err;
+  }
   setAuth({ token, username: 'Offline key', thumb: null, manual: true, offline: true });
   setSource({
     serverId: root.machineIdentifier || uri,

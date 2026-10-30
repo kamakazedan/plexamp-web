@@ -342,7 +342,12 @@ export function albumMenu(album, { select = null, open = false } = {}) {
   });
 }
 
+// (`without`: as for playArtist, in everything here that takes their tracks.)
 export function artistMenu(artist, { without = null } = {}) {
+  const theirs = async (opts) => {
+    const list = await tracksOf([artist], opts);
+    return without?.size ? list.filter((t) => !without.has(String(t.albumId))) : list;
+  };
   sheet({
     title: artist.title,
     image: artist.thumb,
@@ -351,8 +356,8 @@ export function artistMenu(artist, { without = null } = {}) {
       { icon: 'play', label: 'Play', onSelect: () => playArtist(artist, { without }) },
       { icon: 'shuffle', label: 'Shuffle', onSelect: () => playArtist(artist, { shuffle: true, without }) },
       { icon: 'radio', label: 'Artist radio', onSelect: () => artistRadio(artist) },
-      ...queueActions(() => tracksOf([artist], { limit: PLAYLIST_PLAY_LIMIT })),
-      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: artist.title, load: () => tracksOf([artist]), suggest: artist.title }) },
+      ...queueActions(() => theirs({ limit: PLAYLIST_PLAY_LIMIT })),
+      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: artist.title, load: () => theirs(), suggest: artist.title }) },
       isAdminNow() && {
         icon: 'collection',
         label: 'Add to collection…',
