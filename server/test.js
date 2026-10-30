@@ -10,7 +10,7 @@ import { OwnerSignIns, OWNER_LIMITS } from './owners.js';
 import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
-import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
+import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS, MB_LIMITS, retryAfterMs } from './musicbrainz.js';
 import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, sameArtist, genericTitle, evidenceOf } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
@@ -694,7 +694,7 @@ test('MusicBrainz: an artist in another script, and their songs, are checked by 
   );
 });
 
-test('MusicBrainz: musicbrainz.org once a second, your own server as fast as it answers, saying which version asks', async () => {
+test('MusicBrainz: musicbrainz.org once a second, your own server ten times a second at most, saying which version asks', async () => {
   const seen = [];
   const fetchImpl = async (url, init) => {
     seen.push({ host: new URL(url).host, at: Date.now(), agent: init.headers['User-Agent'] });
@@ -716,6 +716,69 @@ test('MusicBrainz: musicbrainz.org once a second, your own server as fast as it 
   // Your own server failing a search: most likely its search indexes.
   const noIndexes = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
   await assert.rejects(noIndexes.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502 && /search indexes/.test(e.message));
+});
+
+test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most, slower when it\'s slow, and left alone as long as it asks when it says it\'s busy', async () => {
+  // Retry-After: seconds, or a date; within reason.
+  const now = Date.parse('2026-10-30T12:00:00Z');
+  assert.equal(retryAfterMs('120', now), 120000);
+  assert.equal(retryAfterMs('Fri, 30 Oct 2026 12:01:30 GMT', now), 90000);
+  assert.equal(retryAfterMs('', now), MB_LIMITS.busyMs);
+  assert.equal(retryAfterMs('0', now), MB_LIMITS.busyMs);
+  assert.equal(retryAfterMs('2', now), 5000);
+  assert.equal(retryAfterMs('86400', now), MB_LIMITS.busyMaxMs);
+  // Ten a second at most, one at a time.
+  const starts = [];
+  const quick = async () => {
+    starts.push(Date.now());
+    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+  };
+  const own = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: quick });
+  await Promise.all([1, 2, 3, 4].map((i) => own.ask('/ws/2/artist', { query: `a${i}` })));
+  assert.ok(starts.slice(1).every((t, i) => t - starts[i] >= MB_LIMITS.ownGapMs - 5), starts.map((t) => t - starts[0]).join(','));
+  // An answer slower than slowMs: as long again before the next.
+  const was = { ...MB_LIMITS };
+  Object.assign(MB_LIMITS, { slowMs: 60, slowWaitMaxMs: 1000 });
+  try {
+    const times = [];
+    const slow = new MusicBrainz({
+      base: 'http://mb.local:5000',
+      gapMs: 0,
+      fetchImpl: async () => {
+        times.push(Date.now());
+        if (times.length === 1) await new Promise((r) => setTimeout(r, 150));
+        return { ok: true, status: 200, json: async () => ({}) };
+      },
+    });
+    await slow.ask('/ws/2/artist', { query: 'x' });
+    const after = Date.now();
+    await slow.ask('/ws/2/artist', { query: 'y' });
+    assert.ok(times[1] - after >= 140, `${times[1] - after} ms`);
+  } finally {
+    Object.assign(MB_LIMITS, was);
+  }
+  // "Too many requests" (429): nothing new asked of it for as long as it said, and the features say so, with how long.
+  let n = 0;
+  const busy = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (n++, { ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '45' : null) }, json: async () => ({}) }) }).advanced(new MBKept());
+  await assert.rejects(busy.artistInfo('Somebody'), (e) => e instanceof MusicBrainzError && e.status === 503 && /busy/.test(e.message));
+  await assert.rejects(busy.artistInfo('Somebody Else'), (e) => e instanceof MusicBrainzError && e.status === 503 && e.retryAfter > 40 && e.retryAfter <= 45);
+  assert.equal(n, 1);
+  // ...nor by anything else meanwhile: an AI playlist's check, or what
+  // was waiting its turn (turned away at once, saying how long).
+  await assert.rejects(busy.check([{ kind: 'artist', artist: 'Someone' }, { kind: 'track', artist: 'Someone', title: 'A Song' }]), (e) => e instanceof MusicBrainzError && e.status === 503 && e.retryAfter > 40);
+  await assert.rejects(busy.ask('/ws/2/recording', { query: 'x' }), (e) => e.status === 503 && /in a minute/.test(e.message));
+  assert.equal(n, 1);
+  // A 503 to a lookup that isn't a search (as a rate limit in front of a
+  // server of your own answers) is it being busy too; a search's is its
+  // search indexes (above).
+  let m = 0;
+  const limited = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (m++, { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) }) });
+  await assert.rejects(limited.ask('/ws/2/artist/0383dadf-2a4e-4d10-a46a-e9e041da8eb3', { inc: 'aliases' }), (e) => e.status === 503 && /busy/.test(e.message) && e.retryAfter === 60);
+  await assert.rejects(limited.ask('/ws/2/release-group', { artist: '0383dadf-2a4e-4d10-a46a-e9e041da8eb3' }), (e) => e.status === 503 && /busy/.test(e.message));
+  assert.equal(m, 1);
+  // A longer wait is said in minutes.
+  const later = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => ({ ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '240' : null) }, json: async () => ({}) }) });
+  await assert.rejects(later.ask('/ws/2/artist', { query: 'x' }), (e) => /in 4 minutes/.test(e.message) && e.retryAfter === 240);
 });
 
 test('MusicBrainz: a check stops when whoever asked has gone, or its time is up', async () => {

@@ -168,6 +168,12 @@ function allow(key, perMinute, n = 1, map = buckets) {
   return b.n <= perMinute;
 }
 
+// How long till `key`'s minute is over (seconds, for a Retry-After).
+function againIn(key, map = buckets) {
+  const b = map.get(key);
+  return b ? Math.max(1, Math.ceil((b.at + 60000 - Date.now()) / 1000)) : 60;
+}
+
 // A sign-in this service hasn't seen lately is checked with plex.tv. Made-up
 // tokens would each be another question for plex.tv, so each address gets
 // a few a minute: counted as each is checked (ones seen lately aren't).
@@ -190,9 +196,11 @@ function identifyFor(req, token, { counted = true } = {}) {
 // ---------- HTTP helpers ----------
 
 class HttpError extends Error {
-  constructor(status, message) {
+  // `retryAfter`: seconds to wait before asking again (as Retry-After says).
+  constructor(status, message, { retryAfter = null } = {}) {
     super(message);
     this.status = status;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -566,7 +574,7 @@ async function musicbrainzFeatures(req, res, what) {
     signIn: 'Sign in to Plex first.',
     noAccess: 'The MusicBrainz features are for people who can use this player’s Plex server, and your Plex account can’t.',
   });
-  if (!allow(`mba|${key}`, 120)) throw new HttpError(429, 'Too many requests in a short time. Wait a minute and try again.');
+  if (!allow(`mba|${key}`, 120)) throw new HttpError(429, 'Too many requests in a short time. Wait a minute and try again.', { retryAfter: againIn(`mba|${key}`) });
   const body = await readBody(req, 256 * 1024);
   const name = (v) => String(v || '').slice(0, 200);
   const year = (v) => (Number.isSafeInteger(Number(v)) && Number(v) > 1000 && Number(v) < 3000 ? Number(v) : null);
@@ -1463,7 +1471,7 @@ async function handle(req, res) {
   } catch (err) {
     const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError || err instanceof MusicBrainzError;
     if (!known) log.error(`${req.method} ${url.pathname}: ${err.stack || err.message}`);
-    if (!res.headersSent) send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.' });
+    if (!res.headersSent) send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.' }, err?.retryAfter ? { 'Retry-After': String(err.retryAfter) } : {});
   } finally {
     // Paths only (no query strings), so nothing secret can be logged. The
     // checks nginx makes for each proxied request would only be noise, and

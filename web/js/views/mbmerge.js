@@ -53,11 +53,11 @@ async function inTurn(items, n, fn) {
 export async function mbMergeView({ el, onDispose }) {
   el.append(backHeader('Artists to merge', { fallback: '/settings/musicbrainz' }));
   if (!mbFeatures()) {
-    el.append(emptyState('This player’s MusicBrainz features are off (MUSICBRAINZ_ADVANCED).'));
+    el.append(emptyState('MusicBrainz features are turned off on this player.'));
     return;
   }
   if (!(await isAdmin().catch(() => false))) {
-    el.append(emptyState('This is for the server’s owner: merging artists in Plex is theirs to do.'));
+    el.append(emptyState('Only the server’s owner can merge artists in Plex.'));
     return;
   }
   const s = app.server;
@@ -75,7 +75,7 @@ export async function mbMergeView({ el, onDispose }) {
     h(
       'p.lede',
       null,
-      `Artists Plex has more than once in ${app.source.sectionTitle}: those of the very same name, and those whose name is several artists’ (“Alphabeat;FORCE”, as files can be tagged), looked up on ${mbWhere()}. Those it plainly has as one artist are chosen to merge; the rest are yours to choose, saying why they’re left. One OK merges all you’ve chosen, by Plex’s own merge, for everyone and every app.`,
+      `Artists that appear more than once in ${app.source.sectionTitle}, checked on ${mbWhere()}. Ticked ones are the same artist on MusicBrainz; tick others if you know they are. Merging is done in Plex, for everyone, and can’t be undone here.`,
     ),
     status,
     top,
@@ -84,7 +84,7 @@ export async function mbMergeView({ el, onDispose }) {
     h(
       'p.hint.pad',
       null,
-      'Plex makes artists from your files’ album artist tags, so new files tagged as these were come in apart again. MusicBrainz Picard or beets can tag them (one album artist, and each of several artists as a value of its own).',
+      'New files tagged the same way will come in apart again: fix their album artist tag (MusicBrainz Picard or beets can).',
     ),
   );
 
@@ -146,7 +146,7 @@ export async function mbMergeView({ el, onDispose }) {
       const withAlbums = [];
       for (const a of entries) withAlbums.push({ artist: a, mbid: mbidOf(a), albums: await albumsOf(a) });
       const id = (g.kind === 'joined' ? withAlbums[0].mbid : withAlbums.map((e) => e.mbid).find(Boolean)) || null;
-      const mb = await artistOnMB(g.name, { id, namesakes: true });
+      const mb = await artistOnMB(g.name, { id, namesakes: true, background: true });
       g.mb = mb;
       g.entries = withAlbums;
       g.verdict = sameArtist(withAlbums, { name: g.name, ...mb, joined: g.kind === 'joined' });
@@ -220,43 +220,40 @@ export async function mbMergeView({ el, onDispose }) {
     await lookUpAll(groupsNow(), true);
     if (gone) return;
     busyNow = false;
-    status.replaceChildren(`Looked through ${fmt.count(artists.size, 'artist', 'artists')}.`);
+    status.replaceChildren(`Checked ${fmt.count(artists.size, 'artist', 'artists')}.`);
     render();
   }
 
+  // Why it's ticked, in a few words.
   const evidence = (g) => {
-    if (g.kind === 'joined') {
-      return g.mb?.namesakes?.length
-        ? `MusicBrainz has its albums and your ${g.name}’s as ${g.name}’s, and none as another’s of the name.`
-        : end(`MusicBrainz has your ${g.name}’s albums as theirs, and knows only one ${g.name}`);
-    }
-    return `MusicBrainz has albums of each of them as ${g.name}’s, and none as another’s of the name${g.byId ? ' (and Plex has the same MusicBrainz id for them)' : ''}.`;
+    if (g.kind === 'joined') return g.mb?.namesakes?.length ? `MusicBrainz says it’s ${g.name}’s.` : end(`MusicBrainz knows only one ${g.name}`);
+    return 'MusicBrainz says they’re the same artist.';
   };
-  // What MusicBrainz has of one's albums, said.
-  const albumsSaid = (x, name) => {
-    const n = fmt.count(x.albums, 'album', 'albums');
-    if (x.plain.length) return `${n}, ${x.plain.length === x.albums ? (x.albums === 1 ? 'which' : 'all of which') : fmt.number(x.plain.length)} MusicBrainz has as ${name}’s`;
-    if (x.weak.length) return `${n}, only ${quoted(x.weak)} as ${name}’s on MusicBrainz, a title plenty of artists have`;
-    return `${n}, none MusicBrainz has as theirs (by title and year)`;
+  // How many of one's albums MusicBrainz matches to the artist ("1 of 3").
+  const known = (x) => {
+    if (x?.plain?.length) return `${fmt.number(x.plain.length)} of ${fmt.number(x.albums)}`;
+    if (x?.weak?.length) return `only ${quoted(x.weak)} of ${fmt.number(x.albums)}, a common title`;
+    return `0 of ${fmt.number(x?.albums || 0)}`;
   };
+  // Why it isn't, in a few words.
   const why = (g) => {
-    const one = g.kind === 'joined' ? 'it’s theirs' : 'they’re one artist';
-    if (g.verdict === 'first') return `Plex has ${fmt.number(g.members.length)} artists called ${g.name}: merge those first, and this is looked at then.`;
-    if (g.verdict === 'error') return `Couldn’t be looked up just now (${g.error}). Look again to try again.`;
+    if (g.verdict === 'first') return end(`Merge the ${fmt.number(g.members.length)} called ${g.name} first`);
+    if (g.verdict === 'error') return 'Couldn’t check just now. Try Look again.';
     if (g.verdict === 'different') {
-      if (g.idsDiffer) return 'Plex has different MusicBrainz ids for them: different artists of one name.';
-      const apart = g.evidence?.flatMap((x) => x.apart) || [];
-      return `MusicBrainz has ${apart.length ? quoted(apart) : g.kind === 'joined' ? 'its albums' : 'their albums'} as another ${g.name}’s: different artists of one name.`;
+      if (g.idsDiffer) return 'Plex links them to different artists on MusicBrainz.';
+      const apart = [...new Set(g.evidence?.flatMap((x) => x.apart) || [])];
+      return end(`MusicBrainz says ${apart.length ? quoted(apart) : g.kind === 'joined' ? 'its albums' : 'their albums'} ${apart.length === 1 ? 'is' : 'are'} by a different ${g.name}`);
     }
-    if (g.mb && !g.mb.artist) return end(`MusicBrainz doesn’t know ${g.name}, so it can’t say whether ${one}`);
-    if (g.idsDiffer || g.otherId) return `Plex has another artist’s MusicBrainz id for ${g.kind === 'joined' ? 'it' : 'one of them'}, so MusicBrainz can’t say whether ${one}.`;
-    if (g.mb?.moreNamesakes) return `MusicBrainz has more artists called ${g.name} than are looked through here, so it can’t say whether ${one}.`;
-    if (g.mb?.capped || g.mb?.namesakes?.some((n) => n?.capped)) return `MusicBrainz has more of ${g.name}’s releases than are looked through here, so it can’t say whether ${one}.`;
+    if (g.mb && !g.mb.artist) return end(`MusicBrainz doesn’t know ${g.name}`);
+    if (g.idsDiffer || g.otherId) return 'Not sure: Plex links one of them to another artist on MusicBrainz.';
+    if (g.mb?.moreNamesakes) return end(`Not sure: MusicBrainz has too many artists called ${g.name} to tell`);
+    if (g.mb?.capped || g.mb?.namesakes?.some((n) => n?.capped)) return end(`Not sure: ${g.name} has too many releases on MusicBrainz to tell`);
     const ev = g.evidence || [];
-    const weakApart = ev.flatMap((x) => x.apartWeak);
-    if (weakApart.length) return `MusicBrainz has ${quoted(weakApart)} as another ${g.name}’s, a title plenty of artists have, so it can’t say whether ${one}.`;
-    const said = g.kind === 'joined' ? `Your ${g.name}: ${albumsSaid(ev[0], g.name)}; this one: ${albumsSaid(ev[1], g.name)}` : `Plex’s ${fmt.number(ev.length)}: ${ev.map((x) => `one with ${albumsSaid(x, g.name)}`).join('; ')}`;
-    return `${said}. Not enough to say whether ${one}.`;
+    const weakApart = [...new Set(ev.flatMap((x) => x.apartWeak))];
+    if (weakApart.length) return end(`Not sure: MusicBrainz says ${quoted(weakApart)} ${weakApart.length === 1 ? 'is' : 'are'} by a different ${g.name}, but ${weakApart.length === 1 ? 'it’s a common title' : 'they’re common titles'}`);
+    const none = ev.every((x) => !x?.plain?.length && !x?.weak?.length);
+    if (g.kind === 'joined') return none ? 'Not sure: MusicBrainz can’t match any of the albums.' : `Not sure: MusicBrainz matches too few of the albums (your ${g.name}: ${known(ev[0])}; this one: ${known(ev[1])}).`;
+    return none ? 'Not sure: MusicBrainz can’t match any of their albums.' : `Not sure: MusicBrainz matches too few of their albums (${ev.map(known).join('; ')}).`;
   };
 
   const rowsFor = (list, cls) =>
@@ -277,10 +274,10 @@ export async function mbMergeView({ el, onDispose }) {
       const albumCount = (a) => fmt.count(g.entries?.find((e) => e.artist === a)?.albums.length ?? 0, 'album', 'albums');
       const sub =
         g.verdict !== 'same'
-          ? why(g) + (canChoose(g) ? ' Choose it to merge it anyway.' : '')
+          ? why(g) + (canChoose(g) ? ' Tick to merge anyway.' : '')
           : g.kind === 'joined'
-            ? `${end(`${albumCount(g.joined)} of ${g.name}’s with ${listOf(g.with)}, into your ${g.name}`)} ${evidence(g)}`
-            : `${fmt.number(g.members.length)} artists in Plex (${g.members.map((a) => albumCount(a)).join(', ')}). ${evidence(g)}`;
+            ? `${albumCount(g.joined)}, with ${listOf(g.with)}. ${end(`Merges into ${g.name}`)} ${evidence(g)}`
+            : `${fmt.number(g.members.length)} in Plex (${g.members.map((a) => albumCount(a)).join(', ')}). ${evidence(g)}`;
       return h(
         `${canChoose(g) ? 'label' : 'div'}.row.mb-merge-row.${cls}${g.verdict !== 'same' ? `.mb-merge-${g.verdict}` : ''}`,
         null,
@@ -289,8 +286,8 @@ export async function mbMergeView({ el, onDispose }) {
       );
     });
 
-  // "Choose all" or "Choose none" for a section's rows, as they're chosen
-  // now (see paintButtons).
+  // "Tick all" or "Untick all" for a section's rows, as they're ticked now
+  // (see paintButtons).
   let allButtons = [];
   const allOrNone = (list) => {
     const choosable = list.filter(canChoose);
@@ -315,7 +312,7 @@ export async function mbMergeView({ el, onDispose }) {
         h(
           'button.btn.btn-primary.mb-merge-go',
           { type: 'button', disabled: busyNow || !n, onclick: () => mergeChosen() },
-          n ? `Merge ${fmt.number(n)} in Plex` : 'Choose some to merge',
+          n ? `Merge ${fmt.number(n)} in Plex` : 'Tick some to merge',
         ),
         h('button.btn.btn-secondary.mb-merge-again', { type: 'button', disabled: busyNow, onclick: () => scan() }, 'Look again'),
       );
@@ -324,7 +321,7 @@ export async function mbMergeView({ el, onDispose }) {
     for (const box of lists.querySelectorAll('input.mb-merge-check')) box.disabled = busyNow;
     for (const { btn, choosable } of allButtons) {
       btn.disabled = busyNow;
-      btn.textContent = choosable.every(chosen) ? 'Choose none' : 'Choose all';
+      btn.textContent = choosable.every(chosen) ? 'Untick all' : 'Tick all';
     }
   }
 
@@ -338,11 +335,11 @@ export async function mbMergeView({ el, onDispose }) {
       list.length ? h('section.block', null, sectionHeader(`${title} (${fmt.number(list.length)})`, null, allOrNone(list)), h('div.rows.mb-merge-rows', null, rowsFor(list, cls))) : null;
     lists.replaceChildren(
       ...[
-        groups.length ? null : emptyState('Plex has no artist more than once here.'),
-        groups.length && !twice.length && !joined.length ? emptyState('Nothing MusicBrainz plainly has as one artist, to merge: those left as they are are yours to choose.') : null,
-        block('The same name, more than once', twice, 'mb-merge-twice'),
+        groups.length ? null : emptyState('No artist appears more than once here.'),
+        groups.length && !twice.length && !joined.length ? emptyState('Nothing MusicBrainz is sure about. Check the ones below yourself.') : null,
+        block('Same name, more than once', twice, 'mb-merge-twice'),
         block('Several artists in one name', joined, 'mb-merge-joined'),
-        block('Left as they are', left, 'mb-merge-left'),
+        block('Check these yourself', left, 'mb-merge-left'),
       ].filter(Boolean),
     );
     paintButtons();
@@ -355,13 +352,21 @@ export async function mbMergeView({ el, onDispose }) {
   async function mergeChosen() {
     const list = groups.filter((g) => canChoose(g) && chosen(g)).sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'twice' ? -1 : 1));
     if (!list.length) return;
-    const unsure = list.filter((g) => g.verdict === 'unknown').length;
-    const apart = list.filter((g) => g.verdict === 'different').length;
-    const caution = [unsure ? `${fmt.number(unsure)} MusicBrainz can’t say are one artist` : '', apart ? `${fmt.number(apart)} it has as different artists` : ''].filter(Boolean);
+    // What each will do, a line each: names on the left into the artist on
+    // the right.
+    const line = (g) =>
+      h(
+        'li',
+        null,
+        g.kind === 'joined' ? `“${g.joined.title}” → ${g.name}` : `${g.name} ×${fmt.number(g.members.length)} → one ${g.name}`,
+        g.verdict === 'unknown' ? h('span.ask-note', null, ' (not sure)') : g.verdict === 'different' ? h('span.ask-note', null, ' (MusicBrainz says different)') : null,
+      );
     const sure = await confirmAction({
-      title: list.length === 1 ? `Merge ${list[0].kind === 'joined' ? `“${list[0].joined.title}” into ${list[0].name}` : `the ${fmt.number(list[0].members.length)} called ${list[0].name}`}?` : `Merge ${fmt.number(list.length)} in Plex?`,
-      message: `In Plex itself, for everyone and every app: each one’s albums and tracks go to one artist (of those of one name, the one Plex has MusicBrainz’s id for, or more albums of; for a name of several, the artist of its first name), and the others are gone. It’s Plex’s own merge, which this player can’t undo.${caution.length ? ` Of these, ${listOf(caution)}: merged as you’ve chosen.` : ''}`,
-      confirm: 'Merge in Plex',
+      title: 'Merge in Plex?',
+      message: list.length === 1 ? 'This merge:' : `${fmt.number(list.length)} separate merges:`,
+      details: h('ul', null, list.map(line)),
+      after: 'Albums and tracks move to the artist on the right, for everyone. This can’t be undone here.',
+      confirm: list.length === 1 ? 'Merge' : `Merge ${fmt.number(list.length)}`,
       danger: true,
     });
     if (!sure || gone) return;
@@ -406,7 +411,7 @@ export async function mbMergeView({ el, onDispose }) {
     await lookUpAll(groupsNow());
     if (gone) return;
     busyNow = false;
-    status.replaceChildren(`Merged ${fmt.number(done)}. ${fmt.count(artists.size, 'artist', 'artists')} here now.`);
+    status.replaceChildren(`Merged ${fmt.number(done)}. ${fmt.count(artists.size, 'artist', 'artists')} now.`);
     render();
   }
 

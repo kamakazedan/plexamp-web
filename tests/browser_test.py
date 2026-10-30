@@ -364,7 +364,7 @@ with sync_playwright() as pw:
         mock('/__mock/add-album?title=Fresh%20Arrival')
         check('ws: new album appears on Home without reloading', wait_for(lambda: has_card(page, 'Fresh Arrival'), 20))
         page.goto(APP + '#/settings/debug')
-        check('ws: Connection page names the WebSocket', 'WebSocket' in live_status(page), live_status(page))
+        check('ws: Connection page says live updates are instant', live_status(page).split(' | ')[1:2] == ['Instant'], live_status(page))
         shot(page, 'ws-01-connection')
         play_first_album_track(page, APP, album=1)
         page.click('.pb-main')
@@ -543,7 +543,7 @@ with sync_playwright() as pw:
         page.goto(APP + '#/settings/ai')
         page.wait_for_selector('.ai-wait .row-value')
         wait_value = page.locator('.ai-wait .row-value').inner_text()
-        unloaded = page.wait_for_selector('.ai-shared p.hint:has-text("isn’t in memory")', timeout=15000) is not None
+        unloaded = page.wait_for_selector('.ai-shared p.hint:has-text("may take a few minutes")', timeout=15000) is not None
         check('ai: Settings › AI says how long to wait for the model, and when it isn\'t in memory', wait_value == '5 minutes' and unloaded, wait_value)
         settings(page, {'ai': {'mode': 'auto', 'wait': 0.05}})  # 3 seconds
         page.goto(APP + '#/ai-playlist')
@@ -848,7 +848,7 @@ with sync_playwright() as pw:
         check('nows: new album appears on Home', wait_for(lambda: has_card(page, 'Second Arrival'), 20))
         page.goto(APP_NOWS + '#/settings/debug')
         status = live_status(page)
-        check('nows: Connection page explains WebSockets are off', 'WEBSOCKETS=off' in status, status)
+        check('nows: Connection page explains WebSockets are off', 'Instant (backup route)' in status and 'set up not to use WebSockets' in status, status)
         shot(page, 'nows-01-connection')
         check('nows: ...with no setting of this device\'s for them', page.locator('.radio-row', has_text='Without WebSockets').count() == 0
               and page.locator('button', has_text='Reconnect live updates').count() == 0)
@@ -870,7 +870,7 @@ with sync_playwright() as pw:
         check('blocked: updates still arrive', wait_for(lambda: has_card(page, 'Third Arrival'), 20))
         page.goto(APP + '#/settings/debug')
         status = live_status(page)
-        check('blocked: Connection page says why', 'couldn’t' in status, status)
+        check('blocked: Connection page says why', 'Instant (backup route)' in status and 'WebSockets don’t work on this network' in status, status)
         ctx.close()
 
     # ---------- poll: event stream held back too ----------
@@ -904,7 +904,7 @@ with sync_playwright() as pw:
             status = live_status(page)
             shot(page, 'wsonly-01-connection')
             check('wsonly: with WEBSOCKETS=on and WebSockets refused, live updates never fall back to anything else',
-                  modes == 'connecting' and not streams and 'WEBSOCKETS=on' in status, f'{modes} {status} {streams[:1]}')
+                  modes == 'connecting' and not streams and 'WebSockets only' in status, f'{modes} {status} {streams[:1]}')
             mock('/__mock/config?ws=1&sse=on')
             js(page, "() => import('./js/live.js').then(m => m.live.checkNow())")
             got = wait_mode(page, 'websocket', 30) == 'websocket' and not streams
@@ -912,7 +912,7 @@ with sync_playwright() as pw:
             page.goto(APP_DEBUG + '#/settings/debug')
             after = live_status(page)
             check('wsonly: ...and keep trying a WebSocket, which works once it gets through (and isn\'t said not to then)',
-                  got and 'WEBSOCKETS=on' in after and 'couldn’t connect' not in after, f'{live_mode(page)} {after}')
+                  got and 'WebSockets only' in after and 'Couldn’t connect' not in after, f'{live_mode(page)} {after}')
             ctx.close()
         finally:
             mock('/__mock/config?ws=1&sse=on')
@@ -3458,17 +3458,17 @@ with sync_playwright() as pw:
         shot(page, 'routes-03-routes')
         check('routes: opening the Connection page tries no routes; testing the connection does', quiet == ([], 0) and len(routes) == 3, f'{quiet} {routes}')
         check('routes: through this container when its address on the network doesn\'t answer, saying why',
-              'Through this container' in conn and 'set up for Mock Plex too' in conn and [k for k, _ in routes] == ['local', 'proxy', 'remote']
-              and '(in use)' in routes[1][1] and 'Didn’t answer this browser' in routes[0][1] and ' ms' in routes[2][1] and 'Chrome asks you first' in hint,
+              'Through this app' in conn and 'set up to talk directly to Mock Plex' in conn and 'best route that answers' in conn and [k for k, _ in routes] == ['local', 'proxy', 'remote']
+              and '(in use)' in routes[1][1] and 'No answer' in routes[0][1] and ' ms' in routes[2][1] and 'Chrome asks first' in hint,
               f'{conn!r} {routes} {hint!r}')
         page.click('.radio-row:has(.row-title:text-is("Straight to the server"))')
         page.wait_for_selector('.toast:has-text("Now connected over the internet")')
-        page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Remote")', timeout=15000)
+        page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Over the internet")', timeout=15000)
         direct = (js(page, "() => import('./js/state.js').then((m) => [m.app.source.kind, m.app.settings.route])"), page.locator('.kv', has_text='Connection').first.inner_text())
-        check('routes: "Straight to the server" goes there, over the internet here', direct[0] == ['remote', 'direct'] and 'Remote' in direct[1] and page.locator('.route-row').count() == 0, str(direct))
-        page.click('.radio-row:has(.row-title:text-is("Best that answers"))')
-        page.wait_for_selector('.toast:has-text("Now connected through this container")')
-        page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Through this container")', timeout=15000)
+        check('routes: "Straight to the server" goes there, over the internet here', direct[0] == ['remote', 'direct'] and 'Over the internet' in direct[1] and page.locator('.route-row').count() == 0, str(direct))
+        page.click('.radio-row:has(.row-title:text-is("Best that works"))')
+        page.wait_for_selector('.toast:has-text("Now connected through this app")')
+        page.wait_for_selector('.kv:has-text("Connection") .kv-v:text-is("Through this app")', timeout=15000)
         # The test of the connection: through this container, which part
         # doesn't answer.
         no_plex = re.compile(r'/pms/identity')
@@ -3477,7 +3477,7 @@ with sync_playwright() as pw:
         page.wait_for_selector('.kv:has-text("Response time") .kv-v:not(:has-text("Testing"))')
         said = page.locator('.kv', has_text='Response time').inner_text()
         page.unroute(no_plex)
-        check('routes: a test that gets no answer through this container says this container answered', 'This container answers, but Mock Plex didn’t answer through it' in said, said)
+        check('routes: a test that gets no answer through this container says this container answered', 'Plexamp-web answers, but Mock Plex didn’t answer through it' in said, said)
         page.click('button:has-text("Test connection")')
         page.wait_for_selector('.kv:has-text("Response time") .kv-v:has-text(" ms")')
         check('routes: ...and the time it takes when it answers', re.search(r'\d ms', page.locator('.kv', has_text='Response time').inner_text()) is not None)
@@ -7250,7 +7250,7 @@ with sync_playwright() as pw:
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
         check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that switching keeps nothing of yours for them',
-              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'none of it goes with them' in said, f'{rows} {said!r}')
+              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'Switching clears all of yours from this device' in said, f'{rows} {said!r}')
 
         # Dan's: settings (some kept for his account), a search, what's
         # playing, a missing track an AI playlist of his suggested (with what
@@ -7536,7 +7536,7 @@ with sync_playwright() as pw:
         check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
         check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
         check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (with no switch of any kind)',
-              'yours and your friends' in lede and 'Kept for your Plex account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
+              'yours and your friends' in lede and 'Kept by this player for your Plex account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
 
         # Noted on one device, on the other once it's read again; counted again.
         note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')
@@ -7686,7 +7686,7 @@ with sync_playwright() as pw:
         local.wait_for_selector('.missing-row')
         local_lede = local.locator('.missing-lede').inner_text()
         check('missingsync: with SYNC_MISSING_TRACKS=false, nothing goes to the player, and the list says it\'s this device\'s',
-              not asked and 'kept on this device' in local_lede and local.locator('.missing-lede ~ .rows label').count() == 0, f'{asked} {local_lede}')
+              not asked and 'Kept on this device' in local_lede and local.locator('.missing-lede ~ .rows label').count() == 0, f'{asked} {local_lede}')
         local_ctx.close()
 
     # ---------- mb: the MusicBrainz features (MUSICBRAINZ_ADVANCED) ----------
@@ -7942,7 +7942,7 @@ with sync_playwright() as pw:
         reads = []  # the library's artists, read from Plex
         page.on('request', lambda r: reads.append(r.url) if '/all?' in r.url and 'type=8' in r.url else None)
 
-        def merge_page(status=r'^Looked through'):
+        def merge_page(status=r'^Checked'):
             page.wait_for_function("(re) => new RegExp(re).test(document.querySelector('.mb-merge-status')?.textContent || '')", arg=status, timeout=60000)
             rows = lambda cls: {page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(): {
                 'text': page.locator(f'.{cls}').nth(i).inner_text(),
@@ -7956,14 +7956,14 @@ with sync_playwright() as pw:
             shot(page, 'mb-05-merge')
             gh = twice.get('Glass Harbour', {})
             check('mb: artists to merge: two of one name MusicBrainz plainly has as one (Glass Harbour) are offered, chosen to begin with, saying why',
-                  list(twice) == ['Glass Harbour'] and gh['checked'] is True and 'MusicBrainz has albums of each of them as Glass Harbour’s' in gh['text'], f'{twice} {joined} {left}')
+                  list(twice) == ['Glass Harbour'] and gh['checked'] is True and 'MusicBrainz says they’re the same artist' in gh['text'], f'{twice} {joined} {left}')
             ns, ja = left.get('Northbound Static', {}), left.get('Juniper & Ash', {})
             check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash): left as they are, saying why album by album, for you to choose',
-                  'different artists of one name' in ns.get('text', '') and '“Frost Engine”' in ns.get('text', '') and ns.get('checked') is False
-                  and 'none MusicBrainz has as theirs' in ja.get('text', '') and 'Not enough to say' in ja.get('text', '') and ja.get('checked') is False, str(left))
+                  'are by a different Northbound Static' in ns.get('text', '') and '“Frost Engine”' in ns.get('text', '') and ns.get('checked') is False
+                  and 'Not sure' in ja.get('text', '') and 'can’t match any of their albums' in ja.get('text', '') and ja.get('checked') is False, str(left))
             first = left.get('Glass Harbour;Kilo Meridian', {})
             check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first, not to choose yet)',
-                  not joined and 'those first' in first.get('text', '') and first.get('checked') is None, f'{joined} {left}')
+                  not joined and 'called Glass Harbour first' in first.get('text', '') and first.get('checked') is None, f'{joined} {left}')
             go = page.locator('.mb-merge-actions:not([hidden]) .mb-merge-go').first
             check('mb: ...one button merges all that are chosen', go.inner_text() == 'Merge 1 in Plex', go.inner_text())
             # An OK first, then Plex's own merge, into the one Plex has
@@ -7972,14 +7972,15 @@ with sync_playwright() as pw:
             before = len(reads)
             go.click()
             asked_ok = page.locator('.sheet.open').inner_text()
-            page.locator('.sheet.open button', has_text='Merge in Plex').click()
+            page.locator('.sheet.open .ask-form button.btn-danger').click()
             wait_for(lambda: merges(), 10, 0.3)
-            check('mb: ...merged in Plex with the owner\'s OK (Plex\'s own merge, which the player can\'t undo), into the one Plex has MusicBrainz\'s id for',
-                  merges() == [{'into': named['Glass Harbour']['ratingKey'], 'ids': [added[0]['ratingKey']]}] and 'can’t undo' in asked_ok, f'{merges()} {asked_ok!r}')
+            check('mb: ...merged in Plex with the owner\'s OK (each merge on a line of its own; Plex\'s own merge, which can\'t be undone here), into the one Plex has MusicBrainz\'s id for',
+                  merges() == [{'into': named['Glass Harbour']['ratingKey'], 'ids': [added[0]['ratingKey']]}] and 'Glass Harbour ×2 → one Glass Harbour' in asked_ok
+                  and 'can’t be undone' in asked_ok, f'{merges()} {asked_ok!r}')
             twice, joined, left = merge_page(r'^Merged 1\.')
             row_text = joined.get('Glass Harbour;Kilo Meridian', {}).get('text', '')
             check('mb: ...then the name of several artists\' in one is looked at, into the artist of its first name (MusicBrainz knows only one of it), without reading the library again',
-                  not twice and 'with Kilo Meridian' in row_text and 'into your Glass Harbour' in row_text and 'knows only one Glass Harbour' in row_text
+                  not twice and 'with Kilo Meridian' in row_text and 'Merges into Glass Harbour' in row_text and 'knows only one Glass Harbour' in row_text
                   and joined['Glass Harbour;Kilo Meridian']['checked'] is True and len(reads) == before, f'{twice} {joined} {len(reads) - before}')
             # Several at once: that one, and one left as it is, chosen too
             # (MusicBrainz can't say: merged as chosen, the OK saying so).
@@ -7987,13 +7988,14 @@ with sync_playwright() as pw:
             check('mb: ...and those left as they are can be chosen too', go.inner_text() == 'Merge 2 in Plex', go.inner_text())
             go.click()
             asked_ok = page.locator('.sheet.open').inner_text()
-            page.locator('.sheet.open button', has_text='Merge in Plex').click()
+            page.locator('.sheet.open .ask-form button.btn-danger').click()
             wait_for(lambda: len(merges()) == 3, 15, 0.3)
             twice, joined, left = merge_page(r'^Merged 2\.')
-            check('mb: ...merged with one OK, saying which MusicBrainz can\'t say are one artist (those of one name first)',
+            check('mb: ...merged with one OK, a line for each (separate merges), saying which MusicBrainz isn\'t sure of (those of one name first)',
                   merges()[1] == {'into': named['Juniper & Ash']['ratingKey'], 'ids': [added[2]['ratingKey']]}
                   and merges()[2] == {'into': named['Glass Harbour']['ratingKey'], 'ids': [added[3]['ratingKey']]}
-                  and '1 MusicBrainz can’t say are one artist' in asked_ok and not joined and 'Juniper & Ash' not in left and len(reads) == before, f'{merges()} {asked_ok!r} {left}')
+                  and '2 separate merges' in asked_ok and '“Glass Harbour;Kilo Meridian” → Glass Harbour' in asked_ok and 'Juniper & Ash ×2 → one Juniper & Ash (not sure)' in asked_ok
+                  and not joined and 'Juniper & Ash' not in left and len(reads) == before, f'{merges()} {asked_ok!r} {left}')
             artist_page('Glass Harbour', until='.view .hero')
             page.wait_for_selector('.view .card-title:has-text("Harbour Remixes")', timeout=20000)
             on_page = page.locator('.view .card-title').all_inner_texts()

@@ -3,6 +3,32 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.33.0 - 2026-10-30
+
+### Changed
+
+- **Artists to merge: the OK lists each merge on a line of its own**,
+  what goes into what ("Glass Harbour ×2 → one Glass Harbour",
+  "“Alphabeat;FORCE” → Alphabeat"), saying which MusicBrainz isn't sure
+  of, so several chosen don't read as one big merge. The page's wording is
+  shorter and plainer too.
+- **Gentler on a MusicBrainz mirror of your own**, for every MusicBrainz
+  feature: the player asks it one thing at a time, ten a second at most
+  (before, as fast as it answered), and less often while it's slow to
+  answer. One that says it's busy (a 429, a 503 with Retry-After, or a 503
+  to anything but a search, as a rate limit in front of it gives) is asked
+  nothing at all, by any feature, for as long as it says (a minute if it
+  doesn't). The app asks the player 90 times a minute at most, and
+  pages looking through your library 60, so what you're waiting on always
+  has room (a shuffle's or a radio's live tracks and demos never wait: with
+  no room, they go by their titles that time). When the player's busy, the
+  app waits as it's told and carries on (Years and genres to fix said
+  "429" and stopped).
+- **Plainer settings**: every setting says what it does in a line or two,
+  without the technical words (no "container", nor the player's settings'
+  names): "Through this app" for the route through the player, and
+  "Plexamp-web is set up to talk directly to …" for why.
+
 ## 0.32.0 - 2026-10-30
 
 ### Changed

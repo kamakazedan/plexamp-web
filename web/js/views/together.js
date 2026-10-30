@@ -20,7 +20,7 @@ export async function togetherView({ el, params, onDispose }) {
   el.append(body);
 
   if (!app.config.together) {
-    body.append(emptyState('Play Together is turned off on this player. Whoever runs it can turn it on with the PLAY_TOGETHER setting.'));
+    body.append(emptyState('Play Together is turned off on this player. Whoever runs it can turn it on.'));
     return;
   }
 

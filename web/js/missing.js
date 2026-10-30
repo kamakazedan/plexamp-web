@@ -62,9 +62,9 @@ export function missingKeptNote() {
   const kept = missingKept();
   if (!kept) return '';
   const server = app.source?.serverName || 'the server';
-  if (kept.owner === true) return ` Kept for your Plex account, on every device, with your friends’ too, so you see everything that’s missing from ${server}.`;
-  if (kept.owner === false) return ` Kept for your Plex account, on every device, and whoever runs ${server} sees them too, so they can add them.`;
-  return ` Kept for your Plex account, on every device, where the owner of ${server} sees them too.`;
+  if (kept.owner === true) return ' Kept by this player for your Plex account, on every device. You see your friends’ too.';
+  if (kept.owner === false) return ` Kept by this player for your Plex account, on every device. The owner of ${server} sees them too, so they can add them.`;
+  return ` Kept by this player for your Plex account, on every device. The owner of ${server} sees them too.`;
 }
 
 // What's kept for the server in use, artists first, then by artist and

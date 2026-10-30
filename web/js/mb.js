@@ -43,24 +43,69 @@ export const MISSING_KINDS = ['albums', 'singles', 'compilations', 'soundtracks'
 
 // ---------- with the player ----------
 
-async function call(path, body, { signal } = {}) {
+// The player's MusicBrainz features are asked PER_MINUTE times a minute at
+// most from this tab (the player takes 120 a minute from each account), and,
+// once the player's said it's had too many (429), not again till it says
+// (its Retry-After), then asked again, twice at most. A page looking through
+// the library (`background`: Years and genres, Artists to merge) asks while
+// fewer than BACKGROUND_PER_MINUTE have gone in the last minute, so what
+// someone's waiting on always has room; and what can do without (`now`: a
+// shuffle's or a radio's live tracks and demos, an import's other names)
+// never waits for a turn: without one, it's turned away at once, and goes
+// without.
+const PER_MINUTE = 90;
+const BACKGROUND_PER_MINUTE = 60;
+const asked = []; // when the last ones were asked (performance.now()), oldest first
+let notBefore = 0;
+const sleep = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => (clearTimeout(t), reject(signal.reason)), { once: true });
+  });
+const busy = (wait) => Object.assign(new Error('MusicBrainz is busy just now.'), { status: 429, mb: true, retryAfter: Math.max(1, Math.ceil(wait / 1000)) });
+async function myTurn(signal, { background = false, now = false } = {}) {
+  const most = background ? BACKGROUND_PER_MINUTE : PER_MINUTE;
+  for (;;) {
+    const t = performance.now();
+    while (asked.length && t - asked[0] >= 60000) asked.shift();
+    // (Till fewer than `most` were asked in the last minute.)
+    const wait = Math.max(notBefore - t, asked.length >= most ? asked[asked.length - most] + 60000 - t : 0);
+    if (wait <= 0) {
+      asked.push(t);
+      return;
+    }
+    if (now) throw busy(wait);
+    await sleep(Math.min(wait, 5000), signal);
+  }
+}
+
+async function call(path, body, { signal, background = false, now = false } = {}) {
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '' };
   if (app.source?.token && app.source.token !== app.auth?.token) headers['X-Plex-Server-Token'] = app.source.token;
-  let res;
-  try {
-    res = await fetch(`api/musicbrainz/${path}`, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'omit', signal: signal || AbortSignal.timeout(40000) });
-  } catch (err) {
-    if (signal?.aborted) throw err;
-    throw Object.assign(new Error('The player’s MusicBrainz features didn’t answer.'), { status: 0 });
+  for (let tries = 0; ; tries += 1) {
+    await myTurn(signal, { background, now });
+    let res;
+    try {
+      res = await fetch(`api/musicbrainz/${path}`, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'omit', signal: signal || AbortSignal.timeout(40000) });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw Object.assign(new Error('The player’s MusicBrainz features didn’t answer.'), { status: 0 });
+    }
+    if (res.status === 429) {
+      const secs = Number(res.headers.get('retry-after')) || 30;
+      notBefore = Math.max(notBefore, performance.now() + Math.min(300, Math.max(1, secs)) * 1000);
+      if (tries < 2 && !now) continue;
+    }
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* empty or not JSON */
+    }
+    if (!res.ok) throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, mb: true, retryAfter: Number(res.headers.get('retry-after')) || null });
+    return data || {};
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* empty or not JSON */
-  }
-  if (!res.ok) throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status });
-  return data || {};
 }
 
 // An artist on MusicBrainz, by name (or by their MusicBrainz id, `id`,
@@ -73,12 +118,15 @@ async function call(path, body, { signal } = {}) {
 // asked again).
 const artists = new Map();
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export function artistOnMB(name, { groups = true, id = null, namesakes = false } = {}) {
+export function artistOnMB(name, { groups = true, id = null, namesakes = false, background = false, now = false } = {}) {
   const byId = MBID.test(String(id)) ? id : null;
   const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${byId || norm(name)}`;
   if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], capped: false, namesakes: [], moreNamesakes: false });
-  if (!artists.has(key)) {
-    const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}) }).then(
+  // (One a page looking through the library is still waiting on isn't
+  // shared with someone waiting themselves: they ask for it on their own.)
+  const had = artists.get(key);
+  if (!had || (had.background && !background && !had.done)) {
+    const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}) }, { background, now }).then(
       (r) => ({
         artist: r.artist || null,
         groups: Array.isArray(r.groups) ? r.groups : [],
@@ -87,9 +135,14 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false }
         moreNamesakes: r.moreNamesakes === true,
       }),
       (err) => {
-        artists.delete(key);
+        if (artists.get(key) === job) artists.delete(key);
         throw err;
       },
+    );
+    job.background = background;
+    job.then(
+      () => (job.done = true),
+      () => {},
     );
     artists.set(key, job);
     while (artists.size > 200) artists.delete(artists.keys().next().value);
@@ -103,12 +156,12 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false }
 // MusicBrainz, or which it is can't be told) or 'pending' (being looked
 // up: ask again later). `wait`: how long the player may wait for those it
 // doesn't know yet (ms).
-export async function albumsOnMB(items, { genres = false, wait = 0, signal } = {}) {
+export async function albumsOnMB(items, { genres = false, wait = 0, signal, background = false, now = false } = {}) {
   if (!mbFeatures() || !items.length) return items.map(() => null);
   const out = [];
   for (let i = 0; i < items.length; i += 200) {
     const part = items.slice(i, i + 200).map((it) => ({ artist: String(it.artist || '').slice(0, 200), title: String(it.title || '').slice(0, 200), year: Number(it.year) || null }));
-    const r = await call('albums', { items: part, genres, wait }, { signal });
+    const r = await call('albums', { items: part, genres, wait }, { signal, background, now });
     const results = Array.isArray(r.results) ? r.results : [];
     out.push(...part.map((_, j) => results[j] ?? null));
   }
@@ -125,7 +178,7 @@ let aliasesRest = 0;
 export async function aliasesOf(name) {
   if (!mbFeatures() || Date.now() < aliasesRest) return [];
   try {
-    const { artist } = await artistOnMB(name, { groups: false });
+    const { artist } = await artistOnMB(name, { groups: false, now: true });
     const want = norm(name);
     return [...new Set((artist?.aliases || []).filter((a) => norm(a) && norm(a) !== want))].slice(0, 8);
   } catch (err) {
@@ -174,7 +227,7 @@ export async function withoutLiveOrDemos(tracks, { server = app.server, keep = 1
     else if (mbFeatures() && types[i] && artist && title && norm(artist) !== 'various artists') ask.push({ id, artist, title, year });
   });
   if (ask.length) {
-    const groups = await albumsOnMB(ask, { wait: MB_WAIT }).catch(() => []);
+    const groups = await albumsOnMB(ask, { wait: MB_WAIT, now: true }).catch(() => []);
     ask.forEach((a, i) => {
       const g = groups[i];
       if (g && typeof g === 'object') kinds.set(a.id, kindOf(g.primary, g.secondary));
