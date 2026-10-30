@@ -4575,6 +4575,25 @@ with sync_playwright() as pw:
               let_go and track_meta(first['id']).get('userRating') == 8 and shown_now == 8, f'{outbox()} {track_meta(first["id"]).get("userRating")} {shown_now}')
         player(page, 'p.pause()')
         mock(f'/:/rate?key={first["id"]}&rating=-1&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        # A kept play Plex fails (a 500) while it answers otherwise: tried
+        # again in a while, not over and over, and the connection isn't
+        # taken for gone.
+        failed = []
+
+        def fail_timeline(route):
+            if 'pw-test-500' in route.request.url:
+                failed.append(route.request.url)
+            route.fulfill(status=500, body='')
+        page.route('**/:/timeline?**', fail_timeline)
+        page.evaluate("""(id) => import('./js/outbox.js').then((o) => { o.keepPlayed({ id, duration: 200000 }, 199000, 'pw-test-500'); return o.flush(); })""", q[1])
+        page.wait_for_timeout(8000)
+        lost = js(page, "() => import('./js/connection.js').then((c) => c.connection.lost)")
+        still = outbox()
+        page.unroute('**/:/timeline?**')
+        check('signal: a kept play Plex fails while it answers otherwise is tried again in a while, not over and over (nor the connection taken for gone)',
+              len(failed) == 1 and not lost and page.locator('#banner:not([hidden])').count() == 0 and any(x['kind'] == 'played' and x['id'] == q[1] for x in still),
+              f'{len(failed)} {lost} {still}')
+        js(page, "() => import('./js/outbox.js').then((o) => o.keptOf('played').forEach((x) => o.forget(x.key)))")
         # What's kept is the account's: signing out clears it, unsent.
         js(page, """() => import('./js/outbox.js').then((o) => o.keep({ kind: 'rated', key: 'rated|1', id: '1', value: 4, title: 'Kept', loved: false }))""")
         before = outbox()

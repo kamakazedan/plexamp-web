@@ -218,23 +218,33 @@ function plainly(groups, it, self) {
   return (Array.isArray(groups) ? groups : []).some((g) => albumKey(g.title) === key && firstYear(g) && Math.abs(firstYear(g) - y) <= 1);
 }
 
-// Album titles plenty of artists have: "Live", "Greatest Hits", "Demos",
-// "Remixes", "Vol. 2", "II", "1999", any of two or three letters ("Up"),
-// and those with the artist's own name besides ("The Best of Alphabeat",
-// "Alphabeat Live"). `key`: the title as albumKey has it; `self`: the
-// artist's name, as albumKey has it. An album of one such title that's an
-// artist's, by its title and year, isn't plain evidence on its own that
-// it's that artist's rather than another's of the name.
-const ROMAN = '(?=[mdclxvi])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})';
-const NUMBER = `(?:\\d+|${ROMAN})`;
-const PART = '(?:vol|volume|part|pt|no|chapter|book)';
-const COMMON =
-  '(?:(?:very )?best(?: of)?|greatest hits|greatest|hits|essentials?|singles|b sides|rarities|remix(?:es|ed)?|collection|complete|anthology|demos?|live|unplugged|acoustic|instrumentals?|untitled|unreleased|ep|lp|album|mixtape|sampler|compilation|retrospective|gold|covers|sessions|debut)';
-const GENERIC = new RegExp(`^(?:${COMMON}(?: ${PART})?(?: ${NUMBER})*|(?:${PART} )?${NUMBER}(?: ${NUMBER})*)$`);
+// Album titles plenty of artists have: of one word ("Live", "Christmas",
+// "Love", "Home"), of three letters or fewer ("Up"), live at somewhere
+// ("Live in Tokyo"), or of stock words and numbers alone ("Greatest Hits
+// Vol. 2", "BBC Sessions", "The Complete Recordings", "Second Album",
+// "II"), the artist's own name aside ("The Best of Alphabeat", "Alphabeat
+// Live"). `key`: the title as albumKey has it; `self`: the artist's name,
+// as albumKey has it. An album of one such title that's an artist's, by its
+// title and year, isn't plain evidence on its own that it's that artist's
+// rather than another's of the name.
+const STOCK = new Set(
+  `a an and the of in at on from to for with by
+  best very greatest hits hit essential essentials singles single b side sides rarities rare
+  remix remixes remixed mix mixes collection collected complete recordings recorded anthology
+  demo demos live unplugged acoustic instrumental instrumentals untitled unreleased ep lp album albums
+  mixtape sampler compilation retrospective gold platinum covers cover sessions session debut
+  christmas xmas holiday holidays songs song love ballads bbc peel mtv radio tracks bonus
+  remastered remaster deluxe edition expanded version versions vol volume part pt no chapter book
+  first second third new early years favourites favorites selected works anniversary special
+  one two three four five six seven eight nine ten`.split(/\s+/),
+);
+const ROMAN = /^(?=[mdclxvi])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$/;
 export function genericTitle(key, self = '') {
   let k = String(key || '');
-  if (self && k !== self) k = ` ${k} `.replace(` ${self} `, ' ').trim().replace(/^(?:of|by) | (?:of|by)$/g, '');
-  return k.length < 4 || GENERIC.test(k);
+  if (self && k !== self) k = ` ${k} `.replace(` ${self} `, ' ').trim();
+  const words = k.split(' ').filter(Boolean);
+  if (k.length < 4 || words.length < 2 || /^live (?:in|at|from|on) /.test(k)) return true;
+  return words.every((w) => STOCK.has(w) || /^\d+$/.test(w) || ROMAN.test(w));
 }
 
 // Whether library artists are one artist, the artist of `name`, to merge

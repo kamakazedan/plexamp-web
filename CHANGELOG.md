@@ -14,9 +14,9 @@ you're running is shown in **Settings › About**.
   never skipped, nor converted instead, for want of the connection (before,
   up to three were skipped, then it stopped). Plays and ratings are kept on
   the device meanwhile and sent to Plex once it's back, so the tracks played
-  count as they would have, and a rating shows at once (but one of a track
-  rated again since, in another app or on another device, stays as that
-  one has it). The banner says what's happening till then, asking again
+  count as they would have (and not twice), and a rating shows at once (but
+  one of a track rated again since, in another app or on another device,
+  stays as that one has it). The banner says what's happening till then, asking again
   every half a minute (and for another way to your server). Your Plex
   server down or restarting behind the container (`PLEX_SERVER_URL`) counts
   as the connection gone too. What's kept is your account's, on that

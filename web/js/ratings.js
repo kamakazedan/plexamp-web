@@ -112,25 +112,35 @@ export async function rateTrack(track, rating) {
 // more than this device's clock and the server's could be apart): that
 // one stands, and shows here. One Plex refuses is let go, saying so.
 const CLOCKS_APART_MS = 120000;
-sendsWith('rated', async (x) => {
-  try {
-    const now = await app.server.metadata(x.id);
-    if (Number(now?.lastRatedAt) * 1000 > x.at + CLOCKS_APART_MS) {
-      const value = now.userRating ?? null;
-      known.set(String(x.id), value);
-      ratingEvents.dispatchEvent(new CustomEvent('rated', { detail: { id: String(x.id), rating: value } }));
-      paintRows(String(x.id), value);
+sendsWith(
+  'rated',
+  async (x) => {
+    try {
+      const now = await app.server.metadata(x.id);
+      if (Number(now?.lastRatedAt) * 1000 > x.at + CLOCKS_APART_MS) {
+        const value = now.userRating ?? null;
+        known.set(String(x.id), value);
+        ratingEvents.dispatchEvent(new CustomEvent('rated', { detail: { id: String(x.id), rating: value } }));
+        paintRows(String(x.id), value);
+        return false;
+      }
+      // (Not one rated again here meanwhile, in this tab or another: that
+      // one's sent itself, or kept in its place.)
+      if (kept(x.key)?.at !== x.at) return false;
+      await app.server.rate(x.id, x.value);
+    } catch (err) {
+      if (unreachable(err)) throw err;
+      toast(`Couldn’t save your rating of “${x.title || 'a track'}” from while the connection was gone. ${describeError(err)}`, { timeout: 6000 });
       return false;
     }
-    await app.server.rate(x.id, x.value);
-  } catch (err) {
-    if (unreachable(err)) throw err;
-    toast(`Couldn’t save your rating of “${x.title || 'a track'}” from while the connection was gone. ${describeError(err)}`, { timeout: 6000 });
-    return false;
-  }
-  if (x.loved && app.settings.lovedPlaylist !== false) keepLoved({ id: x.id, title: x.title, userRating: x.value });
-  return true;
-});
+    if (x.loved && app.settings.lovedPlaylist !== false) keepLoved({ id: x.id, title: x.title, userRating: x.value });
+    return true;
+  },
+  {
+    letGo: (x) =>
+      toast(`Couldn’t save your rating of “${x.title || 'a track'}” from while the connection was gone: ${app.source?.serverName || 'your server'} kept failing it.`, { timeout: 6000 }),
+  },
+);
 
 // ---------- ❤️ Tracks ----------
 

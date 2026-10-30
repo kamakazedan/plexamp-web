@@ -235,8 +235,9 @@ for pair in OFFLINE_KEY:OFFLINE_PWD OFFLINE_FROM:OFFLINE_NETWORKS; do
 done
 if [ "${#renames[@]}" -gt 0 ]; then
     # (sed -i writes a new file beside it, with its owner and permissions,
-    # and only then puts it in its place: never a file half written.)
-    sed -E -i "${renames[@]}" \
+    # and only then puts it in its place: never a file half written. Where
+    # the file's a link to another, that other.)
+    sed -E -i --follow-symlinks "${renames[@]}" \
         -e 's/^# player can be signed in to with this key, as your Plex server lets it in$/# player can be signed in to with this password, as your Plex server lets it in/' \
         -e 's/^# Where the offline key can be used from: private \(your own networks\), any,$/# Where the offline password can be used from: private (your own networks), any,/' \
         "$ENV_FILE"

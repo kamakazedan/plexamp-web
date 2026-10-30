@@ -2679,10 +2679,12 @@ test('MusicBrainz features: artists Plex has more than once, merged only on plai
   // Album titles plenty of artists have
   const generic = (title, name = '') => genericTitle(albumKey(title), albumKey(name));
   for (const [title, name] of [['Live'], ['Greatest Hits, Vol. 2'], ['The Very Best Of'], ['Demos'], ['B-Sides'], ['Remixes'], ['EP 1'], ['II'], ['1999'], ['Up'], ['Live 2009'],
+    ['Christmas'], ['Christmas Album'], ['Greatest Hits Live'], ['Live Hits'], ['Hits & Rarities'], ['BBC Sessions'], ['Peel Sessions'], ['MTV Unplugged'], ['Live in Tokyo'],
+    ['The Complete Recordings'], ['Best of the Best'], ['Second Album'], ['Bonus Tracks'], ['Remastered'], ['Deluxe'], ['Ballads'], ['Love Songs'], ['Love'], ['Home'], ['Blue'],
     ['The Best of Alphabeat', 'Alphabeat'], ['Alphabeat Live', 'Alphabeat'], ['Led Zeppelin IV', 'Led Zeppelin']]) {
     assert.equal(generic(title, name), true, title);
   }
-  for (const title of ['This Is Alphabeat', 'The Beat Is...', 'Express Non-Stop', 'Live at Roskilde', 'Civil War', 'Night Shift']) assert.equal(generic(title, 'Alphabeat'), false, title);
+  for (const title of ['This Is Alphabeat', 'The Beat Is...', 'Express Non-Stop', 'Civil War', 'Night Shift', 'Songs from the Big Chair']) assert.equal(generic(title, 'Alphabeat'), false, title);
 
   // An album of each that's plainly theirs on MusicBrainz (by its title, within a year), none another's
   assert.equal(sameArtist([old, fresh], mb), 'same');

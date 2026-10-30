@@ -17,7 +17,7 @@ import { debugLog, debugOn } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
 import { Prefetcher, cachedLoader, recordingLoader } from './prefetch.js';
 import { connection, connectionLost, connectionBack, serverAnswers } from './connection.js';
-import { keepPlayed } from './outbox.js';
+import { keepPlayed, flush } from './outbox.js';
 
 const PRELOAD_AT = 25; // seconds before the next track starts
 // ...once this one has loaded to its end, or has this much buffered (and,
@@ -654,7 +654,6 @@ class Player extends EventTarget {
   async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true, resume = false } = {}) {
     this.cancelTransition();
     this.cancelRescue();
-    this.cancelHold();
     for (const d of this.decks) this.unwatchStall(d);
     this.qualityLater = false; // (it loads as Streaming quality now says)
     if (!resume) {
@@ -669,6 +668,9 @@ class Player extends EventTarget {
     if (reportPrev) this.endHere(prev);
     this.resumeAs = null;
     this.saveProgress(true);
+    // (Only now: a track waiting for the connection was where its hold has
+    // it, for the two above: see time.)
+    this.cancelHold();
     this.index = index;
     const track = this.current;
     if (!track || !app.server) return this.reset();
@@ -2328,24 +2330,21 @@ class Player extends EventTarget {
     // playing one's, if both have it: a queue of one track, repeated).
     const deck = this.deck.qid === track.qid ? this.deck : this.decks.find((d) => d.qid != null && d.qid === track.qid);
     const playback = deck?.playback || (this.resumeAs?.qid === track.qid ? this.resumeAs.playback : null);
+    const sentAt = Date.now();
     const sent = app.server.timeline(track, state, time * 1000, playback);
     // A track's last report (played to its end from what was loaded ahead,
-    // say) that couldn't get there as the connection's gone: kept, and sent
-    // once it's back (outbox.js), so the play counts as it would have. If
-    // the server answers again already (it was gone a moment), it's sent
-    // again now instead, the once.
+    // say) that couldn't get there: kept, and sent from there (outbox.js),
+    // so the play counts as it would have (but not twice: not if Plex has
+    // it as played already, as it may, from this one timed out): once the
+    // connection's back, or now, if the server answers again already (it
+    // was gone a moment).
     if (state !== 'stopped') return;
     const s = app.server;
     sent.then(async (ok) => {
       if (ok || app.server !== s) return;
-      const answers = await serverAnswers();
-      if (app.server !== s) return;
-      if (answers) {
-        s.timeline(track, state, time * 1000, playback);
-        return;
-      }
-      keepPlayed(track, time * 1000, playback);
-      connectionLost();
+      keepPlayed(track, time * 1000, playback, sentAt);
+      if (await serverAnswers()) flush();
+      else connectionLost();
     });
   }
 

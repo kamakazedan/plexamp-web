@@ -9,19 +9,23 @@
 // and one the server refuses is let go (ratings.js says so).
 import { app, on } from './state.js';
 import { store } from './plex.js';
-import { connection, connectionLost, connectionBack, unreachable } from './connection.js';
+import { connection, connectionLost, connectionBack, unreachable, serverAnswers } from './connection.js';
 import { debugLog } from './debug.js';
 
 const KEY = 'outbox';
 const MAX = 500;
 const MAX_AGE = 14 * 86400000;
 const AGAIN_MS = 20000;
+// Tries at one the server answers otherwise, but fails (a 500, say), or
+// doesn't answer in time, before it's let go.
+const TRIES = 3;
 
-// kind -> async (item) => true (sent), or false (the server refused it):
-// throws { network } for the connection gone again.
+// kind -> { send: async (item) => true (sent), or false (the server refused
+// it): throws { network } for the connection gone again; letGo(item): one
+// that couldn't be sent, let go (see TRIES) }.
 const senders = new Map();
-export function sendsWith(kind, fn) {
-  senders.set(kind, fn);
+export function sendsWith(kind, send, { letGo = null } = {}) {
+  senders.set(kind, { send, letGo });
 }
 
 const KINDS = new Set(['played', 'rated']);
@@ -82,10 +86,18 @@ function later() {
 
 // Each kept for this server, sent in turn (another tab, sending them too,
 // takes turns with this one: navigator.locks, where there is it). Stops at
-// the first that can't get there yet, to try again in a while.
+// the first that can't get there yet, to try again in a while: never
+// sooner than AGAIN_MS after, whatever asks for it (the connection back,
+// say), so nothing can have it ask again and again.
 let flushing = null;
+let failedAt = 0;
 export function flush() {
   clearTimeout(timer);
+  const wait = failedAt + AGAIN_MS - Date.now();
+  if (wait > 0) {
+    timer = setTimeout(flush, wait);
+    return Promise.resolve();
+  }
   if (flushing) return flushing;
   flushing = (async () => {
     try {
@@ -108,14 +120,31 @@ async function send() {
     if (!next || !s || !senders.has(next.kind)) return;
     let sent = false;
     try {
-      sent = await senders.get(next.kind)(next);
+      sent = await senders.get(next.kind).send(next);
     } catch (err) {
       if (unreachable(err)) {
-        connectionLost();
-        later();
-        return;
+        failedAt = Date.now();
+        // The server not answering either: the connection's gone, and
+        // what's kept goes once it's back.
+        if (!(await serverAnswers())) {
+          connectionLost();
+          later();
+          return;
+        }
+        // It answers, but not to this: it's this one that can't get
+        // there (the server failing it, or too slow to answer it). Again
+        // in a while, a few times, then let go.
+        const tries = (Number(next.tries) || 0) + 1;
+        if (tries < TRIES) {
+          save(load().map((x) => (x.key === next.key && x.at === next.at ? { ...x, tries } : x)));
+          later();
+          return;
+        }
+        debugLog('offline', `a kept ${next.kind} couldn't be sent, ${TRIES} times, so it's let go: ${err?.message || err}`, 'warn');
+        senders.get(next.kind).letGo?.(next);
+      } else {
+        debugLog('offline', `a kept ${next.kind} couldn't be sent: ${err?.message || err}`, 'warn');
       }
-      debugLog('offline', `a kept ${next.kind} couldn't be sent: ${err?.message || err}`, 'warn');
     }
     // (As they are now: another tab, or a rating rated again, may have
     // changed them meanwhile.)
@@ -127,16 +156,32 @@ async function send() {
 
 // A track's last report, played to its end, say ('stopped': see plex.js
 // timeline). Not once Sync recent plays is off (here, or on another device:
-// it follows the account), as it would have been then.
+// it follows the account), as it would have been then. Nor where Plex has
+// the track as played about when it was first sent (`sentAt`): it got
+// there then, if not its answer (it timed out on its way back, say), and
+// a play sent again could count twice.
+const SENT_SLACK_MS = 30000; // (how far apart this device's clock and the server's can be, and then some)
 sendsWith('played', async (x) => {
   if (app.settings.reportPlays === false) return false;
+  const now = await app.server.metadata(x.id);
+  const seen = Number(now?.lastViewedAt) * 1000 || 0;
+  if (seen && seen >= (Number(x.sentAt) || x.at) - SENT_SLACK_MS && seen <= x.at + SENT_SLACK_MS) return false;
   const ok = await app.server.timeline({ id: x.id, duration: x.duration || undefined }, 'stopped', x.time, x.playback || undefined);
   if (!ok) throw Object.assign(new Error('network'), { network: true });
   return true;
 });
 
-export function keepPlayed(track, timeMs, playback) {
-  keep({ kind: 'played', key: `played|${track.id}|${playback || ''}|${Math.round(timeMs)}`, id: track.id, duration: Number(track.duration) || 0, time: Math.max(0, Math.round(timeMs)), playback: playback || null });
+// `sentAt`: when it was sent the first time (Date.now()).
+export function keepPlayed(track, timeMs, playback, sentAt = Date.now()) {
+  keep({
+    kind: 'played',
+    key: `played|${track.id}|${playback || ''}|${Math.round(timeMs)}`,
+    id: track.id,
+    duration: Number(track.duration) || 0,
+    time: Math.max(0, Math.round(timeMs)),
+    playback: playback || null,
+    sentAt,
+  });
 }
 
 // Tried again as the connection comes back, the browser says it's online,
