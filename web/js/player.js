@@ -352,7 +352,10 @@ class Player extends EventTarget {
     this.rescueTimer = null;
     this.rescueOnline = null;
     this.rescueGo = null;
-    this.drops = null; // { qid, n }: how many times the connection to a track's stream has dropped (see couldntPlay)
+    this.drops = null; // { qid, n, at }: how many times the connection to a track's stream has dropped (see dropped)
+    this.asIs = null; // the track whose file has played as it is here (see couldntPlay)
+    this.asIsAgain = null; // ...the one whose file was loaded as it is once more, the server handing it over
+    this.fileFails = null; // { qid, n }: how many times the server failed a track's file, asked for it (see couldntPlay)
     this.stallRetry = null; // the one loaded again after waiting for data too long (see watchStall)
     this.stallLimits = { ...STALL };
     this.restoredAt = 0;
@@ -559,6 +562,8 @@ class Player extends EventTarget {
     el.addEventListener('timeupdate', () => mine() && this.onTime());
     el.addEventListener('durationchange', () => mine() && this.queueTime());
     el.addEventListener('loadedmetadata', () => {
+      // (A file that's played as it is here: see couldntPlay.)
+      if (mine() && !deck.isHls && deck.qid != null) this.asIs = deck.qid;
       if (!mine() || this.pendingSeek == null) return;
       try {
         el.currentTime = resolve(this.pendingSeek);
@@ -1495,6 +1500,10 @@ class Player extends EventTarget {
       this.setState('paused');
       // The browser wants a tap before it plays sound (e.g. after a reload).
       this.remote?.blocked();
+    } else if (err?.name === 'NotSupportedError') {
+      // (A source that didn't load, or won't play: the element's error too,
+      // which is seen to there: a drop, or a file converted. See onError.)
+      debugLog('player', `play() failed: ${err.message || err.name}`);
     } else if (err?.name !== 'AbortError' && navigator.onLine !== false) {
       // (Offline, a source that can't load is the element's error, which
       // waits for the connection: see onError.)
@@ -1533,29 +1542,57 @@ class Player extends EventTarget {
   // to play (see onError).
   couldntPlay(track, err, media, { at = this.time, autoplay = this.isPlaying } = {}) {
     const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? this.time : at;
-    if (track.partKey && (media?.code === MediaError.MEDIA_ERR_NETWORK || (!this.triedTranscode && this.drops?.qid === track.qid))) {
-      // The connection to its stream dropped (the server answering
-      // otherwise), or, loaded again after it did, it didn't come (the
-      // browser says the format's wrong, then, as it does for a file that
-      // didn't come at all: see fileComes).
+    const code = media?.code;
+    // The connection to its stream dropped (the server answering otherwise).
+    if (track.partKey && code === MediaError.MEDIA_ERR_NETWORK) {
       this.dropped(track, { at, autoplay, startAt });
       return;
     }
-    if (!this.triedTranscode && track.partKey) {
-      // The browser couldn't play the file as it is, it says: but it says
-      // so too of a file that didn't come at all (no answer to it, or the
-      // server failing it: a weak signal, say). So it's converted (as a file
-      // of a format this browser can't play is) only once the server's
-      // handed it over; otherwise it's a drop, as above.
+    if (this.triedTranscode || !track.partKey) {
+      this.couldntPlayHere(track, err);
+      return;
+    }
+    // The browser couldn't play the file as it is, it says ("not supported"):
+    // as it says too of a file that didn't come (no answer to it, or the
+    // server failing it: a weak signal, say). So for a file that's played as
+    // it is here already, or whose connection's dropped, a drop; otherwise
+    // the server's asked for it: a drop if it doesn't hand it over; if it
+    // does, the file as it is once more (the connection may have been gone
+    // a moment), and only then, failing again with the server handing it
+    // over, converted (as a file of a format this browser can't play is). A
+    // file the server keeps failing (an answer of 500 or more, three times):
+    // a track that won't play here. Another error (it came, but couldn't be
+    // decoded): converted, as before.
+    if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+      if (this.asIs === track.qid || this.drops?.qid === track.qid) {
+        this.dropped(track, { at, autoplay, startAt });
+        return;
+      }
       const token = this.loadToken;
       this.fileComes(track).then((comes) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
-        if (comes) this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
-        else this.dropped(track, { at, autoplay, startAt });
+        if (comes === true) {
+          if (this.asIsAgain === track.qid) {
+            this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
+          } else {
+            this.asIsAgain = track.qid;
+            this.load(this.index, { startAt, reportPrev: false, resume: true });
+          }
+          return;
+        }
+        if (comes === 'failed') {
+          const n = (this.fileFails?.qid === track.qid ? this.fileFails.n : 0) + 1;
+          this.fileFails = { qid: track.qid, n };
+          if (n >= 3) {
+            this.couldntPlayHere(track, err);
+            return;
+          }
+        }
+        this.dropped(track, { at, autoplay, startAt });
       });
       return;
     }
-    this.couldntPlayHere(track, err);
+    this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
   }
 
   // The connection to a track's stream dropped, or it didn't come: the same
@@ -1583,18 +1620,18 @@ class Player extends EventTarget {
     this.holdFor(track, at, autoplay, { delay: Math.min(30000, 2000 * 2 ** (n - 2)), gone: false, transcode: again.transcode });
   }
 
-  // Whether the server hands over a track's file as it is: false for no
-  // answer, or an answer of 500 or more (the connection dropping, the
-  // server failing), which a media element's error can't be told from
-  // (Chromium's says the format's wrong either way). Only the answer's
-  // start is read: the rest is let go.
+  // Whether the server hands over a track's file as it is: true; false for
+  // no answer (the connection dropping), 'failed' for an answer of 500 or
+  // more (the server failing it), which a media element's error can't be
+  // told from (Chromium's says the format's wrong either way). Only the
+  // answer's start is read: the rest is let go.
   async fileComes(track) {
     if (!app.server || navigator.onLine === false) return false;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
       const res = await fetch(this.sourceFor(track, false).url, { cache: 'no-store', signal: ctrl.signal });
-      return res.status < 500;
+      return res.status < 500 ? true : 'failed';
     } catch {
       return false;
     } finally {

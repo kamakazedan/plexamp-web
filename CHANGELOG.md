@@ -14,8 +14,10 @@ you're running is shown in **Settings › About**.
   The player says so, and suggests a lower Streaming quality, a tap away.
   Before (since 0.18.3), it was converted after the second drop, till
   Streaming quality changed. And a file the browser says it can't play is
-  converted only once your server's handed it over: one that didn't come
-  (as browsers say of one that doesn't) is a drop.
+  converted only if your server hands it over and it still doesn't play,
+  loaded again as it is: one that didn't come (as browsers say of one that
+  doesn't) is a drop. (One that came but couldn't be decoded is converted,
+  as before; one your server keeps failing is skipped.)
 - **Artists to merge, several at once**: those MusicBrainz plainly has as
   one artist are chosen to begin with, and one OK merges all you've chosen,
   one after another (those of one name first). The page then shows what's
