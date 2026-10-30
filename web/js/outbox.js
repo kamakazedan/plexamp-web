@@ -42,7 +42,7 @@ function save(items) {
 export function keep(item) {
   if (!app.source?.serverId || !KINDS.has(item.kind)) return;
   const x = { ...item, id: String(item.id), server: app.source.serverId, at: Date.now() };
-  save([...load().filter((y) => y.key !== x.key), x]);
+  save([...load().filter((y) => y.key !== x.key || y.server !== x.server), x]);
   debugLog('offline', `kept for when the connection's back: ${x.kind} (${load().length} kept)`);
   later();
 }

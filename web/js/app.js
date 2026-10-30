@@ -176,10 +176,12 @@ function ensureConnection() {
 async function checkConnection() {
   const src = app.source;
   if (!src || !app.server) return;
+  let unreachable = true;
   try {
     await app.server.identity({ timeout: 5000, cache: 'no-store' });
     debugLog('connection', `${src.serverName} answers at ${where(src.kind)}`);
     connectionBack();
+    if (bannerKind === 'connection') hideBanner();
     // A better route may answer now (back home, say).
     if (pickable(src) && !pinned(src) && rank(src.kind) > 0) {
       bestRoute(src)
@@ -197,6 +199,8 @@ async function checkConnection() {
       showBanner('Plex rejected the saved sign-in.', 'Sign in again', () => navigate('/settings/account'));
       return;
     }
+    // (It answered, if not as it should: there, if not right.)
+    unreachable = !!err.network;
   }
   if (pickable(src)) {
     try {
@@ -213,6 +217,10 @@ async function checkConnection() {
     }
   }
   if (app.source !== src) return;
+  if (!unreachable) {
+    showBanner(`Can’t reach ${src.serverName}.`, 'Try again', () => ensureConnection(), 'connection');
+    return;
+  }
   connectionLost();
   connectionBanner();
 }
