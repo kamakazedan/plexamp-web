@@ -138,8 +138,9 @@ function schedule() {
   timer = setTimeout(flush, Math.min(MAX_WAIT_MS, Math.max(at - now, gate(), 1000)));
 }
 
-// Each due for this server, sent in turn (another tab, sending them too,
-// takes turns with this one: navigator.locks, where there is it). Stops at
+// Each due for this server, sent in turn, oldest first (but those that have
+// failed after the others; another tab, sending them too, takes turns with
+// this one: navigator.locks, where there is it). Stops at
 // the first that can't be sent, to go on in a while: never sooner than
 // AGAIN_MS after, whatever asks for it (the connection back, say), so
 // nothing can have it ask again and again.
@@ -170,11 +171,19 @@ async function send() {
   const s = app.server;
   const server = app.source?.serverId;
   if (!s || !server) return;
+  // (Each once in a go, even were taking it out not kept.)
+  const done = new Set();
+  const name = (x) => `${x.server}|${x.key}|${x.at}`;
+  let sooner = false;
   for (let n = 0; n < MAX; n += 1) {
     if (app.server !== s) return;
     const now = Date.now();
-    const next = load().find((x) => x.server === server && senders.has(x.kind) && due(x, now));
-    if (!next) return;
+    const ready = load().filter((x) => x.server === server && senders.has(x.kind) && due(x, now) && !done.has(name(x)));
+    if (!ready.length) return;
+    // (The oldest of those that have failed least: one that's failed goes
+    // after the others.)
+    const next = ready.reduce((a, b) => ((Number(b.fails) || 0) < (Number(a.fails) || 0) ? b : a));
+    done.add(name(next));
     let sent = false;
     try {
       sent = await senders.get(next.kind).send(next, s);
@@ -201,7 +210,11 @@ async function send() {
         const serverFails = (Number(was.serverFails) || 0) + (err?.status >= 500 ? 1 : 0);
         if (serverFails < SERVER_FAILS) {
           const wait = BACKOFF_MS[Math.min(fails, BACKOFF_MS.length) - 1];
-          update(was, { fails, serverFails, notBefore: Math.max(Number(was.notBefore) || 0, Date.now() + wait) });
+          // (Not a wait from before further off than any: the clock's gone
+          // back since.)
+          const stored = Number(was.notBefore) || 0;
+          const prior = stored - Date.now() <= MAX_WAIT_MS ? stored : 0;
+          update(was, { fails, serverFails, notBefore: Math.max(prior, Date.now() + wait) });
           debugLog('offline', `a kept ${next.kind} couldn't be sent (${err?.message || err}): again in ${Math.round(wait / 1000)} s`, 'warn');
           return;
         }
@@ -212,8 +225,33 @@ async function send() {
     // (As they are now: another tab, or a rating rated again, may have
     // changed them meanwhile.)
     save(load().filter((x) => !same(x, next)));
-    if (sent && app.server === s) connectionBack();
+    if (sent && app.server === s) {
+      connectionBack();
+      if (!sooner) {
+        sooner = true;
+        waitLess();
+      }
+    }
   }
+}
+
+// After a patchy stretch: those that only got no answer (never the server
+// failing them) wait no longer, now one's got there (or the connection's
+// back), rather than waiting out their time, up to an hour: but for what
+// a send of theirs that may have got there still needs (CHECK_AFTER_MS).
+function waitLess() {
+  const now = Date.now();
+  let changed = false;
+  const items = load().map((x) => {
+    if (!(Number(x.notBefore) > now) || Number(x.serverFails) > 0) return x;
+    const sends = (Array.isArray(x.sends) ? x.sends : []).map(Number).filter(Number.isFinite);
+    const floor = sends.length ? Math.max(...sends) + CHECK_AFTER_MS : 0;
+    const notBefore = floor > now ? floor : 0;
+    if (notBefore === Number(x.notBefore)) return x;
+    changed = true;
+    return { ...x, notBefore };
+  });
+  if (changed) save(items);
 }
 
 // A track's last report, played to its end, say ('stopped': see plex.js
@@ -256,7 +294,13 @@ export function keepPlayed(track, timeMs, playback, sentAt = null) {
 // Tried again as the connection comes back, the browser says it's online,
 // or a server's chosen; and a few seconds after the app starts, for any kept
 // from before (the page closed while the connection was gone, say).
-connection.addEventListener('back', () => flush());
-window.addEventListener('online', () => flush());
+connection.addEventListener('back', () => {
+  waitLess();
+  flush();
+});
+window.addEventListener('online', () => {
+  waitLess();
+  flush();
+});
 on('source', () => app.server && flush());
 if (load().length) timer = setTimeout(flush, 3000);
