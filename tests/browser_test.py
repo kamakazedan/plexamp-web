@@ -105,7 +105,9 @@ def crashed(kind, value, tb):
     section and its own lines (not Playwright's), then the error."""
     import traceback
     own = [f'{f.name}:{f.lineno}' for f in traceback.extract_tb(tb) if f.filename.endswith('browser_test.py')]
-    annotate('Browser tests stopped', f'in {NOW["section"] or "?"}, at {" > ".join(own[-6:])}: {kind.__name__}: {value}')
+    annotate('Browser tests stopped', f'in {NOW["section"] or "the first sign-in"}, at {" > ".join(own[-6:])}: {kind.__name__}: {value}')
+    if errors:
+        annotate('Browser tests: what the pages said before that', ' | '.join(errors[-4:]))
     sys.__excepthook__(kind, value, tb)
 
 
@@ -163,7 +165,20 @@ def shot(page, name):
 
 def login(page, app, token='t', app_defaults=False):
     page.goto(app + '#/login')
-    page.click('text=Use a server address and token instead')
+    try:
+        page.click('text=Use a server address and token instead')
+    except Exception:
+        # (What showed instead, for CI's summary page: the address, and what's on it.)
+        try:
+            shown = page.evaluate('() => document.body.innerText.slice(0, 400)')
+        except Exception as e:  # noqa: BLE001 - said instead
+            shown = f'(couldn\'t be read: {e})'
+        annotate('Browser tests: no sign-in page', f'{page.url}: {shown!r}')
+        try:
+            page.screenshot(path=os.path.join(OUT, 'no-sign-in-page.png'))
+        except Exception:  # noqa: BLE001 - only for looking at
+            pass
+        raise
     if LOGIN_URL:
         page.fill('.login-form input[type=url]', LOGIN_URL)
     # (The token's field: with an offline key, its field is a password's too.)
