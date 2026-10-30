@@ -7959,8 +7959,8 @@ with sync_playwright() as pw:
                   list(twice) == ['Glass Harbour'] and gh['checked'] is True and 'MusicBrainz says they’re the same artist' in gh['text'], f'{twice} {joined} {left}')
             ns, ja = left.get('Northbound Static', {}), left.get('Juniper & Ash', {})
             check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash): left as they are, saying why album by album, for you to choose',
-                  'is by a different Northbound Static' in ns.get('text', '') and '“Frost Engine”' in ns.get('text', '') and ns.get('checked') is False
-                  and 'Not sure' in ja.get('text', '') and 'none of' in ja.get('text', '') and ja.get('checked') is False, str(left))
+                  'are by a different Northbound Static' in ns.get('text', '') and '“Frost Engine”' in ns.get('text', '') and ns.get('checked') is False
+                  and 'Not sure' in ja.get('text', '') and 'can’t match any of their albums' in ja.get('text', '') and ja.get('checked') is False, str(left))
             first = left.get('Glass Harbour;Kilo Meridian', {})
             check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first, not to choose yet)',
                   not joined and 'called Glass Harbour first' in first.get('text', '') and first.get('checked') is None, f'{joined} {left}')

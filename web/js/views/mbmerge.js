@@ -229,11 +229,11 @@ export async function mbMergeView({ el, onDispose }) {
     if (g.kind === 'joined') return g.mb?.namesakes?.length ? `MusicBrainz says it’s ${g.name}’s.` : end(`MusicBrainz knows only one ${g.name}`);
     return 'MusicBrainz says they’re the same artist.';
   };
-  // How many of one's albums MusicBrainz knows as the artist's.
+  // How many of one's albums MusicBrainz matches to the artist ("1 of 3").
   const known = (x) => {
-    if (x.plain.length) return x.plain.length === x.albums ? (x.albums === 1 ? 'its 1' : `all ${fmt.number(x.albums)}`) : `${fmt.number(x.plain.length)} of ${fmt.number(x.albums)}`;
-    if (x.weak.length) return `only ${quoted(x.weak)} of ${fmt.number(x.albums)} (a common title)`;
-    return `none of ${fmt.number(x.albums)}`;
+    if (x?.plain?.length) return `${fmt.number(x.plain.length)} of ${fmt.number(x.albums)}`;
+    if (x?.weak?.length) return `only ${quoted(x.weak)} of ${fmt.number(x.albums)}, a common title`;
+    return `0 of ${fmt.number(x?.albums || 0)}`;
   };
   // Why it isn't, in a few words.
   const why = (g) => {
@@ -251,8 +251,9 @@ export async function mbMergeView({ el, onDispose }) {
     const ev = g.evidence || [];
     const weakApart = ev.flatMap((x) => x.apartWeak);
     if (weakApart.length) return end(`Not sure: MusicBrainz says ${quoted(weakApart)} is by a different ${g.name}, but it’s a common title`);
-    if (g.kind === 'joined') return `Not sure. Albums MusicBrainz knows: your ${g.name}, ${known(ev[0])}; this one, ${known(ev[1])}.`;
-    return `Not sure. Albums MusicBrainz knows: ${ev.map(known).join('; ')}.`;
+    const none = ev.every((x) => !x?.plain?.length && !x?.weak?.length);
+    if (g.kind === 'joined') return none ? 'Not sure: MusicBrainz can’t match any of the albums.' : `Not sure: MusicBrainz matches too few of the albums (your ${g.name}: ${known(ev[0])}; this one: ${known(ev[1])}).`;
+    return none ? 'Not sure: MusicBrainz can’t match any of their albums.' : `Not sure: MusicBrainz matches too few of their albums (${ev.map(known).join('; ')}).`;
   };
 
   const rowsFor = (list, cls) =>

@@ -652,7 +652,7 @@ function playbackView({ el }) {
       // those: turned off or on, it's that with them or without.)
       toggleRow({
         title: 'Skip live tracks and demos',
-        subtitle: 'Leaves live tracks and demos out of radio, shuffles and Guest DJs. Albums and playlists you play yourself are unaffected.',
+        subtitle: `Leaves live tracks and demos out of radio, shuffles and Guest DJs. Albums and playlists you play yourself are unaffected.${mbFeatures() ? ' Uses MusicBrainz too, for albums Plex hasn’t labelled.' : ''}`,
         checked: skipLiveOn(),
         onChange: (v) => saveSettings({ skipLive: v, mbSkipLive: v }),
       }),
