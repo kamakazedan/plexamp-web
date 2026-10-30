@@ -667,6 +667,8 @@ class Player extends EventTarget {
     if (!resume) {
       this.rescue = null;
       this.drops = null;
+      this.asIsAgain = null;
+      this.fileFails = null;
       this.stallRetry = null;
     }
     const prev = this.current;
@@ -1554,32 +1556,27 @@ class Player extends EventTarget {
     }
     // The browser couldn't play the file as it is, it says ("not supported"):
     // as it says too of a file that didn't come (no answer to it, or the
-    // server failing it: a weak signal, say). So for a file that's played as
-    // it is here already, or whose connection's dropped, a drop; otherwise
-    // the server's asked for it: a drop if it doesn't hand it over; if it
-    // does, the file as it is once more (the connection may have been gone
-    // a moment), and only then, failing again with the server handing it
-    // over, converted (as a file of a format this browser can't play is). A
-    // file the server keeps failing (an answer of 500 or more, three times):
-    // a track that won't play here. Another error (it came, but couldn't be
-    // decoded): converted, as before.
+    // server failing it: a weak signal, say). A file that's played as it is
+    // here: a drop, loaded again at once the first time. Otherwise the
+    // server's asked for it first (fileComes): a file that's played as it
+    // is here, or whose connection's dropped, is never converted for this,
+    // only loaded again (a drop); one that hasn't played here yet, that the
+    // server hands over, is loaded as it is once more (the connection may
+    // have been gone a moment), and only then, failing again so, converted
+    // (as a file of a format this browser can't play is). A file the server
+    // fails (an answer of 500 or more), three times: a track that won't play
+    // here. Another error (it came, but couldn't be decoded): converted, as
+    // before.
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
-      if (this.asIs === track.qid || this.drops?.qid === track.qid) {
+      const asIs = this.asIs === track.qid;
+      const dropping = this.drops?.qid === track.qid;
+      if (asIs && !dropping) {
         this.dropped(track, { at, autoplay, startAt });
         return;
       }
       const token = this.loadToken;
       this.fileComes(track).then((comes) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
-        if (comes === true) {
-          if (this.asIsAgain === track.qid) {
-            this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
-          } else {
-            this.asIsAgain = track.qid;
-            this.load(this.index, { startAt, reportPrev: false, resume: true });
-          }
-          return;
-        }
         if (comes === 'failed') {
           const n = (this.fileFails?.qid === track.qid ? this.fileFails.n : 0) + 1;
           this.fileFails = { qid: track.qid, n };
@@ -1587,6 +1584,14 @@ class Player extends EventTarget {
             this.couldntPlayHere(track, err);
             return;
           }
+        } else if (comes === true && !asIs && !dropping) {
+          if (this.asIsAgain === track.qid) {
+            this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
+          } else {
+            this.asIsAgain = track.qid;
+            this.load(this.index, { startAt, reportPrev: false, resume: true });
+          }
+          return;
         }
         this.dropped(track, { at, autoplay, startAt });
       });

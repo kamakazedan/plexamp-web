@@ -4071,6 +4071,20 @@ with sync_playwright() as pw:
         player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
         check('stream: ...whereas one the server hands over, that still doesn\'t play once loaded again as it is, is converted (as a format the browser can\'t play is)',
               converted and asked['probe'] >= 2 and asked['media'] >= 1 and not play_errors(), f'{rate()} {asked}')
+        # One the server keeps failing (an answer of 500, asked for it three
+        # times): a track that won't play here, skipped, saying so.
+        play_track(4, 2)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        failing = now()['id']
+        page.route('**/library/parts/**', lambda route: route.fulfill(status=500, body=''))
+        player(page, f"({not_supported}, {first_load}, p.onError(), true)")
+        said_so = wait_for(lambda: len(play_errors()) >= 1, 30, 0.2)
+        page.unroute('**/library/parts/**')
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        skipped = wait_for(lambda: now()['id'] != failing and now()['state'] == 'playing', 20, 0.25)
+        check('stream: ...and one the server keeps failing (500, three times asked) won\'t play here: skipped, saying so (not held for ever)',
+              said_so and skipped and len(play_errors()) == 1, f'{now()} {play_errors()}')
+        js(page, '() => { window.__playErrors = []; }')
 
         # ...whereas one that doesn't play as it is here stays converted, at
         # the bitrate asked for (paused when it's changed, too).
