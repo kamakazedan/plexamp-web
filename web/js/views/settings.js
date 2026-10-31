@@ -1,5 +1,5 @@
 import { app, on, saveSettings, setSource, signOut, switchAccount, proxyUri } from '../state.js';
-import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, switchHomeUser, getUser } from '../plex.js';
+import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, switchHomeUser, getUser, store } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, askText, avatar as personAvatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
@@ -137,7 +137,7 @@ function accountButtons() {
 function confirmSignOut() {
   sheet({
     title: 'Sign out?',
-    subtitle: `Clears your queue, AI settings and Home layout from this device. How the app looks and plays stays.${
+    subtitle: `Clears your queue, lists, AI settings, player name and Home layout from this device${store.keys('profile.').length ? ', and settings kept for anyone switched from' : ''}. How the app looks and plays stays.${
       keptCount() ? ` ${keptCount() === 1 ? 'A play or rating' : `${keptCount()} plays and ratings`} from while you were offline will be lost.` : ''
     }${
       app.auth?.offline
@@ -239,7 +239,7 @@ function chooseHomeUser(users, mine, myId) {
       h(
         'p.home-users-note',
         null,
-        'Everyone has their own settings, playlists and ratings. Yours come back when you switch back.',
+        'Everyone has their own settings, playlists and ratings. Your settings are kept on this device for when you switch back.',
       ),
     ),
   });
@@ -507,7 +507,7 @@ const FADES = [
   [
     'smart',
     'Smart',
-    'Fades where the music ends, with albums gapless. Needs Plex’s loudness analysis.',
+    'Fades where the music ends, with albums gapless. Without Plex’s loudness analysis, at the very end.',
   ],
   ['always', 'Always', 'Fades between every track.'],
   ['off', 'Off', 'No fades.'],
@@ -635,7 +635,7 @@ function playbackView({ el }) {
       }),
       toggleRow({
         title: 'Skip tracks you’ve rated down',
-        subtitle: 'Leaves thumbs-down and one-star tracks out of radio, mixes and shuffles.',
+        subtitle: 'Leaves thumbs-down and one-star tracks out of radio, mixes, shuffles, Guest DJs and AI playlists.',
         checked: app.settings.skipDisliked !== false,
         onChange: (v) => saveSettings({ skipDisliked: v }),
       }),
@@ -849,7 +849,7 @@ function debugView({ el, onDispose }) {
       h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
       kv('Play Together', !app.config.together ? 'Off on this player' : together.active ? `In a session (${together.status === 'live' ? 'connected' : 'reconnecting'})` : 'On'),
-      kv('Debug mode', app.config.debug ? 'On (problems go to Plexamp-web’s log)' : 'Off'),
+      kv('Debug mode', app.config.debug ? 'On (problems go to Plexamp-web’s log, never sign-ins)' : 'Off'),
       kv('Client ID', clientId()),
       kv('App version', APP_INFO.version),
     ),
@@ -942,7 +942,7 @@ function missingSection(onDispose) {
       mbOffered()
         ? toggleRow({
             title: 'Check suggestions on MusicBrainz',
-            subtitle: `Drops made-up songs and artists, checked on ${mbWhere()}.`,
+            subtitle: `Drops made-up songs and artists, checked on ${mbWhere()} (only names are sent).`,
             checked: aiSettings().musicbrainz !== false,
             onChange: (v) => {
               saveAI({ musicbrainz: v });
@@ -1117,8 +1117,8 @@ function aiView({ el, onDispose }) {
         'ul',
         null,
         step('Windows', 'in PowerShell, run ', h('code', null, `setx OLLAMA_ORIGINS "${site}"`), ', then quit Ollama (its icon by the clock) and open it again.'),
-        step('Mac', 'in Terminal, run ', h('code', null, `launchctl setenv OLLAMA_ORIGINS "${site}"`), ', then quit Ollama and open it again.'),
-        step('Linux', 'run ', h('code', null, 'sudo systemctl edit ollama'), ', add ', h('code', null, `Environment="OLLAMA_ORIGINS=${site}"`), ' under [Service], then ', h('code', null, 'sudo systemctl restart ollama'), '.'),
+        step('Mac', 'in Terminal, run ', h('code', null, `launchctl setenv OLLAMA_ORIGINS "${site}"`), ', then quit Ollama and open it again (again after the Mac restarts).'),
+        step('Linux', 'run ', h('code', null, 'sudo systemctl edit ollama'), ', add the lines ', h('code', null, '[Service]'), ' and ', h('code', null, `Environment="OLLAMA_ORIGINS=${site}"`), ', then ', h('code', null, 'sudo systemctl restart ollama'), '.'),
       ),
       h('p.hint', null, 'Already allowing other sites? Put them all in, with commas between.'),
     );

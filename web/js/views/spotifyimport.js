@@ -88,7 +88,7 @@ export function importFromSpotify() {
     h(
       'p.spotify-private',
       null,
-      `Only those files are opened, on this device. Just playlist names and track titles, artists and albums are kept, to find them on ${app.source?.serverName || 'your Plex server'}.`,
+      `Only those files are opened, on this device: any others aren’t read. Just playlist names and track titles, artists and albums are kept, and they go no further than ${app.source?.serverName || 'your Plex server'}.`,
     ),
     status,
     choose,

@@ -67,7 +67,7 @@ export async function mbMergeView({ el, onDispose }) {
     h(
       'p.lede',
       null,
-      'Artists Plex has more than once. Ticked ones are the same artist on MusicBrainz.',
+      'Artists Plex has more than once. Ticked ones are the same artist on MusicBrainz. Merging changes Plex for everyone.',
     ),
     status,
     top,

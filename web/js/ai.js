@@ -166,10 +166,10 @@ async function send(target, path, init) {
 // ---------- HTTP ----------
 
 // A request to your own Ollama that got no answer the page could read: is
-// it running, but not letting this site in? A request whose answer the page
-// isn't let read (no-cors) gets an answer from it all the same, as Ollama
-// gives a site its OLLAMA_ORIGINS doesn't list one (403). 'blocked' then,
-// 'network' where nothing answers.
+// something answering there, but not letting this site in (as Ollama does a
+// site its OLLAMA_ORIGINS doesn't list)? A request whose answer the page
+// isn't let read (no-cors, without this site's address) gets an answer all
+// the same. 'blocked' then, 'network' where nothing answers.
 async function unreachable(target, err) {
   if (target?.kind === 'custom') {
     try {
@@ -313,6 +313,7 @@ async function streamChat(target, body, signal, onProgress, onLoading) {
   let timedOut = false;
   let idle = null;
   let answering = false; // the model has started answering
+  let reached = false; // the request was answered (whatever came of it after)
   let loading = false;
   const setLoading = (on) => {
     if (loading === on) return;
@@ -376,6 +377,7 @@ async function streamChat(target, body, signal, onProgress, onLoading) {
       setLoading(false);
     }
     const res = await send(target, '/api/chat', requestInit(target, 'POST', body, ctrl.signal));
+    reached = true;
     if (!res.ok) throw await readError(res);
     if (res.body?.getReader) {
       const reader = res.body.getReader();
@@ -407,7 +409,8 @@ async function streamChat(target, body, signal, onProgress, onLoading) {
       }
       throw new AIError('timeout', answering ? 'The AI model took too long to answer.' : `The AI model didn’t start answering within ${waited}. You can wait longer in Settings › AI.`);
     }
-    throw await unreachable(target, err);
+    // (Cut off part-way through an answer, as a proxy's timeout can: no answer.)
+    throw reached ? new AIError('network', err.message || 'network error') : await unreachable(target, err);
   } finally {
     clearTimeout(idle);
     clearTimeout(total);
@@ -454,7 +457,7 @@ export function describeAIError(err, target = aiTarget()) {
     case 'no-matches':
       return err.message;
     case 'blocked':
-      return `Ollama is running, but doesn’t allow ${location.origin} yet: see How to allow this site.`;
+      return `${where} answers, but doesn’t allow ${location.origin} yet: see How to allow this site.`;
     case 'network':
       return target?.kind === 'custom' ? `No answer from Ollama at ${where}. Check it’s running on that computer.` : 'Couldn’t reach the AI service. Check Plexamp-web and Ollama are running.';
     default:

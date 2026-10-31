@@ -284,7 +284,9 @@ function leave(next) {
   // out to be theirs again. Signing out: everyone's go.)
   const mine = next && profileKey(next.from);
   const theirsKey = next && profileKey(next.to);
-  if (mine) store.set(mine, { settings: app.settings, syncPending: store.get(SYNC_PENDING), syncRev: store.get(SYNC_REV) });
+  // (Not your own AI server's key: whoever's switched to could read what's
+  // kept here, in the browser. It's asked for again when you're back.)
+  if (mine) store.set(mine, { settings: { ...app.settings, ai: { ...app.settings.ai, apiKey: '' } }, syncPending: store.get(SYNC_PENDING), syncRev: store.get(SYNC_REV) });
   const kept = theirsKey ? store.get(theirsKey) : null;
   const theirs = kept && typeof kept === 'object' && kept.settings && typeof kept.settings === 'object' && theirsKey !== mine ? kept : null;
   const profiles = next ? store.keys(PROFILE).filter((k) => k !== theirsKey) : [];

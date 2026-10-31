@@ -1711,9 +1711,14 @@ class Handler(BaseHTTPRequestHandler):
         # them: what the player asks to see whether searching it works.)
         if query and MOCK['mbsearch'] == 'off':
             return self.send_json_plain({'count': 0, 'artists': [], 'recordings': [], 'release-groups': []})
-        if p == '/ws/2/artist' and query.startswith('arid:'):
+        if query.startswith('arid:'):
             radiohead = 'a74b1b7f-71a5-4011-9441-d0b5e4122711'
-            return self.send_json_plain({'count': 1, 'artists': [{'id': radiohead, 'name': 'Radiohead', 'score': 100}]} if query == f'arid:{radiohead}' else {'count': 0, 'artists': []})
+            if query != f'arid:{radiohead}':
+                return self.send_json_plain({'count': 0, 'artists': [], 'recordings': [], 'release-groups': []})
+            credit = [{'name': 'Radiohead', 'artist': {'id': radiohead, 'name': 'Radiohead'}}]
+            return self.send_json_plain({'count': 1, 'artists': [{'id': radiohead, 'name': 'Radiohead', 'score': 100}],
+                                         'recordings': [{'id': mb_id('recording|Creep'), 'title': 'Creep', 'score': 100, 'artist-credit': credit}],
+                                         'release-groups': [{'id': mb_id('group|Radiohead|OK Computer'), 'title': 'OK Computer', 'score': 100, 'artist-credit': credit}]})
         # (The MusicBrainz features: an artist by name or other name, looked
         # up by id, and their release groups, and a group's genres.)
         if p == '/ws/2/artist' and ' OR alias:' in query:

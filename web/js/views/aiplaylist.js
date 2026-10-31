@@ -400,7 +400,7 @@ export async function aiPlaylistView({ el, onDispose }) {
           'div.button-row',
           null,
           h('button.btn.btn-secondary', { type: 'button', onclick: () => start(prompt) }, 'Try again'),
-          err?.code === 'not-configured' || err?.code === 'no-model' || err?.code === 'timeout' || err?.status === 404 ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings') : null,
+          ['not-configured', 'no-model', 'timeout', 'blocked', 'network'].includes(err?.code) || err?.status === 404 ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings') : null,
         ),
       ),
     );

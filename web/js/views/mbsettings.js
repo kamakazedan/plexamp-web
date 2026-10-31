@@ -63,7 +63,7 @@ export async function musicbrainzSettingsView({ el }) {
     h(
       'p.lede',
       null,
-      `Extras from ${mbWhere()}. Only artist names are sent.`,
+      `Extras from ${mbWhere()}. Only artist names are sent, and nothing in your library changes.`,
     ),
     h(
       'div.rows',

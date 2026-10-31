@@ -1181,8 +1181,10 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
     } else if (u.pathname === '/ws/2/release-group') {
       const all = groupsOf[u.searchParams.get('artist')] || [];
       body = { 'release-group-count': all.length, 'release-groups': all };
-    } else if (u.pathname === '/ws/2/recording' || u.pathname === '/ws/2/release-group') {
-      body = { recordings: [], 'release-groups': [] };
+    } else if (query && (u.pathname === '/ws/2/recording' || u.pathname === '/ws/2/release-group')) {
+      // (No one, unless it works: then Radiohead's, asked for by their id.)
+      const theirs = searchWorks && query === `arid:${CANARY}`;
+      body = { recordings: theirs ? [{ id: MB_ID(301), title: 'Creep' }] : [], 'release-groups': theirs ? [{ id: MB_ID(302), title: 'OK Computer' }] : [] };
     }
     return { ok: true, status: 200, json: async () => body };
   };
@@ -1207,11 +1209,21 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
   assert.equal(got[0]?.title, 'Takk...');
   assert.equal(got[1], 'unchecked');
   assert.ok(!asked.some((x) => x.includes('Nobody Plex Matched')), 'not searched for while searching finds no one');
-  // The AI's check of a song or an artist: an error too, not "made up".
+  // The AI's check of a song or an artist: an error too, not "made up" (a song's in the recordings' own index).
   await assert.rejects(mb.check([{ kind: 'artist', artist: 'Real Band' }]), (e) => e.searchBroken === true);
+  await assert.rejects(mb.check([{ kind: 'track', artist: 'Real Band', title: 'Real Song' }]), (e) => e.searchBroken === true);
+  // Those only a search could find don't hold up those found by id behind them in the background (no rests for them).
+  mb.search.artist.at -= MB_LIMITS.searchBadMs + 1000;
+  const queuedFirst = ['One', 'Two', 'Three'].map((n) => ({ artist: `Unmatched ${n}`, title: 'Some Album', year: 2000, artistId: null }));
+  assert.deepEqual(await mb.albums(queuedFirst), ['pending', 'pending', 'pending']);
+  const t0 = Date.now();
+  // (With its genres: not known yet, so it's behind them in the queue.)
+  const byId = await mb.albums([{ artist: 'Sigur Rós', title: 'Takk...', year: 2005, artistId: MB_ID(1) }], { waitMs: 3000, genres: true });
+  assert.equal(byId[0]?.title, 'Takk...');
+  assert.ok(Date.now() - t0 < 2500, `${Date.now() - t0} ms`);
   // Once searching finds someone again (checked again a while later), not found is not found.
   searchWorks = true;
-  mb.search.at -= MB_LIMITS.searchBadMs + 1000;
+  mb.search.artist.at -= MB_LIMITS.searchBadMs + 1000;
   assert.equal(await mb.artistInfo('Not On MusicBrainz At All'), null);
   assert.equal(mb.had('artist|not on musicbrainz at all'), null);
   assert.equal(mb.searchBroken(), false);

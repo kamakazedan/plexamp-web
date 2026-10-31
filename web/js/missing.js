@@ -62,9 +62,9 @@ export function missingKeptNote() {
   const kept = missingKept();
   if (!kept) return '';
   const server = app.source?.serverName || 'the server';
-  if (kept.owner === true) return ' Kept for your account, with your friends’.';
-  if (kept.owner === false) return ` Kept for your account. Whoever runs ${server} sees them too.`;
-  return ` Kept for your account. The owner of ${server} sees them too.`;
+  if (kept.owner === true) return ' Kept by this player for your account. You see your friends’ too.';
+  if (kept.owner === false) return ` Kept by this player for your account. Whoever runs ${server} sees them too, with your name.`;
+  return ` Kept by this player for your account. The owner of ${server} sees them too, with your name.`;
 }
 
 // What's kept for the server in use, artists first, then by artist and

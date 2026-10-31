@@ -978,14 +978,14 @@ with sync_playwright() as pw:
         try:
             page.fill('.ai-custom input[type=url]', OLLAMA)
             page.click('.ai-custom button:has-text("Connect")')
-            page.wait_for_selector('.ai-models .warn:has-text("Ollama is running")', timeout=25000)
+            page.wait_for_selector('.ai-models .warn:has-text("answers, but doesn’t allow")', timeout=25000)
             msg = page.locator('.ai-models .warn').inner_text()
             page.click('.origins summary')
             how = page.locator('.origins').inner_text()
             shot(page, 'custom-01-blocked')
             site = APP_NOWS.rstrip('/')
             check('custom: an Ollama that doesn\'t let this site in is told apart from one that doesn\'t answer, saying how to allow it (this site\'s address, for Windows, Mac and Linux)',
-                  'Ollama is running' in msg and site in msg and f'setx OLLAMA_ORIGINS "{site}"' in how and f'launchctl setenv OLLAMA_ORIGINS "{site}"' in how
+                  f'{OLLAMA} answers, but doesn’t allow {site}' in msg and f'setx OLLAMA_ORIGINS "{site}"' in how and f'launchctl setenv OLLAMA_ORIGINS "{site}"' in how
                   and f'OLLAMA_ORIGINS={site}' in how, f'{msg!r} {how!r}')
         finally:
             own('refuse=0')
@@ -7340,10 +7340,10 @@ with sync_playwright() as pw:
               and not any(k.startswith('pw.player') or k in ('pw.libraryCounts', 'pw.syncPending', 'pw.syncRev') for k in keys)
               and 'harbour' not in tab and playing == [None, 0] and 'Dans Secret Song' not in kid_missing and 'Dans Secret Song' not in kid_stored
               and 'own prompt' not in kid_stored, f'{theirs} {keys} {tab[:200]} {playing} {kid_missing}')
-        check('plexhome: ...Dan\'s settings kept aside for him on the device (by his Plex account\'s id), and only his settings: not his queue, searches or missing tracks',
+        check('plexhome: ...Dan\'s settings kept aside for him on the device (by his Plex account\'s id), and only his settings: not his queue, searches or missing tracks, nor his own AI server\'s key',
               (dan_aside or {}).get('settings', {}).get('quality') == '320' and dan_aside['settings'].get('playerName') == 'Dan’s phone'
               and [k for k in keys if k.startswith('pw.profile.')] == ['pw.profile.a1001'] and set(dan_aside) <= {'settings', 'syncPending', 'syncRev'}
-              and not any(w in json.dumps(dan_aside) for w in ('harbour', 'Dans Secret Song', 'own prompt', 'dans-queued-track')), json.dumps(dan_aside)[:300])
+              and not any(w in json.dumps(dan_aside) for w in ('harbour', 'Dans Secret Song', 'own prompt', 'dans-queued-track', 'key-123')), json.dumps(dan_aside)[:300])
         check('plexhome: ...not even what another tab of Dan\'s kept in the moment before it heard (his queue, his settings)',
               js(page, "() => localStorage.getItem('test.kept')") and 'dans-queued-track' not in kid_stored and 'dans-key' not in kid_stored
               and 'pw.left' not in keys, kid_stored[:300])
@@ -7388,8 +7388,8 @@ with sync_playwright() as pw:
               and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts(), str(back))
         own_again = js(page, "() => import('./js/state.js').then(({ app }) => ({ quality: app.settings.quality, name: app.settings.playerName, ai: app.settings.ai }))")
         aside = js(page, "() => [Object.keys(localStorage).filter((k) => k.startsWith('pw.profile.')).sort(), JSON.parse(localStorage.getItem('pw.profile.a1004') || 'null')]")
-        check('plexhome: ...his settings kept on the device come back too (Streaming quality, the player\'s name, his own AI server), and Kid\'s are kept aside for Kid',
-              own_again == {'quality': '320', 'name': 'Dan’s phone', 'ai': {'mode': 'custom', 'url': OLLAMA, 'apiKey': 'key-123', 'model': 'llama3.1:8b', 'notes': 'Loves trip-hop'}}
+        check('plexhome: ...his settings kept on the device come back too (Streaming quality, the player\'s name, his own AI server, but for its key), and Kid\'s are kept aside for Kid',
+              own_again == {'quality': '320', 'name': 'Dan’s phone', 'ai': {'mode': 'custom', 'url': OLLAMA, 'apiKey': '', 'model': 'llama3.1:8b', 'notes': 'Loves trip-hop'}}
               and aside[0] == ['pw.profile.a1004'] and (aside[1] or {}).get('settings', {}).get('quality') == '128', f'{own_again} {aside}')
 
         # Gran can't use Dan's server: she chooses one, and can switch (or
@@ -7571,7 +7571,7 @@ with sync_playwright() as pw:
         check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
         check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
         check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (with no switch of any kind)',
-              'yours and your friends' in lede and 'Kept for your account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
+              'yours and your friends' in lede and 'Kept by this player for your account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
 
         # Noted on one device, on the other once it's read again; counted again.
         note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')

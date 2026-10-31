@@ -1221,7 +1221,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
   const list = numberedList({ total, album: true });
-  const bar = editBar('Drag to reorder, remove tracks, or tap the picture to change it. Changes save as you go.', {
+  const bar = editBar('Drag to reorder or remove tracks (they stay in your library), or tap the picture to change it. Changes save to Plex as you go.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort('track', pl.title, (by, label) => sortBy(by, label)),
   });
@@ -1538,7 +1538,7 @@ export async function collectionView({ el, params, onHide }) {
     h('section.hero.hero-album', null, picture.el, h('div.hero-info', null, title, countEl, buttons)),
   );
   collapseWhenHidden(head, title);
-  const bar = editBar('Drag to reorder, remove items, or tap the picture to change it. Changes save as you go.', {
+  const bar = editBar('Drag to reorder or remove items (they stay in your library), or tap the picture to change it. Changes save to Plex as you go.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort(meta.subtype || 'album', meta.title, (by, label) => sortBy(by, label)),
   });

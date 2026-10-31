@@ -48,8 +48,8 @@ export function missingTracksView({ el, onDispose }) {
       (!kept
         ? `${what}. Kept on this device.`
         : kept.owner === true
-          ? `${what}: yours and your friends’. Kept for your account; what anyone asked the AI stays on their device.`
-          : `${what}. Kept for your account. ${kept.owner === false ? `Whoever runs ${server}` : `The owner of ${server}`} sees them too, so they can add them; what you asked the AI stays on your device.`) +
+          ? `${what}: yours and your friends’. Kept by this player for your account; what anyone asked the AI stays on their device.`
+          : `${what}. Kept by this player for your account. ${kept.owner === false ? `Whoever runs ${server}` : `The owner of ${server}`} sees them too, with your name, so they can add them; what you asked the AI stays on your device.`) +
       (mbOn() ? '' : ' The AI sometimes makes songs up, so check before you go looking.');
   };
   paintLede();

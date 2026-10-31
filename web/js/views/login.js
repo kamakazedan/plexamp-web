@@ -42,7 +42,7 @@ export async function loginView({ el, query = {} }) {
       null,
       h('img.login-mark', { src: 'icons/icon.svg', alt: '', width: 88, height: 88 }),
       h('h1.login-title', null, 'Play your Plex music'),
-      h('p.login-text', null, 'Sign in with your Plex account.'),
+      h('p.login-text', null, 'Sign in with your Plex account, on plex.tv, then straight back here.'),
       offline?.el,
       signIn,
       status,

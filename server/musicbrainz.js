@@ -29,7 +29,7 @@ export const MB_LIMITS = {
   busyMaxMs: 300000,
   // A search that found no one at all: whether searching it finds anyone
   // is checked (see searchCheck), and that's taken as it is for so long.
-  searchOkMs: 6 * 3600000,
+  searchOkMs: 10 * 60000,
   searchBadMs: 10 * 60000,
   keepMs: 7 * 24 * 3600 * 1000,
   kept: 5000, // answers kept
@@ -121,7 +121,7 @@ export class MusicBrainz {
     this.fetch = fetchImpl;
     this.public = isPublic(this.base);
     this.checkSearch = !!checkSearch && !this.public;
-    this.search = null; // { works, at }: whether searching it found anyone, as last checked
+    this.search = {}; // index ('artist', 'recording', 'release-group') -> { works, at }: whether searching it found anyone, as last checked
     this.gapMs = gapMs ?? (this.public ? MB_LIMITS.gapMs : MB_LIMITS.ownGapMs);
     this.agent = `plexamp-web${/^[0-9][0-9.]*$/.test(version) ? `/${version}` : ''} ( https://github.com/kamakazedan/plexamp-web )`;
     this.log = log;
@@ -241,7 +241,7 @@ export class MusicBrainz {
     const found = (data.artists || []).some(
       (a) => Number(a.score) >= 80 && (norm(a.name) === want || (a.aliases || []).some((x) => norm(x.name) === want)),
     );
-    if (!found && !(data.artists || []).length) await this.searchCheck(signal);
+    if (!found && !(data.artists || []).length) await this.searchCheck(signal, { index: 'artist' });
     return this.remember(key, found ? 'real' : 'unknown');
   }
 
@@ -261,11 +261,12 @@ export class MusicBrainz {
     if ((songs.recordings || []).some((r) => Number(r.score) >= 70 && sameTitle(norm(r.title), want) && theirs(r['artist-credit']))) {
       return this.remember(key, 'real');
     }
+    if (!(songs.recordings || []).length) await this.searchCheck(signal, { index: 'recording' });
     const albums = await this.ask('/ws/2/release-group', { query: query('releasegroup'), limit: '5' }, signal);
     if ((albums['release-groups'] || []).some((g) => Number(g.score) >= 80 && norm(g.title) === want && theirs(g['artist-credit']))) {
       return this.remember(key, 'album');
     }
-    if (!(songs.recordings || []).length && !(albums['release-groups'] || []).length) await this.searchCheck(signal);
+    if (!(albums['release-groups'] || []).length) await this.searchCheck(signal, { index: 'release-group' });
     return this.remember(key, 'unknown');
   }
 
@@ -329,28 +330,31 @@ export class MusicBrainz {
 
   // A search found no one at all: whether searching this MusicBrainz finds
   // anyone. A server of your own whose search indexes haven't been built
-  // finds no one, without saying anything's wrong, so every artist and song
-  // would seem not to be on MusicBrainz. Checked once in a while (an artist
-  // every MusicBrainz has, by its id); while it finds no one, nothing a
-  // search couldn't find is taken as not on MusicBrainz (it's an error,
-  // `searchBroken`, said to the app), and what's found by a MusicBrainz id
-  // is found as ever.
-  async searchCheck(signal, { background = false } = {}) {
+  // (or are being built again) finds no one, without saying anything's
+  // wrong, so every artist and song would seem not to be on MusicBrainz.
+  // Checked in each index searched (artists, recordings, release groups),
+  // for an artist every MusicBrainz has, by its id, at most every few
+  // minutes; while it finds no one, nothing a search couldn't find is taken
+  // as not on MusicBrainz (it's an error, `searchBroken`, said to the app),
+  // and what's found by a MusicBrainz id is found as ever.
+  async searchCheck(signal, { index = 'artist', background = false } = {}) {
     if (!this.checkSearch) return;
-    const s = this.search;
+    const s = this.search[index];
     if (!s || Date.now() - s.at > (s.works ? MB_LIMITS.searchOkMs : MB_LIMITS.searchBadMs)) {
-      const found = await this.ask('/ws/2/artist', { query: `arid:${SEARCH_CANARY}`, limit: '1' }, signal, { background });
-      const works = (Array.isArray(found?.artists) ? found.artists : []).some((a) => a?.id === SEARCH_CANARY);
-      if (!works && s?.works !== false) this.log?.warn('musicbrainz: searching the MusicBrainz server finds no one, so its search indexes may not be built: until it does, artists are found by their MusicBrainz ids only');
-      if (works && s?.works === false) this.log?.info('musicbrainz: searching the MusicBrainz server finds artists again');
-      this.search = { works, at: Date.now() };
+      const found = await this.ask(`/ws/2/${index}`, { query: `arid:${SEARCH_CANARY}`, limit: '1' }, signal, { background });
+      const list = found?.[index === 'artist' ? 'artists' : index === 'recording' ? 'recordings' : 'release-groups'];
+      const works = index === 'artist' ? (Array.isArray(list) ? list : []).some((a) => a?.id === SEARCH_CANARY) : Array.isArray(list) && list.length > 0;
+      if (!works && s?.works !== false) this.log?.warn(`musicbrainz: searching the MusicBrainz server's ${index}s finds no one, so its search indexes may not be built: until it does, only what's found by a MusicBrainz id is found`);
+      if (works && s?.works === false) this.log?.info(`musicbrainz: searching the MusicBrainz server's ${index}s finds them again`);
+      this.search[index] = { works, at: Date.now() };
     }
-    if (!this.search.works) throw this.cantSearch();
+    if (!this.search[index].works) throw this.cantSearch();
   }
 
-  // ...as it was last checked, still: no one found.
+  // ...artists, as it was last checked, still: no one found.
   searchBroken() {
-    return this.checkSearch && this.search?.works === false && Date.now() - this.search.at <= MB_LIMITS.searchBadMs;
+    const s = this.search.artist;
+    return this.checkSearch && s?.works === false && Date.now() - s.at <= MB_LIMITS.searchBadMs;
   }
 
   cantSearch() {
@@ -386,7 +390,7 @@ export class MusicBrainz {
       const found = await this.ask('/ws/2/artist', { query: `artist:${phrase(name)} OR alias:${phrase(name)}`, limit: '10' }, signal, opts);
       hit = pickArtist(found.artists, want);
       if (!hit) {
-        if (!(Array.isArray(found?.artists) && found.artists.length)) await this.searchCheck(signal, opts);
+        if (!(Array.isArray(found?.artists) && found.artists.length)) await this.searchCheck(signal, { ...opts, index: 'artist' });
         return this.adv.set(key, null);
       }
     }
@@ -442,7 +446,7 @@ export class MusicBrainz {
     if (list === undefined) {
       this.resting();
       const found = await this.ask('/ws/2/artist', { query: `artist:${phrase(name)} OR sortname:${phrase(name)}`, limit: '25' }, signal, { background });
-      if (!(Array.isArray(found?.artists) && found.artists.length)) await this.searchCheck(signal, { background });
+      if (!(Array.isArray(found?.artists) && found.artists.length)) await this.searchCheck(signal, { index: 'artist', background });
       list = this.adv.set(key, sameNamed(found.artists, want));
     }
     const rest = (list || []).filter((x) => x.id !== but);
@@ -536,6 +540,13 @@ export class MusicBrainz {
           await this.album(it.artist, it.title, { genres: it.genres, year: it.year, id: it.id, background: true });
           this.done(key);
         } catch (err) {
+          // Only a search could find it, and searching finds no one: let go
+          // straight away (the app's told it's unchecked; asked about again,
+          // it's queued again, and searching's checked again by then).
+          if (err?.searchBroken) {
+            this.done(key);
+            continue;
+          }
           // MusicBrainz busy or out of reach: a rest, and again (three
           // times at most, each to the back of the queue).
           this.todo.delete(key);
