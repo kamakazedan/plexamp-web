@@ -126,9 +126,22 @@ export function migrateSettings(s) {
 export const SYNCED_BEFORE = 'syncedBefore';
 
 // Someone signed out or switched user here (see leave): what's kept for
-// the next person, as it was kept ({ switch, auth, source }, or { settings }
-// on signing out), till the first start since.
+// the next person, as it was kept ({ switch, auth, source, and their
+// settings where they had some kept here }, or { settings } on signing
+// out), till the first start since.
 const LEFT = 'left';
+
+// (sync.js: changes here not yet kept for the account, and the account's
+// settings as this browser last had them. Not the next account's.)
+export const SYNC_PENDING = 'syncPending';
+export const SYNC_REV = 'syncRev';
+
+// Each person's settings on this device, kept while someone else in their
+// Plex Home uses it (see switchAccount), by their Plex account's id:
+// 'profile.<id>': { settings, syncPending, syncRev }, put back when they
+// switch back. All of them go on signing out, or signing in over someone.
+const PROFILE = 'profile.';
+const profileKey = (id) => (/^[A-Za-z0-9_-]{1,64}$/.test(String(id ?? '')) ? `${PROFILE}${id}` : null);
 
 // What stays once someone has left: this device's id, what this browser
 // has met, a sign-in being started (Sign in with Plex), and what leaving
@@ -149,6 +162,13 @@ function settleLeft(stay = false) {
   if (left.switch) {
     if (same('auth', left.auth)) keep.push('auth');
     if (same('source', left.source)) keep.push('source');
+    // (Theirs, kept from when they last switched away from here.)
+    if (left.settings && same('settings', left.settings)) {
+      keep.push('settings');
+      if (same(SYNC_PENDING, left.syncPending)) keep.push(SYNC_PENDING);
+      if (same(SYNC_REV, left.syncRev)) keep.push(SYNC_REV);
+    }
+    keep.push(...store.keys(PROFILE));
   } else if (same('settings', left.settings)) {
     keep.push('settings');
   }
@@ -197,10 +217,6 @@ export const searchScope = () => (app.settings.searchAllLibraries ? undefined : 
 // its own until 0.19.0).
 export const homeKey = () => '*';
 
-// (sync.js: changes here not yet kept for the account, and the account's
-// settings as this browser last had them. Not the next account's.)
-export const SYNC_PENDING = 'syncPending';
-export const SYNC_REV = 'syncRev';
 // (missingsync.js: someone signed in over someone else here, so the Missing
 // tracks list here may be theirs, never to go to the next account.)
 export const MISSING_OVER = 'aiMissingOver';
@@ -217,6 +233,7 @@ export function setAuth(auth) {
     store.set(SYNC_PENDING, null);
     store.set(SYNC_REV, null);
     store.set(MISSING_OVER, true);
+    for (const k of store.keys(PROFILE)) store.set(k, null);
   }
   app.auth = auth;
   store.set('auth', auth);
@@ -243,12 +260,14 @@ export function signOut() {
 }
 
 // Switching to someone else in your Plex Home (Settings › Account): as
-// signing out, and more, as they're another person: every setting goes
-// back to how it is to begin with too (theirs come from their account,
-// where the player keeps them for it), and none of yours goes with them.
-// Then the page loads afresh, signed in as them (`next.auth`), on the same
-// server and library where they can use those (`next.source`), or else
-// they choose.
+// signing out, but your settings are kept on this device for you (by your
+// Plex account's id, `next.from`), none of them theirs: they get the ones
+// kept for them here (`next.to`) from when they last switched away, or
+// else every setting as it is to begin with (and theirs from their
+// account, where the player keeps them for it). Your queue and the rest go,
+// as on signing out. Then the page loads afresh, signed in as them
+// (`next.auth`), on the same server and library where they can use those
+// (`next.source`), or else they choose.
 export function switchAccount(next) {
   leave(next);
 }
@@ -261,14 +280,32 @@ function leave(next) {
     saveSettings({ ai: { ...ai, mode: app.settings.ai?.mode === 'off' ? 'off' : ai.mode }, playerName, home: {} });
   }
   store.set(SYNCED_BEFORE, true);
-  store.clear(next ? ['clientId', SYNCED_BEFORE] : ['clientId', 'settings', SYNCED_BEFORE]);
+  // (Switching: yours kept for you, and theirs, kept from before, taken
+  // out to be theirs again. Signing out: everyone's go.)
+  const mine = next && profileKey(next.from);
+  const theirsKey = next && profileKey(next.to);
+  if (mine) store.set(mine, { settings: app.settings, syncPending: store.get(SYNC_PENDING), syncRev: store.get(SYNC_REV) });
+  const kept = theirsKey ? store.get(theirsKey) : null;
+  const theirs = kept && typeof kept === 'object' && kept.settings && typeof kept.settings === 'object' && theirsKey !== mine ? kept : null;
+  const profiles = next ? store.keys(PROFILE).filter((k) => k !== theirsKey) : [];
+  store.clear(next ? ['clientId', SYNCED_BEFORE, ...profiles] : ['clientId', 'settings', SYNCED_BEFORE]);
   // (This page is the next person's now, or nobody's: see the store.)
   store.own(next?.auth?.token);
   if (next) {
     store.set('auth', next.auth);
     if (next.source) store.set('source', next.source);
+    if (theirs) {
+      store.set('settings', theirs.settings);
+      if (theirs.syncPending) store.set(SYNC_PENDING, theirs.syncPending);
+      if (theirs.syncRev) store.set(SYNC_REV, theirs.syncRev);
+    }
   }
-  store.set(LEFT, next ? { switch: true, auth: next.auth, source: next.source ?? null } : { settings: store.get('settings') });
+  store.set(
+    LEFT,
+    next
+      ? { switch: true, auth: next.auth, source: next.source ?? null, ...(theirs ? { settings: theirs.settings, syncPending: theirs.syncPending ?? null, syncRev: theirs.syncRev ?? null } : {}) }
+      : { settings: store.get('settings') },
+  );
   // Nothing more is kept from here on (what's playing, say, as the page goes).
   store.freeze();
   app.auth = null;

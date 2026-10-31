@@ -60,6 +60,16 @@ export const store = {
       /* ignore */
     }
   },
+  // The keys kept that start with `prefix` (as get and set take them).
+  keys(prefix = '') {
+    try {
+      return Object.keys(localStorage)
+        .filter((k) => k.startsWith(`pw.${prefix}`))
+        .map((k) => k.slice(3));
+    } catch {
+      return [];
+    }
+  },
   freeze() {
     frozen = true;
   },

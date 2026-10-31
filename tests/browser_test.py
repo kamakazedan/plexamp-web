@@ -7249,8 +7249,8 @@ with sync_playwright() as pw:
         shot(page, 'plexhome-02-users')
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
-        check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that switching keeps nothing of yours for them',
-              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'Switching clears all of yours from this device' in said, f'{rows} {said!r}')
+        check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that your settings come back when you switch back',
+              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'Yours come back when you switch back' in said, f'{rows} {said!r}')
 
         # Dan's: settings (some kept for his account), a search, what's
         # playing, a missing track an AI playlist of his suggested (with what
@@ -7316,11 +7316,16 @@ with sync_playwright() as pw:
         playing = player(page, '[p.current && p.current.id, p.queue.length]')
         kid_missing = js(page, "() => import('./js/missing.js').then((m) => m.missingList().map((x) => x.title))")
         kid_stored = js(page, '() => JSON.stringify(localStorage)')
-        check('plexhome: ...with nothing of Dan\'s on the device: every setting as it is to begin with (his for his account too), no queue, no searches, none of his missing tracks',
+        dan_aside = js(page, "() => JSON.parse(localStorage.getItem('pw.profile.a1001') || 'null')")
+        check('plexhome: ...with nothing of Dan\'s for Kid: every setting as it is to begin with (his for his account too), no queue, no searches, none of his missing tracks',
               theirs == {'grid': 'normal', 'skip': True, 'name': '', 'quality': 'original', 'ai': {'mode': 'auto', 'url': '', 'apiKey': '', 'model': '', 'notes': ''}}
               and not any(k.startswith('pw.player') or k in ('pw.libraryCounts', 'pw.syncPending', 'pw.syncRev') for k in keys)
               and 'harbour' not in tab and playing == [None, 0] and 'Dans Secret Song' not in kid_missing and 'Dans Secret Song' not in kid_stored
               and 'own prompt' not in kid_stored, f'{theirs} {keys} {tab[:200]} {playing} {kid_missing}')
+        check('plexhome: ...Dan\'s settings kept aside for him on the device (by his Plex account\'s id), and only his settings: not his queue, searches or missing tracks',
+              (dan_aside or {}).get('settings', {}).get('quality') == '320' and dan_aside['settings'].get('playerName') == 'Dan’s phone'
+              and [k for k in keys if k.startswith('pw.profile.')] == ['pw.profile.a1001'] and set(dan_aside) <= {'settings', 'syncPending', 'syncRev'}
+              and not any(w in json.dumps(dan_aside) for w in ('harbour', 'Dans Secret Song', 'own prompt', 'dans-queued-track')), json.dumps(dan_aside)[:300])
         check('plexhome: ...not even what another tab of Dan\'s kept in the moment before it heard (his queue, his settings)',
               js(page, "() => localStorage.getItem('test.kept')") and 'dans-queued-track' not in kid_stored and 'dans-key' not in kid_stored
               and 'pw.left' not in keys, kid_stored[:300])
@@ -7335,7 +7340,7 @@ with sync_playwright() as pw:
         page.wait_for_selector('.view .empty-state, .view .grid-playlists .card', timeout=15000)
         kid_lists = set(page.locator('.view .grid-playlists .card .card-title').all_inner_texts())
         check('plexhome: ...Kid\'s own playlists, none of Dan\'s', dan_lists and not kid_lists & dan_lists and page.locator('.view .empty-state').count() == 1, str(kid_lists))
-        settings(page, {'gridSize': 'small'})
+        settings(page, {'gridSize': 'small', 'quality': '128'})
         kid_kept = wait_for(lambda: kept_for('t4')['settings'].get('gridSize') == 'small', 10, 0.3)
         dan_now = kept_for('t')['settings']
         check('plexhome: ...what\'s kept for Kid\'s account is Kid\'s own, and Dan\'s stays as it was',
@@ -7363,6 +7368,11 @@ with sync_playwright() as pw:
         check('plexhome: switching back to Dan (no PIN to ask for): his token, server and library, and his settings, missing tracks and playlists again',
               back['token'] == 't' and back['server'] == 'mock-server-1' and back['section'] == section_before and dan_again and his_missing
               and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts(), str(back))
+        own_again = js(page, "() => import('./js/state.js').then(({ app }) => ({ quality: app.settings.quality, name: app.settings.playerName, ai: app.settings.ai }))")
+        aside = js(page, "() => [Object.keys(localStorage).filter((k) => k.startsWith('pw.profile.')).sort(), JSON.parse(localStorage.getItem('pw.profile.a1004') || 'null')]")
+        check('plexhome: ...his settings kept on the device come back too (Streaming quality, the player\'s name, his own AI server), and Kid\'s are kept aside for Kid',
+              own_again == {'quality': '320', 'name': 'Dan’s phone', 'ai': {'mode': 'custom', 'url': OLLAMA, 'apiKey': 'key-123', 'model': 'llama3.1:8b', 'notes': 'Loves trip-hop'}}
+              and aside[0] == ['pw.profile.a1004'] and (aside[1] or {}).get('settings', {}).get('quality') == '128', f'{own_again} {aside}')
 
         # Gran can't use Dan's server: she chooses one, and can switch (or
         # sign out) from there.
@@ -7382,6 +7392,13 @@ with sync_playwright() as pw:
             switch_to(page, 'Dan', where='.setup-account')
         page.wait_for_selector('.source-body .row', timeout=20000)
         check('plexhome: ...back to Dan from there, who chooses his (nothing of Gran\'s to go on)', who(page)['token'] == 't' and page.url.endswith('#/setup'), str(who(page)))
+        # Signing out: everyone's kept settings go too.
+        page.click('.setup-account button:has-text("Sign out")')
+        with page.expect_event('load', timeout=15000):
+            page.click('.sheet.open .sheet-action:has-text("Sign out")')
+        page.wait_for_timeout(500)
+        profiles_left = js(page, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.profile.'))")
+        check('plexhome: signing out takes everyone\'s kept settings off the device too', profiles_left == [], str(profiles_left))
 
         # The PIN went to plex.tv only: not to this app (whatever it logs),
         # nor kept anywhere here.

@@ -126,7 +126,7 @@ function accountButtons() {
         // yourself, as switching to you would clear what's kept for you.)
         const mine = (u) => u.uuid === String(me.uuid);
         if (users.length < 2 || !users.some(mine)) return;
-        switchBtn.onclick = () => chooseHomeUser(users, mine);
+        switchBtn.onclick = () => chooseHomeUser(users, mine, String(me.uuid));
         switchBtn.hidden = false;
       })
       .catch(() => {});
@@ -203,8 +203,9 @@ function accountSyncRows() {
 
 // ---------- Plex Home: switching to someone else in it ----------
 
-// The people in your Plex Home (`mine`: which is you), to switch to.
-function chooseHomeUser(users, mine) {
+// The people in your Plex Home (`mine`: which is you, `myId`: your Plex
+// account's id), to switch to.
+function chooseHomeUser(users, mine, myId) {
   const list = h('div.rows.home-users');
   let panel = null;
   for (const u of users) {
@@ -218,7 +219,7 @@ function chooseHomeUser(users, mine) {
           ? null
           : async () => {
               await panel?.close();
-              switchToHomeUser(u);
+              switchToHomeUser(u, myId);
             },
         lead: avatar(u.thumb, u.title),
         title: u.title,
@@ -239,7 +240,7 @@ function chooseHomeUser(users, mine) {
       h(
         'p.home-users-note',
         null,
-        'Everyone has their own playlists, ratings and settings. Switching clears all of yours from this device, settings too.',
+        'Everyone has their own settings, playlists and ratings. Yours come back when you switch back.',
       ),
     ),
   });
@@ -249,7 +250,7 @@ function chooseHomeUser(users, mine) {
 // them, the server and library this is on (where they can use those), and
 // the page afresh as them (state.js switchAccount).
 let switching = false;
-async function switchToHomeUser(u) {
+async function switchToHomeUser(u, myId) {
   if (switching) return;
   let pin = null;
   if (u.protected) {
@@ -268,7 +269,7 @@ async function switchToHomeUser(u) {
     const source = await sourceFor(token);
     // (By the name they were chosen by.)
     const thumb = typeof user.thumb === 'string' && /^https:\/\//.test(user.thumb) ? user.thumb : u.thumb;
-    switchAccount({ auth: { token, username: u.title, thumb, manual: false }, source });
+    switchAccount({ auth: { token, username: u.title, thumb, manual: false }, source, from: myId, to: u.uuid });
   } catch (err) {
     switching = false;
     cover.remove();
