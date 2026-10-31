@@ -137,7 +137,7 @@ function accountButtons() {
 function confirmSignOut() {
   sheet({
     title: 'Sign out?',
-    subtitle: `Clears your queue and personal settings from this device.${
+    subtitle: `Clears your queue, AI settings and Home layout from this device. How the app looks and plays stays.${
       keptCount() ? ` ${keptCount() === 1 ? 'A play or rating' : `${keptCount()} plays and ratings`} from while you were offline will be lost.` : ''
     }${
       app.auth?.offline
