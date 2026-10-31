@@ -10,11 +10,10 @@ import { musicbrainzSettingsView } from './mbsettings.js';
 import { mbReviewView } from './mbreview.js';
 import { mbMergeView } from './mbmerge.js';
 import { mbFeatures, skipLiveOn } from '../mb.js';
-import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
+import { missingCount, mbOffered, missingKeptNote } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
-import { player } from '../player.js';
 import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.js';
 import { keptCount } from '../outbox.js';
 
@@ -138,17 +137,17 @@ function accountButtons() {
 function confirmSignOut() {
   sheet({
     title: 'Sign out?',
-    subtitle: `Clears your queue, lists, AI settings, player name and Home layout from this device. How the app looks and plays stays.${
-      keptCount() ? ` ${keptCount() === 1 ? 'A play or rating' : `${keptCount()} plays and ratings`} saved while offline ${keptCount() === 1 ? 'hasn’t' : 'haven’t'} reached Plex yet, and will be lost.` : ''
+    subtitle: `Clears your queue and personal settings from this device.${
+      keptCount() ? ` ${keptCount() === 1 ? 'A play or rating' : `${keptCount()} plays and ratings`} from while you were offline will be lost.` : ''
     }${
       app.auth?.offline
-        ? ' The offline password session ends.'
+        ? ''
         : app.config.settingsSync && app.config.missingSync
-        ? ' This player keeps your settings and missing tracks for your account, for next time.'
+        ? ' Your settings and missing tracks stay kept for your account.'
         : app.config.settingsSync
-          ? ' This player keeps your settings for your account, for next time.'
+          ? ' Your settings stay kept for your account.'
           : app.config.missingSync
-            ? ' This player keeps your missing tracks for your account, for next time.'
+            ? ' Your missing tracks stay kept for your account.'
             : ''
     }`,
     actions: [
@@ -169,12 +168,12 @@ function confirmSignOut() {
 // Whether settings follow the account (sync.js), with a switch for it.
 function accountSyncRows() {
   const rows = h('div.rows');
-  const mine = 'Some stay on each device: streaming quality, connection, device name, sharing with your devices, playback speed, Load ahead, Keep played tracks and AI settings.';
+  const mine = 'Some, like Streaming quality, stay on each device.';
   if (!app.config.settingsSync || app.auth?.offline) {
     rows.append(
       row({
         title: 'Kept on this device',
-        subtitle: app.auth?.offline ? 'With the offline password, settings stay in this browser.' : 'Settings stay in this browser (this player doesn’t save them to accounts).',
+        subtitle: app.auth?.offline ? 'Not with the offline password.' : 'This player doesn’t keep settings for accounts.',
       }),
     );
     return rows;
@@ -183,7 +182,7 @@ function accountSyncRows() {
     rows.replaceChildren(
       toggleRow({
         title: 'On all your devices',
-        subtitle: `${on === null ? 'Couldn’t check just now. ' : ''}Your settings follow your Plex account to every browser you sign in on. ${mine} Off: each device keeps its own.`,
+        subtitle: `${on === null ? 'Couldn’t check just now. ' : ''}Your settings follow your Plex account. ${mine}`,
         checked: on !== false,
         onChange: async (v) => {
           try {
@@ -306,7 +305,7 @@ async function sourceFor(token) {
 
 export async function sourceView({ el, firstRun = false }) {
   el.append(firstRun ? pageHeader('Choose your music') : backHeader('Source', { fallback: '/settings' }));
-  if (firstRun) el.append(h('p.lede', null, 'Pick the Plex server and music library to play from. You can change this later in Settings.'));
+  if (firstRun) el.append(h('p.lede', null, 'Choose a Plex server and music library.'));
   const body = h('div.source-body');
   el.append(body);
   // Who's signed in, to switch user or sign out from here too (someone in
@@ -363,7 +362,7 @@ async function showServers(body) {
 
   body.replaceChildren();
   if (listError) body.append(errorState(`Couldn't load your servers from plex.tv. ${describeError(listError)}`, () => showServers(body)));
-  else if (!entries.length) body.append(emptyState('No Plex servers are linked to this account. You can still enter a server address below.'));
+  else if (!entries.length) body.append(emptyState('No Plex servers on this account. You can enter a server address below.'));
   body.append(list);
 }
 
@@ -381,7 +380,7 @@ function manualForm(body, servers) {
       },
     },
     h('label.field', null, h('span', null, 'Server address'), url),
-    h('p.hint', null, 'Use the address you’d type to reach Plex on this network, including the port (usually 32400).'),
+    h('p.hint', null, 'For example http://192.168.1.10:32400'),
     h('div.form-actions', null, h('button.btn.btn-secondary', { type: 'button', onclick: () => showServers(body) }, 'Back'), go),
   );
   body.replaceChildren(form);
@@ -421,7 +420,7 @@ async function connect(entry, rowEl, subEl, body, servers) {
     if (subEl) subEl.textContent = prevText;
     rowEl?.removeAttribute('aria-busy');
     if (err.unreachable || err.network) {
-      toast(`Can't reach ${entry.name} from this browser. Check it's online, and that remote access is on or the address is right.`, { timeout: 6000 });
+      toast(`Can’t reach ${entry.name}. Check it’s online and the address is right.`, { timeout: 6000 });
     } else {
       toast(describeError(err));
     }
@@ -498,19 +497,19 @@ export async function openSourceSheet() {
 // ---------- Playback ----------
 
 const QUALITIES = [
-  ['original', 'Original', 'Your files as they are, at their best quality. Ones your browser can’t play are converted.'],
-  ['320', 'High (320 kbps)', 'Converted by your server. Good for slower connections.'],
-  ['192', 'Normal (192 kbps)', 'Converted by your server. Uses less data.'],
-  ['128', 'Data saver (128 kbps)', 'Converted by your server. Uses the least data.'],
+  ['original', 'Original', 'Your files as they are, best quality.'],
+  ['320', 'High (320 kbps)', 'For slower connections.'],
+  ['192', 'Normal (192 kbps)', 'Uses less data.'],
+  ['128', 'Data saver (128 kbps)', 'Uses the least data.'],
 ];
 
 const FADES = [
   [
     'smart',
     'Smart',
-    'Fades where the music really ends, so there’s no silent gap. Tracks next to each other on an album play gaplessly. Needs Plex’s loudness analysis, or it fades at the very end.',
+    'Fades where the music ends, with albums gapless. Needs Plex’s loudness analysis.',
   ],
-  ['always', 'Always', 'Fades between every track, albums included.'],
+  ['always', 'Always', 'Fades between every track.'],
   ['off', 'Off', 'No fades.'],
 ];
 const FADE_LENGTHS = [2, 3, 4, 5, 6, 8, 10, 12].map((v) => [v, `${v} seconds`]);
@@ -530,36 +529,29 @@ function memoryFor(n, quality) {
 
 export function loadAheadChoices(quality = app.settings.quality) {
   const most = LOAD_AHEAD_BYTES / 1024 / 1024;
-  const out = [[0, 'Off', 'Each track loads as it plays (the next one just before it starts).']];
+  const out = [[0, 'Off', 'Each track loads as it plays.']];
   for (let n = 1; n <= LOAD_AHEAD_MAX; n++) {
     const { takes, big } = memoryFor(n, quality);
-    out.push([n, fmt.count(n, 'track', 'tracks'), `${n === 1 ? 'The next track' : `The next ${n} tracks`}: ${takes}.${big > most ? ' Only as many as fit.' : ''}`]);
+    out.push([n, fmt.count(n, 'track', 'tracks'), `${takes}.${big > most ? ` Only as many as fit in ${fmt.number(most)} MB.` : ''}`]);
   }
   return out;
 }
 
 // Keep played tracks' choices, likewise.
 export function keepPlayedChoices(quality = app.settings.quality) {
-  const out = [[0, 'Off', 'A track played again is fetched from your server again.']];
+  const out = [[0, 'Off', 'Played tracks load again if you go back.']];
   for (let n = 1; n <= KEEP_PLAYED_MAX; n++) {
     const { takes } = memoryFor(n, quality);
-    out.push([n, fmt.count(n, 'track', 'tracks'), `${n === 1 ? 'The last track played' : `The last ${n} tracks played`}: ${takes}.`]);
+    out.push([n, fmt.count(n, 'track', 'tracks'), `${takes}.`]);
   }
   return out;
 }
 
-// What's in memory now, for these settings: "2 tracks (61 MB)".
-function loadedAhead() {
-  const done = player.ahead.summary().filter((e) => e.state === 'done');
-  if (!done.length) return '';
-  const mb = done.reduce((n, e) => n + e.bytes, 0) / 1024 / 1024;
-  return ` In memory now: ${fmt.count(done.length, 'track', 'tracks')} (${mbText(mb)}).`;
-}
 // How far under the rest of a track its ending has to drop (transitions.js).
 const QUIET_ENDINGS = [
-  ['soft', 'When it softens', 'Starts the next track as soon as the ending gets softer. Can cut a quiet last verse short.'],
-  ['quiet', 'When it’s quiet', 'Starts the next track when the ending gets quiet, like a fading outro.'],
-  ['hushed', 'When it’s nearly silent', 'Waits until the ending is almost silent.'],
+  ['soft', 'When it softens', 'Earliest. Can cut a quiet last verse short.'],
+  ['quiet', 'When it’s quiet', 'Like a fading outro.'],
+  ['hushed', 'When it’s nearly silent', 'Latest.'],
   ['off', 'Never', 'Quiet endings play out in full.'],
 ];
 
@@ -575,7 +567,7 @@ function playbackView({ el }) {
   });
   const length = choiceRow({
     title: 'Crossfade length',
-    subtitle: 'How long the fade between tracks lasts. With Smart, a quiet ending can make it longer.',
+    subtitle: 'How long each fade lasts.',
     options: FADE_LENGTHS,
     value: Number(s.fadeLength) || 5,
     onChange: (v) => saveSettings({ fadeLength: v }),
@@ -583,7 +575,7 @@ function playbackView({ el }) {
   length.hidden = s.fades === 'off' || !canFade;
   const quiet = choiceRow({
     title: 'Quiet endings',
-    subtitle: 'With Smart crossfade: when to start the next track during a quiet ending.',
+    subtitle: 'When to start the next track over a quiet ending.',
     options: QUIET_ENDINGS,
     value: s.quietEndings || 'quiet',
     onChange: (v) => saveSettings({ quietEndings: v }),
@@ -599,7 +591,7 @@ function playbackView({ el }) {
       null,
       toggleRow({
         title: 'Gapless playback',
-        subtitle: 'Starts the next track the moment this one ends, so albums flow without a pause.',
+        subtitle: 'No pause between tracks.',
         checked: s.gapless,
         onChange: (v) => saveSettings({ gapless: v }),
       }),
@@ -607,7 +599,7 @@ function playbackView({ el }) {
         title: 'Crossfade',
         subtitle: canFade
           ? 'Fade from one track into the next.'
-          : 'This browser can’t fade audio: tracks change where the music ends instead.',
+          : 'This browser can’t fade audio.',
         options: FADES,
         value: s.fades || 'off',
         onChange: (v) => {
@@ -620,15 +612,14 @@ function playbackView({ el }) {
       quiet,
       choiceRow({
         title: 'Load ahead',
-        subtitle: `Loads upcoming tracks in full, so a slow or dropped connection doesn’t stop the music. This device only (up to ${fmt.number(LOAD_AHEAD_BYTES / 1024 / 1024)} MB, in memory).${loadedAhead()}`,
+        subtitle: 'Loads the next tracks in full, so a dropped connection doesn’t stop the music.',
         options: aheadChoices,
         value: Math.min(LOAD_AHEAD_MAX, Math.max(0, Math.round(Number(s.loadAhead) || 0))),
         onChange: (v) => saveSettings({ loadAhead: v }),
       }),
       choiceRow({
         title: 'Keep played tracks',
-        subtitle:
-          'Keeps tracks you’ve just played in memory, so going back plays them straight away, even if the connection drops. This device only.',
+        subtitle: 'Keeps recent tracks, so going back plays them instantly.',
         options: keepChoices,
         value: Math.min(KEEP_PLAYED_MAX, Math.max(0, Math.round(Number(s.keepPlayed) || 0))),
         onChange: (v) => saveSettings({ keepPlayed: v }),
@@ -636,16 +627,15 @@ function playbackView({ el }) {
       toggleRow({
         title: 'Loudness levelling',
         subtitle: canFade
-          ? 'Turns louder tracks down to match quieter ones, never up, so nothing distorts. Albums keep their own ups and downs. Needs Plex’s loudness analysis.'
-          : 'This browser can’t change the volume (iPhone and iPad), so this doesn’t work here.',
+          ? 'Turns louder tracks down to match quieter ones, never up.'
+          : 'This browser can’t change the volume (iPhone and iPad).',
         checked: !!s.loudness,
         disabled: !canFade,
         onChange: (v) => saveSettings({ loudness: v }),
       }),
       toggleRow({
         title: 'Skip tracks you’ve rated down',
-        subtitle:
-          'Leaves tracks with a thumbs down or one star out of radio, mixes, shuffles, Guest DJs and AI playlists. Albums and playlists you play yourself are unaffected.',
+        subtitle: 'Leaves thumbs-down and one-star tracks out of radio, mixes and shuffles.',
         checked: app.settings.skipDisliked !== false,
         onChange: (v) => saveSettings({ skipDisliked: v }),
       }),
@@ -653,7 +643,7 @@ function playbackView({ el }) {
       // those: turned off or on, it's that with them or without.)
       toggleRow({
         title: 'Skip live tracks and demos',
-        subtitle: `Leaves live tracks and demos out of radio, shuffles and Guest DJs. Albums and playlists you play yourself are unaffected.${mbFeatures() ? ' Uses MusicBrainz too, for albums Plex hasn’t labelled.' : ''}`,
+        subtitle: `Leaves them out of radio, shuffles and Guest DJs.${mbFeatures() ? ' Uses MusicBrainz too.' : ''}`,
         checked: skipLiveOn(),
         onChange: (v) => saveSettings({ skipLive: v, mbSkipLive: v }),
       }),
@@ -667,8 +657,7 @@ function playbackView({ el }) {
         null,
         toggleRow({
           title: 'Share playback with your devices',
-          subtitle:
-            'See and control what’s playing on your other devices signed in to this account. Tap Listen here on a device to move the music there. Off: this device plays on its own.',
+          subtitle: 'See and control what’s playing on your other devices.',
           checked: s.shareDevices !== false,
           onChange: (v) => saveSettings({ shareDevices: v }),
         }),
@@ -711,9 +700,9 @@ function radioRows(label, options, current, onChange) {
 // names them.
 const ROUTE_NAMES = { local: 'On your network', proxy: 'Through this app', remote: 'Over the internet', relay: 'Plex relay (slow)' };
 const ROUTE_CHOICES = [
-  ['best', 'Best that works', 'Your network first, then through this app, then the internet, then Plex’s relay.'],
-  ['container', 'Through this app', 'Always through this app, while it can reach the server.'],
-  ['direct', 'Straight to the server', 'Straight to the server when possible. Through this app only if that fails.'],
+  ['best', 'Best that works', 'Tries your network, this app, the internet, then Plex’s relay.'],
+  ['container', 'Through this app', 'Always through this app.'],
+  ['direct', 'Straight to the server', 'Through this app only if that fails.'],
 ];
 
 // Why the app reaches the server the way it does.
@@ -833,7 +822,7 @@ function debugView({ el, onDispose }) {
       radioRows('Route to the server', ROUTE_CHOICES, app.settings.route || 'best', useRoute),
     );
   }
-  routes.append(h('div.section-head', null, h('h2', null, 'Routes')), h('p.lede', null, `Each way this device can reach ${src.serverName}, tested just now.`), routeList, routeHint);
+  routes.append(h('div.section-head', null, h('h2', null, 'Routes')), h('p.lede', null, `How this device can reach ${src.serverName}.`), routeList, routeHint);
   const support = ['flac', 'alac', 'mp3', 'aac', 'opus']
     .map((c) => `${fmt.codec(c)} ${canPlayCodec(c) ? 'yes' : 'no'}`)
     .concat(`HLS ${canPlayHlsNatively() ? 'built in' : 'via hls.js'}`)
@@ -860,7 +849,7 @@ function debugView({ el, onDispose }) {
       h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
       kv('Play Together', !app.config.together ? 'Off on this player' : together.active ? `In a session (${together.status === 'live' ? 'connected' : 'reconnecting'})` : 'On'),
-      kv('Debug mode', app.config.debug ? 'On: problems are written to Plexamp-web’s log (no sign-in details)' : 'Off'),
+      kv('Debug mode', app.config.debug ? 'On (problems go to Plexamp-web’s log)' : 'Off'),
       kv('Client ID', clientId()),
       kv('App version', APP_INFO.version),
     ),
@@ -935,7 +924,7 @@ function missingSection(onDispose) {
     const n = missingCount();
     count.textContent = n ? fmt.number(n) : '';
     listRow.hidden = !aiSettings().missing && !n;
-    showSub.textContent = `Keep a list of songs and artists AI playlists suggest that you don’t have, to look for later.${missingKeptNote()}`;
+    showSub.textContent = `List songs and artists the AI suggests that you don’t have.${missingKeptNote()}`;
   }
   paint();
   // An AI playlist made meanwhile can add to it (and the player says whose
@@ -953,7 +942,7 @@ function missingSection(onDispose) {
       mbOffered()
         ? toggleRow({
             title: 'Check suggestions on MusicBrainz',
-            subtitle: `Checks each missing song and artist on ${mbWhere()}, and drops ones that don’t exist (the AI sometimes makes them up). Only names are sent.`,
+            subtitle: 'Drops ones that don’t exist (the AI sometimes makes them up).',
             checked: aiSettings().musicbrainz !== false,
             onChange: (v) => {
               saveAI({ musicbrainz: v });
@@ -973,7 +962,7 @@ function waitRow() {
     null,
     choiceRow({
       title: 'Wait for the model',
-      subtitle: 'How long to wait for the AI to start answering. The first request after it starts can take minutes.',
+      subtitle: 'How long to wait for the AI to start answering.',
       options: WAIT_CHOICES.map((m) => [m, `${m} minutes`]),
       value: WAIT_CHOICES.includes(aiWaitMinutes()) ? aiWaitMinutes() : 5,
       onChange: (v) => saveAI({ wait: v }),
@@ -992,7 +981,7 @@ function aiView({ el, onDispose }) {
   const shared = sharedAI();
   const options = [
     ...(shared ? [['auto', 'This player’s model', 'The AI model this player provides.']] : []),
-    ['custom', 'My own Ollama server', 'An Ollama server you run, like one on this computer. Its address and key stay on this device.'],
+    ['custom', 'My own Ollama server', 'One you run. Its address and key stay on this device.'],
     ['off', 'Off', 'Hide AI features on this device.'],
   ];
   const chosen = () => {
@@ -1016,15 +1005,15 @@ function aiView({ el, onDispose }) {
       'p.lede',
       null,
       shared
-        ? 'AI playlists and the AI DJ need an AI model: this player’s, or your own. These settings are for this device.'
-        : 'AI playlists and the AI DJ need an AI model on your own Ollama server. These settings are for this device.',
+        ? 'For AI playlists and the AI DJ, on this device.'
+        : 'For AI playlists and the AI DJ, on this device, with your own Ollama server.',
     ),
     h('div.section-head', null, h('h2', null, 'Where the model runs')),
     radioRows('Where the model runs', options, chosen(), (v) => {
       saveAI({ mode: v });
       render();
     }),
-    ...(shared ? [] : [h('p.hint.pad', null, 'This player doesn’t provide an AI model. Whoever runs it can add one.')]),
+    ...(shared ? [] : [h('p.hint.pad', null, 'This player has no AI model of its own.')]),
     sharedBox,
     customBox,
     modelBox,
@@ -1088,7 +1077,7 @@ function aiView({ el, onDispose }) {
     const url = h('input', { type: 'url', placeholder: 'http://localhost:11434', autocomplete: 'url', value: s.url, required: true });
     const key = h('input', { type: 'password', placeholder: 'Optional', autocomplete: 'off', value: s.apiKey });
     const insecure = () => location.protocol === 'https:' && /^http:\/\//i.test(url.value) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url.value);
-    const warn = h('p.hint.warn', { hidden: !insecure() }, 'Browsers block http addresses from this secure page, except on this device (localhost). Use an https address.');
+    const warn = h('p.hint.warn', { hidden: !insecure() }, 'Browsers block http addresses here, except localhost. Use https.');
     url.addEventListener('input', () => (warn.hidden = !insecure()));
     const form = h(
       'form.form',
@@ -1110,14 +1099,29 @@ function aiView({ el, onDispose }) {
     return [
       h('div.section-head', null, h('h2', null, 'Your Ollama server')),
       form,
-      h(
-        'p.hint.pad.origins',
-        null,
-        'Ollama only answers websites it trusts. On the computer running Ollama, set ',
-        h('code', null, `OLLAMA_ORIGINS=${location.origin}`),
-        ' and restart Ollama.',
-      ),
+      originsHelp(),
     ];
+  }
+
+  // Ollama answers only the sites in its OLLAMA_ORIGINS: how to add this
+  // one, on each kind of computer (several go with commas between them).
+  function originsHelp() {
+    const site = location.origin;
+    const step = (os, ...how) => h('li', null, h('strong', null, `${os}: `), ...how);
+    return h(
+      'details.pad.origins',
+      null,
+      h('summary', null, 'How to allow this site'),
+      h('p.hint', null, 'Ollama only answers sites you allow. On the computer running it:'),
+      h(
+        'ul',
+        null,
+        step('Windows', 'in PowerShell, run ', h('code', null, `setx OLLAMA_ORIGINS "${site}"`), ', then quit Ollama (its icon by the clock) and open it again.'),
+        step('Mac', 'in Terminal, run ', h('code', null, `launchctl setenv OLLAMA_ORIGINS "${site}"`), ', then quit Ollama and open it again.'),
+        step('Linux', 'run ', h('code', null, 'sudo systemctl edit ollama'), ', add ', h('code', null, `Environment="OLLAMA_ORIGINS=${site}"`), ' under [Service], then ', h('code', null, 'sudo systemctl restart ollama'), '.'),
+      ),
+      h('p.hint', null, 'Already allowing other sites? Put them all in, with commas between.'),
+    );
   }
 
   async function loadModels() {
@@ -1210,7 +1214,7 @@ function notesSection() {
     'div',
     null,
     h('div.section-head', null, h('h2', null, 'Notes for the AI')),
-    h('label.field.pad', null, h('span', null, 'Anything the AI should know about your taste. Used for AI playlists and the AI DJ.'), area),
+    h('label.field.pad', null, h('span', null, 'Your taste, for AI playlists and the AI DJ.'), area),
   );
 }
 

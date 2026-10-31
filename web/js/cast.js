@@ -555,7 +555,7 @@ function promptRemote() {
   }
   // The device is only ever given the server's temporary token: without one, nothing's sent.
   if (!player.prepareRemote()) {
-    if (cast.tokenRefused) toast('Your Plex server didn’t give out a token for other devices, so tracks can’t be sent to one from here.');
+    if (cast.tokenRefused) toast('Your Plex server won’t let this app send tracks to other devices.');
     else {
       toast('Getting ready to play on another device: try again in a moment.');
       fetchMediaToken();
@@ -673,7 +673,7 @@ export function openCastSheet() {
   const note = h(
     'p.cast-note',
     null,
-    'Alexa speakers only play from Amazon’s approved music services, so no app can cast to them. To play there, pair the speaker with this device over Bluetooth. In Chrome on a computer, Chrome’s own Cast menu can also play this tab on a Google speaker.',
+    'Alexa speakers can’t be cast to: pair one with this device over Bluetooth instead. On a computer, Chrome’s Cast menu can play this tab on a Google speaker.',
   );
   sheet({ title: 'Play on', content: h('div', null, list, note) });
 

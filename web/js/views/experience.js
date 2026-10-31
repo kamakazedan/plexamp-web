@@ -27,8 +27,8 @@ const FONT = [
   ['larger', 'Larger'],
 ];
 const RATINGS = [
-  ['tick', 'Favourite', 'Tick the tracks you love (five stars in Plex). Untick to take the rating off.'],
-  ['stars', 'Five stars', 'Rate tracks from one to five stars.'],
+  ['tick', 'Favourite', 'Tick the tracks you love (five stars in Plex).'],
+  ['stars', 'Five stars', 'One to five stars.'],
   ['thumbs', 'Thumbs', 'Thumbs up or down.'],
   ['off', 'Off', 'Don’t show ratings.'],
 ];
@@ -39,12 +39,12 @@ const TOP_SIZES = [
   [100, '100'],
 ];
 const SEEKBARS = [
-  ['smooth', 'Smooth', 'The shape of the track’s loudness, filled in as it plays.'],
+  ['smooth', 'Smooth', 'The track’s shape, filled in as it plays.'],
   ['bars', 'Bars', 'The track’s loudness as bars.'],
   ['simple', 'Simple', 'A plain line.'],
 ];
 const BACKGROUNDS = [
-  ['gradient', 'Album colours', 'A soft blend of colours from the album playing.'],
+  ['gradient', 'Album colours', 'Colours from the album playing.'],
   ['artwork', 'Blurred artwork', 'The album cover, blurred.'],
   ['plain', 'Plain', 'A plain dark background.'],
 ];
@@ -67,13 +67,13 @@ export function experienceView({ el }) {
       libraries.replaceChildren(
         toggleRow({
           title: 'Search all music libraries',
-          subtitle: `Search ${list} too, not just ${here}.`,
+          subtitle: `Also search ${list}.`,
           checked: s.searchAllLibraries,
           onChange: setAndRefresh('searchAllLibraries'),
         }),
         toggleRow({
           title: 'Playlists from all music libraries',
-          subtitle: `Show playlists from ${list} too, not just ${here}.`,
+          subtitle: `Also show playlists from ${list}.`,
           checked: s.playlistsAllLibraries,
           onChange: setAndRefresh('playlistsAllLibraries'),
         }),
@@ -89,33 +89,33 @@ export function experienceView({ el }) {
       row({ href: '/settings/appearance', title: 'Appearance', subtitle: 'Background, colours and artwork.' }),
       row({ href: '/settings/player', title: 'Player', subtitle: 'What the player shows, and its controls.' }),
       row({ href: '/settings/home', title: 'Home screen', subtitle: 'Choose and order the sections on Home.' }),
-      choiceRow({ title: 'Grid size', subtitle: 'Size of albums and playlists in grids and shelves.', options: GRID, value: s.gridSize, onChange: set('gridSize') }),
-      choiceRow({ title: 'Font size', subtitle: 'Size of text throughout the app.', options: FONT, value: s.fontSize, onChange: set('fontSize') }),
-      choiceRow({ title: 'Rating system', subtitle: 'How you rate tracks, in the player and in track lists.', options: RATINGS, value: ratingMode(), onChange: set('ratingSystem') }),
-      toggleRow({ title: 'Ratings in track lists', subtitle: 'Rate tracks right in album, playlist and other track lists.', checked: s.listRatings, onChange: set('listRatings') }),
+      choiceRow({ title: 'Grid size', subtitle: 'How big album and playlist covers are.', options: GRID, value: s.gridSize, onChange: set('gridSize') }),
+      choiceRow({ title: 'Font size', options: FONT, value: s.fontSize, onChange: set('fontSize') }),
+      choiceRow({ title: 'Rating system', subtitle: 'Choose how you rate tracks.', options: RATINGS, value: ratingMode(), onChange: set('ratingSystem') }),
+      toggleRow({ title: 'Ratings in track lists', subtitle: 'Show the rating system in albums, playlists, etc.', checked: s.listRatings, onChange: set('listRatings') }),
       toggleRow({
         title: 'Keep ❤️ Tracks up to date',
-        subtitle: 'Tracks you favourite (five stars or a thumbs up) go in your ❤️ Tracks playlist, and leave it if you change that rating.',
+        subtitle: 'Tracks your favourites, updates the ❤️ Tracks playlist automatically.',
         checked: s.lovedPlaylist,
         onChange: set('lovedPlaylist'),
       }),
       toggleRow({
         title: 'Show codec information',
-        subtitle: 'Show formats and quality, like FLAC 24/96 or MP3 320, on albums, covers, search and the player.',
+        subtitle: 'Show quality badges e.g. FLAC 24/96 across the app.',
         checked: s.codecInfo !== false,
         onChange: setAndRefresh('codecInfo'),
       }),
       toggleRow({ title: 'Show popular tracks', subtitle: 'Mark an album’s best-known tracks.', checked: s.popularTracks, onChange: setAndRefresh('popularTracks') }),
-      choiceRow({ title: 'Top plays list size', subtitle: 'How many items the Most played lists in Search show.', options: TOP_SIZES, value: Number(s.topListSize) || 25, onChange: setAndRefresh('topListSize') }),
-      toggleRow({ title: 'Show preview buttons', subtitle: 'Add a button to tracks to hear 15 seconds, without changing what’s queued.', checked: s.previewButtons, onChange: setAndRefresh('previewButtons') }),
+      choiceRow({ title: 'Top plays list size', subtitle: 'Length of the Most played lists in Search.', options: TOP_SIZES, value: Number(s.topListSize) || 25, onChange: setAndRefresh('topListSize') }),
+      toggleRow({ title: 'Show preview buttons', subtitle: 'Hear 15 seconds of a track without queueing it.', checked: s.previewButtons, onChange: setAndRefresh('previewButtons') }),
       libraries,
       toggleRow({
         title: '1-tap playback',
-        subtitle: 'Tapping a track always plays it. Off: while something’s playing, choose to play it now, next or later.',
+        subtitle: 'Tap a track to play it. Off: choose now, next or later.',
         checked: s.oneTapPlayback,
         onChange: set('oneTapPlayback'),
       }),
-      toggleRow({ title: 'Sync recent plays', subtitle: 'Tell Plex what you play, so play counts and recent plays match on all your devices.', checked: s.reportPlays, onChange: set('reportPlays') }),
+      toggleRow({ title: 'Sync recent plays', subtitle: 'Tell Plex what you play, so play counts match everywhere.', checked: s.reportPlays, onChange: set('reportPlays') }),
       row({ href: '/settings/desktop', title: 'Desktop integration', subtitle: 'Media keys, the tab title and keyboard shortcuts.' }),
       playerNameRow(),
     ),
@@ -126,7 +126,7 @@ function playerNameRow() {
   const value = h('span.row-value', null, app.settings.playerName || defaultDeviceName());
   return row({
     title: 'Player name',
-    subtitle: 'The name Plex shows for this player, in its dashboard and activity.',
+    subtitle: 'How this player shows up in Plex.',
     right: value,
     chevron: true,
     onClick: () => {
@@ -164,11 +164,11 @@ export function appearanceView({ el }) {
       null,
       toggleRow({
         title: 'Colour from artwork',
-        subtitle: 'Tint the background and player with colours from the album that’s playing.',
+        subtitle: 'Tint the app with the playing album’s colours.',
         checked: s.tintBackground,
         onChange: set('tintBackground'),
       }),
-      choiceRow({ title: 'Background', subtitle: 'Behind everything, while music plays.', options: BACKGROUNDS, value: s.backgroundStyle, onChange: set('backgroundStyle') }),
+      choiceRow({ title: 'Background', subtitle: 'Shown while music plays.', options: BACKGROUNDS, value: s.backgroundStyle, onChange: set('backgroundStyle') }),
     ),
   );
 }
@@ -184,17 +184,17 @@ export function playerSettingsView({ el }) {
     h(
       'div.rows',
       null,
-      toggleRow({ title: 'Show rating', subtitle: 'Show and change your rating of the track, under its title.', checked: s.showRating !== false, onChange: set('showRating') }),
-      toggleRow({ title: 'Show volume control', subtitle: 'Show the volume slider in the player.', checked: s.showVolume, onChange: set('showVolume') }),
-      choiceRow({ title: 'Seekbar style', subtitle: 'How the playback position is drawn.', options: SEEKBARS, value: s.seekbarStyle, onChange: set('seekbarStyle') }),
+      toggleRow({ title: 'Show rating', subtitle: 'Rate the playing track from the player.', checked: s.showRating !== false, onChange: set('showRating') }),
+      toggleRow({ title: 'Show volume control', checked: s.showVolume, onChange: set('showVolume') }),
+      choiceRow({ title: 'Seekbar style', options: SEEKBARS, value: s.seekbarStyle, onChange: set('seekbarStyle') }),
       toggleRow({ title: 'Side by side layout', subtitle: 'On wide screens, show Up next beside the player.', checked: s.sideBySide, onChange: set('sideBySide') }),
-      toggleRow({ title: 'Show album year', subtitle: 'Show the year after the album’s name.', checked: s.showAlbumYear, onChange: set('showAlbumYear') }),
-      toggleRow({ title: 'Show full player', subtitle: 'Open the player when you start playing something.', checked: s.showFullPlayer, onChange: set('showFullPlayer') }),
-      toggleRow({ title: 'Music playback speed', subtitle: 'Add a speed button to the player, from 0.5× to 2×.', checked: s.playbackSpeed, onChange: set('playbackSpeed') }),
-      toggleRow({ title: 'Sleep timer', subtitle: 'Add a button to stop playing after a while, or at the end of a track.', checked: s.sleepTimer, onChange: set('sleepTimer') }),
+      toggleRow({ title: 'Show album year', checked: s.showAlbumYear, onChange: set('showAlbumYear') }),
+      toggleRow({ title: 'Show full player', subtitle: 'Open the player when music starts.', checked: s.showFullPlayer, onChange: set('showFullPlayer') }),
+      toggleRow({ title: 'Music playback speed', subtitle: 'A speed button, from 0.5× to 2×.', checked: s.playbackSpeed, onChange: set('playbackSpeed') }),
+      toggleRow({ title: 'Sleep timer', subtitle: 'Stop playing after a while, or at the end of a track.', checked: s.sleepTimer, onChange: set('sleepTimer') }),
       toggleRow({
         title: 'Use long-form controls',
-        subtitle: 'For tracks over 20 minutes, like DJ mixes and audiobooks: show skip buttons, and pick up where you stopped.',
+        subtitle: 'For tracks over 20 minutes: skip buttons, and resume where you stopped.',
         checked: s.longForm,
         onChange: set('longForm'),
       }),
@@ -229,14 +229,14 @@ export function desktopView({ el }) {
       null,
       toggleRow({
         title: 'Media keys and lock screen',
-        subtitle: 'Control playback with your keyboard’s media keys, headphone buttons and your phone’s lock screen.',
+        subtitle: 'Control music from media keys, headphones and the lock screen.',
         checked: s.mediaSession,
         onChange: set('mediaSession'),
       }),
-      toggleRow({ title: 'Show what’s playing in the tab', subtitle: 'Put the track’s name in the browser tab’s title.', checked: s.tabTitle, onChange: set('tabTitle') }),
+      toggleRow({ title: 'Show what’s playing in the tab', checked: s.tabTitle, onChange: set('tabTitle') }),
       toggleRow({
         title: 'Keyboard shortcuts',
-        subtitle: 'Space plays and pauses, Shift+→ and Shift+← skip, and / goes to Search.',
+        subtitle: 'Space to play or pause, Shift+← and Shift+→ to skip, / to search.',
         checked: s.keyboardShortcuts,
         onChange: set('keyboardShortcuts'),
       }),
@@ -342,7 +342,7 @@ export function homeEditorView({ el }) {
       'div.home-editor-source',
       null,
       h('div.home-editor-title', null, 'Your Home screen'),
-      h('div.home-editor-sub', null, `For every library and server${app.config.settingsSync ? ', and every device you sign in on' : ''}. Drag to reorder; tap a section to show, hide or change it.`),
+      h('div.home-editor-sub', null, 'Drag to reorder. Tap a section to show, hide or change it.'),
     ),
     list,
     h(

@@ -970,7 +970,25 @@ with sync_playwright() as pw:
         page.click('.ai-custom button:has-text("Connect")')
         page.wait_for_selector('.ai-models .warn', timeout=25000)
         msg = page.locator('.ai-models .warn').inner_text()
-        check('custom: explains an unreachable Ollama', 'Couldn’t reach Ollama' in msg and 'OLLAMA_ORIGINS' in msg, msg)
+        check('custom: explains an unreachable Ollama', 'No answer from Ollama at http://127.0.0.1:11999' in msg and 'OLLAMA_ORIGINS' not in msg, msg)
+        # An Ollama that answers, but not this site (its OLLAMA_ORIGINS
+        # doesn't list it): said so, with how to allow it, this site's own
+        # address in each step.
+        own('refuse=1')
+        try:
+            page.fill('.ai-custom input[type=url]', OLLAMA)
+            page.click('.ai-custom button:has-text("Connect")')
+            page.wait_for_selector('.ai-models .warn:has-text("let this site in")', timeout=25000)
+            msg = page.locator('.ai-models .warn').inner_text()
+            page.click('.origins summary')
+            how = page.locator('.origins').inner_text()
+            shot(page, 'custom-01-blocked')
+            site = APP_NOWS.rstrip('/')
+            check('custom: an Ollama that doesn\'t let this site in is told apart from one that doesn\'t answer, saying how to allow it (this site\'s address, for Windows, Mac and Linux)',
+                  'Ollama is running' in msg and site in msg and f'setx OLLAMA_ORIGINS "{site}"' in how and f'launchctl setenv OLLAMA_ORIGINS "{site}"' in how
+                  and f'OLLAMA_ORIGINS={site}' in how, f'{msg!r} {how!r}')
+        finally:
+            own('refuse=0')
         ctx.close()
 
     # ---------- desktop layout ----------
@@ -3702,7 +3720,7 @@ with sync_playwright() as pw:
         player(page, "(p.transcoding = true, p.emit('track'), true)")
         page.wait_for_selector('.np.open .np-converted', timeout=10000)
         label = page.locator('.np-converted').get_attribute('aria-label') or ''
-        check('np: ...or, converted as the file didn\'t play as it is, says that', 'the file didn’t play as it is here' in label and 'Streaming quality' not in label, label)
+        check('np: ...or, converted as the file didn\'t play as it is, says that', 'the file didn’t play here' in label and 'Streaming quality' not in label, label)
         kinds = js(page, """() => Promise.all([import('./js/player.js'), import('./js/state.js')]).then(([{ player: p }, s]) => {
             s.saveSettings({ quality: '320' });
             const out = [p.sourceFor({ id: '1', codec: 'mp3', bitrate: 128, partKey: '/library/parts/1/file.mp3' }).hls,
@@ -5508,8 +5526,8 @@ with sync_playwright() as pw:
         converted = page.locator('.sheet.open').inner_text()
         page.keyboard.press('Escape')
         check('loudness: Load ahead goes from off to 10 tracks, each saying about how much memory it takes (as MP3 and FLAC, or at the bitrate it\'s converted to)',
-              'Off' in sheet_text and '10 tracks' in sheet_text and 'The next 10 tracks: about 96 MB as MP3, 300 MB as FLAC.' in sheet_text
-              and 'The next 2 tracks: about 19 MB at 320 kbps.' in converted, f'{labels} {sheet_text[-200:]} {converted[-200:]}')
+              'Off' in sheet_text and '10 tracks' in sheet_text and 'about 96 MB as MP3, 300 MB as FLAC.' in sheet_text
+              and 'about 19 MB at 320 kbps.' in converted, f'{labels} {sheet_text[-200:]} {converted[-200:]}')
         # ...and Keep played tracks: off, or 1 to 5, likewise (1 to start with).
         page.wait_for_timeout(300)
         page.click('.choice-row:has-text("Keep played tracks")')
@@ -5525,7 +5543,7 @@ with sync_playwright() as pw:
         fresh_ctx.close()
         check('loudness: Keep played tracks goes from off to 5, each saying about how much memory it takes (1 to start with)',
               keep_start == 1 and 'Off' in kept_text and '5 tracks' in kept_text and '6 tracks' not in kept_text
-              and 'The last track played: about 9.6 MB at 320 kbps.' in kept_text and 'The last 5 tracks played: about 48 MB at 320 kbps.' in kept_text, f'{keep_start} {kept_text[-300:]}')
+              and 'about 9.6 MB at 320 kbps.' in kept_text and 'about 48 MB at 320 kbps.' in kept_text, f'{keep_start} {kept_text[-300:]}')
         settings(page, {'quality': 'original'})
         js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
         ctx.close()
@@ -6436,8 +6454,8 @@ with sync_playwright() as pw:
         text_ = page.locator('.spotify-guide').inner_text()
         link = page.locator('.spotify-privacy')
         check('spotify: From Spotify says why it\'s Spotify\'s download of your data, how to ask for it, and to choose just its playlist files',
-              'developer programme' in text_ and 'Download your data' in text_ and 'Account data' in text_ and 'Playlist1.json' in text_ and 'YourLibrary.json' in text_
-              and 'date of birth' in text_ and 'Leave them out' in text_ and 'turned away unread' in text_
+              'download them from Spotify yourself' in text_ and 'Download your data' in text_ and 'Account data' in text_ and 'Playlist1.json' in text_ and 'YourLibrary.json' in text_
+              and 'personal details' in text_ and 'Leave the other files out' in text_ and 'Only those files are opened' in text_
               and link.get_attribute('href') == 'https://www.spotify.com/account/privacy/' and link.get_attribute('target') == '_blank' and 'noopener' in (link.get_attribute('rel') or ''), text_[:600])
         shot(page, 'spotify-00-guide')
         choose_files([('my_spotify_data.zip', b'PK\x03\x04 not really a zip')])
@@ -7553,7 +7571,7 @@ with sync_playwright() as pw:
         check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
         check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
         check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (with no switch of any kind)',
-              'yours and your friends' in lede and 'Kept by this player for your Plex account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
+              'yours and your friends' in lede and 'Kept for your account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
 
         # Noted on one device, on the other once it's read again; counted again.
         note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')

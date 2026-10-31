@@ -586,7 +586,7 @@ export async function artistView({ el, params, onDispose }) {
           h(
             'p.hint.pad',
             null,
-            `MusicBrainz has ${list.length === 1 ? 'this album' : 'these albums'} as another artist’s of the name${n.note ? ` (“${n.note}”)` : ''}, not this one’s: so ${list.length === 1 ? 'it’s' : 'they’re'} kept apart here, and out of this page’s Play, Shuffle and Popular tracks. `,
+            `By a different artist with this name on MusicBrainz${n.note ? ` (“${n.note}”)` : ''}, so left out of Play and Shuffle here. `,
             h('a', { href: `https://musicbrainz.org/artist/${n.id}`, target: '_blank', rel: 'noopener noreferrer' }, 'See them on MusicBrainz'),
           ),
           grid(
@@ -632,7 +632,7 @@ export async function artistView({ el, params, onDispose }) {
     const kindsButton = h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albumsNow())) }, 'Kinds…');
     const head = sectionHeader('Not in your library', null, kindsButton);
     if (!missing.length) {
-      missingBox.replaceChildren(h('section.block.mb-missing', null, head, h('p.hint.pad', null, `Your library has all of ${artist.title}’s that MusicBrainz has, of the kinds chosen.`)));
+      missingBox.replaceChildren(h('section.block.mb-missing', null, head, h('p.hint.pad', null, `You have everything MusicBrainz lists for ${artist.title}.`)));
       return;
     }
     const name = (g) => KIND_NAMES[kindOf(g.primary, g.secondary)];
@@ -657,7 +657,7 @@ export async function artistView({ el, params, onDispose }) {
               ),
             ),
           ),
-          list.length > MISSING_SHOWN ? h('p.hint.pad', null, `and ${fmt.number(list.length - MISSING_SHOWN)} more (the copy and the download have them all)`) : null,
+          list.length > MISSING_SHOWN ? h('p.hint.pad', null, `and ${fmt.number(list.length - MISSING_SHOWN)} more (in the copy and download)`) : null,
         ),
       );
     const fileName = `${artist.title.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'artist'}`;
@@ -669,7 +669,7 @@ export async function artistView({ el, params, onDispose }) {
         h(
           'p.hint.pad',
           null,
-          `${artist.title}’s releases on MusicBrainz that your library hasn’t, of ${chosen.length === RELEASE_KINDS.length ? 'every kind' : `these kinds: ${RELEASE_KINDS.filter(([k]) => chosen.includes(k)).map(([, label]) => label).join(', ')}`}.`,
+          `${artist.title}’s releases on MusicBrainz that you don’t have.`,
         ),
         ...blocks,
         h(
@@ -865,10 +865,10 @@ export async function similarArtistsView({ el, params, kind }) {
   el.append(backHeader(sonic ? `Sounds like ${artist.title}` : `Similar to ${artist.title}`, { fallback: `/artist/${artist.ratingKey}` }));
   const artists = sonic ? await sonicallySimilar(s, artist, { limit: ALL_ARTISTS, maxDistance: 0.4 }) : await similarInLibrary(s, sec, artist, ALL_ARTISTS);
   el.append(
-    h('p.lede', null, sonic ? `Artists in your library who sound like ${artist.title}, nearest first, by your server’s sonic analysis.` : `Artists in your library that Plex says are like ${artist.title}.`),
+    h('p.lede', null, sonic ? `Artists in your library who sound like ${artist.title}.` : `Artists in your library that Plex says are like ${artist.title}.`),
     artists.length
       ? grid(artists.map(artistCard), { centered: true })
-      : emptyState(sonic ? 'Your server hasn’t found any that sound like them (it needs sonic analysis for that).' : `None of the artists Plex says are like ${artist.title} are in your library.`),
+      : emptyState(sonic ? 'None found. Your server needs sonic analysis for this.' : `None of the artists Plex says are like ${artist.title} are in your library.`),
   );
 }
 
@@ -1154,7 +1154,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       });
   }
   // Until the lock has been used, a reminder of what it's for.
-  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder, sort or remove tracks, or change the picture.', { key: 'lock' }) : () => {};
+  const hint = lock ? pointOut(lock.el, 'Locked. Tap the lock to edit.', { key: 'lock' }) : () => {};
   const picture = pictureBox(playlistArt(pl), {
     what: 'playlist',
     id: pl.ratingKey,
@@ -1178,7 +1178,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     return [
       share
         ? { icon: 'together', label: 'Sharing…', description: shareLine(share), onSelect: () => openShareDialog(pl, { onChange: refresh }) }
-        : { icon: 'together', label: 'Share with friends…', description: 'Plex friends who can use this server get a copy, kept the same as yours', onSelect: () => openShareDialog(pl, { onChange: refresh }) },
+        : { icon: 'together', label: 'Share with friends…', description: 'Friends get a copy that stays in sync with yours', onSelect: () => openShareDialog(pl, { onChange: refresh }) },
     ];
   };
   const menu = iconButton('more', 'More options', () =>
@@ -1221,7 +1221,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
   const list = numberedList({ total, album: true });
-  const bar = editBar('Drag a track to move it, or remove it, and tap the picture to change it. Changes are saved to Plex as you go; the tracks stay in your library.', {
+  const bar = editBar('Drag to reorder, remove tracks, or tap the picture to change it. Changes save as you go.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort('track', pl.title, (by, label) => sortBy(by, label)),
   });
@@ -1511,7 +1511,7 @@ export async function collectionView({ el, params, onHide }) {
 
   const lock = editable ? lockButton('collection', () => setEditing(!editing)) : null;
   lock?.set(false);
-  const hint = lock ? pointOut(lock.el, 'Locked, so nothing changes by accident. Tap the lock to reorder, sort or remove what’s in it, or change the picture.', { key: 'lock' }) : () => {};
+  const hint = lock ? pointOut(lock.el, 'Locked. Tap the lock to edit.', { key: 'lock' }) : () => {};
   const picture = pictureBox(meta.thumb || meta.composite, {
     what: 'collection',
     id: meta.ratingKey,
@@ -1538,7 +1538,7 @@ export async function collectionView({ el, params, onHide }) {
     h('section.hero.hero-album', null, picture.el, h('div.hero-info', null, title, countEl, buttons)),
   );
   collapseWhenHidden(head, title);
-  const bar = editBar('Drag to change the order, or remove what doesn’t belong, and tap the picture to change it. Changes are saved to Plex as you go; nothing leaves your library.', {
+  const bar = editBar('Drag to reorder, remove items, or tap the picture to change it. Changes save as you go.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort(meta.subtype || 'album', meta.title, (by, label) => sortBy(by, label)),
   });

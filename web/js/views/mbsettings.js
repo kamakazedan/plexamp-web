@@ -37,7 +37,7 @@ export function chooseMissingKinds(after) {
   };
   sheet({
     title: 'Missing albums shown',
-    subtitle: 'Which kinds of missing albums to show on artist pages',
+    subtitle: 'Which kinds to show',
     variant: 'dialog',
     content: h('div.rows.mb-kinds', null, RELEASE_KINDS.map(([id, name]) => toggleRow({ title: name, checked: missingKinds().includes(id), onChange: (v) => set(id, v) }))),
   });
@@ -63,33 +63,32 @@ export async function musicbrainzSettingsView({ el }) {
     h(
       'p.lede',
       null,
-      `These look your artists up on ${mbWhere()}. Only artist names are sent, and answers are kept for a month.`,
+      `Extras from ${mbWhere()}. Only artist names are sent.`,
     ),
     h(
       'div.rows',
       null,
       toggleRow({
         title: 'Missing albums on artist pages',
-        subtitle: 'Show an artist’s albums, EPs and singles you don’t have, on their page.',
+        subtitle: 'Albums, EPs and singles you don’t have yet.',
         checked: s.mbMissingAlbums !== false,
         onChange: set('mbMissingAlbums'),
       }),
       kinds,
       toggleRow({
         title: 'Original release years',
-        subtitle: 'Sort an artist’s albums by when they first came out, and show that year (Plex often has a reissue’s year).',
+        subtitle: 'Sort and date albums by when they first came out.',
         checked: s.mbOriginalYears !== false,
         onChange: set('mbOriginalYears'),
       }),
       toggleRow({
         title: 'Artists of the same name',
-        subtitle: 'When Plex mixes up two artists with the same name, show the other one’s albums in their own section, left out of Play and Shuffle. Only when MusicBrainz is sure.',
+        subtitle: 'Separates albums by a different artist with the same name.',
         checked: s.mbNamesakes !== false,
         onChange: set('mbNamesakes'),
       }),
     ),
-    h('p.hint.pad', null, 'Artists are also found by their other names (other spellings, old names) when importing playlists or checking missing tracks.'),
-    h('p.hint.pad', null, 'Skip live tracks and demos (Settings › Playback) also asks MusicBrainz about albums Plex hasn’t labelled. Nothing in your library is changed.'),
+    h('p.hint.pad', null, 'Imports and missing tracks also find artists by their other names.'),
     admin
       ? h(
           'div',

@@ -63,14 +63,14 @@ export function importFromSpotify() {
     h(
       'p.ask-message',
       null,
-      'Spotify only lets other apps read your playlists through its developer programme, which needs a Premium account and allows five people. But anyone can download their own data from Spotify, with all their playlists, however long, and that’s what’s used here.',
+      'Spotify doesn’t let apps like this read your playlists, but you can download them from Spotify yourself, however long they are.',
     ),
     h(
       'ol.spotify-steps',
       null,
       step(
         'Ask Spotify for your data',
-        'On spotify.com, open your account’s Privacy settings, tick Account data under Download your data, and request it. Spotify emails you to confirm, then again when it’s ready, usually within a few days.',
+        'In your Spotify account’s Privacy settings, tick Account data under Download your data and request it. It usually takes a few days.',
         h('a.btn.btn-secondary.spotify-privacy', { href: SPOTIFY_PRIVACY_URL, target: '_blank', rel: 'noopener noreferrer' }, icon('external', 20), h('span', null, 'Spotify’s privacy settings')),
       ),
       step(
@@ -83,17 +83,17 @@ export function importFromSpotify() {
         h('code', null, 'YourLibrary.json'),
         ', with your Liked Songs.',
       ),
-      step('Choose just those', 'The other files hold your personal details: your email, date of birth, address and phone number, your payment card, and what you’ve searched for and listened to. Leave them out.'),
+      step('Choose just those', 'Leave the other files out: they hold your personal details.'),
     ),
     h(
       'p.spotify-private',
       null,
-      `Only files with those names are opened, here on this device: any other is turned away unread. Of them, only each playlist’s name and each track’s title, artist and album are kept, and those go no further than ${app.source?.serverName || 'your Plex server'}, to find the tracks there and make the playlists you choose.`,
+      `Only those files are opened, on this device. Just playlist names and track titles, artists and albums are kept, to find them on ${app.source?.serverName || 'your Plex server'}.`,
     ),
     status,
     choose,
     // (SPOTIFY_LINK_IMPORT on the container.)
-    linkBtn ? h('div.spotify-or', null, h('p.ask-message', null, 'Or bring over a public playlist from its link, straight away: only its first 100 tracks, though.'), linkBtn) : null,
+    linkBtn ? h('div.spotify-or', null, h('p.ask-message', null, 'Or bring over a public playlist from its link: its first 100 tracks only.'), linkBtn) : null,
   );
   const { panel } = sheet({
     title: 'From Spotify',

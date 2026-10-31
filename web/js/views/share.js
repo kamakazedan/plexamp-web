@@ -36,8 +36,8 @@ export function openShareDialog(pl, { onChange } = {}) {
   const go = h('button.btn.btn-primary', { type: 'button', disabled: true }, mine ? 'Save' : 'Share');
   const stop = mine ? h('button.link-btn.danger.share-stop', { type: 'button' }, 'Stop sharing') : null;
   const intro = mine
-    ? 'Everyone it’s shared with has a copy of their own, kept the same as yours. Anyone who can edit it changes it for everyone.'
-    : 'Each friend gets a copy of their own, in plexamp-web, kept the same as yours. Anyone who can edit it changes it for everyone.';
+    ? 'Everyone gets their own copy that stays in sync. Editors change it for everyone.'
+    : 'Each friend gets a copy in plexamp-web that stays in sync. Editors change it for everyone.';
   const box = sheet({
     title: mine ? `Sharing “${pl.title}”` : `Share “${pl.title}”`,
     content: h('div.friend-picker.share-picker', null, h('p.friend-intro', null, intro), list, h('div.friend-actions', null, go, stop)),

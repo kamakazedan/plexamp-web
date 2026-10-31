@@ -42,7 +42,7 @@ export async function loginView({ el, query = {} }) {
       null,
       h('img.login-mark', { src: 'icons/icon.svg', alt: '', width: 88, height: 88 }),
       h('h1.login-title', null, 'Play your Plex music'),
-      h('p.login-text', null, 'Sign in with your Plex account. You’ll go to plex.tv to sign in, then come straight back here.'),
+      h('p.login-text', null, 'Sign in with your Plex account.'),
       offline?.el,
       signIn,
       status,
@@ -101,10 +101,10 @@ function offlinePanel(query) {
   if (query.offline === 'gone') show('The offline password’s session has ended (the player restarted, say). Use the password again.');
   const why = {
     off: '',
-    'plex-tv': ' If it stays that way, this player’s offline password can be used here in a moment.',
-    server: ' Nor can the offline password be used: your Plex server doesn’t let this player in without signing in.',
+    'plex-tv': ' If it stays down, you can use the offline password in a moment.',
+    server: ' The offline password can’t be used either: your Plex server needs a sign-in.',
     'server-down': ' Your Plex server isn’t answering this player either.',
-    network: ' Nor can the offline password be used from your network.',
+    network: ' The offline password can’t be used from your network.',
   };
   // (Till the page goes: it's on screen, then not.)
   let timer = null;
@@ -132,11 +132,11 @@ function offlinePanel(query) {
     }
     if (state.on) {
       const first = form.hidden;
-      show('plex.tv isn’t answering this player, so you can’t sign in with Plex right now. This player is in offline mode: its offline password plays its library until plex.tv is back.', { withKey: true });
+      show('Plex’s sign-in isn’t answering right now. Until it’s back, you can use this player’s offline password.', { withKey: true });
       if (first) key.focus();
       return again(OFFLINE_EVERY);
     }
-    show(`plex.tv isn’t answering this player, so you can’t sign in with Plex right now.${why[state.why] ?? ''}`);
+    show(`Plex’s sign-in isn’t answering right now.${why[state.why] ?? ''}`);
     again(state.why === 'plex-tv' ? OFFLINE_SOON : OFFLINE_EVERY);
   };
   return { el, start: check };

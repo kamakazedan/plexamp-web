@@ -165,6 +165,23 @@ async function send(target, path, init) {
 
 // ---------- HTTP ----------
 
+// A request to your own Ollama that got no answer the page could read: is
+// it running, but not letting this site in? A request whose answer the page
+// isn't let read (no-cors) gets an answer from it all the same, as Ollama
+// gives a site its OLLAMA_ORIGINS doesn't list one (403). 'blocked' then,
+// 'network' where nothing answers.
+async function unreachable(target, err) {
+  if (target?.kind === 'custom') {
+    try {
+      await fetch(`${target.base}/api/version`, { mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(5000) });
+      return new AIError('blocked', 'Ollama answers, but doesn’t let this site in.');
+    } catch {
+      /* nothing answers */
+    }
+  }
+  return new AIError('network', err?.message || 'network error');
+}
+
 async function readError(res) {
   let text = '';
   try {
@@ -198,7 +215,7 @@ async function simple(target, path, timeout = 15000) {
   } catch (err) {
     if (err instanceof AIError) throw err;
     if (ctrl.signal.aborted) throw new AIError('timeout', 'The AI server didn’t answer in time.');
-    throw new AIError('network', err.message || 'network error');
+    throw await unreachable(target, err);
   } finally {
     clearTimeout(timer);
   }
@@ -386,11 +403,11 @@ async function streamChat(target, body, signal, onProgress, onLoading) {
       const mins = aiWaitMinutes();
       const waited = mins >= 1 ? `${Math.round(mins)} minute${Math.round(mins) === 1 ? '' : 's'}` : `${Math.round(mins * 60)} seconds`;
       if (loading) {
-        throw new AIError('timeout', `The AI model was still loading after ${waited}. It carries on loading, so try again in a minute or two (or wait longer in Settings › AI).`, { loading: true });
+        throw new AIError('timeout', 'The AI model is still loading. Try again in a minute or two.', { loading: true });
       }
       throw new AIError('timeout', answering ? 'The AI model took too long to answer.' : `The AI model didn’t start answering within ${waited}. You can wait longer in Settings › AI.`);
     }
-    throw new AIError('network', err.message || 'network error');
+    throw await unreachable(target, err);
   } finally {
     clearTimeout(idle);
     clearTimeout(total);
@@ -436,10 +453,10 @@ export function describeAIError(err, target = aiTarget()) {
     case 'bad-reply':
     case 'no-matches':
       return err.message;
+    case 'blocked':
+      return `Ollama is running, but doesn’t allow ${location.origin} yet: see How to allow this site.`;
     case 'network':
-      return target?.kind === 'custom'
-        ? `Couldn’t reach Ollama at ${where}. Check it’s running and reachable from this device, and that OLLAMA_ORIGINS on that server allows ${location.origin}.`
-        : 'Couldn’t reach the AI service. Check the container and Ollama are running.';
+      return target?.kind === 'custom' ? `No answer from Ollama at ${where}. Check it’s running on that computer.` : 'Couldn’t reach the AI service. Check Plexamp-web and Ollama are running.';
     default:
       break;
   }
@@ -453,7 +470,7 @@ export function describeAIError(err, target = aiTarget()) {
   if (status === 404 && /model/i.test(said)) {
     const name = /"([^"]+)"/.exec(said)?.[1] || target?.model || 'the model';
     return shared
-      ? `The AI model “${name}” isn’t installed on the AI server. Whoever runs this player can install it, or set OLLAMA_MODEL to one that is.`
+      ? `The AI model “${name}” isn’t installed yet. Whoever runs this player can install it.`
       : `The model “${name}” isn’t installed there. Choose another in Settings › AI.`;
   }
   if (status === 404) return shared ? 'This player doesn’t have a shared AI model set up.' : `${where} doesn’t look like an Ollama server.`;

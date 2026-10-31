@@ -46,13 +46,11 @@ export function missingTracksView({ el, onDispose }) {
     const what = `Songs and artists from AI playlists and Spotify imports that ${server} doesn’t have`;
     lede.textContent =
       (!kept
-        ? `${what}. Kept on this device (each server has its own list). `
+        ? `${what}. Kept on this device.`
         : kept.owner === true
-          ? `${what}: yours and your friends’. Kept by this player for your Plex account, on every device. What anyone asked the AI for, and Spotify playlist names, stay on the device they used. `
-          : `${what}. Kept by this player for your Plex account, on every device. ${kept.owner === false ? `Whoever runs ${server}` : `The owner of ${server}`} sees them too, with your Plex name, so they can add them. What you asked the AI for, and your Spotify playlist names, stay on the device you used. `) +
-      (mbOn()
-        ? 'AI suggestions are checked on MusicBrainz first, and ones it doesn’t know (probably made up) are left out. Check on MusicBrainz checks any that weren’t.'
-        : 'The AI sometimes suggests songs that don’t exist, so check before you go looking.');
+          ? `${what}: yours and your friends’. Kept for your account; what anyone asked the AI stays on their device.`
+          : `${what}. Kept for your account. ${kept.owner === false ? `Whoever runs ${server}` : `The owner of ${server}`} sees them too, so they can add them; what you asked the AI stays on your device.`) +
+      (mbOn() ? '' : ' The AI sometimes makes songs up, so check before you go looking.');
   };
   paintLede();
   el.append(backHeader('Missing tracks', { fallback: '/settings/ai' }), lede);
@@ -193,11 +191,7 @@ export function missingTracksView({ el, onDispose }) {
     } else {
       kids.push(
         emptyState(
-          everyone
-            ? `Nothing missing so far. Songs and artists ${server} doesn’t have, from your or your friends’ AI playlists and Spotify imports, will show here.`
-            : aiSettings().missing
-              ? 'Nothing missing so far. Songs and artists AI playlists suggest that you don’t have will show here.'
-              : 'Nothing here. Turn on Show missing tracks in Settings › AI to list songs and artists AI playlists suggest that you don’t have.',
+          everyone || aiSettings().missing ? 'Nothing missing so far.' : 'Turn on Show missing tracks in Settings › AI to list them here.',
         ),
       );
     }

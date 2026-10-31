@@ -331,7 +331,7 @@ const ARRANGERS = {
 };
 
 export const DJS = [
-  { id: 'bridge', kind: 'insert', name: 'DJ Bridge', description: 'Between each of your tracks and the next, plays one that sits between them in sound.' },
+  { id: 'bridge', kind: 'insert', name: 'DJ Bridge', description: 'Plays a track between each of yours that bridges their sound.' },
   { id: 'echo', kind: 'insert', name: 'DJ Echo', description: 'Follows each track with the one that sounds most like it.' },
   { id: 'steady', kind: 'continue', name: 'DJ Steady', description: 'Keeps the mood going with tracks that sound like the one playing.' },
   { id: 'double', kind: 'insert', name: 'DJ Double', description: 'Follows each track with another by the same artist.' },
@@ -341,12 +341,12 @@ export const DJS = [
     id: 'ai',
     kind: 'continue',
     name: 'AI DJ',
-    description: 'Your AI model picks each next track and says why: other artists’ best-known songs, in the genre you started with.',
+    description: 'Your AI model picks each next track and says why.',
     needsAI: true,
   },
   // Only what's queued:
   { id: 'queue-echo', kind: 'reorder', name: 'Queue Echo', description: 'Plays next whichever track in your queue sounds most like the one playing.' },
-  { id: 'queue-bridge', kind: 'reorder', name: 'Queue Bridge', description: 'When your next track sounds far from this one, first plays one from later in your queue that sits between them.' },
+  { id: 'queue-bridge', kind: 'reorder', name: 'Queue Bridge', description: 'Smooths big jumps with a bridging track from later in your queue.' },
 ];
 
 export const djName = (id) => DJS.find((d) => d.id === id)?.name || 'Guest DJ';
@@ -543,9 +543,9 @@ class GuestDJ extends EventTarget {
 
   noSonic(queue = false) {
     if (queue) {
-      this.warnOnce('no-sonic-queue', 'Plex has no sonic analysis for these tracks, so the DJ goes by their genres, styles, moods and years. Turn on sonic analysis for this library in Plex for better transitions.');
+      this.warnOnce('no-sonic-queue', 'No sonic analysis for these tracks, so the DJ goes by genre and year. Turn it on in Plex for better picks.');
     } else {
-      this.warnOnce('no-sonic', 'No sonically similar tracks were found, so the DJ is matching on genre. Turn on sonic analysis for this library in Plex for better picks.');
+      this.warnOnce('no-sonic', 'No sonically similar tracks found, so the DJ is matching on genre. Turn on sonic analysis in Plex for better picks.');
     }
   }
 

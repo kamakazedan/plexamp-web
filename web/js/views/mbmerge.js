@@ -67,7 +67,7 @@ export async function mbMergeView({ el, onDispose }) {
     h(
       'p.lede',
       null,
-      `Artists that appear more than once in ${app.source.sectionTitle}, checked on ${mbWhere()}. Ticked ones are the same artist on MusicBrainz; tick others if you know they are. Merging is done in Plex, for everyone, and can’t be undone here.`,
+      'Artists Plex has more than once. Ticked ones are the same artist on MusicBrainz.',
     ),
     status,
     top,
@@ -76,7 +76,7 @@ export async function mbMergeView({ el, onDispose }) {
     h(
       'p.hint.pad',
       null,
-      'New files tagged the same way will come in apart again: fix their album artist tag (MusicBrainz Picard or beets can).',
+      'New files tagged the same way will split again: fix their album artist tag.',
     ),
   );
 
@@ -329,7 +329,7 @@ export async function mbMergeView({ el, onDispose }) {
     lists.replaceChildren(
       ...[
         groups.length ? null : emptyState('No artist appears more than once here.'),
-        groups.length && !twice.length && !joined.length ? emptyState('Nothing MusicBrainz is sure about. Check the ones below yourself.') : null,
+        groups.length && !twice.length && !joined.length ? emptyState('Nothing MusicBrainz is sure about. Check the ones below.') : null,
         block('Same name, more than once', twice, 'mb-merge-twice'),
         block('Several artists in one name', joined, 'mb-merge-joined'),
         block('Check these yourself', left, 'mb-merge-left'),

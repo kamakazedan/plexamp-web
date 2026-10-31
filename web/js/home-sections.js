@@ -42,7 +42,7 @@ export const SECTIONS = [
   decade(2020),
   { id: 'recentlyAdded', title: 'Recently added', description: 'The newest albums in this library.', on: true },
   { id: 'topAlbums', title: 'Top albums from … (period)', description: 'Your most played albums over a period.', on: false, periods: PERIODS, period: 'month' },
-  { id: 'stations', title: 'Stations', description: 'Radio from the whole library: library radio, your favourites, deep cuts, time travel and a random album.', on: true },
+  { id: 'stations', title: 'Stations', description: 'Library radio, favourites, deep cuts, time travel and more.', on: true },
   { id: 'mostPlayed', title: 'Most played in … (period)', description: 'Your most played tracks over a period.', on: false, periods: PERIODS, period: 'month' },
   { id: 'moreFromLabel', title: 'More from … (record label)', description: 'Albums from the label of something you played lately.', on: false },
   { id: 'history', title: 'History', description: 'Tracks you played last.', on: false },

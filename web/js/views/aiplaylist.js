@@ -349,7 +349,7 @@ export async function aiPlaylistView({ el, onDispose }) {
     const time = () => (elapsed.textContent = `${Math.round((Date.now() - j.started) / 1000)} s`);
     time();
     const tick = setInterval(time, 1000);
-    const loadingNote = h('p.ai-loading', { hidden: true }, 'Loading the AI model into memory. After Ollama starts, this can take a few minutes.');
+    const loadingNote = h('p.ai-loading', { hidden: true }, 'Loading the AI model. The first time can take a few minutes.');
     body.replaceChildren(
       h(
         'div.ai-progress',

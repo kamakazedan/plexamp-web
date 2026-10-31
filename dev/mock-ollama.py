@@ -12,7 +12,8 @@ after Ollama starts), &unload=1 empties its memory and &reset=1 its counts;
 like Ollama, a load stops when the request that asked for it goes away.
 &fail=1 makes chats fail as a model that crashed would (saying things about
 the server, as Ollama does), &fail=2 the same partway through an answer,
-and &fail=0 stops that.
+and &fail=0 stops that. &refuse=1 refuses every website (403), as an Ollama
+whose OLLAMA_ORIGINS doesn't list the site, &refuse=0 stops that.
 
     python3 dev/mock-ollama.py                 # http://127.0.0.1:11434
     python3 dev/mock-ollama.py --origins '*'   # allow any website
@@ -60,11 +61,14 @@ STATE = {
     'cancelled': 0,  # loads given up because the request went away
     'dj_prompt': '',  # what the AI DJ was asked last
     'fail': 0,  # chats fail (/__mock/config?fail=1), or partway through (fail=2)
+    'refuse': 0,  # every website refused, as one OLLAMA_ORIGINS doesn't list (/__mock/config?refuse=1)
 }
 LOCK = threading.Lock()
 
 
 def origin_allowed(origin):
+    if origin and STATE['refuse']:
+        return False
     return not origin or any(o == '*' or fnmatch(origin, o) for o in ORIGINS)
 
 
@@ -242,6 +246,9 @@ class Handler(BaseHTTPRequestHandler):
             m = re.search(r'[?&]fail=([012])', self.path)
             if m:
                 STATE['fail'] = int(m.group(1))
+            m = re.search(r'[?&]refuse=([01])', self.path)
+            if m:
+                STATE['refuse'] = int(m.group(1))
             return self.send_json(STATE)
         return self.send_json({'error': 'not found'}, 404)
 
