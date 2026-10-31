@@ -536,6 +536,12 @@ export class MusicBrainz {
         // (MusicBrainz not answering: a rest until it's tried again.)
         while (this.down()) await new Promise((r) => setTimeout(r, Math.min(1000, this.downUntil - Date.now() + 10)));
         const [key, it] = this.todo.entries().next().value;
+        // (Only a search could find it, and searching finds no one just
+        // now: let go without asking. The app's told it's unchecked.)
+        if (!it.id && this.searchBroken()) {
+          this.done(key);
+          continue;
+        }
         try {
           await this.album(it.artist, it.title, { genres: it.genres, year: it.year, id: it.id, background: true });
           this.done(key);

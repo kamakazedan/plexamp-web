@@ -1164,6 +1164,7 @@ test('MusicBrainz features: what\'s looked up is kept in a file only the service
 test('MusicBrainz features: a server of your own whose search finds no one isn\'t taken at its word: albums by Plex\'s MusicBrainz ids still, the rest unchecked, and nothing kept as not on MusicBrainz', async () => {
   const CANARY = 'a74b1b7f-71a5-4011-9441-d0b5e4122711';
   let searchWorks = false;
+  let groupsWork = true;
   const asked = [];
   const groupsOf = { [MB_ID(1)]: [{ id: MB_ID(101), title: 'Takk...', 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '2005-09-12' }] };
   const fetchImpl = async (url) => {
@@ -1178,13 +1179,16 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
       else if (searchWorks && /Sigur/.test(query)) body = { count: 1, artists: [{ id: MB_ID(1), name: 'Sigur Rós', 'sort-name': 'Sigur Rós', score: 100 }] };
     } else if (u.pathname === `/ws/2/artist/${MB_ID(1)}`) {
       body = { id: MB_ID(1), name: 'Sigur Rós', 'sort-name': 'Sigur Rós', aliases: [], genres: [] };
-    } else if (u.pathname === '/ws/2/release-group') {
+    } else if (u.pathname === '/ws/2/release-group' && !query) {
       const all = groupsOf[u.searchParams.get('artist')] || [];
       body = { 'release-group-count': all.length, 'release-groups': all };
     } else if (query && (u.pathname === '/ws/2/recording' || u.pathname === '/ws/2/release-group')) {
-      // (No one, unless it works: then Radiohead's, asked for by their id.)
-      const theirs = searchWorks && query === `arid:${CANARY}`;
-      body = { recordings: theirs ? [{ id: MB_ID(301), title: 'Creep' }] : [], 'release-groups': theirs ? [{ id: MB_ID(302), title: 'OK Computer' }] : [] };
+      // (No one, unless it works: then Radiohead's, asked for by their id;
+      // release groups apart from recordings, `groupsWork`.)
+      const index = u.pathname === '/ws/2/recording' ? 'recordings' : 'release-groups';
+      const works = index === 'recordings' ? searchWorks : searchWorks && groupsWork;
+      const theirs = works && query === `arid:${CANARY}`;
+      body = { [index]: theirs ? [{ id: MB_ID(index === 'recordings' ? 301 : 302), title: index === 'recordings' ? 'Creep' : 'OK Computer' }] : [] };
     }
     return { ok: true, status: 200, json: async () => body };
   };
@@ -1223,10 +1227,17 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
   assert.ok(Date.now() - t0 < 2500, `${Date.now() - t0} ms`);
   // Once searching finds someone again (checked again a while later), not found is not found.
   searchWorks = true;
-  mb.search.artist.at -= MB_LIMITS.searchBadMs + 1000;
+  for (const index of Object.values(mb.search)) index.at -= MB_LIMITS.searchBadMs + 1000;
   assert.equal(await mb.artistInfo('Not On MusicBrainz At All'), null);
   assert.equal(mb.had('artist|not on musicbrainz at all'), null);
   assert.equal(mb.searchBroken(), false);
+  // A song neither index has: not on MusicBrainz, once both are searched and work.
+  assert.equal(await mb.song('Some Band', 'Not A Real Song'), 'unknown');
+  // ...but with the release groups' index gone since (rebuilt, say), not taken at its word, once it's checked again (in ten minutes at most).
+  groupsWork = false;
+  mb.search['release-group'].at -= MB_LIMITS.searchOkMs + 1000;
+  await assert.rejects(mb.song('Some Band', 'Another Song'), (e) => e.searchBroken === true);
+  assert.equal(mb.remembered('song|some band|another song'), undefined);
   // musicbrainz.org's search is never checked.
   assert.equal(new MusicBrainz({ fetchImpl, checkSearch: true }).checkSearch, false);
 });

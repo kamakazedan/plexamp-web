@@ -1117,7 +1117,7 @@ function aiView({ el, onDispose }) {
         'ul',
         null,
         step('Windows', 'in PowerShell, run ', h('code', null, `setx OLLAMA_ORIGINS "${site}"`), ', then quit Ollama (its icon by the clock) and open it again.'),
-        step('Mac', 'in Terminal, run ', h('code', null, `launchctl setenv OLLAMA_ORIGINS "${site}"`), ', then quit Ollama and open it again (again after the Mac restarts).'),
+        step('Mac', 'in Terminal, run ', h('code', null, `launchctl setenv OLLAMA_ORIGINS "${site}"`), ', then quit Ollama and open it again (run it again after the Mac restarts).'),
         step('Linux', 'run ', h('code', null, 'sudo systemctl edit ollama'), ', add the lines ', h('code', null, '[Service]'), ' and ', h('code', null, `Environment="OLLAMA_ORIGINS=${site}"`), ', then ', h('code', null, 'sudo systemctl restart ollama'), '.'),
       ),
       h('p.hint', null, 'Already allowing other sites? Put them all in, with commas between.'),

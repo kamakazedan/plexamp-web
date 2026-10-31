@@ -7268,7 +7268,7 @@ with sync_playwright() as pw:
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
         check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that your settings come back when you switch back',
-              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'Yours come back when you switch back' in said, f'{rows} {said!r}')
+              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'kept on this device for when you switch back' in said, f'{rows} {said!r}')
 
         # Dan's: settings (some kept for his account), a search, what's
         # playing, a missing track an AI playlist of his suggested (with what

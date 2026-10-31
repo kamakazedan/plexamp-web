@@ -8,9 +8,9 @@ you're running is shown in **Settings › About**.
 ### Changed
 
 - **Switching user keeps your settings**: they're kept aside on the
-  device for you (Streaming quality, the player's name, your own AI server
-  and the rest, but for its key, asked for again) and come back when you
-  switch back, instead of being cleared. Whoever you switch to gets theirs, kept from the last time
+  device for you (Streaming quality, the player's name, your own AI
+  server and the rest, but for its key, which you enter again) and come
+  back when you switch back, instead of being cleared. Whoever you switch to gets theirs, kept from the last time
   they switched away from this device, or the settings to begin with.
   None of yours goes to them; your queue still goes, as on signing out,
   and signing out takes everyone's kept settings off the device.

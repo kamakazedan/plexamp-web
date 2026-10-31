@@ -63,7 +63,7 @@ export async function musicbrainzSettingsView({ el }) {
     h(
       'p.lede',
       null,
-      `Extras from ${mbWhere()}. Only artist names are sent, and nothing in your library changes.`,
+      `Extras from ${mbWhere()}. Only artist names are sent.`,
     ),
     h(
       'div.rows',
@@ -94,6 +94,7 @@ export async function musicbrainzSettingsView({ el }) {
           'div',
           null,
           h('div.section-head', null, h('h2', null, 'Your library')),
+          h('p.hint.pad', null, 'These change Plex for everyone, when you say so.'),
           h(
             'div.rows',
             null,

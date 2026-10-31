@@ -174,7 +174,7 @@ async function unreachable(target, err) {
   if (target?.kind === 'custom') {
     try {
       await fetch(`${target.base}/api/version`, { mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(5000) });
-      return new AIError('blocked', 'Ollama answers, but doesn’t let this site in.');
+      return new AIError('blocked', 'Something answers there, but doesn’t let this site in.');
     } catch {
       /* nothing answers */
     }
@@ -211,7 +211,13 @@ async function simple(target, path, timeout = 15000) {
   try {
     const res = await send(target, path, requestInit(target, 'GET', undefined, ctrl.signal));
     if (!res.ok) throw await readError(res);
-    return await res.json();
+    try {
+      return await res.json();
+    } catch {
+      // (It answered, but not as Ollama does: a web page, say.)
+      if (ctrl.signal.aborted) throw new AIError('timeout', 'The AI server didn’t answer in time.');
+      throw new AIError('not-ollama', 'That doesn’t answer as Ollama does.');
+    }
   } catch (err) {
     if (err instanceof AIError) throw err;
     if (ctrl.signal.aborted) throw new AIError('timeout', 'The AI server didn’t answer in time.');
@@ -410,7 +416,7 @@ async function streamChat(target, body, signal, onProgress, onLoading) {
       throw new AIError('timeout', answering ? 'The AI model took too long to answer.' : `The AI model didn’t start answering within ${waited}. You can wait longer in Settings › AI.`);
     }
     // (Cut off part-way through an answer, as a proxy's timeout can: no answer.)
-    throw reached ? new AIError('network', err.message || 'network error') : await unreachable(target, err);
+    throw reached ? new AIError('cut', err.message || 'cut off') : await unreachable(target, err);
   } finally {
     clearTimeout(idle);
     clearTimeout(total);
@@ -456,6 +462,10 @@ export function describeAIError(err, target = aiTarget()) {
     case 'bad-reply':
     case 'no-matches':
       return err.message;
+    case 'cut':
+      return target?.kind === 'custom' ? `Ollama at ${where} stopped answering part-way. Try again.` : 'The AI service stopped answering part-way. Try again.';
+    case 'not-ollama':
+      return `${where} doesn’t look like an Ollama server.`;
     case 'blocked':
       return `${where} answers, but doesn’t allow ${location.origin} yet: see How to allow this site.`;
     case 'network':
