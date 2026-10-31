@@ -3711,7 +3711,7 @@ with sync_playwright() as pw:
         told = page.locator('.toast').inner_text()
         shot(page, 'np-01-converted')
         check('np: a converted track is marked, saying why (as its tooltip and when tapped)',
-              quality.strip() == '320 kbps' and 'Streaming quality is set to High (320 kbps)' in label and 'The file is FLAC' in label
+              quality.strip() == '320 kbps' and 'Streaming quality is High (320 kbps)' in label and 'The file is FLAC' in label
               and 'Streaming quality' in told and 'Settings' in told, f'{label!r} {quality!r} {told!r}')
         # Back to Original, it plays the file itself; told it's converting
         # anyway (as when the file doesn't play as it is), it says that.
