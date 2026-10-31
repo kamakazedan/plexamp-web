@@ -5614,7 +5614,7 @@ with sync_playwright() as pw:
         dan.wait_for_selector('button:has-text("Start a session")')
         check('together: tab is there', dan.locator('#tabs .tab[data-tab=together]').count() == 1)
         note = dan.locator('.together-note').last.inner_text()
-        check('together: it says friends need access to the library', 'needs access to Music [Hi-Res]' in note and 'shared with them in Plex' in note, note)
+        check('together: it says friends need access to the library', 'need Music [Hi-Res] shared with them in Plex' in note, note)
         shot(dan, 'together-01-lobby')
         dan.click('button:has-text("Start a session")')
         dan.wait_for_selector('label.friend')
