@@ -4601,7 +4601,7 @@ with sync_playwright() as pw:
         said = wait_for(lambda: page.locator('#banner:not([hidden])').count() == 1 and 'offline' in page.inner_text('#banner'), 10, 0.3)
         shot(page, 'signal-01-offline')
         check('signal: offline, the banner says so, and that what\'s loaded plays on, with plays and ratings kept',
-              said and 'plays on' in page.inner_text('#banner') and 'kept' in page.inner_text('#banner'), page.inner_text('#banner') if said else '')
+              said and 'plays on' in page.inner_text('#banner') and 'sync when' in page.inner_text('#banner'), page.inner_text('#banner') if said else '')
         # A rating, offline: shown at once, kept, and Plex hasn't it yet.
         rated = js(page, "() => Promise.all([import('./js/player.js'), import('./js/ratings.js')]).then(([{ player: p }, r]) => r.rateTrack(p.current, 6).then((x) => ({ ...x, shown: r.ratingOf(p.current) })))")
         page.wait_for_selector('.toast:has-text("once the connection")', timeout=5000)
