@@ -10,7 +10,7 @@ import { musicbrainzSettingsView } from './mbsettings.js';
 import { mbReviewView } from './mbreview.js';
 import { mbMergeView } from './mbmerge.js';
 import { mbFeatures, skipLiveOn } from '../mb.js';
-import { missingCount, mbOffered, missingKeptNote } from '../missing.js';
+import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
@@ -942,7 +942,7 @@ function missingSection(onDispose) {
       mbOffered()
         ? toggleRow({
             title: 'Check suggestions on MusicBrainz',
-            subtitle: 'Drops ones that don’t exist (the AI sometimes makes them up).',
+            subtitle: `Drops made-up songs and artists, checked on ${mbWhere()}.`,
             checked: aiSettings().musicbrainz !== false,
             onChange: (v) => {
               saveAI({ musicbrainz: v });
