@@ -55,6 +55,8 @@ testing, these endpoints need no token:
         then nothing more for a minute (as through a proxy that's stopped
         passing it on), stall= none; nogenre=ID,... takes those albums'
         genres away (as an album Plex has none for), nogenre= puts them back;
+        mbsearch=off: the MusicBrainz's searches find no one at all (as a
+        mirror without its search indexes built), lookups by id as ever;
         hubs=on|titles|off: an artist's rows (/hubs/metadata/ID), with
         identifiers that say what's in them, only titles that do, or none
         (as an older server); types=off: albums' details without their
@@ -1112,7 +1114,7 @@ def hls_playlist(seconds):
 # ---------------------------------------------------------------- notifications
 
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'honour': '--honour' in sys.argv, 'tv': 'down' if '--tv-down' in sys.argv else 'up',
-        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums'}
+        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on'}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 MERGES = []  # artists merged (PUT /library/metadata/ID/merge?ids=...)
 MERGED = {}  # ratingKey -> an artist merged into another, gone from the library (for undo_merges)
@@ -1704,6 +1706,19 @@ class Handler(BaseHTTPRequestHandler):
         MB_SEEN['last'] = query or p
         MB_SEEN['asked'] = (MB_SEEN['asked'] + [self.path])[-500:]
         artists_ = {a['title'].lower() for a in artists} | {a.lower() for a in MB_EXTRA['artists']}
+        # (A search, as a MusicBrainz without its search indexes answers
+        # one: no one at all. And Radiohead by id, as every MusicBrainz has
+        # them: what the player asks to see whether searching it works.)
+        if query and MOCK['mbsearch'] == 'off':
+            return self.send_json_plain({'count': 0, 'artists': [], 'recordings': [], 'release-groups': []})
+        if query.startswith('arid:'):
+            radiohead = 'a74b1b7f-71a5-4011-9441-d0b5e4122711'
+            if query != f'arid:{radiohead}':
+                return self.send_json_plain({'count': 0, 'artists': [], 'recordings': [], 'release-groups': []})
+            credit = [{'name': 'Radiohead', 'artist': {'id': radiohead, 'name': 'Radiohead'}}]
+            return self.send_json_plain({'count': 1, 'artists': [{'id': radiohead, 'name': 'Radiohead', 'score': 100}],
+                                         'recordings': [{'id': mb_id('recording|Creep'), 'title': 'Creep', 'score': 100, 'artist-credit': credit}],
+                                         'release-groups': [{'id': mb_id('group|Radiohead|OK Computer'), 'title': 'OK Computer', 'score': 100, 'artist-credit': credit}]})
         # (The MusicBrainz features: an artist by name or other name, looked
         # up by id, and their release groups, and a group's genres.)
         if p == '/ws/2/artist' and ' OR alias:' in query:
@@ -2076,6 +2091,8 @@ class Handler(BaseHTTPRequestHandler):
                     collections.remove(SMART_COLLECTION)
             if 'types' in q:  # off: albums' details without their release types, as some servers give them
                 MOCK['types'] = 'off' if q['types'][0] in ('0', 'off', 'false') else 'on'
+            if 'mbsearch' in q:  # off: the MusicBrainz's search finds no one (search indexes not built); lookups by id work
+                MOCK['mbsearch'] = 'off' if q['mbsearch'][0] in ('0', 'off', 'false') else 'on'
             if 'children' in q:  # all: an artist's /children has all their albums, as an older server's
                 MOCK['children'] = 'all' if q['children'][0] == 'all' else 'albums'
             if 'stall' in q:

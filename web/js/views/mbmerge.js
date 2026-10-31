@@ -18,7 +18,7 @@
 import { app } from '../state.js';
 import { describeError, dropCached } from '../router.js';
 import { h, backHeader, sectionHeader, emptyState, toast, fmt, confirmAction, spinner } from '../ui.js';
-import { artistOnMB, mbFeatures } from '../mb.js';
+import { artistOnMB, mbFeatures, mbidOf } from '../mb.js';
 import { mbWhere } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
@@ -27,14 +27,6 @@ import { joinedParts, sameArtist, evidenceOf } from '../releases.js';
 const PAGE = 500; // artists read from Plex at a time
 // (Names compilations and works by no one known go by: never one artist.)
 const NOBODY = new Set(['various artists', 'various', 'unknown artist', 'unknown', 'anonymous', 'traditional']);
-
-// An artist's MusicBrainz id, where Plex has it (its Guid, asked for with
-// includeGuids).
-const mbidOf = (artist) =>
-  (Array.isArray(artist?.Guid) ? artist.Guid : [])
-    .map((g) => String(g?.id || ''))
-    .find((g) => /^mbid:\/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(g))
-    ?.slice(7) || null;
 
 const listOf = (names) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
 // A sentence's end, after a name that may have one of its own ("goddard.").
@@ -75,7 +67,7 @@ export async function mbMergeView({ el, onDispose }) {
     h(
       'p.lede',
       null,
-      `Artists that appear more than once in ${app.source.sectionTitle}, checked on ${mbWhere()}. Ticked ones are the same artist on MusicBrainz; tick others if you know they are. Merging is done in Plex, for everyone, and can’t be undone here.`,
+      'Artists Plex has more than once. Ticked ones are the same artist on MusicBrainz. Merging changes Plex for everyone.',
     ),
     status,
     top,
@@ -84,7 +76,7 @@ export async function mbMergeView({ el, onDispose }) {
     h(
       'p.hint.pad',
       null,
-      'New files tagged the same way will come in apart again: fix their album artist tag (MusicBrainz Picard or beets can).',
+      'New files tagged the same way will split again: fix their album artist tag.',
     ),
   );
 
@@ -165,6 +157,7 @@ export async function mbMergeView({ el, onDispose }) {
     } catch (err) {
       g.verdict = 'error';
       g.error = err?.message || describeError(err);
+      g.searchBroken = err?.searchBroken === true;
     }
   }
 
@@ -238,7 +231,7 @@ export async function mbMergeView({ el, onDispose }) {
   // Why it isn't, in a few words.
   const why = (g) => {
     if (g.verdict === 'first') return end(`Merge the ${fmt.number(g.members.length)} called ${g.name} first`);
-    if (g.verdict === 'error') return 'Couldn’t check just now. Try Look again.';
+    if (g.verdict === 'error') return g.searchBroken ? 'Can’t check: searching your MusicBrainz server finds no one (its search indexes may not be built).' : 'Couldn’t check just now. Try Look again.';
     if (g.verdict === 'different') {
       if (g.idsDiffer) return 'Plex links them to different artists on MusicBrainz.';
       const apart = [...new Set(g.evidence?.flatMap((x) => x.apart) || [])];
@@ -336,7 +329,7 @@ export async function mbMergeView({ el, onDispose }) {
     lists.replaceChildren(
       ...[
         groups.length ? null : emptyState('No artist appears more than once here.'),
-        groups.length && !twice.length && !joined.length ? emptyState('Nothing MusicBrainz is sure about. Check the ones below yourself.') : null,
+        groups.length && !twice.length && !joined.length ? emptyState('Nothing MusicBrainz is sure about. Check the ones below.') : null,
         block('Same name, more than once', twice, 'mb-merge-twice'),
         block('Several artists in one name', joined, 'mb-merge-joined'),
         block('Check these yourself', left, 'mb-merge-left'),

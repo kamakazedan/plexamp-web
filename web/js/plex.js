@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.33.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.34.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -58,6 +58,16 @@ export const store = {
         .forEach((k) => localStorage.removeItem(k));
     } catch {
       /* ignore */
+    }
+  },
+  // The keys kept that start with `prefix` (as get and set take them).
+  keys(prefix = '') {
+    try {
+      return Object.keys(localStorage)
+        .filter((k) => k.startsWith(`pw.${prefix}`))
+        .map((k) => k.slice(3));
+    } catch {
+      return [];
     }
   },
   freeze() {

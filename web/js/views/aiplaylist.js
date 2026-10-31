@@ -349,7 +349,7 @@ export async function aiPlaylistView({ el, onDispose }) {
     const time = () => (elapsed.textContent = `${Math.round((Date.now() - j.started) / 1000)} s`);
     time();
     const tick = setInterval(time, 1000);
-    const loadingNote = h('p.ai-loading', { hidden: true }, 'Loading the AI model into memory. After Ollama starts, this can take a few minutes.');
+    const loadingNote = h('p.ai-loading', { hidden: true }, 'Loading the AI model. The first time can take a few minutes.');
     body.replaceChildren(
       h(
         'div.ai-progress',
@@ -400,7 +400,9 @@ export async function aiPlaylistView({ el, onDispose }) {
           'div.button-row',
           null,
           h('button.btn.btn-secondary', { type: 'button', onclick: () => start(prompt) }, 'Try again'),
-          err?.code === 'not-configured' || err?.code === 'no-model' || err?.code === 'timeout' || err?.status === 404 ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings') : null,
+          ['not-configured', 'no-model', 'timeout', 'blocked', 'network', 'cut', 'not-ollama'].includes(err?.code) || [401, 403, 404].includes(err?.status)
+            ? h('a.btn.btn-secondary', { href: '#/settings/ai' }, 'AI settings')
+            : null,
         ),
       ),
     );

@@ -1161,6 +1161,108 @@ test('MusicBrainz features: what\'s looked up is kept in a file only the service
   }
 });
 
+test('MusicBrainz features: a server of your own whose search finds no one isn\'t taken at its word: albums by Plex\'s MusicBrainz ids still, the rest unchecked, and nothing kept as not on MusicBrainz', async () => {
+  const CANARY = 'a74b1b7f-71a5-4011-9441-d0b5e4122711';
+  let searchWorks = false;
+  let groupsWork = true;
+  const asked = [];
+  const groupsOf = { [MB_ID(1)]: [{ id: MB_ID(101), title: 'Takk...', 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '2005-09-12' }] };
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    const query = u.searchParams.get('query');
+    asked.push(query ? `search ${query}` : u.pathname);
+    let body = {};
+    if (u.pathname === '/ws/2/artist' && query) {
+      // (A search finds no one at all, unless it works: then Radiohead, and Sigur Rós by name.)
+      body = { count: 0, artists: [] };
+      if (searchWorks && query === `arid:${CANARY}`) body = { count: 1, artists: [{ id: CANARY, name: 'Radiohead', score: 100 }] };
+      else if (searchWorks && /Sigur/.test(query)) body = { count: 1, artists: [{ id: MB_ID(1), name: 'Sigur Rós', 'sort-name': 'Sigur Rós', score: 100 }] };
+    } else if (u.pathname === `/ws/2/artist/${MB_ID(1)}`) {
+      body = { id: MB_ID(1), name: 'Sigur Rós', 'sort-name': 'Sigur Rós', aliases: [], genres: [] };
+    } else if (u.pathname === '/ws/2/release-group' && !query) {
+      const all = groupsOf[u.searchParams.get('artist')] || [];
+      body = { 'release-group-count': all.length, 'release-groups': all };
+    } else if (query && (u.pathname === '/ws/2/recording' || u.pathname === '/ws/2/release-group')) {
+      // (No one, unless it works: then Radiohead's, asked for by their id;
+      // release groups apart from recordings, `groupsWork`.)
+      const index = u.pathname === '/ws/2/recording' ? 'recordings' : 'release-groups';
+      const works = index === 'recordings' ? searchWorks : searchWorks && groupsWork;
+      const theirs = works && query === `arid:${CANARY}`;
+      body = { [index]: theirs ? [{ id: MB_ID(index === 'recordings' ? 301 : 302), title: index === 'recordings' ? 'Creep' : 'OK Computer' }] : [] };
+    }
+    return { ok: true, status: 200, json: async () => body };
+  };
+  const log = { warned: [], warn(m) { this.warned.push(m); }, info() {}, debug() {} };
+  const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0, log, checkSearch: true }).advanced(new MBKept());
+  // By name: no one found, and searching finds no one at all (not even Radiohead): an error, nothing kept.
+  await assert.rejects(mb.artistInfo('Sigur Rós'), (e) => e instanceof MusicBrainzError && e.searchBroken === true && /search indexes/.test(e.message));
+  assert.equal(mb.had('artist|sigur ros'), undefined, 'not kept as not on MusicBrainz');
+  assert.equal(log.warned.length, 1);
+  assert.ok(mb.searchBroken());
+  // ...checked once in a while, not each time.
+  const checks = () => asked.filter((x) => x.includes('arid:')).length;
+  await assert.rejects(mb.artistInfo('Someone'), (e) => e.searchBroken === true);
+  assert.equal(checks(), 1);
+  // By Plex's id: found as ever (no search). The app is told the rest can't be checked.
+  const items = [
+    { artist: 'Sigur Rós', title: 'Takk...', year: 2005, artistId: MB_ID(1) },
+    { artist: 'Nobody Plex Matched', title: 'Their Album', year: 2001, artistId: null },
+  ];
+  assert.deepEqual(await mb.albums(items), ['pending', 'unchecked']);
+  const got = await mb.albums(items, { waitMs: 2000 });
+  assert.equal(got[0]?.title, 'Takk...');
+  assert.equal(got[1], 'unchecked');
+  assert.ok(!asked.some((x) => x.includes('Nobody Plex Matched')), 'not searched for while searching finds no one');
+  // The AI's check of a song or an artist: an error too, not "made up" (a song's in the recordings' own index).
+  await assert.rejects(mb.check([{ kind: 'artist', artist: 'Real Band' }]), (e) => e.searchBroken === true);
+  await assert.rejects(mb.check([{ kind: 'track', artist: 'Real Band', title: 'Real Song' }]), (e) => e.searchBroken === true);
+  // Those only a search could find don't hold up those found by id behind them in the background (no rests for them).
+  mb.search.artist.at -= MB_LIMITS.searchBadMs + 1000;
+  const queuedFirst = ['One', 'Two', 'Three'].map((n) => ({ artist: `Unmatched ${n}`, title: 'Some Album', year: 2000, artistId: null }));
+  assert.deepEqual(await mb.albums(queuedFirst), ['pending', 'pending', 'pending']);
+  const t0 = Date.now();
+  // (With its genres: not known yet, so it's behind them in the queue.)
+  const byId = await mb.albums([{ artist: 'Sigur Rós', title: 'Takk...', year: 2005, artistId: MB_ID(1) }], { waitMs: 3000, genres: true });
+  assert.equal(byId[0]?.title, 'Takk...');
+  assert.ok(Date.now() - t0 < 2500, `${Date.now() - t0} ms`);
+  // Once searching finds someone again (checked again a while later), not found is not found.
+  searchWorks = true;
+  for (const index of Object.values(mb.search)) index.at -= MB_LIMITS.searchBadMs + 1000;
+  assert.equal(await mb.artistInfo('Not On MusicBrainz At All'), null);
+  assert.equal(mb.had('artist|not on musicbrainz at all'), null);
+  assert.equal(mb.searchBroken(), false);
+  // A song neither index has: not on MusicBrainz, once both are searched and work.
+  assert.equal(await mb.song('Some Band', 'Not A Real Song'), 'unknown');
+  // ...but with the release groups' index gone since (rebuilt, say), not taken at its word, once it's checked again (in ten minutes at most).
+  groupsWork = false;
+  mb.search['release-group'].at -= MB_LIMITS.searchOkMs + 1000;
+  await assert.rejects(mb.song('Some Band', 'Another Song'), (e) => e.searchBroken === true);
+  assert.equal(mb.remembered('song|some band|another song'), undefined);
+  // musicbrainz.org's search is never checked.
+  assert.equal(new MusicBrainz({ fetchImpl, checkSearch: true }).checkSearch, false);
+});
+
+test('MusicBrainz features: artists kept as not on MusicBrainz before 0.34.0 (when a search that found no one was taken at its word) are asked about again', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-mb-'));
+  try {
+    const now = Date.now();
+    const file = join(dir, 'musicbrainz.json');
+    const rows = [['artist|nobody', null, now], ['namesakes|nobody', [], now], ['artist|sigur ros', { id: MB_ID(1), name: 'Sigur Rós', aliases: [], genres: [] }, now], ['artistid|' + MB_ID(7), null, now]];
+    writeFileSync(file, JSON.stringify({ version: 1, kept: rows }));
+    const old = new MBKept({ dir, now: () => now });
+    assert.equal(old.get('artist|nobody'), undefined);
+    assert.equal(old.get('namesakes|nobody'), undefined);
+    assert.ok(old.get('artist|sigur ros'));
+    assert.equal(old.get('artistid|' + MB_ID(7)), null, 'an id MusicBrainz doesn\'t know needs no search');
+    writeFileSync(file, JSON.stringify({ version: 2, kept: rows }));
+    const since = new MBKept({ dir, now: () => now });
+    assert.equal(since.get('artist|nobody'), null);
+    assert.deepEqual(since.get('namesakes|nobody'), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------- shared playlists ----------
 
 test('shared playlists: changes on both sides are merged, whoever made them', () => {

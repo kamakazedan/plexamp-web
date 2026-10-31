@@ -45,7 +45,8 @@ Start with [debug mode](configuration.md#debug-mode): most set-up problems show 
 
 ## AI
 
-- **"Couldn't reach Ollama"** with your own server: check it's running, that this device can reach it, and that `OLLAMA_ORIGINS` includes the player's address (see [ai.md](ai.md#your-own-ollama-on-one-device)).
+- **"Ollama is running, but doesn't allow …"** with your own server: its `OLLAMA_ORIGINS` doesn't list the player's address. **How to allow this site**, in Settings › AI, has the commands (see [ai.md](ai.md#your-own-ollama-on-one-device)); Ollama has to be restarted after. **"No answer from Ollama"**: check it's running, and that this device can reach it.
+- **Years and genres to fix says albums "couldn't be checked: searching your MusicBrainz server finds no one"**: your MusicBrainz mirror's search indexes aren't built (or are empty). Albums whose artist Plex has matched (with a MusicBrainz id) are found anyway; for the rest, build the mirror's search indexes (musicbrainz-docker: see its README on indexing).
 - **"The AI service couldn't confirm your Plex sign-in"**: sign out and in again. With `PLEX_SERVER_URL` set, only people with access to that server can use the shared model; anyone else can use an Ollama of their own (**Settings › AI › My own Ollama server**).
 - **AI answers are slow**: the first request loads the model, which can take a minute on modest hardware, and several after Ollama has just started. The model then stays loaded for 15 minutes.
 - **"The AI model was still loading after 5 minutes"**: it carries on loading, so try again in a minute or two. If it happens often (a big model, or a slow disk), give it longer in **Settings › AI › Wait for the model**.

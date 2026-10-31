@@ -144,7 +144,7 @@ export const similarRadio = (track) =>
   guard(async () => {
     const similar = await pickable((await app.server.nearest(track.id, { limit: 60 })).filter((m) => m.type === 'track').map(normTrack));
     if (!similar.length) {
-      toast('No similar tracks found. Sonic analysis needs to be turned on for this library in Plex.');
+      toast('No similar tracks found. Turn on sonic analysis for this library in Plex.');
       return;
     }
     const context = ctx(`Similar to ${track.title}`, track.albumId ? `/album/${track.albumId}` : null);
@@ -269,7 +269,7 @@ export const sonicPath = (from, to) =>
   guard(async () => {
     let list = (await app.server.computePath(app.source.sectionKey, from.id, to.id)).filter((m) => m.type === 'track').map(normTrack);
     if (list.length < 2) {
-      toast('Plex could not build a path between those tracks. Sonic analysis needs to be turned on for this library.');
+      toast('Plex couldn’t find a path between those tracks. Turn on sonic analysis for this library in Plex.');
       return;
     }
     // (The two you chose, as they are; the way between, picked for you.)

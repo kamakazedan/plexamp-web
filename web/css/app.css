@@ -369,7 +369,6 @@ a.section-head:hover .chev {
 
 .lede {
   margin: 8px var(--gutter) 4px;
-  max-width: 60ch;
   color: var(--muted);
 }
 
@@ -3582,6 +3581,27 @@ p.warn {
 .hint.pad {
   display: block;
   margin: 8px 0 0;
+}
+
+.origins {
+  margin-top: 8px;
+}
+
+.origins summary {
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.origins ul {
+  margin: 6px 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.origins li + li {
+  margin-top: 6px;
 }
 
 .origins code,

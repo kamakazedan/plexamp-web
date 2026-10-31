@@ -11,7 +11,7 @@
 import { app } from '../state.js';
 import { describeError } from '../router.js';
 import { h, icon, backHeader, row, sectionHeader, emptyState, toast, fmt, confirmAction, download, fileDate, spinner } from '../ui.js';
-import { albumsOnMB, firstYear, mbFeatures } from '../mb.js';
+import { albumsOnMB, firstYear, mbFeatures, mbidOf } from '../mb.js';
 import { mbWhere, toCsv } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
@@ -49,12 +49,12 @@ export async function mbReviewView({ el, onDispose }) {
   const years = h('div.mb-review-years');
   const genres = h('div.mb-review-genres');
   el.append(
-    h('p.lede', null, `Albums whose year in Plex isn’t when they first came out (often a reissue’s year), and albums with no genre, checked on ${mbWhere()}. A fix changes the album in Plex for everyone, and Plex keeps it.`),
+    h('p.lede', null, 'Find albums with the wrong year or no genre, and fix them in Plex for everyone.'),
     status,
     actions,
     years,
     genres,
-    h('p.hint.pad', null, 'Plex never changes your files. To fix their tags too, download the list and use MusicBrainz Picard or beets: it has each album’s MusicBrainz ID.'),
+    h('p.hint.pad', null, 'Your files aren’t changed. To fix their tags too, download the list for MusicBrainz Picard or beets.'),
   );
 
   // Every album in the library: what Plex has of it.
@@ -77,6 +77,21 @@ export async function mbReviewView({ el, onDispose }) {
     return;
   }
 
+  // Their artists' MusicBrainz ids, where Plex has them: an album's found
+  // by its artist's id, without a search (which a MusicBrainz server of
+  // your own may not have working), and never by another artist's name.
+  const artistIds = new Map();
+  try {
+    for (let start = 0; !gone; start += PAGE) {
+      const { items, total } = await s.list(sec, 8, { start, size: PAGE, sort: 'titleSort', filters: { includeGuids: 1 } });
+      for (const a of items) if (a?.ratingKey && mbidOf(a)) artistIds.set(String(a.ratingKey), mbidOf(a));
+      if (!items.length || start + PAGE >= total) break;
+    }
+  } catch {
+    /* by their names, then */
+  }
+  if (gone) return;
+
   // The library's genres, by name as norm has it: a genre MusicBrainz has
   // goes on as the library has it ("Hip-Hop", not a "Hip Hop" beside it).
   const libraryGenres = new Map(
@@ -91,6 +106,8 @@ export async function mbReviewView({ el, onDispose }) {
   // be told; 'pending': being looked up), by its artist, its title and the
   // year Plex has (which tells albums of one title apart), with its genres
   // for those without any.
+  // ('unchecked': only a search could find it, and searching the player's
+  // MusicBrainz finds no one.)
   const found = albums.map(() => 'pending');
   const fixed = new Map(); // album id -> what was done: 'year' | 'genres' (and what it was before)
   async function ask(indexes) {
@@ -98,7 +115,10 @@ export async function mbReviewView({ el, onDispose }) {
       const these = indexes.filter((j) => !genresOf(albums[j]).length === withGenres);
       for (let i = 0; i < these.length && !gone; i += ASK) {
         const part = these.slice(i, i + ASK);
-        const got = await albumsOnMB(part.map((j) => ({ artist: albums[j].parentTitle, title: albums[j].title, year: plexYear(albums[j]) })), { genres: withGenres, background: true });
+        const got = await albumsOnMB(
+          part.map((j) => ({ artist: albums[j].parentTitle, title: albums[j].title, year: plexYear(albums[j]), artistId: artistIds.get(String(albums[j].parentRatingKey)) })),
+          { genres: withGenres, background: true },
+        );
         part.forEach((j, k) => (found[j] = got[k] ?? null));
       }
     }
@@ -172,7 +192,7 @@ export async function mbReviewView({ el, onDispose }) {
   async function fixAll(list, fix, undo, what) {
     const sure = await confirmAction({
       title: `Fix ${fmt.count(list.length, 'album', 'albums')} in Plex?`,
-      message: `Changes each album’s ${what} in Plex, for everyone. Undo, straight after, puts them back.`,
+      message: `Changes each album’s ${what} in Plex, for everyone. You can undo it straight after.`,
       confirm: 'Fix them',
       danger: false,
     });
@@ -219,7 +239,7 @@ export async function mbReviewView({ el, onDispose }) {
     render();
   }
 
-  const yearLine = (x) => `${x.m.parentTitle} · ${plexYear(x.m)} in Plex, ${firstYear(x.g)} on MusicBrainz${later(x) ? ' (later: is it the same album?)' : ''}`;
+  const yearLine = (x) => `${x.m.parentTitle} · ${plexYear(x.m)} in Plex, ${firstYear(x.g)} on MusicBrainz${later(x) ? ' (later: maybe not the same album)' : ''}`;
   const genreLine = ({ m, g }) => `${m.parentTitle} · ${[...new Set(g.genres.map(asLibrary))].join(', ')}`;
   const fixButton = (label, onClick) =>
     h(
@@ -245,11 +265,23 @@ export async function mbReviewView({ el, onDispose }) {
     const ys = yearRows();
     const gs = genreRows();
     status.classList.remove('warn');
+    const known = found.filter((g) => g && typeof g === 'object').length;
+    const unchecked = found.filter((g) => g === 'unchecked').length;
+    const cantSearch = unchecked
+      ? ` ${fmt.count(unchecked, 'album', 'albums')} couldn’t be checked: searching your MusicBrainz server finds no one (its search indexes may not be built).`
+      : '';
     status.replaceChildren(
       ...(pending
-        ? [spinner('Looking'), h('span', null, ` Looked up ${fmt.number(albums.length - pending)} of ${fmt.number(albums.length)} albums on ${mbWhere()}…`)]
-        : [`Looked up all ${fmt.count(albums.length, 'album', 'albums')}: ${fmt.count(found.filter((g) => g && typeof g === 'object').length, 'is', 'are')} on MusicBrainz.`]),
+        ? [spinner('Looking'), h('span', null, ` Checking your albums on ${mbWhere()}… ${fmt.number(albums.length - pending)} of ${fmt.number(albums.length)}`)]
+        : [
+            known
+              ? `Checked ${fmt.count(albums.length, 'album', 'albums')}: MusicBrainz knows ${known === albums.length ? 'them all' : fmt.number(known)}.${cantSearch}`
+              : unchecked
+                ? cantSearch.trim()
+                : `MusicBrainz doesn’t know any of your ${fmt.count(albums.length, 'album', 'albums')}, so there’s nothing to compare.`,
+          ]),
     );
+    if (!pending && (unchecked || !known)) status.classList.add('warn');
     actions.replaceChildren(
       ...(lastAll?.list.length
         ? [
@@ -299,7 +331,7 @@ export async function mbReviewView({ el, onDispose }) {
                 null,
                 ys.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: yearLine(x), right: fixButton(`Use ${firstYear(x.g)}`, () => fixYear(x)), cls: `mb-year-row${later(x) ? '.mb-later' : ''}` })),
               ),
-              ys.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(ys.length - 300)} more. Fix all fixes them too (but not those with a later year), and the download has them all.`) : null,
+              ys.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(ys.length - 300)} more: Fix all and the download include them.`) : null,
             ),
           ]
         : []),
@@ -316,11 +348,11 @@ export async function mbReviewView({ el, onDispose }) {
                 null,
                 gs.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: genreLine(x), right: fixButton('Add', () => fixGenres(x)), cls: 'mb-genre-row' })),
               ),
-              gs.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(gs.length - 300)} more. Add all adds them too, and the download has them all.`) : null,
+              gs.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(gs.length - 300)} more: Add all and the download include them.`) : null,
             ),
           ]
-        : !pending && !ys.length
-          ? [emptyState('Nothing to fix: years and genres match MusicBrainz.')]
+        : !pending && !ys.length && found.some((g) => g && typeof g === 'object')
+          ? [emptyState('Nothing to fix.')]
           : []),
     );
   }

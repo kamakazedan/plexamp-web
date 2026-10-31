@@ -476,14 +476,14 @@ function playlistsMenu() {
       {
         icon: 'arrowUp',
         label: 'Import playlists…',
-        description: `From a file exported from plexamp-web. Their tracks are looked for in ${app.source.sectionTitle}.`,
+        description: 'From a plexamp-web playlist file.',
         now: true,
         onSelect: () => importPicker(),
       },
       {
         icon: 'arrowDown',
         label: 'Back up your playlists',
-        description: 'All of yours on this server, in one file, to import again later or on another server. Smart playlists aren’t included.',
+        description: 'All your playlists in one file. Smart playlists aren’t included.',
         onSelect: () => backUpPlaylists(),
       },
     ],
@@ -507,7 +507,7 @@ export async function playlistsView({ el, onDispose }) {
   if (!pls.length) {
     el.append(
       emptyState(
-        'No music playlists yet. To make one, choose Add to playlist… in the menu of a track, album or artist, or import some from a file.',
+        'No playlists yet. Use Add to playlist… on any track, album or artist.',
         h('button.btn.btn-secondary', { type: 'button', onclick: () => importPicker() }, 'Import playlists…'),
       ),
     );

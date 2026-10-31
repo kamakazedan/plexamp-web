@@ -970,7 +970,25 @@ with sync_playwright() as pw:
         page.click('.ai-custom button:has-text("Connect")')
         page.wait_for_selector('.ai-models .warn', timeout=25000)
         msg = page.locator('.ai-models .warn').inner_text()
-        check('custom: explains an unreachable Ollama', 'Couldn’t reach Ollama' in msg and 'OLLAMA_ORIGINS' in msg, msg)
+        check('custom: explains an unreachable Ollama', 'No answer from Ollama at http://127.0.0.1:11999' in msg and 'OLLAMA_ORIGINS' not in msg, msg)
+        # An Ollama that answers, but not this site (its OLLAMA_ORIGINS
+        # doesn't list it): said so, with how to allow it, this site's own
+        # address in each step.
+        own('refuse=1')
+        try:
+            page.fill('.ai-custom input[type=url]', OLLAMA)
+            page.click('.ai-custom button:has-text("Connect")')
+            page.wait_for_selector('.ai-models .warn:has-text("answers, but doesn’t allow")', timeout=25000)
+            msg = page.locator('.ai-models .warn').inner_text()
+            page.click('.origins summary')
+            how = page.locator('.origins').inner_text()
+            shot(page, 'custom-01-blocked')
+            site = APP_NOWS.rstrip('/')
+            check('custom: an Ollama that doesn\'t let this site in is told apart from one that doesn\'t answer, saying how to allow it (this site\'s address, for Windows, Mac and Linux)',
+                  f'{OLLAMA} answers, but doesn’t allow {site}' in msg and f'setx OLLAMA_ORIGINS "{site}"' in how and f'launchctl setenv OLLAMA_ORIGINS "{site}"' in how
+                  and f'OLLAMA_ORIGINS={site}' in how, f'{msg!r} {how!r}')
+        finally:
+            own('refuse=0')
         ctx.close()
 
     # ---------- desktop layout ----------
@@ -3693,7 +3711,7 @@ with sync_playwright() as pw:
         told = page.locator('.toast').inner_text()
         shot(page, 'np-01-converted')
         check('np: a converted track is marked, saying why (as its tooltip and when tapped)',
-              quality.strip() == '320 kbps' and 'Streaming quality is set to High (320 kbps)' in label and 'The file is FLAC' in label
+              quality.strip() == '320 kbps' and 'Streaming quality is High (320 kbps)' in label and 'The file is FLAC' in label
               and 'Streaming quality' in told and 'Settings' in told, f'{label!r} {quality!r} {told!r}')
         # Back to Original, it plays the file itself; told it's converting
         # anyway (as when the file doesn't play as it is), it says that.
@@ -3702,7 +3720,7 @@ with sync_playwright() as pw:
         player(page, "(p.transcoding = true, p.emit('track'), true)")
         page.wait_for_selector('.np.open .np-converted', timeout=10000)
         label = page.locator('.np-converted').get_attribute('aria-label') or ''
-        check('np: ...or, converted as the file didn\'t play as it is, says that', 'the file didn’t play as it is here' in label and 'Streaming quality' not in label, label)
+        check('np: ...or, converted as the file didn\'t play as it is, says that', 'the file didn’t play here' in label and 'Streaming quality' not in label, label)
         kinds = js(page, """() => Promise.all([import('./js/player.js'), import('./js/state.js')]).then(([{ player: p }, s]) => {
             s.saveSettings({ quality: '320' });
             const out = [p.sourceFor({ id: '1', codec: 'mp3', bitrate: 128, partKey: '/library/parts/1/file.mp3' }).hls,
@@ -4583,7 +4601,7 @@ with sync_playwright() as pw:
         said = wait_for(lambda: page.locator('#banner:not([hidden])').count() == 1 and 'offline' in page.inner_text('#banner'), 10, 0.3)
         shot(page, 'signal-01-offline')
         check('signal: offline, the banner says so, and that what\'s loaded plays on, with plays and ratings kept',
-              said and 'plays on' in page.inner_text('#banner') and 'kept' in page.inner_text('#banner'), page.inner_text('#banner') if said else '')
+              said and 'plays on' in page.inner_text('#banner') and 'sync when' in page.inner_text('#banner'), page.inner_text('#banner') if said else '')
         # A rating, offline: shown at once, kept, and Plex hasn't it yet.
         rated = js(page, "() => Promise.all([import('./js/player.js'), import('./js/ratings.js')]).then(([{ player: p }, r]) => r.rateTrack(p.current, 6).then((x) => ({ ...x, shown: r.ratingOf(p.current) })))")
         page.wait_for_selector('.toast:has-text("once the connection")', timeout=5000)
@@ -5508,8 +5526,8 @@ with sync_playwright() as pw:
         converted = page.locator('.sheet.open').inner_text()
         page.keyboard.press('Escape')
         check('loudness: Load ahead goes from off to 10 tracks, each saying about how much memory it takes (as MP3 and FLAC, or at the bitrate it\'s converted to)',
-              'Off' in sheet_text and '10 tracks' in sheet_text and 'The next 10 tracks: about 96 MB as MP3, 300 MB as FLAC.' in sheet_text
-              and 'The next 2 tracks: about 19 MB at 320 kbps.' in converted, f'{labels} {sheet_text[-200:]} {converted[-200:]}')
+              'Off' in sheet_text and '10 tracks' in sheet_text and 'about 96 MB as MP3, 300 MB as FLAC.' in sheet_text
+              and 'about 19 MB at 320 kbps.' in converted, f'{labels} {sheet_text[-200:]} {converted[-200:]}')
         # ...and Keep played tracks: off, or 1 to 5, likewise (1 to start with).
         page.wait_for_timeout(300)
         page.click('.choice-row:has-text("Keep played tracks")')
@@ -5525,7 +5543,7 @@ with sync_playwright() as pw:
         fresh_ctx.close()
         check('loudness: Keep played tracks goes from off to 5, each saying about how much memory it takes (1 to start with)',
               keep_start == 1 and 'Off' in kept_text and '5 tracks' in kept_text and '6 tracks' not in kept_text
-              and 'The last track played: about 9.6 MB at 320 kbps.' in kept_text and 'The last 5 tracks played: about 48 MB at 320 kbps.' in kept_text, f'{keep_start} {kept_text[-300:]}')
+              and 'about 9.6 MB at 320 kbps.' in kept_text and 'about 48 MB at 320 kbps.' in kept_text, f'{keep_start} {kept_text[-300:]}')
         settings(page, {'quality': 'original'})
         js(page, "() => import('./js/player.js').then(({ player }) => player.pause())")
         ctx.close()
@@ -5596,7 +5614,7 @@ with sync_playwright() as pw:
         dan.wait_for_selector('button:has-text("Start a session")')
         check('together: tab is there', dan.locator('#tabs .tab[data-tab=together]').count() == 1)
         note = dan.locator('.together-note').last.inner_text()
-        check('together: it says friends need access to the library', 'needs access to Music [Hi-Res]' in note and 'shared with them in Plex' in note, note)
+        check('together: it says friends need access to the library', 'need Music [Hi-Res] shared with them in Plex' in note, note)
         shot(dan, 'together-01-lobby')
         dan.click('button:has-text("Start a session")')
         dan.wait_for_selector('label.friend')
@@ -6436,8 +6454,8 @@ with sync_playwright() as pw:
         text_ = page.locator('.spotify-guide').inner_text()
         link = page.locator('.spotify-privacy')
         check('spotify: From Spotify says why it\'s Spotify\'s download of your data, how to ask for it, and to choose just its playlist files',
-              'developer programme' in text_ and 'Download your data' in text_ and 'Account data' in text_ and 'Playlist1.json' in text_ and 'YourLibrary.json' in text_
-              and 'date of birth' in text_ and 'Leave them out' in text_ and 'turned away unread' in text_
+              'download them from Spotify yourself' in text_ and 'Download your data' in text_ and 'Account data' in text_ and 'Playlist1.json' in text_ and 'YourLibrary.json' in text_
+              and 'personal details' in text_ and 'Leave the other files out' in text_ and 'Only those files are opened' in text_
               and link.get_attribute('href') == 'https://www.spotify.com/account/privacy/' and link.get_attribute('target') == '_blank' and 'noopener' in (link.get_attribute('rel') or ''), text_[:600])
         shot(page, 'spotify-00-guide')
         choose_files([('my_spotify_data.zip', b'PK\x03\x04 not really a zip')])
@@ -7249,8 +7267,8 @@ with sync_playwright() as pw:
         shot(page, 'plexhome-02-users')
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
-        check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that switching keeps nothing of yours for them',
-              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'Switching clears all of yours from this device' in said, f'{rows} {said!r}')
+        check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that your settings come back when you switch back',
+              rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'kept on this device for when you switch back' in said, f'{rows} {said!r}')
 
         # Dan's: settings (some kept for his account), a search, what's
         # playing, a missing track an AI playlist of his suggested (with what
@@ -7316,11 +7334,16 @@ with sync_playwright() as pw:
         playing = player(page, '[p.current && p.current.id, p.queue.length]')
         kid_missing = js(page, "() => import('./js/missing.js').then((m) => m.missingList().map((x) => x.title))")
         kid_stored = js(page, '() => JSON.stringify(localStorage)')
-        check('plexhome: ...with nothing of Dan\'s on the device: every setting as it is to begin with (his for his account too), no queue, no searches, none of his missing tracks',
+        dan_aside = js(page, "() => JSON.parse(localStorage.getItem('pw.profile.a1001') || 'null')")
+        check('plexhome: ...with nothing of Dan\'s for Kid: every setting as it is to begin with (his for his account too), no queue, no searches, none of his missing tracks',
               theirs == {'grid': 'normal', 'skip': True, 'name': '', 'quality': 'original', 'ai': {'mode': 'auto', 'url': '', 'apiKey': '', 'model': '', 'notes': ''}}
               and not any(k.startswith('pw.player') or k in ('pw.libraryCounts', 'pw.syncPending', 'pw.syncRev') for k in keys)
               and 'harbour' not in tab and playing == [None, 0] and 'Dans Secret Song' not in kid_missing and 'Dans Secret Song' not in kid_stored
               and 'own prompt' not in kid_stored, f'{theirs} {keys} {tab[:200]} {playing} {kid_missing}')
+        check('plexhome: ...Dan\'s settings kept aside for him on the device (by his Plex account\'s id), and only his settings: not his queue, searches or missing tracks, nor his own AI server\'s key',
+              (dan_aside or {}).get('settings', {}).get('quality') == '320' and dan_aside['settings'].get('playerName') == 'Dan’s phone'
+              and [k for k in keys if k.startswith('pw.profile.')] == ['pw.profile.a1001'] and set(dan_aside) <= {'settings', 'syncPending', 'syncRev'}
+              and not any(w in json.dumps(dan_aside) for w in ('harbour', 'Dans Secret Song', 'own prompt', 'dans-queued-track', 'key-123')), json.dumps(dan_aside)[:300])
         check('plexhome: ...not even what another tab of Dan\'s kept in the moment before it heard (his queue, his settings)',
               js(page, "() => localStorage.getItem('test.kept')") and 'dans-queued-track' not in kid_stored and 'dans-key' not in kid_stored
               and 'pw.left' not in keys, kid_stored[:300])
@@ -7335,7 +7358,7 @@ with sync_playwright() as pw:
         page.wait_for_selector('.view .empty-state, .view .grid-playlists .card', timeout=15000)
         kid_lists = set(page.locator('.view .grid-playlists .card .card-title').all_inner_texts())
         check('plexhome: ...Kid\'s own playlists, none of Dan\'s', dan_lists and not kid_lists & dan_lists and page.locator('.view .empty-state').count() == 1, str(kid_lists))
-        settings(page, {'gridSize': 'small'})
+        settings(page, {'gridSize': 'small', 'quality': '128'})
         kid_kept = wait_for(lambda: kept_for('t4')['settings'].get('gridSize') == 'small', 10, 0.3)
         dan_now = kept_for('t')['settings']
         check('plexhome: ...what\'s kept for Kid\'s account is Kid\'s own, and Dan\'s stays as it was',
@@ -7363,6 +7386,11 @@ with sync_playwright() as pw:
         check('plexhome: switching back to Dan (no PIN to ask for): his token, server and library, and his settings, missing tracks and playlists again',
               back['token'] == 't' and back['server'] == 'mock-server-1' and back['section'] == section_before and dan_again and his_missing
               and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts(), str(back))
+        own_again = js(page, "() => import('./js/state.js').then(({ app }) => ({ quality: app.settings.quality, name: app.settings.playerName, ai: app.settings.ai }))")
+        aside = js(page, "() => [Object.keys(localStorage).filter((k) => k.startsWith('pw.profile.')).sort(), JSON.parse(localStorage.getItem('pw.profile.a1004') || 'null')]")
+        check('plexhome: ...his settings kept on the device come back too (Streaming quality, the player\'s name, his own AI server, but for its key), and Kid\'s are kept aside for Kid',
+              own_again == {'quality': '320', 'name': 'Dan’s phone', 'ai': {'mode': 'custom', 'url': OLLAMA, 'apiKey': '', 'model': 'llama3.1:8b', 'notes': 'Loves trip-hop'}}
+              and aside[0] == ['pw.profile.a1004'] and (aside[1] or {}).get('settings', {}).get('quality') == '128', f'{own_again} {aside}')
 
         # Gran can't use Dan's server: she chooses one, and can switch (or
         # sign out) from there.
@@ -7382,6 +7410,13 @@ with sync_playwright() as pw:
             switch_to(page, 'Dan', where='.setup-account')
         page.wait_for_selector('.source-body .row', timeout=20000)
         check('plexhome: ...back to Dan from there, who chooses his (nothing of Gran\'s to go on)', who(page)['token'] == 't' and page.url.endswith('#/setup'), str(who(page)))
+        # Signing out: everyone's kept settings go too.
+        page.click('.setup-account button:has-text("Sign out")')
+        with page.expect_event('load', timeout=15000):
+            page.click('.sheet.open .sheet-action:has-text("Sign out")')
+        page.wait_for_timeout(500)
+        profiles_left = js(page, "() => Object.keys(localStorage).filter((k) => k.startsWith('pw.profile.'))")
+        check('plexhome: signing out takes everyone\'s kept settings off the device too', profiles_left == [], str(profiles_left))
 
         # The PIN went to plex.tv only: not to this app (whatever it logs),
         # nor kept anywhere here.
@@ -7536,7 +7571,7 @@ with sync_playwright() as pw:
         check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
         check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
         check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (with no switch of any kind)',
-              'yours and your friends' in lede and 'Kept by this player for your Plex account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
+              'yours and your friends' in lede and 'Kept by this player for your account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
 
         # Noted on one device, on the other once it's read again; counted again.
         note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')
@@ -8030,6 +8065,27 @@ with sync_playwright() as pw:
         check('mb: only artists\' names went to MusicBrainz, never an album\'s title',
               asked and any('Glass Harbour' in a for a in asked) and not any(t in a for a in asked for t in ('Sea Glass', 'Tidal Lines', 'Hearthstone', 'Harbour Lights Live')),
               str(asked[:6]))
+
+        # A MusicBrainz server of your own whose search finds no one (its
+        # search indexes not built): the years and genres to fix still find
+        # albums by their artist's MusicBrainz id, as Plex has it; an album
+        # by an artist Plex hasn't matched can't be checked, and the page
+        # says why, rather than that MusicBrainz doesn't have it. (Last: the
+        # player takes the search as not working for a while.)
+        unmatched = mock('/__mock/add-artist?name=Unmatched%20Band')['MediaContainer']['Metadata'][0]
+        mock('/__mock/config?mbsearch=off')
+        try:
+            page.goto(APP_MB + '#/settings/mbreview')
+            page.wait_for_function("""() => { const s = document.querySelector('.mb-review-status');
+                return s && !s.querySelector('.spinner') && /couldn.t be checked/.test(s.textContent); }""", timeout=60000)
+            said = page.locator('.mb-review-status').inner_text()
+            shot(page, 'mb-07-review-no-search')
+            years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
+            check('mb: with a MusicBrainz whose search finds no one, albums are still found by their artist\'s MusicBrainz id, and those Plex hasn\'t matched are unchecked, saying why',
+                  'Hearthstone' in years_listed and 'MusicBrainz knows' in said and 'couldn’t be checked' in said and 'search indexes' in said, f'{said!r} {years_listed}')
+        finally:
+            mock('/__mock/config?mbsearch=on')
+            mock(f"/__mock/add-artist?remove={unmatched['ratingKey']}")
         ctx.close()
 
     # ---------- memory: a big library ----------

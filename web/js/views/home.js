@@ -48,8 +48,8 @@ export async function homeView({ el }) {
     el.append(
       emptyState(
         blocks.length
-          ? 'Nothing to show yet. Browse your library and start playing, and your recent music will appear here.'
-          : 'Every Home section is turned off for this library. Choose what to show in Settings › Experience › Home screen.',
+          ? 'Nothing here yet. Play some music and it’ll show up here.'
+          : 'All Home sections are off. Turn some on in Settings › Experience › Home screen.',
         h('a.btn.btn-secondary', { href: blocks.length ? '#/search' : '#/settings/home' }, blocks.length ? 'Browse library' : 'Choose sections'),
       ),
     );

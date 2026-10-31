@@ -235,8 +235,8 @@ function connectionBanner() {
   if (!src || !connection.lost) return;
   const text =
     navigator.onLine === false
-      ? 'You’re offline. What’s loaded already plays on, and your plays and ratings are kept till you’re back.'
-      : `Can’t reach ${src.serverName}. What’s loaded already plays on, and your plays and ratings are kept till it’s back.`;
+      ? 'You’re offline. Loaded music plays on, and plays and ratings sync when you’re back.'
+      : `Can’t reach ${src.serverName}. Loaded music plays on, and plays and ratings sync when it’s back.`;
   showBanner(text, 'Try again', () => ensureConnection(), 'connection');
 }
 

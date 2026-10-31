@@ -116,7 +116,7 @@ setInterval(() => {
   for (const name of devices.sweep()) log.debug(`devices: "${name}" hasn't been heard from for over ${LIMITS_DEVICES.goneMs / 1000} s, so it's no longer the one that plays`);
 }, 15000).unref();
 const sharedModel = config.ollamaUrl ? new SharedModel({ url: config.ollamaUrl, key: config.ollamaKey, model: config.ollamaModel, log }) : null;
-const musicbrainz = config.musicbrainzUrl ? new MusicBrainz({ base: config.musicbrainzUrl, version: config.version, log }) : null;
+const musicbrainz = config.musicbrainzUrl ? new MusicBrainz({ base: config.musicbrainzUrl, version: config.version, log, checkSearch: true }) : null;
 const spotify = config.spotify ? new Spotify({ base: config.spotifyUrl || 'https://open.spotify.com', version: config.version, log }) : null;
 if (config.offlineTiming) {
   const [down, up, retry, ping] = config.offlineTiming.split(',').map(Number);
@@ -556,12 +556,15 @@ async function musicbrainzRoute(req, res, parts) {
 //     theirs ([{ id, name, note, groups }]: see MusicBrainz.namesakes), and
 //     `moreNamesakes` (true) where MusicBrainz has more of the name than
 //     those.
-//   POST /api/musicbrainz/albums { items: [{ artist, title, year }], genres,
-//     wait } -> { results: [{ id, title, primary, secondary, date, genres? }
-//     | null | 'pending'] }: albums' release groups as far as they're known
-//     (`year`, the year Plex has, telling albums of one title apart); what
-//     isn't is looked up in the background (waited for `wait` ms at most),
-//     to ask about again.
+//   POST /api/musicbrainz/albums { items: [{ artist, title, year, artistId
+//     }], genres, wait } -> { results: [{ id, title, primary, secondary,
+//     date, genres? } | null | 'pending' | 'unchecked'], searchBroken? }:
+//     albums' release groups as far as they're known (`year`, the year Plex
+//     has, telling albums of one title apart; `artistId`, the artist's
+//     MusicBrainz id where Plex has it); what isn't is looked up in the
+//     background (waited for `wait` ms at most), to ask about again.
+//     'unchecked', and `searchBroken`: searching MusicBrainz finds no one
+//     just now, and only a search could find that one.
 // While MusicBrainz isn't answering (after a request to it that wasn't),
 // only what's known is answered, for a minute.
 // Only names go to MusicBrainz: an artist's (and an album's title is matched
@@ -599,8 +602,11 @@ async function musicbrainzFeatures(req, res, what) {
       clearTimeout(timer);
     }
   }
-  const items = (Array.isArray(body.items) ? body.items : []).slice(0, MB_ADVANCED_LIMITS.perRequest).map((it) => ({ artist: name(it?.artist), title: name(it?.title), year: year(it?.year) }));
-  return send(res, 200, { results: await musicbrainz.albums(items, { genres: body.genres === true, waitMs: Number(body.wait) || 0, signal: ctrl.signal, who: key }) });
+  const items = (Array.isArray(body.items) ? body.items : [])
+    .slice(0, MB_ADVANCED_LIMITS.perRequest)
+    .map((it) => ({ artist: name(it?.artist), title: name(it?.title), year: year(it?.year), artistId: mbid(it?.artistId) }));
+  const results = await musicbrainz.albums(items, { genres: body.genres === true, waitMs: Number(body.wait) || 0, signal: ctrl.signal, who: key });
+  return send(res, 200, { results, ...(musicbrainz.searchBroken() ? { searchBroken: true } : {}) });
 }
 
 // Search › From Spotify by link (SPOTIFY_LINK_IMPORT): a public playlist's name and
@@ -1471,7 +1477,9 @@ async function handle(req, res) {
   } catch (err) {
     const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError || err instanceof MusicBrainzError;
     if (!known) log.error(`${req.method} ${url.pathname}: ${err.stack || err.message}`);
-    if (!res.headersSent) send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.' }, err?.retryAfter ? { 'Retry-After': String(err.retryAfter) } : {});
+    if (!res.headersSent) {
+      send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.', ...(known && err.searchBroken ? { searchBroken: true } : {}) }, err?.retryAfter ? { 'Retry-After': String(err.retryAfter) } : {});
+    }
   } finally {
     // Paths only (no query strings), so nothing secret can be logged. The
     // checks nginx makes for each proxied request would only be noise, and

@@ -441,7 +441,7 @@ export async function topView({ el, params }) {
 export async function sonicPathView({ el }) {
   el.append(
     backHeader('Sonic path', { fallback: '/search' }),
-    h('p.lede', null, 'Pick a starting track and a destination. Plex fills the gap with tracks that move gradually from one sound to the other.'),
+    h('p.lede', null, 'Pick a start and an end track. Plex fills the gap with tracks that blend from one to the other.'),
   );
   const chosen = { from: null, to: null };
   const go = h('button.btn.btn-primary', { type: 'button', disabled: true, onclick: () => sonicPath(chosen.from, chosen.to) }, icon('play', 20), h('span', null, 'Play path'));

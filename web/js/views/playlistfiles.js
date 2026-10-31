@@ -48,7 +48,7 @@ export async function backUpPlaylists() {
     const mine = (await app.server.playlists()).filter((p) => !p.smart && (p.playlistType || 'audio') === 'audio');
     if (ctrl.signal.aborted) return;
     if (!mine.length) {
-      status.textContent = 'You have no playlists of your own to back up. (Smart playlists aren’t included: their rules are kept by the server.)';
+      status.textContent = 'No playlists of your own to back up. Smart playlists aren’t included.';
       closeBtn.textContent = 'Close';
       return;
     }

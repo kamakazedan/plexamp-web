@@ -350,10 +350,10 @@ function convertedMark(t, q, kbps) {
   const format = fmt.codec(t.codec);
   const why =
     q !== 'original'
-      ? `Converted to ${kbps} kbps by your server as it plays, as Streaming quality is set to ${QUALITY_NAMES[kbps] || `${kbps} kbps`} in Settings › Playback.${format ? ` The file is ${format}.` : ''}`
+      ? `Converted to ${kbps} kbps: Streaming quality is ${QUALITY_NAMES[kbps] || `${kbps} kbps`}.${format ? ` The file is ${format}.` : ''}`
       : t.codec && !canPlayCodec(t.codec)
-        ? `Converted to ${kbps} kbps by your server as it plays: this browser can’t play ${format} files as they are.`
-        : `Converted to ${kbps} kbps by your server as it plays: the file didn’t play as it is here.`;
+        ? `Converted to ${kbps} kbps: this browser can’t play ${format} files.`
+        : `Converted to ${kbps} kbps: the file didn’t play here.`;
   return h(
     'button.np-converted',
     {
