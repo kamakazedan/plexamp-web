@@ -3,6 +3,39 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.34.0 - 2026-10-31
+
+### Changed
+
+- **Switching user keeps your settings**: they're kept aside on the
+  device for you (Streaming quality, the player's name, your own AI server
+  and the rest) and come back when you switch back, instead of being
+  cleared. Whoever you switch to gets theirs, kept from the last time
+  they switched away from this device, or the settings to begin with.
+  None of yours goes to them; your queue still goes, as on signing out,
+  and signing out takes everyone's kept settings off the device.
+- **Every description is one short line**, across Settings and the rest
+  of the app: what a setting does, without what its name already says.
+- **Years and genres to fix finds albums by their artist's MusicBrainz id**
+  where Plex has one (no search needed), and says how many MusicBrainz
+  knows. The page is shorter, and its text runs the width of the page.
+
+### Fixed
+
+- **"0 are on MusicBrainz"**: a MusicBrainz server of your own whose search
+  finds no one (its search indexes not built) had every album and artist
+  found by name taken as not on MusicBrainz, and kept that way for a month.
+  Now the player checks whether searching it finds anyone (Radiohead, by
+  id) when a search comes back empty; while it doesn't, those are said to
+  be unchecked, saying why, and nothing's kept as missing. Those kept as
+  not on MusicBrainz before are asked about again. (The AI's suggestion
+  check and Artists to merge say so too, rather than taking songs for made
+  up or artists for one.)
+- **Your own Ollama, when it blocks the site**: the app tells an Ollama
+  that answers but doesn't allow the site (its OLLAMA_ORIGINS) apart from
+  one that doesn't answer, and **How to allow this site** has the exact
+  commands for Windows, Mac and Linux, with this site's address in them.
+
 ## 0.33.0 - 2026-10-30
 
 ### Changed

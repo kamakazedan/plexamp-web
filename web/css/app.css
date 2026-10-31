@@ -369,7 +369,6 @@ a.section-head:hover .chev {
 
 .lede {
   margin: 8px var(--gutter) 4px;
-  max-width: 60ch;
   color: var(--muted);
 }
 
