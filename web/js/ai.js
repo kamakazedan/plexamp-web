@@ -403,7 +403,7 @@ async function streamChat(target, body, signal, onProgress, onLoading) {
       const mins = aiWaitMinutes();
       const waited = mins >= 1 ? `${Math.round(mins)} minute${Math.round(mins) === 1 ? '' : 's'}` : `${Math.round(mins * 60)} seconds`;
       if (loading) {
-        throw new AIError('timeout', 'The AI model is still loading. Try again in a minute or two.', { loading: true });
+        throw new AIError('timeout', `The AI model is still loading after ${waited}. Try again in a minute or two.`, { loading: true });
       }
       throw new AIError('timeout', answering ? 'The AI model took too long to answer.' : `The AI model didn’t start answering within ${waited}. You can wait longer in Settings › AI.`);
     }
