@@ -465,7 +465,7 @@ export function describeAIError(err, target = aiTarget()) {
     case 'cut':
       return target?.kind === 'custom' ? `Ollama at ${where} stopped answering part-way. Try again.` : 'The AI service stopped answering part-way. Try again.';
     case 'not-ollama':
-      return `${where} doesn’t look like an Ollama server.`;
+      return target?.kind === 'custom' ? `${where} doesn’t look like an Ollama server.` : 'The AI service gave an answer this app can’t read. Try again later.';
     case 'blocked':
       return `${where} answers, but doesn’t allow ${location.origin} yet: see How to allow this site.`;
     case 'network':
