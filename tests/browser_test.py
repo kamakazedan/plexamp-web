@@ -8047,6 +8047,27 @@ with sync_playwright() as pw:
         check('mb: only artists\' names went to MusicBrainz, never an album\'s title',
               asked and any('Glass Harbour' in a for a in asked) and not any(t in a for a in asked for t in ('Sea Glass', 'Tidal Lines', 'Hearthstone', 'Harbour Lights Live')),
               str(asked[:6]))
+
+        # A MusicBrainz server of your own whose search finds no one (its
+        # search indexes not built): the years and genres to fix still find
+        # albums by their artist's MusicBrainz id, as Plex has it; an album
+        # by an artist Plex hasn't matched can't be checked, and the page
+        # says why, rather than that MusicBrainz doesn't have it. (Last: the
+        # player takes the search as not working for a while.)
+        unmatched = mock('/__mock/add-artist?name=Unmatched%20Band')['MediaContainer']['Metadata'][0]
+        mock('/__mock/config?mbsearch=off')
+        try:
+            page.goto(APP_MB + '#/settings/mbreview')
+            page.wait_for_function("""() => { const s = document.querySelector('.mb-review-status');
+                return s && !s.querySelector('.spinner') && /couldn.t be checked/.test(s.textContent); }""", timeout=60000)
+            said = page.locator('.mb-review-status').inner_text()
+            shot(page, 'mb-07-review-no-search')
+            years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
+            check('mb: with a MusicBrainz whose search finds no one, albums are still found by their artist\'s MusicBrainz id, and those Plex hasn\'t matched are unchecked, saying why',
+                  'Hearthstone' in years_listed and 'MusicBrainz knows' in said and 'couldn’t be checked' in said and 'search indexes' in said, f'{said!r} {years_listed}')
+        finally:
+            mock('/__mock/config?mbsearch=on')
+            mock(f"/__mock/add-artist?remove={unmatched['ratingKey']}")
         ctx.close()
 
     # ---------- memory: a big library ----------

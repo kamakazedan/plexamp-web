@@ -47,7 +47,7 @@ import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
-import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES } from '../mb.js';
+import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf } from '../mb.js';
 import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
 import { artistAppearsIn } from '../membership.js';
 import { chooseMissingKinds, missingKinds } from './mbsettings.js';
@@ -358,14 +358,6 @@ const tagKey = (t) => (t?.id != null ? String(t.id) : t?.filter ? String(t.filte
 const SHELF_ARTISTS = 20;
 const ALL_ARTISTS = 60;
 const MISSING_SHOWN = 50; // of each kind, on an artist's page
-
-// An artist's MusicBrainz id, where Plex has it (its Guid, asked for with
-// includeGuids).
-const mbidOf = (artist) =>
-  (Array.isArray(artist?.Guid) ? artist.Guid : [])
-    .map((g) => String(g?.id || ''))
-    .find((g) => /^mbid:\/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(g))
-    ?.slice(7) || null;
 
 export async function artistView({ el, params, onDispose }) {
   const s = app.server;

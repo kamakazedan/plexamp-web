@@ -103,7 +103,14 @@ async function call(path, body, { signal, background = false, now = false } = {}
     } catch {
       /* empty or not JSON */
     }
-    if (!res.ok) throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, mb: true, retryAfter: Number(res.headers.get('retry-after')) || null });
+    if (!res.ok) {
+      throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), {
+        status: res.status,
+        mb: true,
+        retryAfter: Number(res.headers.get('retry-after')) || null,
+        searchBroken: data?.searchBroken === true,
+      });
+    }
     return data || {};
   }
 }
@@ -118,6 +125,14 @@ async function call(path, body, { signal, background = false, now = false } = {}
 // asked again).
 const artists = new Map();
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+// An artist's MusicBrainz id, where Plex has it (its Guid, asked for with
+// includeGuids).
+export const mbidOf = (artist) =>
+  (Array.isArray(artist?.Guid) ? artist.Guid : [])
+    .map((g) => String(g?.id || ''))
+    .find((g) => /^mbid:\/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(g))
+    ?.slice(7) || null;
 export function artistOnMB(name, { groups = true, id = null, namesakes = false, background = false, now = false } = {}) {
   const byId = MBID.test(String(id)) ? id : null;
   const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${byId || norm(name)}`;
@@ -150,20 +165,29 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false, 
   return artists.get(key);
 }
 
-// Albums' release groups ([{ artist, title, year }]: `year`, the year Plex
-// has for it, tells albums of one title apart), as far as the player knows
-// them: each { id, title, primary, secondary, date, genres? }, null (not on
-// MusicBrainz, or which it is can't be told) or 'pending' (being looked
-// up: ask again later). `wait`: how long the player may wait for those it
-// doesn't know yet (ms).
+// Albums' release groups ([{ artist, title, year, artistId }]: `year`, the
+// year Plex has for it, tells albums of one title apart; `artistId`, the
+// artist's MusicBrainz id where Plex has it, finds them without a search),
+// as far as the player knows them: each { id, title, primary, secondary,
+// date, genres? }, null (not on MusicBrainz, or which it is can't be told),
+// 'pending' (being looked up: ask again later) or 'unchecked' (only a
+// search could find it, and searching the player's MusicBrainz finds no
+// one: the list's `searchBroken`). `wait`: how long the player may wait
+// for those it doesn't know yet (ms).
 export async function albumsOnMB(items, { genres = false, wait = 0, signal, background = false, now = false } = {}) {
   if (!mbFeatures() || !items.length) return items.map(() => null);
   const out = [];
   for (let i = 0; i < items.length; i += 200) {
-    const part = items.slice(i, i + 200).map((it) => ({ artist: String(it.artist || '').slice(0, 200), title: String(it.title || '').slice(0, 200), year: Number(it.year) || null }));
+    const part = items.slice(i, i + 200).map((it) => ({
+      artist: String(it.artist || '').slice(0, 200),
+      title: String(it.title || '').slice(0, 200),
+      year: Number(it.year) || null,
+      ...(MBID.test(String(it.artistId)) ? { artistId: it.artistId } : {}),
+    }));
     const r = await call('albums', { items: part, genres, wait }, { signal, background, now });
     const results = Array.isArray(r.results) ? r.results : [];
     out.push(...part.map((_, j) => results[j] ?? null));
+    if (r.searchBroken === true) out.searchBroken = true;
   }
   return out;
 }
