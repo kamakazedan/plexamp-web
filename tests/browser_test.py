@@ -978,7 +978,7 @@ with sync_playwright() as pw:
         try:
             page.fill('.ai-custom input[type=url]', OLLAMA)
             page.click('.ai-custom button:has-text("Connect")')
-            page.wait_for_selector('.ai-models .warn:has-text("let this site in")', timeout=25000)
+            page.wait_for_selector('.ai-models .warn:has-text("Ollama is running")', timeout=25000)
             msg = page.locator('.ai-models .warn').inner_text()
             page.click('.origins summary')
             how = page.locator('.origins').inner_text()
