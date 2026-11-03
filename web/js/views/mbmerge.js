@@ -20,14 +20,12 @@ import { artistOnMB, mbFeatures, mbidOf } from '../mb.js';
 import { mbWhere } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
-import { joinedParts } from '../releases.js';
+import { joinedParts, placeholderArtist } from '../releases.js';
 import { mapLimit } from '../ai.js';
 import { joinWithAnd } from './common.js';
 
 const PAGE = 500; // artists read from Plex at a time
 const COUNTS_AT_ONCE = 4; // artists' album counts asked of Plex at once
-// (Names compilations and works by no one known go by: never one artist.)
-const NOBODY = new Set(['various artists', 'various', 'unknown artist', 'unknown', 'anonymous', 'traditional']);
 
 // What Plex's MusicBrainz ids for them say (Plex's own match, nothing
 // looked up): order 0, two or more of them the same artist on
@@ -92,7 +90,7 @@ export async function mbMergeView({ el, onDispose }) {
     const byName = new Map();
     for (const a of artists) {
       const n = norm(a.title);
-      if (!n || NOBODY.has(n) || joinedParts(a.title)) continue;
+      if (!n || placeholderArtist(a.title) || joinedParts(a.title)) continue;
       if (!byName.has(n)) byName.set(n, []);
       byName.get(n).push(a);
     }

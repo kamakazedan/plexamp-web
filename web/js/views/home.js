@@ -6,6 +6,7 @@ import { artistRadio, playArtist, playList, shuffleLibrary, deepCutsRadio, timeT
 import { openSourceSheet } from './settings.js';
 import { live } from '../live.js';
 import { homeLayout, sectionById, PERIODS, GAPS } from '../home-sections.js';
+import { placeholderArtist } from '../releases.js';
 
 const lastPlayed = (m) => m.lastViewedAt || 0;
 const recency = (m) => lastPlayed(m) || m.updatedAt || m.addedAt || 0;
@@ -85,7 +86,7 @@ const SECTION_VIEWS = {
   mixes: {
     async load({ s, sec }) {
       const { items } = await s.list(sec, 8, { sort: 'lastViewedAt:desc', size: 12 });
-      const artists = items.filter((m) => lastPlayed(m) && m.title !== 'Various Artists').slice(0, 10);
+      const artists = items.filter((m) => lastPlayed(m) && !placeholderArtist(m.title)).slice(0, 10);
       if (!artists.length) return null;
       const cards = artists.map((m) => {
         const c = card({

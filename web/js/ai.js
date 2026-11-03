@@ -19,7 +19,7 @@ import { app, on, DEFAULT_SETTINGS } from './state.js';
 import { normTrack, asArray } from './plex.js';
 import { debugLog } from './debug.js';
 import { norm, otherScript } from './missinglist.js';
-import { sameTitle, editDistance } from './releases.js';
+import { sameTitle, editDistance, placeholderArtist } from './releases.js';
 import { withoutDisliked } from './picks.js';
 import { shuffleArray } from './ui.js';
 import { serviceTokens, refuseServerToken } from './service.js';
@@ -768,7 +768,7 @@ function dedupe(list, cap) {
 // (unless there aren't enough albums to go round). Compilations aside.
 const perAlbum = (length) => Math.max(2, Math.ceil(length / 8));
 const albumOf = (t) => t.albumId || `${norm(t.album)}|${norm(t.albumArtist)}`;
-const compilation = (t) => /^various( artists)?$/i.test(String(t.albumArtist || '').trim());
+const compilation = (t) => placeholderArtist(t.albumArtist);
 
 export function spreadAlbums(chosen, pool, length) {
   const most = perAlbum(length);

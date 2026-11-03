@@ -48,7 +48,7 @@ import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
-import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf, exactAlbum, shortRelease, kindsAgree, notThatRecording, mbOwnServer, albumTracks } from '../mb.js';
+import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf, exactAlbum, shortRelease, kindsAgree, notThatRecording, mbOwnServer, albumTracks, placeholderArtist } from '../mb.js';
 import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
 import { artistAppearsIn } from '../membership.js';
 import { chooseMissingKinds, missingKinds } from './mbsettings.js';
@@ -186,7 +186,7 @@ export async function albumView({ el, params }) {
   // (The very album or none, as Years and genres to fix has it: by Plex's
   // MusicBrainz id for it, or its exact title, and not where its tracks say
   // it's another recording than the title does, a remix single's, say.)
-  if (mbOn('mbOriginalYears') && album.parentTitle && norm(album.parentTitle) !== 'various artists') {
+  if (mbOn('mbOriginalYears') && album.parentTitle && !placeholderArtist(album.parentTitle)) {
     // (On a MusicBrainz of the player's own, by its very tracks too, asked
     // with them only where the first answer would show a year, and shown
     // only once they're checked: see mb.js albumsOnMB, `check`.)
@@ -481,7 +481,7 @@ export async function artistView({ el, params, onDispose }) {
   // first came out (Original release years) and those the library hasn't
   // (Missing albums on artist pages). (Not for Various Artists: theirs is
   // no one's discography.)
-  const various = norm(artist.title) === 'various artists';
+  const various = placeholderArtist(artist.title);
   const wantMB = (mbOn('mbOriginalYears') || mbOn('mbMissingAlbums') || mbOn('mbNamesakes')) && !various;
   const mbP = wantMB ? artistOnMB(artist.title, { id: mbidOf(artist) }).catch(() => null) : Promise.resolve(null);
   // Plex's rows for the page (hubs.js): which kind each of their albums is,

@@ -23,7 +23,7 @@ import { app, on } from './state.js';
 import { readPages } from './plex.js';
 import { mapLimit } from './ai.js';
 import { norm } from './missinglist.js';
-import { sameTitle } from './releases.js';
+import { sameTitle, placeholderArtist } from './releases.js';
 import { creditedTo } from './hubs.js';
 
 export const SMART_LIMIT = 2000; // smart lists longer than this aren't read
@@ -435,10 +435,11 @@ export function searchTerm(title) {
   return runs.sort((a, b) => b.length - a.length)[0] || core;
 }
 
-const NOT_ARTISTS = new Set(['various artists', 'various', 'va', 'unknown artist', 'soundtrack', 'original soundtrack']);
+// (Nor a soundtrack's credit: no one in particular either, here.)
+const SOUNDTRACK_CREDITS = new Set(['soundtrack', 'original soundtrack']);
 const add = (set, name) => {
   const n = norm(name);
-  if (n && !NOT_ARTISTS.has(n)) set.add(n);
+  if (n && !placeholderArtist(name) && !SOUNDTRACK_CREDITS.has(n)) set.add(n);
 };
 
 // Who a song is by, as names to look for: the track's artist and the

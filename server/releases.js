@@ -41,6 +41,35 @@ export const norm = (v) => {
   return OTHER_SCRIPT.test(w) ? w : plain(v) || w;
 };
 
+// Credits that name no one in particular: a compilation's "Various
+// Artists", "Unknown Artist", "Traditional" (as norm has them, and as
+// they're often written in other languages). Never taken for an artist of
+// that name: not looked up on MusicBrainz, merged, mixed or counted as one.
+export const PLACEHOLDER_ARTISTS = new Set([
+  'various artists',
+  'various',
+  'va',
+  'v a',
+  'various artist',
+  'verschiedene interpreten',
+  'artistes divers',
+  'artistes varies',
+  'varios artistas',
+  'artisti vari',
+  'diverse artiesten',
+  'diversos artistas',
+  'unknown artist',
+  'unknown',
+  'anonymous',
+  'traditional',
+  'trad',
+  'オムニバス',
+  '群星',
+  'різні виконавці',
+  'разные исполнители',
+]);
+export const placeholderArtist = (name) => PLACEHOLDER_ARTISTS.has(norm(name));
+
 // How many letters one has to change, add or take away to make one into the
 // other.
 export function editDistance(a, b) {

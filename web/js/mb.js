@@ -26,7 +26,7 @@
 //     years and genres MusicBrainz has that Plex hasn't, to fix in Plex.
 import { app } from './state.js';
 import { norm } from './missinglist.js';
-import { RELEASE_KINDS, kindOf, plexKind, shortRelease, versionedTracks } from './releases.js';
+import { RELEASE_KINDS, kindOf, plexKind, shortRelease, versionedTracks, placeholderArtist } from './releases.js';
 import { serviceFetch } from './service.js';
 
 // The player has them.
@@ -42,7 +42,7 @@ export const mbOn = (setting) => mbFeatures() && app.settings[setting] !== false
 // it's been turned off (as it was on to begin with, with those).
 export const skipLiveOn = () => app.settings.skipLive === true || mbOn('mbSkipLive');
 
-export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup, sameTitle, apartFromNamesakes, exactAlbum, shortRelease, kindsAgree } from './releases.js';
+export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup, sameTitle, apartFromNamesakes, exactAlbum, shortRelease, kindsAgree, placeholderArtist } from './releases.js';
 export const KIND_NAMES = Object.fromEntries(RELEASE_KINDS);
 // Shown to begin with among an artist's missing albums.
 export const MISSING_KINDS = ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'];
@@ -360,7 +360,7 @@ export async function withoutLiveOrDemos(tracks, { server = app.server, keep = 1
     // (Not Various Artists': theirs is everyone's, and MusicBrainz has too
     // many to look through.)
     if (k) kinds.set(id, k);
-    else if (mbFeatures() && types[i] && artist && title && norm(artist) !== 'various artists') ask.push({ id, artist, title, year });
+    else if (mbFeatures() && types[i] && artist && title && !placeholderArtist(artist)) ask.push({ id, artist, title, year });
   });
   if (ask.length) {
     const groups = await albumsOnMB(ask, { wait: MB_WAIT, now: true }).catch(() => []);

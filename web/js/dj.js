@@ -18,6 +18,7 @@ import { normTrack, store } from './plex.js';
 import { aiReady, djPick, describeAIError } from './ai.js';
 import { norm } from './missinglist.js';
 import { coreTitle } from './membership.js';
+import { placeholderArtist } from './releases.js';
 import { describeError } from './router.js';
 import { toast } from './ui.js';
 import { pickable } from './picks.js';
@@ -260,7 +261,7 @@ async function aiCandidates(cur, ctx, anchor) {
   const artistsOf = (items) =>
     items
       .map((m) => ({ id: String(m.ratingKey && m.type === 'artist' ? m.ratingKey : m.grandparentRatingKey || ''), name: m.type === 'artist' ? m.title : m.grandparentTitle }))
-      .filter((a) => a.id && a.name && !avoid.has(norm(a.name)) && norm(a.name) !== 'various artists' && !listed.has(a.id) && listed.add(a.id));
+      .filter((a) => a.id && a.name && !avoid.has(norm(a.name)) && !placeholderArtist(a.name) && !listed.has(a.id) && listed.add(a.id));
   const lists = [artistsOf(near), artistsOf(similar.filter((m) => m.type === 'artist')), artistsOf(inGenre)];
   // Taken in turn, so each kind has its say.
   let artists = [];
