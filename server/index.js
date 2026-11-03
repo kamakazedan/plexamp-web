@@ -366,6 +366,7 @@ function aiRefused(reason, user = null) {
 
 const aiBusy = new Map(); // limit key -> chats under way
 let aiChats = 0;
+const OLLAMA_ERROR_BYTES = 64 * 1024; // of Ollama's answer when it turns a chat down, read at most
 
 async function aiRoute(req, res, parts) {
   if (!sharedModel) throw new HttpError(404, 'This player has no shared AI model.');
@@ -471,7 +472,7 @@ async function aiChat(req, res, who) {
     const status = upstream.statusCode || 502;
     let message = '';
     try {
-      message = errorText(await readAnswer(upstream, 65536));
+      message = errorText(await readAnswer(upstream, OLLAMA_ERROR_BYTES));
     } catch {
       message = '';
     }
@@ -879,6 +880,8 @@ function offlinePass(res, token, { stream, single, tokenPath }) {
 // minute, so made-up ones can't have it asked without end. (Those it has are
 // still asked each time: only not counted. Nor is the owner's: see pmsAuth.)
 const PMS_NEW_CHECKS_PER_MINUTE = 60;
+const ASKED_LATELY_MS = 10 * 60000; // asked about this lately, a sign-in isn't counted
+const ASKED_LATELY_KEPT = 5000; // ...of so many sign-ins at most, the latest
 const askedLately = new Map(); // token hash -> until, oldest first
 function pmsCheckable(req, token) {
   // (Nor while the server's being asked about it already: those wait for
@@ -889,8 +892,8 @@ function pmsCheckable(req, token) {
 function askedAbout(token) {
   const key = fingerprintOf(token);
   askedLately.delete(key);
-  askedLately.set(key, Date.now() + 10 * 60000);
-  if (askedLately.size > 5000) askedLately.delete(askedLately.keys().next().value);
+  askedLately.set(key, Date.now() + ASKED_LATELY_MS);
+  if (askedLately.size > ASKED_LATELY_KEPT) askedLately.delete(askedLately.keys().next().value);
 }
 
 // Is this the sign-in of the Plex server's owner? 'owner', 'friend' (someone
@@ -1582,9 +1585,9 @@ function started() {
     log.error(`couldn't hand the socket to the ${config.user} user: ${err.message}`);
     process.exit(1);
   }
-  startSharing();
-  startSettings();
-  startMissing();
+  shares = startKept(config.sharing, 'shared playlists', Shares);
+  accountSettings = startKept(config.settingsSync, 'settings that follow each account', SettingsStore);
+  missingLists = startKept(config.missingSync, 'missing tracks that follow each account', MissingStore);
   startMusicBrainzKept();
   startOwners();
   const off = [
@@ -1601,34 +1604,27 @@ function started() {
   auth.loadServerId();
 }
 
-// Shared playlists, kept in the data folder (it has to be this service's to
-// write, or they're off).
-function startSharing() {
-  if (!config.sharing) return;
-  if (config.dataDir) {
-    try {
-      accessSync(config.dataDir, fsConstants.W_OK);
-    } catch {
-      log.error(`shared playlists are off: ${config.dataDir} can't be written to by this service`);
-      return;
-    }
+// Whether this service can write to a folder.
+function canWrite(dir) {
+  try {
+    accessSync(dir, fsConstants.W_OK);
+    return true;
+  } catch {
+    return false;
   }
-  shares = new Shares({ dir: config.dataDir || null, log });
 }
 
-// Settings that follow each Plex account, kept in the data folder too (it
-// has to be this service's to write, or they're off).
-function startSettings() {
-  if (!config.settingsSync) return;
-  if (config.dataDir) {
-    try {
-      accessSync(config.dataDir, fsConstants.W_OK);
-    } catch {
-      log.error(`settings that follow each account are off: ${config.dataDir} can't be written to by this service`);
-      return;
-    }
+// Shared playlists, settings that follow each Plex account, and Missing
+// tracks that follow each one too (`what`, for the log), each kept in the
+// data folder by a `Store`: it has to be this service's to write, or
+// they're off. (No folder: in memory, for development.)
+function startKept(on, what, Store) {
+  if (!on) return null;
+  if (config.dataDir && !canWrite(config.dataDir)) {
+    log.error(`${what} are off: ${config.dataDir} can't be written to by this service`);
+    return null;
   }
-  accountSettings = new SettingsStore({ dir: config.dataDir || null, log });
+  return new Store({ dir: config.dataDir || null, log });
 }
 
 // What the app's MusicBrainz features look up (MUSICBRAINZ_ADVANCED), kept
@@ -1637,13 +1633,9 @@ function startSettings() {
 function startMusicBrainzKept() {
   if (!musicbrainz || !config.musicbrainzAdvanced) return;
   let dir = (config.musicbrainzKeep && config.dataDir) || null;
-  if (dir) {
-    try {
-      accessSync(dir, fsConstants.W_OK);
-    } catch {
-      log.warn(`musicbrainz: ${dir} can't be written to by this service, so what's looked up is kept in memory only (until it restarts)`);
-      dir = null;
-    }
+  if (dir && !canWrite(dir)) {
+    log.warn(`musicbrainz: ${dir} can't be written to by this service, so what's looked up is kept in memory only (until it restarts)`);
+    dir = null;
   }
   musicbrainz.advanced(new MBKept({ dir, log }));
 }
@@ -1654,30 +1646,11 @@ function startMusicBrainzKept() {
 function startOwners() {
   if (!config.plexServerUrl) return;
   let dir = (config.ownersKeep && config.dataDir) || null;
-  if (dir) {
-    try {
-      accessSync(dir, fsConstants.W_OK);
-    } catch {
-      log.warn(`${dir} can't be written to by this service, so the owner's sign-ins are kept in memory only: if it restarts while plex.tv isn't answering, they're not known till it is`);
-      dir = null;
-    }
+  if (dir && !canWrite(dir)) {
+    log.warn(`${dir} can't be written to by this service, so the owner's sign-ins are kept in memory only: if it restarts while plex.tv isn't answering, they're not known till it is`);
+    dir = null;
   }
   owners = new OwnerSignIns({ dir, log });
-}
-
-// Missing tracks that follow each Plex account, kept in the data folder too
-// (it has to be this service's to write, or they're off).
-function startMissing() {
-  if (!config.missingSync) return;
-  if (config.dataDir) {
-    try {
-      accessSync(config.dataDir, fsConstants.W_OK);
-    } catch {
-      log.error(`missing tracks that follow each account are off: ${config.dataDir} can't be written to by this service`);
-      return;
-    }
-  }
-  missingLists = new MissingStore({ dir: config.dataDir || null, log });
 }
 
 server.on('error', (err) => {
