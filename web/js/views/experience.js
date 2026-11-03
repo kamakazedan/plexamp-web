@@ -63,7 +63,6 @@ export function experienceView({ el }) {
     .musicSections()
     .then((secs) => {
       if (secs.length < 2) return;
-      const here = app.source.sectionTitle;
       const others = secs.filter((x) => String(x.key) !== String(app.source.sectionKey)).map((x) => x.title);
       const list = joinWithAnd(others);
       libraries.replaceChildren(

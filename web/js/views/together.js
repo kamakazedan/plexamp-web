@@ -260,7 +260,6 @@ function pickFriends({ title, subtitle, confirm, offerQueue = false, exclude = n
 // ---------- in a session ----------
 
 function sessionPage() {
-  const s = together.session;
   const wrap = h('div.together-session');
   wrap.append(
     h('div.together-status', null, h('span.live-dot'), h('span.together-status-text')),
