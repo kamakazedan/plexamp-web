@@ -32,12 +32,15 @@ cleanup() {
 trap cleanup EXIT
 cleanup
 
+# (On every address in its container, so the apps reach it by its name, and
+# this machine at the port given to it on 127.0.0.1.)
 mock() { # name port script args...
     name="$1"
     port="$2"
-    shift 2
+    script="$3"
+    shift 3
     docker run -d --name "$name" --network "$NET" -p "127.0.0.1:$port:$port" -v "$ROOT/dev:/dev-scripts:ro" "$PY" \
-        python "/dev-scripts/$@" >/dev/null
+        python "/dev-scripts/$script" --host 0.0.0.0 "$@" >/dev/null
 }
 
 # In GitHub Actions, a problem also becomes an annotation on the run's
@@ -94,7 +97,7 @@ done
 
 status=0
 APP_URL=http://127.0.0.1:8081/ APP_URL_NOWS=http://127.0.0.1:8082/ APP_URL_DEBUG=http://127.0.0.1:8083/ \
-    MOCK_PLEX=http://127.0.0.1:32400 PLEX_LOGIN_URL= \
+    MOCK_PLEX=http://127.0.0.1:32400 PLEX_LOGIN_URL='' \
     APP_URL_BIG=http://127.0.0.1:8084/ MOCK_PLEX_BIG=http://127.0.0.1:32401 APP_URL_MB=http://127.0.0.1:8086/ \
     APP_URL_OFFLINE=http://127.0.0.1:8087/ MOCK_PLEX_OPEN=http://127.0.0.1:32402 \
     OLLAMA_DIRECT=http://127.0.0.1:11434 OLLAMA_NOTHINK=http://127.0.0.1:11435 \
@@ -106,12 +109,19 @@ case "$log" in
     *"plexamp-web browser"*"answered 404"*) echo "PASS debug: browser problems are in the container log" ;;
     *) annotate "FAIL debug: browser problems are in the container log"; status=1 ;;
 esac
-if printf '%s' "$log" | grep -Eq 'X-Plex-Token=t2?([^A-Za-z0-9_.~-]|$)'; then
-    annotate "FAIL debug: a token reached the container log"
-    status=1
-else
-    echo "PASS debug: no tokens in the container log"
-fi
+# Nothing anyone signs in with reaches any app's log, debug mode or not: the
+# mock's Plex tokens (in an address, a header or JSON), an offline-password
+# session's (pwoff-…), or the offline password.
+for n in pwb-web pwb-web2 pwb-web3 pwb-web4 pwb-web5 pwb-web6; do
+    found="$(docker logs "$n" 2>&1 | grep -Eo -e '[Xx]-[Pp]lex-[Tt]oken(=|: ?)t[2-5]?([^A-Za-z0-9_.~-]|$)' -e '"authToken": ?"t[2-5]?"' \
+        -e 'pwoff-[0-9a-f]+' -e 'offline-pwd-for-tests' | head -n 3 | tr '\n' ' ' || true)"
+    if [ -n "$found" ]; then
+        annotate "FAIL $n: a sign-in reached the container log ($found)"
+        status=1
+    else
+        echo "PASS $n: no sign-ins in the container log"
+    fi
+done
 
 if [ "$status" -ne 0 ]; then
     for n in pwb-web pwb-web3 pwb-web5 pwb-web6; do

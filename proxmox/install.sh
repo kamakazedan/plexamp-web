@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Installs plexamp-web on Debian 12 or 13, or updates it to the newest
-# version: nginx and Node.js from Debian, the app from GitHub, and hls.js
-# from npm (checked against the registry's checksum, as the Docker image's
-# build does). It's what proxmox/plexamp-web.sh runs inside the container it
-# makes, and what `update-plexamp-web` runs there later.
+# version: nginx and Node.js from Debian (with Debian's other packages
+# upgraded, for their security fixes), the app from GitHub, and hls.js from
+# npm (checked against the checksum the Dockerfile keeps for it, as the
+# Docker image's build does). It's what proxmox/plexamp-web.sh runs inside
+# the container it makes, and what `update-plexamp-web` runs there later.
 #
 # The app comes from the repository's "stable" branch, which CI moves to
 # each commit that passed every test (the commits the Docker image is built
-# from), or from main if there's no such branch yet. PW_REF picks another.
+# from). PW_REF picks another branch, a tag or a commit. Run as it's
+# downloaded, this finds which commit that is, downloads it, and runs that
+# commit's own installer on it, so the installer and the app are always the
+# same commit.
+#
+# An update that doesn't start (a setting the new version won't take, say)
+# puts the version from before back, and says what was wrong.
 #
 # Settings live in /etc/plexamp-web/plexamp-web.env, with the same names as
 # the Docker image's (PLEX_SERVER_URL, OLLAMA_URL and so on). To change
@@ -16,13 +23,14 @@
 # Every step in detail, with the tools' own output: PW_VERBOSE=1, or
 # --verbose (update-plexamp-web --verbose passes it on).
 #
-# For tests: PW_SOURCE_DIR installs from a folder instead of GitHub, and
-# PW_NO_SYSTEMD=1 skips systemd (in a container without it).
+# For tests: PW_SOURCE_DIR installs from a folder instead of GitHub (as the
+# installer it downloaded runs), and PW_NO_SYSTEMD=1 skips systemd (in a
+# container without it: the settings are still checked, as they are when
+# the app starts).
 set -euo pipefail
 
 REPO="${PW_REPO:-kamakazedan/plexamp-web}"
 REF="${PW_REF:-stable}"
-WANT_REF="$REF" # for updates (REF may fall back to main below)
 BASE=/opt/plexamp-web
 ENV_FILE=/etc/plexamp-web/plexamp-web.env
 
@@ -33,8 +41,9 @@ else
 fi
 say() { printf '  %s %s\n' "$OK" "$*"; }
 note() { printf '    %s%s%s\n' "$DIM" "$*" "$RESET"; }
+bad() { printf '  %s %s\n' "$BAD" "$*" >&2; }
 fail() {
-    printf '  %s %s\n' "$BAD" "$*" >&2
+    bad "$*"
     exit 1
 }
 
@@ -56,6 +65,7 @@ shown() {
 }
 # In detail mode, a command that fails says which line of this it was
 # (otherwise the tool's own error is the last thing shown).
+# shellcheck disable=SC2329 # (the ERR trap below runs it)
 stopped() {
     printf '  %s Stopped at line %s of the installer: %s\n' "$BAD" "$1" "$(sed -n "$1p" "${BASH_SOURCE[0]}" 2>/dev/null | sed 's/^ *//')" >&2
 }
@@ -67,88 +77,157 @@ fi
 [ "$(id -u)" = 0 ] || fail "Run this as root."
 [ -r /etc/debian_version ] || fail "This installs on Debian (12 or 13)."
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "PW_REPO should look like owner/name."
-[[ "$REF" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "PW_REF should be a branch or tag name."
+[[ "$REF" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "PW_REF should be a branch or tag name, or a commit."
+
+# One install or update at a time (the installer it downloads, below, runs
+# under this one's lock).
+if [ -z "${PW_LOCK_HELD:-}" ] && command -v flock >/dev/null 2>&1; then
+    mkdir -p /run/lock
+    exec 9>/run/lock/plexamp-web-install.lock
+    flock -n 9 || fail "Another install or update of plexamp-web is running here: wait for it to finish, then try again."
+    export PW_LOCK_HELD=1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+# (apt waits a while for another apt, as unattended upgrades may be running;
+# and the lock above isn't handed on to anything it starts: 9>&-.)
+apt_wait=(-o DPkg::Lock::Timeout=120)
+
+# get URL FILE [curl options]: its HTTP status (000: no answer, or it
+# stopped partway).
+get() {
+    local code url="$1" out="$2"
+    shift 2
+    code="$(curl -sSL -o "$out" -w '%{http_code}' "$@" "$url" 2>/dev/null)" || code=000
+    detail "$url: HTTP $code" >&2
+    printf '%s' "$code"
+}
+
+# ---------- from GitHub: one commit, and that commit's own installer ----------
+
+if [ -z "${PW_SOURCE_DIR:-}" ]; then
+    detail "In detail: Debian $(cat /etc/debian_version), $REPO ($REF): finding which commit that is, to install it with its own installer"
+    if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+        detail "apt-get install curl ca-certificates tar gzip, to download it with"
+        { apt-get update -qq "${apt_wait[@]}" 9>&- && apt-get install -y -qq --no-install-recommends "${apt_wait[@]}" curl ca-certificates tar gzip >/dev/null 9>&-; } || fail "Couldn't install curl to download plexamp-web with. Nothing of plexamp-web was changed."
+    fi
+    download_dir="$(mktemp -d)"
+    trap 'rm -rf "$download_dir"' EXIT
+    if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+        commit="$REF"
+    else
+        code="$(get "https://api.github.com/repos/$REPO/commits/$REF" "$download_dir/commit" -H 'Accept: application/vnd.github.sha')"
+        commit="$(tr -d '\r\n' <"$download_dir/commit" 2>/dev/null || true)"
+        case "$code" in
+            200) [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "GitHub didn't say which commit $REF is ($REPO). Nothing was changed." ;;
+            404 | 422)
+                if [ "$REF" = stable ]; then fail "$REPO has no stable branch yet: CI makes it once a commit on main has passed every test. Nothing was changed."; fi
+                fail "$REPO has no branch, tag or commit $REF on GitHub. Nothing was changed."
+                ;;
+            403 | 429) fail "GitHub's had too many requests from this address to say which commit $REF is (HTTP $code): try again in an hour. Nothing was changed." ;;
+            *) fail "Couldn't ask GitHub which commit $REF is ($REPO: HTTP $code). Nothing was changed." ;;
+        esac
+    fi
+    detail "$REF is commit $commit"
+    code="$(get "https://github.com/$REPO/archive/$commit.tar.gz" "$download_dir/app.tar.gz")"
+    [ "$code" = 200 ] || fail "Couldn't download plexamp-web ($REPO, $REF at ${commit:0:7}) from GitHub (HTTP $code). Nothing was changed."
+    mkdir "$download_dir/app"
+    tar -xzf "$download_dir/app.tar.gz" -C "$download_dir/app" --strip-components=1 || fail "The download of $REPO at ${commit:0:7} didn't unpack. Nothing was changed."
+    [ -f "$download_dir/app/proxmox/install.sh" ] || fail "The download of $REPO at ${commit:0:7} has no installer (proxmox/install.sh). Nothing was changed."
+    detail "Running that commit's own installer, on what it downloaded"
+    status=0
+    PW_SOURCE_DIR="$download_dir/app" PW_COMMIT="$commit" PW_REF="$REF" PW_REPO="$REPO" PW_VERBOSE="$([ "$verbose" = true ] && echo 1 || true)" \
+        bash "$download_dir/app/proxmox/install.sh" || status=$?
+    exit "$status"
+fi
+
+# ---------- installing (from PW_SOURCE_DIR) ----------
 
 systemd=true
 if [ "${PW_NO_SYSTEMD:-}" = 1 ] || [ ! -d /run/systemd/system ]; then systemd=false; fi
 was="$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" "$BASE/html/js/plex.js" 2>/dev/null || true)"
-detail "In detail: Debian $(cat /etc/debian_version), $REPO ($REF)$([ -n "$was" ] && printf ', %s installed now' "$was")$([ "$systemd" = true ] || printf ', without systemd')"
-
-export DEBIAN_FRONTEND=noninteractive
-detail "apt-get update"
-if [ "$verbose" = true ]; then shown apt-get update; else apt-get update -qq; fi
-detail "apt-get install nginx nodejs curl wget ca-certificates tar gzip"
-if [ "$verbose" = true ]; then
-    shown apt-get install -y --no-install-recommends nginx nodejs curl wget ca-certificates tar gzip
-else
-    apt-get install -y -qq --no-install-recommends nginx nodejs curl wget ca-certificates tar gzip >/dev/null
-fi
-say "Installed nginx $(nginx -v 2>&1 | sed -n 's#.*nginx/##p') and Node.js $(node --version) from Debian"
+detail "In detail: Debian $(cat /etc/debian_version), $REPO ($REF$([ -n "${PW_COMMIT:-}" ] && printf ' at %s' "${PW_COMMIT:0:7}"))$([ -n "$was" ] && printf ', %s installed now' "$was")$([ "$systemd" = true ] || printf ', without systemd')"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# Debian's own: nginx and Node.js, and every package's security fixes
+# (keeping config files as they are).
+keep_config=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+detail "apt-get update"
+if [ "$verbose" = true ]; then shown apt-get update "${apt_wait[@]}" 9>&-; else apt-get update -qq "${apt_wait[@]}" 9>&-; fi
+detail "apt-get install nginx nodejs curl wget ca-certificates tar gzip"
+if [ "$verbose" = true ]; then
+    shown apt-get install -y --no-install-recommends "${apt_wait[@]}" "${keep_config[@]}" nginx nodejs curl wget ca-certificates tar gzip 9>&-
+else
+    apt-get install -y -qq --no-install-recommends "${apt_wait[@]}" "${keep_config[@]}" nginx nodejs curl wget ca-certificates tar gzip >/dev/null 9>&-
+fi
+say "Installed nginx $(nginx -v 2>&1 | sed -n 's#.*nginx/##p') and Node.js $(node --version) from Debian"
+detail "apt-get upgrade, for the security fixes of Debian's other packages (config files kept as they are)"
+LC_ALL=C.UTF-8 apt-get upgrade -y -q "${apt_wait[@]}" "${keep_config[@]}" >"$work/upgrade.log" 2>&1 9>&- || { cat "$work/upgrade.log" >&2; fail "Debian's packages couldn't be upgraded (apt-get upgrade). Nothing of plexamp-web was changed."; }
+if [ "$verbose" = true ]; then sed 's/^/      /' "$work/upgrade.log"; fi
+upgraded="$(sed -n 's/^\([0-9][0-9]*\) upgraded,.*/\1/p' "$work/upgrade.log" | tail -n 1)"
+case "${upgraded:-0}" in
+    0) say "Debian's packages are up to date" ;;
+    1) say "Upgraded 1 of Debian's packages, for its security fixes" ;;
+    *) say "Upgraded $upgraded of Debian's packages, for their security fixes" ;;
+esac
+
 # size FILE: how big it is, to say so.
 size() { numfmt --to=iec --suffix=B "$(wc -c <"$1")" 2>/dev/null || printf '%s bytes' "$(wc -c <"$1")"; }
 
-if [ -n "${PW_SOURCE_DIR:-}" ]; then
-    mkdir "$work/app"
-    detail "Copying web, server, docker, proxmox and the Dockerfile from $PW_SOURCE_DIR"
-    cp -r "$PW_SOURCE_DIR/web" "$PW_SOURCE_DIR/server" "$PW_SOURCE_DIR/docker" "$PW_SOURCE_DIR/proxmox" "$PW_SOURCE_DIR/Dockerfile" "$work/app/"
-    say "Copied plexamp-web from $PW_SOURCE_DIR"
-else
-    # download URL FILE: its HTTP status (000: no answer, or it stopped partway).
-    download() {
-        local code
-        code="$(curl -sSL -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || code=000
-        if [ "$code" = 200 ]; then detail "$1: HTTP $code, $(size "$2")" >&2; else detail "$1: HTTP $code" >&2; fi
-        printf '%s' "$code"
-    }
-    # The stable branch, or main until CI has made one: only when GitHub
-    # says there's no stable branch, never because a download failed (that
-    # would install something untested).
-    code="$(download "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" "$work/app.tar.gz")"
-    if [ "$code" = 404 ] && [ "$REF" = stable ]; then
-        detail "There's no stable branch yet, so main instead"
-        REF=main
-        code="$(download "https://github.com/$REPO/archive/refs/heads/main.tar.gz" "$work/app.tar.gz")"
-    elif [ "$code" = 404 ]; then
-        detail "$REF isn't a branch: trying it as a tag or commit"
-        code="$(download "https://github.com/$REPO/archive/$REF.tar.gz" "$work/app.tar.gz")"
-    fi
-    [ "$code" = 200 ] || fail "Couldn't download plexamp-web ($REPO, $REF) from GitHub (HTTP ${code:-000}). Nothing was changed."
-    unset -f download
-    mkdir "$work/app"
-    detail "Unpacking it in $work/app"
-    tar -xzf "$work/app.tar.gz" -C "$work/app" --strip-components=1
-fi
+mkdir "$work/app"
+detail "Copying web, server, docker, proxmox and the Dockerfile from $PW_SOURCE_DIR"
+cp -r "$PW_SOURCE_DIR/web" "$PW_SOURCE_DIR/server" "$PW_SOURCE_DIR/docker" "$PW_SOURCE_DIR/proxmox" "$PW_SOURCE_DIR/Dockerfile" "$work/app/"
 for f in web/index.html web/js/plex.js server/index.js docker/40-plexamp-web.sh docker/nginx.conf proxmox/install.sh Dockerfile; do
     [ -f "$work/app/$f" ] || fail "The download is missing $f."
 done
 detail "It has what's needed (web/index.html, server/index.js, docker/nginx.conf and the rest)"
 version="$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" "$work/app/web/js/plex.js")"
-[ -n "${PW_SOURCE_DIR:-}" ] || say "Downloaded plexamp-web ${version:-?} ($REPO, $REF)"
+if [ -n "${PW_COMMIT:-}" ]; then
+    say "Downloaded plexamp-web ${version:-?} ($REPO, $REF at ${PW_COMMIT:0:7})"
+else
+    say "Copied plexamp-web ${version:-?} from $PW_SOURCE_DIR"
+fi
 
-# hls.js: the version the Docker image bundles, checked against the npm
-# registry's own checksum for it.
+# hls.js: the version the Docker image bundles, checked against the checksum
+# the Dockerfile keeps for it (the npm registry's for that version), so the
+# registry alone can't change it.
 hls="$(sed -n 's/^ARG HLS_JS_VERSION=\([0-9][0-9.]*\)$/\1/p' "$work/app/Dockerfile" | head -n 1)"
-[ -n "$hls" ] || fail "Couldn't tell which hls.js version to use."
-detail "hls.js $hls, the version the Dockerfile names: https://registry.npmjs.org/hls.js/$hls"
-curl -fsSL "https://registry.npmjs.org/hls.js/$hls" -o "$work/hls.json" || fail "Couldn't reach the npm registry for hls.js."
+hls_integrity="$(sed -n 's/^ARG HLS_JS_INTEGRITY=\(sha512-[A-Za-z0-9+/=]*\)$/\1/p' "$work/app/Dockerfile" | head -n 1)"
+if [ -z "$hls" ] || [ -z "$hls_integrity" ]; then fail "Couldn't tell which hls.js to use, and its checksum (the Dockerfile's HLS_JS_VERSION and HLS_JS_INTEGRITY)."; fi
+detail "hls.js $hls, the version the Dockerfile names"
 curl -fsSL "https://registry.npmjs.org/hls.js/-/hls.js-$hls.tgz" -o "$work/hls.tgz" || fail "Couldn't download hls.js."
 detail "https://registry.npmjs.org/hls.js/-/hls.js-$hls.tgz: $(size "$work/hls.tgz")"
 checked="$(node -e '
     const { readFileSync } = require("fs");
     const { createHash } = require("crypto");
-    const want = JSON.parse(readFileSync(process.argv[1], "utf8")).dist.integrity;
-    const got = "sha512-" + createHash("sha512").update(readFileSync(process.argv[2])).digest("base64");
-    if (!/^sha512-/.test(want) || want !== got) { console.error("hls.js does not match the npm registry checksum"); process.exit(1); }
+    const got = "sha512-" + createHash("sha512").update(readFileSync(process.argv[1])).digest("base64");
+    if (got !== process.argv[2]) { console.error("hls.js is " + got + ", not the " + process.argv[2] + " the Dockerfile has"); process.exit(1); }
     console.log(got);
-' "$work/hls.json" "$work/hls.tgz")" || fail "hls.js didn't match its checksum, so it wasn't installed."
-detail "Its checksum, as the registry gives it: $checked"
+' "$work/hls.tgz" "$hls_integrity")" || fail "hls.js didn't match its checksum, so it wasn't installed."
+detail "Its checksum, the Dockerfile's: $checked"
 mkdir "$work/hls"
 tar -xzf "$work/hls.tgz" -C "$work/hls"
-say "Downloaded hls.js $hls (it matched the npm registry's checksum)"
+say "Downloaded hls.js $hls (it matched its checksum)"
+
+# What's there now, to put back if this version doesn't start: the app
+# and what browsers load (moved aside below), the settings, nginx's site,
+# the systemd units and the two commands.
+had=false
+before="$work/before"
+mkdir "$before"
+if [ -d "$BASE/app" ] && [ -d "$BASE/html" ]; then
+    had=true
+    for f in "$ENV_FILE" /etc/nginx/conf.d/default.conf /etc/systemd/system/plexamp-web-config.service /etc/systemd/system/plexamp-web.service \
+        /etc/systemd/system/nginx.service.d/plexamp-web.conf /usr/local/bin/update-plexamp-web /usr/local/bin/plexamp-web-settings; do
+        if [ -f "$f" ]; then
+            mkdir -p "$before$(dirname "$f")"
+            cp -p "$f" "$before$f"
+        fi
+    done
+    detail "Kept what's there now ($was), to put back if this version doesn't start"
+fi
 
 mkdir -p "$BASE" /etc/plexamp-web
 rm -rf "$BASE/app.new" "$BASE/html.new"
@@ -159,12 +238,12 @@ mkdir -p "$BASE/html.new/vendor"
 cp "$work/hls/package/dist/hls.min.js" "$BASE/html.new/vendor/hls.min.js"
 cp "$work/hls/package/LICENSE" "$BASE/html.new/vendor/hls.js-LICENSE.txt"
 printf '%s\n' "$hls" >"$BASE/html.new/vendor/hls.js-VERSION.txt"
+# (The ones from before stay beside them, as .old, till this one has started.)
 for d in app html; do
     rm -rf "$BASE/$d.old"
     if [ -d "$BASE/$d" ]; then mv "$BASE/$d" "$BASE/$d.old"; fi
     mv "$BASE/$d.new" "$BASE/$d"
 done
-rm -rf "$BASE/app.old" "$BASE/html.old"
 
 # Settings: written once (proxmox/plexamp-web.sh may have put them here
 # already), and kept as they are on an update.
@@ -273,7 +352,9 @@ put_command() {
 
 # `update-plexamp-web`: the newest version, with the same settings. All of
 # it in braces, so it's read to the end before any of it runs: the
-# installer it runs puts a new one in its place.
+# installer it runs puts a new one in its place. (The installer it
+# downloads finds which commit the branch is, and installs that commit with
+# that commit's own installer.)
 put_command /usr/local/bin/update-plexamp-web <<UPDATE
 #!/bin/sh
 # Updates plexamp-web to the newest tested version; settings are kept.
@@ -288,7 +369,7 @@ for arg in "\$@"; do
         -v | --verbose) verbose=1 ;;
         -h | --help)
             echo "Usage: update-plexamp-web [--verbose]"
-            echo "Updates plexamp-web to the newest tested version ($REPO, $WANT_REF), keeping its settings."
+            echo "Updates plexamp-web to the newest tested version ($REPO, $REF), keeping its settings."
             echo "  -v, --verbose   every step in detail, with the tools' own output (or PW_VERBOSE=1)"
             exit 0 ;;
         *) echo "update-plexamp-web: there's no option \$arg (see --help). Nothing was changed." >&2; exit 2 ;;
@@ -296,18 +377,12 @@ for arg in "\$@"; do
 done
 tmp="\$(mktemp)"
 trap 'rm -f "\$tmp"' EXIT
+url="https://raw.githubusercontent.com/$REPO/$REF/proxmox/install.sh"
 # (Its HTTP status; 000 when it didn't all arrive.)
-get() {
-    url="https://raw.githubusercontent.com/$REPO/\$1/proxmox/install.sh"
-    code="\$(curl -sSL -o "\$tmp" -w '%{http_code}' "\$url" 2>/dev/null)" || code=000
-    if [ -n "\$verbose" ]; then echo "    The installer, \$url: HTTP \$code" >&2; fi
-    echo "\$code"
-}
-code="\$(get $WANT_REF)"
-# main only while there's no stable branch (not because a download failed).
-if [ "\$code" = 404 ] && [ "$WANT_REF" = stable ]; then code="\$(get main)"; fi
+code="\$(curl -sSL -o "\$tmp" -w '%{http_code}' "\$url" 2>/dev/null)" || code=000
+if [ -n "\$verbose" ]; then echo "    The installer, \$url: HTTP \$code" >&2; fi
 [ "\$code" = 200 ] || { echo "Couldn't download the installer (HTTP \${code:-000}). Nothing was changed." >&2; exit 1; }
-LC_ALL=C.UTF-8 PW_REPO="$REPO" PW_REF="$WANT_REF" PW_VERBOSE="\$verbose" bash "\$tmp"
+LC_ALL=C.UTF-8 PW_REPO="$REPO" PW_REF="$REF" PW_VERBOSE="\$verbose" bash "\$tmp"
 exit
 }
 UPDATE
@@ -369,10 +444,13 @@ ExecStart=/bin/sh $BASE/app/docker/40-plexamp-web.sh
 [Install]
 WantedBy=multi-user.target
 UNIT
+# (Wants: after the network's up only means something where it's asked
+# for.)
 cat >/etc/systemd/system/plexamp-web.service <<UNIT
 [Unit]
 Description=plexamp-web service (Play Together, Play on, your devices, the shared AI model)
 Requires=plexamp-web-config.service
+Wants=network-online.target
 After=plexamp-web-config.service network-online.target
 
 [Service]
@@ -402,7 +480,32 @@ After=plexamp-web-config.service
 ExecStartPre=-/bin/rm -f /run/plexamp-web/pms/plex.sock
 UNIT
 
-if [ "$systemd" = true ]; then
+# check_settings: the start-up script, as plexamp-web-config runs it (the
+# settings, and the unit's own environment), for where systemd isn't: what
+# it said in $work/check.log.
+check_settings() {
+    local vars
+    vars="$(sed -n 's/^Environment=//p' /etc/systemd/system/plexamp-web-config.service)"
+    # shellcheck disable=SC2016,SC2086 # (the script's own $1 and $@; the unit's settings, one word each)
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C.UTF-8 bash -c 'set -a; . "$1"; set +a; shift; exec env "$@" /bin/sh "'"$BASE"'/app/docker/40-plexamp-web.sh"' \
+        check "$ENV_FILE" $vars >"$work/check.log" 2>&1 9>&-
+}
+
+# start: restarts plexamp-web with what's in place, and says whether it's
+# up: its settings taken, the app answering at http://127.0.0.1/ and its
+# service at /api/health. Without systemd, its settings are checked, as
+# they would be. What went wrong, if anything, is in $work/why.
+start() {
+    : >"$work/why"
+    if [ "$systemd" != true ]; then
+        detail "Checking the settings, as plexamp-web-config would (systemd isn't running here)"
+        check_settings && return 0
+        grep '^plexamp-web: ' "$work/check.log" | tail -n 4 >"$work/why" || true
+        [ -s "$work/why" ] || tail -n 4 "$work/check.log" >"$work/why"
+        return 1
+    fi
+    local since up=false
+    since="$(date +%s)"
     detail "systemctl daemon-reload"
     systemctl daemon-reload
     detail "systemctl enable plexamp-web-config plexamp-web nginx"
@@ -410,15 +513,16 @@ if [ "$systemd" = true ]; then
     # All at once, so each restarts once (restarting the settings alone
     # restarts the service with them, and it went again after).
     detail "systemctl restart plexamp-web-config plexamp-web nginx"
-    since="$(date +%s)"
-    systemctl restart plexamp-web-config.service plexamp-web.service nginx.service
-    # Until the service is up, nginx answers its address with an error
-    # (502), so the checks are quiet, and only the outcome is told.
-    detail "Waiting for it to answer at http://127.0.0.1/api/health (up to 15 seconds)"
-    for _ in $(seq 1 30); do
-        curl -fs -o /dev/null http://127.0.0.1/api/health && break
-        sleep 0.5
-    done
+    if systemctl restart plexamp-web-config.service plexamp-web.service nginx.service 2>/dev/null; then
+        # Until the service is up, nginx answers its address with an error
+        # (502), so the checks are quiet, and only the outcome is told.
+        detail "Waiting for it to answer at http://127.0.0.1/api/health (up to 30 seconds)"
+        for _ in $(seq 1 60); do
+            curl -fs -o /dev/null http://127.0.0.1/api/health && break
+            sleep 0.5
+        done
+        if curl -fs -o /dev/null http://127.0.0.1/ && curl -fs -o /dev/null http://127.0.0.1/api/health; then up=true; fi
+    fi
     if [ "$verbose" = true ]; then
         for unit in plexamp-web-config plexamp-web nginx; do
             detail "$unit: $(systemctl is-active "$unit" 2>/dev/null || true)"
@@ -426,10 +530,53 @@ if [ "$systemd" = true ]; then
         detail "What they logged as they started (journalctl -u plexamp-web-config -u plexamp-web -u nginx):"
         shown journalctl --no-pager -o cat -u plexamp-web-config -u plexamp-web -u nginx --since "@$since" || true
     fi
-    curl -fs -o /dev/null http://127.0.0.1/ || fail "plexamp-web didn't start. See: journalctl -u plexamp-web-config -u plexamp-web -u nginx"
-    curl -fs -o /dev/null http://127.0.0.1/api/health || note "Its service (Play Together, Play on, your devices) isn't answering yet: journalctl -u plexamp-web"
-    detail "It answered after $(($(date +%s) - since)) s"
-    say "plexamp-web ${version:-} is running"
-else
-    say "Installed. systemd isn't running here, so start it yourself."
+    if [ "$up" = true ]; then
+        detail "It answered after $(($(date +%s) - since)) s"
+        return 0
+    fi
+    # What the start-up script said (a setting it won't take, say), or else
+    # the last of what they all logged.
+    journalctl --no-pager -o cat -u plexamp-web-config --since "@$since" 2>/dev/null | grep '^plexamp-web: ' | tail -n 4 >"$work/why" || true
+    [ -s "$work/why" ] || journalctl --no-pager -o cat -u plexamp-web-config -u plexamp-web -u nginx --since "@$since" 2>/dev/null | tail -n 4 >"$work/why" || true
+    return 1
+}
+
+# put_back: the version from before, as it was, in place of this one.
+put_back() {
+    local f
+    for d in app html; do
+        rm -rf "${BASE:?}/$d"
+        mv "$BASE/$d.old" "$BASE/$d"
+    done
+    (cd "$before" && find . -type f) | while read -r f; do
+        f="${f#.}"
+        cp -p "$before$f" "$f.restore"
+        mv -f "$f.restore" "$f"
+    done
+}
+
+if start; then
+    rm -rf "$BASE/app.old" "$BASE/html.old"
+    if [ "$systemd" = true ]; then
+        say "plexamp-web ${version:-} is running"
+    else
+        say "Installed (its settings check out). systemd isn't running here, so start it yourself."
+    fi
+    exit 0
 fi
+bad "plexamp-web ${version:-} didn't start$([ "$systemd" = true ] || printf ' with these settings'). What it said:"
+sed 's/^/      /' "$work/why" >&2
+if [ "$had" != true ]; then
+    fail "Change what it says (plexamp-web-settings, or $ENV_FILE), then run this again. See also: journalctl -u plexamp-web-config -u plexamp-web -u nginx"
+fi
+was="${was:-the version from before}"
+detail "Putting $was back, as it was"
+put_back
+if start; then
+    bad "So plexamp-web $was is back, as it was. Where what it said is about a setting, change that (plexamp-web-settings), then update again."
+else
+    bad "plexamp-web $was, put back as it was, didn't start either. What it said:"
+    sed 's/^/      /' "$work/why" >&2
+    bad "See: journalctl -u plexamp-web-config -u plexamp-web -u nginx"
+fi
+exit 1

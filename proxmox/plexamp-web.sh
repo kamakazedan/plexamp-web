@@ -108,7 +108,7 @@ pve="${pve_full%%.*}"
 if [ -z "$pve" ] || [ "$pve" -lt 8 ]; then fail "This needs Proxmox VE 8 or later."; fi
 arch="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "PW_REPO should look like owner/name."
-[[ "$REF" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "PW_REF should be a branch or tag name."
+[[ "$REF" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "PW_REF should be a branch or tag name, or a commit."
 ok "Proxmox VE $pve_full ($arch)"
 
 # ---------- settings ----------
@@ -209,6 +209,10 @@ valid IP "The address" '^dhcp$|^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
 if [ "$IP" != dhcp ]; then
     ask GATEWAY "Gateway" ""
     valid GATEWAY "The gateway" '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+elif [ -n "${GATEWAY:-}" ]; then
+    # (It goes into the container's network settings, so it's never left
+    # unchecked: with DHCP, the network gives the gateway.)
+    fail "GATEWAY is for a fixed address (IP=192.168.1.50/24, say): with DHCP the network gives one. Take GATEWAY out, or set IP too."
 fi
 
 ask PLEX_SERVER_URL "Your Plex server's address, like http://192.168.1.10:32400 (Enter to skip)" ""
@@ -255,8 +259,12 @@ info "Looking for a Debian template"
 template="$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | pick || true)"
 if [ -z "$template" ]; then
     info "Downloading a Debian template"
-    quietly pveam update || true
+    listed=true
+    quietly pveam update || listed=false
     template="$(pveam available --section system 2>/dev/null | pick || true)"
+    if [ -z "$template" ] && [ "$listed" = false ]; then
+        fail "Couldn't get the list of container templates (pveam update): check this node can reach the internet."
+    fi
     [ -n "$template" ] || fail "No Debian 12 or 13 template for $arch was found (pveam available --section system)."
     quietly pveam download "$TEMPLATE_STORAGE" "$template" || fail "The template $template couldn't be downloaded."
 fi
@@ -356,10 +364,10 @@ pct exec "$CTID" -- mkdir -p /etc/plexamp-web
 pct push "$CTID" "$work/plexamp-web.env" /etc/plexamp-web/plexamp-web.env --perms 600
 
 # The installer: next to this script when it's run from a copy of the repo
-# (bash proxmox/plexamp-web.sh), otherwise (bash -c "$(curl …)") from GitHub:
-# the stable branch (the commits that passed every test), or main if there's
-# no stable branch yet (only then: a download that failed is no reason to
-# install something untested).
+# (bash proxmox/plexamp-web.sh), otherwise (bash -c "$(curl …)") from GitHub's
+# stable branch (the commits that passed every test). In the container it
+# finds which commit the branch is, downloads it, and installs it with that
+# commit's own installer, so the installer and the app are one commit.
 here=""
 src="${BASH_SOURCE[0]:-}"
 if [ -n "$src" ] && [ -f "$src" ]; then here="$(cd "$(dirname "$src")" && pwd)"; fi
@@ -370,9 +378,9 @@ elif [ -n "$here" ] && [ -f "$here/install.sh" ] && [ -f "$here/plexamp-web.sh" 
 else
     got=0
     download "https://raw.githubusercontent.com/$REPO/$REF/proxmox/install.sh" "$work/install.sh" || got=$?
+    # (Never another branch instead: that would be untested.)
     if [ "$got" = 2 ] && [ "$REF" = stable ]; then
-        got=0
-        download "https://raw.githubusercontent.com/$REPO/main/proxmox/install.sh" "$work/install.sh" || got=$?
+        fail "$REPO has no stable branch yet: CI makes it once a commit on main has passed every test. Nothing was installed in container $CTID."
     fi
     [ "$got" = 0 ] || fail "Couldn't download the installer ($REPO, $REF). Nothing was installed in container $CTID."
 fi

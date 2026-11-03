@@ -38,7 +38,8 @@ esac'
 stub pveam 'echo "pveam $*" >>"$S/calls"
 case "$1" in
   list) [ -f "$S/have-template" ] && echo "local:vztmpl/$(cat "$S/have-template")  120MB" ;;
-  available) printf "system  debian-11-standard_11.7-1_amd64.tar.zst\nsystem  debian-12-standard_12.7-1_amd64.tar.zst\nsystem  debian-13-standard_13.1-2_amd64.tar.zst\nsystem  ubuntu-24.04-standard_24.04-2_amd64.tar.zst\n" ;;
+  update) [ -f "$S/offline" ] && exit 1 ;;
+  available) [ -f "$S/offline" ] && exit 0; printf "system  debian-11-standard_11.7-1_amd64.tar.zst\nsystem  debian-12-standard_12.7-1_amd64.tar.zst\nsystem  debian-13-standard_13.1-2_amd64.tar.zst\nsystem  ubuntu-24.04-standard_24.04-2_amd64.tar.zst\n" ;;
   download) echo "$3" >"$S/have-template" ;;
 esac
 exit 0'
@@ -57,7 +58,7 @@ esac
 exit 0'
 
 reset() {
-    rm -rf "$T/calls" "$T/pushed" "$T"/exists-* "$T/have-template" "$T/uid" "$T/install-fails"
+    rm -rf "$T/calls" "$T/pushed" "$T"/exists-* "$T/have-template" "$T/uid" "$T/install-fails" "$T/offline"
     echo "pve-manager/8.2.4/faa83925 (running kernel: 6.8.12-1-pve)" >"$T/pveversion"
 }
 
@@ -216,9 +217,27 @@ refuses "a bad name" "The name isn't right" 'CT_HOSTNAME=Not_A_Name!'
 refuses "a storage that can't hold containers" "nfs-backups can't hold containers" 'STORAGE=nfs-backups'
 refuses "a storage over two lines" "can't hold containers" "STORAGE=$(printf 'local-lvm\nnfs-backups')"
 refuses "a fixed address without a gateway" "The gateway isn't right" 'IP=192.168.1.50/24'
+# (It goes into the container's network settings, so it's never unchecked.)
+refuses "a gateway with DHCP" "GATEWAY is for a fixed address" 'GATEWAY=192.168.1.1,firewall=1'
 refuses "an ID that's taken" "There's already a container or VM 123"
 refuses "to run without root" "Run this as root"
 refuses "Proxmox VE 7" "This needs Proxmox VE 8 or later"
+
+# ---------- no internet on the node ----------
+
+# Without a list of templates, it says to check the network (not that there's
+# no Debian template).
+reset
+touch "$T/offline"
+if run; then
+    fail "no template list: it went ahead"
+elif calls | grep -q '^pct create'; then
+    fail "no template list: it made a container"
+elif grep -q "Couldn't get the list of container templates (pveam update): check this node can reach the internet" "$T/out"; then
+    pass "without the list of templates, it says to check the network"
+else
+    fail "no template list: $(tail -1 "$T/out")"
+fi
 
 # ---------- a download that stopped partway ----------
 
@@ -237,8 +256,8 @@ fi
 # ---------- downloading the installer ----------
 
 # Run from a download (with no installer beside it), it fetches the
-# installer from GitHub: only when all of it arrived, and from main only
-# when there's no stable branch.
+# installer from GitHub: only when all of it arrived, and never from another
+# branch (main) when there's no stable branch.
 mkdir -p "$T/alone"
 cp "$SCRIPT" "$T/alone/plexamp-web.sh"
 stub curl 'out=""; url=""
@@ -263,11 +282,14 @@ else
 fi
 reset
 echo nostable >"$T/curl-mode"
-alone || true
-if calls | grep -qx 'curl https://raw.githubusercontent.com/kamakazedan/plexamp-web/main/proxmox/install.sh' && calls | grep -q 'bash /root/install-plexamp-web.sh'; then
-    pass "without a stable branch, the installer comes from main"
+if alone; then
+    fail "no stable branch: it went ahead"
+elif calls | grep -q 'main/proxmox/install.sh\|install-plexamp-web.sh'; then
+    fail "no stable branch: it used main, or installed something: $(calls | grep -E 'curl|install')"
+elif grep -q "has no stable branch yet" "$T/out"; then
+    pass "without a stable branch, it says so, and installs nothing (not main's)"
 else
-    fail "no stable branch: $(calls | grep -E 'curl|install')"
+    fail "no stable branch: $(tail -2 "$T/out")"
 fi
 rm -f "$T/curl-mode"
 
