@@ -13,7 +13,7 @@
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { norm } from './missinglist.js';
-import { albumKey, matchGroup, exactAlbum, exactKey, sameTitle, titlesAgree, trackKey, tracksInCommon, releaseSizes } from './releases.js';
+import { albumKey, matchGroup, exactAlbum, exactKey, sameTitle, titlesAgree, trackKey, tracksInCommon, releaseSizes, PLACEHOLDER_ARTISTS } from './releases.js';
 import { ServiceError } from './errors.js';
 import { CONTROL_CHARACTERS } from './clean.js';
 import { readCapped } from './plex.js';
@@ -376,7 +376,7 @@ export class MusicBrainz {
     if (kept !== undefined) return kept;
     // (Not Various Artists, by any name: on MusicBrainz, theirs are
     // everyone's compilations, far too many to look through for one.)
-    if (byId ? SPECIAL_ARTISTS.has(id) : VARIOUS.has(want)) return this.adv.set(key, null);
+    if (byId ? SPECIAL_ARTISTS.has(id) : PLACEHOLDER_ARTISTS.has(want)) return this.adv.set(key, null);
     this.resting();
     const opts = { background };
     let hit = byId ? { id } : null;
@@ -434,7 +434,7 @@ export class MusicBrainz {
   // which Plex can have as one artist (see the app's mb.js).
   async namesakes(name, { but = null, signal, background = false } = {}) {
     const want = norm(name);
-    if (!this.adv || !want || VARIOUS.has(want)) return [];
+    if (!this.adv || !want || PLACEHOLDER_ARTISTS.has(want)) return [];
     const key = `namesakes|${want}`;
     let list = this.had(key);
     if (list === undefined) {
@@ -502,7 +502,7 @@ export class MusicBrainz {
     const who = norm(artist);
     const byId = MBID.test(String(id));
     if (!this.adv || (!who && !byId)) return null;
-    if (byId ? SPECIAL_ARTISTS.has(id) : VARIOUS.has(who)) return null;
+    if (byId ? SPECIAL_ARTISTS.has(id) : PLACEHOLDER_ARTISTS.has(who)) return null;
     // (An id MusicBrainz doesn't know: by name, as artistInfo goes.)
     let info = byId ? this.had(`artistid|${id}`) : this.had(`artist|${who}`);
     if (info === null && byId && who) info = this.had(`artist|${who}`);
@@ -802,29 +802,6 @@ const SPECIAL_ARTISTS = new Set([
   'a0ef7e1d-44ff-4039-9435-7d5fefdeecc9',
   '90068d37-bae7-4292-be4a-704c145bd616',
   '80a8851f-444c-4539-892b-ad2a49292aa9',
-]);
-const VARIOUS = new Set([
-  'various artists',
-  'various',
-  'va',
-  'v a',
-  'various artist',
-  'verschiedene interpreten',
-  'artistes divers',
-  'artistes varies',
-  'varios artistas',
-  'artisti vari',
-  'diverse artiesten',
-  'diversos artistas',
-  'unknown artist',
-  'unknown',
-  'anonymous',
-  'traditional',
-  'trad',
-  'オムニバス',
-  '群星',
-  'різні виконавці',
-  'разные исполнители',
 ]);
 const DATE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
 const text = (v, n) => (typeof v === 'string' ? v.replace(CONTROL_CHARACTERS, ' ').trim().slice(0, n) : '');

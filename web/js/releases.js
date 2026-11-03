@@ -89,8 +89,12 @@ export function editDistance(a, b) {
 const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
 function spelledAlike(a, b) {
+  const shorter = Math.min(a.length, b.length);
+  const most = Math.max(1, Math.floor(shorter / 10)); // letters that may differ
+  // (Never fewer than their lengths differ by: that's told at once.)
+  if (shorter < 6 || Math.abs(a.length - b.length) > most) return false;
   if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b) || numbersOf(a) !== numbersOf(b)) return false;
-  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
+  return editDistance(a, b) <= most;
 }
 
 // Titles (as norm has them) close enough to be the same: one the other with
