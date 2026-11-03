@@ -10,7 +10,6 @@
 // With MUSICBRAINZ_ADVANCED, the app's MusicBrainz features too (see the
 // end of this file): what MusicBrainz says of the library's artists and
 // albums, by artist, kept on disk for a month.
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { norm } from './missinglist.js';
@@ -18,6 +17,7 @@ import { albumKey, matchGroup, exactAlbum, exactKey, sameTitle, titlesAgree, tra
 import { ServiceError } from './errors.js';
 import { CONTROL_CHARACTERS } from './clean.js';
 import { readCapped } from './plex.js';
+import { readDataFile, writeDataFile } from './datafile.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org
@@ -1048,16 +1048,16 @@ export class MBKept {
     this.map.delete(key);
   }
 
+  // (One that can't be read is kept aside, never written over: see
+  // datafile.js.)
   load() {
-    if (!this.file || !existsSync(this.file)) return;
-    try {
-      const data = JSON.parse(readFileSync(this.file, 'utf8'));
-      const rows = Array.isArray(data?.kept) ? data.kept : [];
+    const read = (data) => {
+      const rows = Array.isArray(data.kept) ? data.kept : [];
       const now = this.now();
       // (Kept before 0.34.0, when a search that found no one at all was
       // taken at its word: those artists found by a search that weren't,
       // and the namesakes of those that had none, are asked again.)
-      const before = !(Number(data?.version) >= 2);
+      const before = !(Number(data.version) >= 2);
       for (const row of rows) {
         if (!Array.isArray(row) || typeof row[0] !== 'string' || row[0].length > 500 || !Number.isFinite(row[2])) continue;
         if (row[2] > now || now - row[2] > MB_ADVANCED_LIMITS.keepMs) continue;
@@ -1067,9 +1067,8 @@ export class MBKept {
       }
       clearTimeout(this.timer);
       this.timer = null;
-    } catch (err) {
-      this.log?.warn(`musicbrainz: couldn't read ${this.file} (${err.message}); starting without what was kept`);
-    }
+    };
+    if (!readDataFile(this.file, read, { log: this.log, what: 'musicbrainz' })) this.file = null;
   }
 
   // Written soon after the first change since the service started, then at
@@ -1089,12 +1088,10 @@ export class MBKept {
 
   write() {
     if (!this.file) return;
-    const tmp = `${this.file}.tmp`;
     // (Tried again no sooner than the next time it would be written.)
     this.wrote = Date.now();
     try {
-      writeFileSync(tmp, JSON.stringify({ version: 2, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) }), { mode: 0o600 });
-      renameSync(tmp, this.file);
+      writeDataFile(this.file, { version: 2, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) });
     } catch (err) {
       this.log?.error(`musicbrainz: couldn't save what was looked up to ${this.file}: ${err.message}`);
     }

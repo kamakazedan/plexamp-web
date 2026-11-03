@@ -19,12 +19,12 @@
 //
 // Kept in a file (missing.json in the data folder), written soon after each
 // change, readable by the service only.
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { MISSING_LIMITS, MISSING_LISTS, applyOp, applyForget, idOf, shortList, shortLists, sourceOf, trimMissing } from './missinglist.js';
 import { ServiceError } from './errors.js';
 import { userId, SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
+import { readDataFile, writeDataFile } from './datafile.js';
 
 export const MISSING_STORE_LIMITS = {
   accounts: 500, // with a list on this player (on any server: one cleared counts while it remembers changes, see kept)
@@ -171,15 +171,15 @@ export class MissingStore {
     return Math.floor(this.now() / 1000);
   }
 
+  // (One that can't be read is kept aside, never written over: see
+  // datafile.js.)
   load() {
-    if (!this.file || !existsSync(this.file)) return;
-    try {
-      const data = JSON.parse(readFileSync(this.file, 'utf8'));
+    const read = (data) => {
       const now = this.seconds();
       // (Written before 0.25.0: again, soon, as it's kept now, without the
       // whole hash of a Spotify playlist's name, or 0.24.0's `shared`.)
-      if ((Number(data?.version) || 1) < MISSING_FILE_VERSION) this.changed();
-      for (const [server, s] of Object.entries(data?.servers && typeof data.servers === 'object' ? data.servers : {})) {
+      if ((Number(data.version) || 1) < MISSING_FILE_VERSION) this.changed();
+      for (const [server, s] of Object.entries(data.servers && typeof data.servers === 'object' ? data.servers : {})) {
         if (!SERVER_ID.test(server) || !s || typeof s !== 'object') continue;
         for (const [key, a] of Object.entries(s.accounts && typeof s.accounts === 'object' ? s.accounts : {})) {
           const uid = userId(key);
@@ -209,9 +209,8 @@ export class MissingStore {
         const kept = this.servers.get(server);
         if (kept) kept.rev = Math.max(Number.isSafeInteger(s.rev) && s.rev > 0 ? s.rev : 1, ...[...kept.accounts.values()].map((a) => a.rev));
       }
-    } catch (err) {
-      this.log?.warn(`missing tracks: couldn't read ${this.file} (${err.message}); starting without them`);
-    }
+    };
+    if (!readDataFile(this.file, read, { log: this.log, what: 'missing tracks' })) this.file = null;
   }
 
   // An account's list for a server (made, with `create`). (A new one's revs
@@ -440,10 +439,8 @@ export class MissingStore {
       }
       servers[server] = { rev: s.rev, accounts };
     }
-    const tmp = `${this.file}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify({ version: MISSING_FILE_VERSION, servers }), { mode: 0o600 });
-      renameSync(tmp, this.file);
+      writeDataFile(this.file, { version: MISSING_FILE_VERSION, servers });
     } catch (err) {
       this.log?.error(`missing tracks: couldn't save them to ${this.file}: ${err.message}`);
     }

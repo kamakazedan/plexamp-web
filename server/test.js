@@ -17,10 +17,11 @@ import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlay
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
 import { applyNote, applyMerge, applyRestore, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
+import { readDataFile } from './datafile.js';
 import { createServer, request as httpRequest } from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync, chownSync, chmodSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, existsSync, statSync, writeFileSync, rmSync, chownSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2515,6 +2516,54 @@ test('missing tracks: kept in a file only the service can read, and read back (w
     assert.equal(again.total, 3);
     writeFileSync(file, '{ not json');
     assert.equal(new MissingStore({ dir }).servers.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the data folder: a file that can\'t be read is kept aside, never written over, and each is written whole', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-data-'));
+  const said = [];
+  const log = { info() {}, debug() {}, warn: (m) => said.push(m), error: (m) => said.push(m) };
+  try {
+    const stores = [
+      ['shares.json', () => new Shares({ dir, log }), (st) => st.create(dan, { server: SRV, playlist: '1', title: 'P', tracks: ['1'] })],
+      ['settings.json', () => new SettingsStore({ dir, log }), (st) => st.update(dan.id, { set: { gapless: true } })],
+      ['missing.json', () => new MissingStore({ dir, log, now: () => AT * 1000 }), (st) => asOwner(st, [noteOp([song('A', 'One')])])],
+      ['musicbrainz.json', () => new MBKept({ dir, log }), (st) => st.set('genres|x', ['Rock'])],
+      ['owners.json', () => new OwnerSignIns({ dir, log }), (st) => st.add(createHash('sha256').update('t').digest('hex'))],
+    ];
+    for (const [name, make, change] of stores) {
+      const file = join(dir, name);
+      // (Cut short by a power cut, say; empty; or not what was written.)
+      for (const broken of ['{"shares":[{"id":', '', '[1, 2]']) {
+        writeFileSync(file, broken);
+        said.length = 0;
+        const st = make();
+        const aside = readdirSync(dir).filter((f) => f.startsWith(`${name}.unreadable-`));
+        assert.equal(aside.length, 1, `${name}: ${readdirSync(dir).join(' ')}`);
+        assert.match(aside[0], /\.unreadable-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\dZ$/);
+        assert.equal(readFileSync(join(dir, aside[0]), 'utf8'), broken);
+        assert.match(said.join('\n'), new RegExp(`couldn't read .*${name}.*kept aside as ${name.replace('.', '\\.')}\\.unreadable-`));
+        // Changed, it's written afresh (whole, then in its place), and the one kept aside stays as it was.
+        change(st);
+        st.flush();
+        assert.ok(JSON.parse(readFileSync(file, 'utf8')), name);
+        assert.equal(statSync(file).mode & 0o777, 0o600);
+        assert.ok(!existsSync(`${file}.tmp`));
+        assert.equal(readFileSync(join(dir, aside[0]), 'utf8'), broken);
+        rmSync(join(dir, aside[0]));
+      }
+    }
+    // One whose reading went wrong partway is kept aside too...
+    writeFileSync(join(dir, 'odd.json'), '{}');
+    assert.equal(readDataFile(join(dir, 'odd.json'), () => { throw new Error('not as expected'); }, { log, what: 'test' }), true);
+    assert.ok(readdirSync(dir).some((f) => f.startsWith('odd.json.unreadable-')));
+    // ...and one that can't even be moved aside (here, its name too long for more) is left as it is, never to be written over.
+    const long = join(dir, `${'x'.repeat(240)}.json`);
+    writeFileSync(long, '{');
+    assert.equal(readDataFile(long, () => {}, { log, what: 'test' }), false);
+    assert.equal(readFileSync(long, 'utf8'), '{');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
