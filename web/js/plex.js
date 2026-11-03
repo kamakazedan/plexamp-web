@@ -280,6 +280,11 @@ export async function switchHomeUser(token, uuid, pin) {
 
 // ---------- server discovery ----------
 
+// The Plex servers an account can use, as plex.tv lists them, each with its
+// own sign-in for it (`token`: the account's own is only ever one of its own
+// servers', never sent to someone else's), and whether plex.tv says this
+// browser is on the server's network (`sameNetwork`: their public addresses
+// are the same; undefined where it doesn't say).
 export async function listServers(token) {
   const params = { includeHttps: 1, includeRelay: 1, includeIPv6: 1, ...plexParams(token) };
   let resources;
@@ -296,7 +301,8 @@ export async function listServers(token) {
       name: r.name,
       owned: !!r.owned,
       sharedBy: r.sourceTitle || null,
-      token: r.accessToken || token,
+      token: r.accessToken || (r.owned ? token : null),
+      sameNetwork: r.publicAddressMatches == null ? undefined : yes(r.publicAddressMatches),
       connections: asArray(r.connections).map((c) => ({
         uri: c.uri,
         local: !!c.local,
@@ -328,24 +334,30 @@ export const routeRank = (kind, prefer = 'best') => (ROUTE_RANKS[prefer] || ROUT
 
 // Every route to a server, tried at once: [{ uri, kind, ok, ms, why }], `why`
 // saying why one can't be used ('http': a plain http address, which a page
-// served over https can't use; 'insecure': a plain http address over the
-// internet, which would carry your sign-in unencrypted; 'timeout';
-// 'network'; 'status' (it answered with an error, `status`); 'other': it
-// leads to another server). Each is asked who it is, and only counts if
-// it's this very server. The question carries the server's sign-in, as the
-// app's requests over that route would: a Plex server only lets a page on
-// another address read its answer when the request carries one, so without
-// it every route but this container's proxy looks dead (as in 0.16.0). It
-// only goes where the route rules above allow: https addresses, whose
-// certificate the browser checks (a plex.direct one is made for this very
-// server), plain http only on the home network, and this player's own
-// address.
+// served over https can't use; 'insecure': a plain http address that would
+// carry your sign-in unencrypted to whoever answers there, where that can't
+// be counted on to be the server: over the internet, or on a home network
+// this browser isn't known to be on; 'timeout'; 'network'; 'status' (it
+// answered with an error, `status`); 'other': it leads to another server).
+// Each is asked who it is, and only counts if it's this very server. The
+// question carries the server's sign-in, as the app's requests over that
+// route would: a Plex server answers who it is to anyone, but only lets a
+// page on another address read the answer when the request carries a
+// sign-in, so without it every route but this container's proxy looks dead
+// (as in 0.16.0). It only goes where the route rules above allow: https
+// addresses, whose certificate the browser checks (a plex.direct one is
+// made for this very server), this player's own address, and plain http
+// only on the server's home network: a server of your own (someone else's
+// home network isn't one you're on, and an address on it can be anyone's
+// on yours), and not while plex.tv says this browser is on another network
+// (see listServers' sameNetwork).
 export async function probeConnections(server, { proxy = null, timeout = 6000 } = {}) {
   const pageIsHttps = location.protocol === 'https:';
+  const onItsNetwork = !!server.owned && server.sameNetwork !== false;
   const candidates = server.connections.map((c) => {
     const kind = c.relay ? 'relay' : c.local ? 'local' : 'remote';
     const http = c.protocol === 'http' || /^http:/i.test(c.uri);
-    return { uri: c.uri, kind, why: http && pageIsHttps ? 'http' : http && kind !== 'local' ? 'insecure' : null };
+    return { uri: c.uri, kind, why: http && pageIsHttps ? 'http' : http && (kind !== 'local' || !onItsNetwork) ? 'insecure' : null };
   });
   if (proxy) candidates.push({ uri: proxy, kind: 'proxy', why: null });
   return Promise.all(
@@ -455,6 +467,10 @@ const chunks = (list, size) => {
 
 // ---------- Plex Media Server ----------
 
+// A server's id as Plex knows it (its machineIdentifier), not an address in
+// its place (one signed in to by address, that didn't say).
+const knownId = (id) => !!id && !/^https?:/.test(String(id));
+
 export class PlexServer {
   constructor({ uri, token, name, id }) {
     this.uri = uri.replace(/\/+$/, '');
@@ -502,6 +518,16 @@ export class PlexServer {
 
   identity(opts) {
     return this.get('/identity', null, opts);
+  }
+
+  // Its identity, where it's this very server that answers at its address
+  // (an address on one network can be another server's on the next): where
+  // another answers, an error (`other`). (A server known only by its
+  // address, as one signed in to by address can be, takes any answer.)
+  async checkIdentity(opts) {
+    const mc = await this.identity(opts);
+    if (knownId(this.id) && mc.machineIdentifier !== this.id) throw Object.assign(new Error('Another Plex server answers at this address.'), { other: true });
+    return mc;
   }
 
   async musicSections(opts) {
@@ -803,7 +829,7 @@ export class PlexServer {
   }
 
   async machineId() {
-    if (this.id && !/^https?:/.test(this.id)) return this.id;
+    if (knownId(this.id)) return this.id;
     const mc = await this.identity();
     this.id = mc.machineIdentifier;
     return this.id;

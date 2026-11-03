@@ -1,7 +1,7 @@
 // Entry point: wires the router, shell, player bar and backdrop together.
 import './debug.js';
-import { app, setSource, on, proxyUri } from './state.js';
-import { PlexServer, listServers, pickConnection, routeRank, ROUTE_KINDS } from './plex.js';
+import { app, setSource, on, proxyUri, serverFor } from './state.js';
+import { listServers, pickConnection, routeRank, ROUTE_KINDS } from './plex.js';
 import { route, startRouter, navigate, goTab, parseHash, refresh, dropCached, overlayDepth } from './router.js';
 import { h, icon } from './ui.js';
 import { player } from './player.js';
@@ -160,10 +160,12 @@ const pickable = (src) => !app.auth?.manual && ROUTE_KINDS.includes(src.kind);
 // stays the route while it answers.
 const pinned = (src) => src.kind === 'proxy' && !src.connections?.length;
 
-// Check the saved server still answers; if not, look for another route to
-// it (e.g. we left the house and the local address stopped working). And
-// when it answers only remotely, whether a better route works now (back
-// home, or this container's proxy).
+// Check the saved server still answers, as itself (another server can be at
+// its address now: see plex.js checkIdentity); if not, look for another
+// route to it (e.g. we left the house and the local address stopped
+// working). And when it answers only remotely, whether a better route works
+// now (back home, or this container's proxy). A route found once another
+// server or library has been chosen meanwhile is let go.
 // (One at a time: asked again while it's asking, it's that one's answer.)
 let ensuring = null;
 function ensureConnection() {
@@ -178,7 +180,7 @@ async function checkConnection() {
   if (!src || !app.server) return;
   let gone = true;
   try {
-    await app.server.identity({ timeout: 5000, cache: 'no-store' });
+    await app.server.checkIdentity({ timeout: 5000, cache: 'no-store' });
     debugLog('connection', `${src.serverName} answers at ${where(src.kind)}`);
     connectionBack();
     if (bannerKind === 'connection') hideBanner();
@@ -194,7 +196,8 @@ async function checkConnection() {
     }
     return;
   } catch (err) {
-    debugLog('connection', `${src.serverName} didn’t answer (${err.status || 'network error'}); looking for another address`, 'warn');
+    const why = err.other ? 'another server answered there' : err.unreadable ? 'what answered wasn’t Plex' : err.status || 'network error';
+    debugLog('connection', `${src.serverName} didn’t answer (${why}); looking for another address`, 'warn');
     if (err.status === 401) {
       showBanner('Plex rejected the saved sign-in.', 'Sign in again', () => navigate('/settings/account'));
       return;
@@ -206,6 +209,7 @@ async function checkConnection() {
   if (pickable(src)) {
     try {
       const conn = await bestRoute(src);
+      if (app.source !== src) return;
       if (conn) {
         debugLog('connection', `switched ${src.serverName} to ${where(conn.kind)}`);
         setSource({ ...src, uri: conn.uri, kind: conn.kind, token: conn.srv.token, connections: conn.srv.connections });
@@ -342,9 +346,7 @@ function updateTitle() {
 }
 
 function boot() {
-  if (app.source && app.auth?.token) {
-    app.server = new PlexServer({ uri: app.source.uri, token: app.source.token, name: app.source.serverName, id: app.source.serverId });
-  }
+  if (app.source && app.auth?.token) app.server = serverFor(app.source);
   applyLook();
   on('settings', applyLook);
   player.addEventListener('track', updateTitle);
@@ -358,6 +360,10 @@ function boot() {
   wireLiveUpdates();
   on('signout', hideBanner);
   on('source', hideBanner);
+  // Kept pages ask the server the way they were built with (its address, and
+  // their pictures' addresses): with another way to it, they're built again
+  // next time (the page on screen is brought up to date where that's chosen).
+  on('source', ({ addressChanged }) => addressChanged && dropCached(() => true));
 
   startRouter({ mainEl: document.getElementById('main'), changed: onRouteChange });
 

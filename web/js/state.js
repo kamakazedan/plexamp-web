@@ -240,14 +240,23 @@ export function setAuth(auth) {
   store.own(auth?.token);
 }
 
+// The Plex server a source is on, to ask it things.
+export const serverFor = (source) => new PlexServer({ uri: source.uri, token: source.token, name: source.serverName, id: source.serverId });
+
 // `serverChanged` tells listeners (the player, the backdrop) whether this is
-// a different server or just a new address/library on the same one.
+// a different server or just a new address/library on the same one;
+// `addressChanged`, whether it's asked anywhere new (another address, or
+// with another sign-in), so nothing kept from before asks the old one.
 export function setSource(source) {
   const prev = app.source;
   app.source = source;
   store.set('source', source);
-  app.server = source ? new PlexServer({ uri: source.uri, token: source.token, name: source.serverName, id: source.serverId }) : null;
-  emit('source', { source, serverChanged: !prev || !source || prev.serverId !== source.serverId });
+  app.server = source ? serverFor(source) : null;
+  emit('source', {
+    source,
+    serverChanged: !prev || !source || prev.serverId !== source.serverId,
+    addressChanged: !prev || !source || prev.uri !== source.uri || prev.token !== source.token,
+  });
 }
 
 // Signing out clears everything kept for you on this device: the sign-in,

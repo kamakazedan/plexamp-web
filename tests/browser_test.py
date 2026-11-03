@@ -334,21 +334,24 @@ with sync_playwright() as pw:
         # Routes to a server: each is asked who it is, and only counts if
         # it's that very server. When its local address doesn't answer, this
         # container's proxy comes next (if it leads there); a plain http
-        # address over the internet isn't used. The question carries the
+        # address over the internet isn't used, nor one on a home network
+        # this browser may not be on (someone else's server's, or your own
+        # while plex.tv says you're elsewhere). The question carries the
         # sign-in: like a real Plex server, the mock only lets a page on
         # another address read who it is when the request has one.
         asked = []
         page.on('request', lambda r: asked.append(r.url) if r.url.startswith(MOCK + '/identity') else None)
         routes = js(page, """() => Promise.all([import('./js/plex.js'), import('./js/state.js')]).then(async ([p, s]) => {
-            const srv = { id: s.app.source.serverId, token: s.app.source.token, connections: [
+            const srv = { id: s.app.source.serverId, token: s.app.source.token, owned: true, connections: [
                 { uri: 'http://127.0.0.1:9', local: true, relay: false, protocol: 'http' },
                 { uri: '%s', local: false, relay: false, protocol: 'http' }] };
             const home = { ...srv, connections: [{ uri: '%s', local: true, relay: false, protocol: 'http' }] };
             const pick = async (x) => (await p.pickConnection(x, { proxy: s.proxyUri() }))?.kind || null;
             const internet = (await p.probeConnections(srv)).find((c) => c.kind === 'remote')?.why;
-            return [await pick(srv), await pick({ ...srv, id: 'another-server' }), await pick(home), await pick({ ...home, id: 'another-server' }), internet]; })""" % (MOCK, MOCK))
-        check('core: routes to a server: its local address first, then the container\'s proxy; never another server, nor plain http over the internet',
-              routes == ['proxy', None, 'local', None, 'insecure'] and asked and all('X-Plex-Token=' in u for u in asked), f'{routes} {asked}')
+            const away = await Promise.all([{ ...home, owned: false }, { ...home, sameNetwork: false }].map(async (x) => (await p.probeConnections(x))[0].why));
+            return [await pick(srv), await pick({ ...srv, id: 'another-server' }), await pick(home), await pick({ ...home, id: 'another-server' }), internet, ...away]; })""" % (MOCK, MOCK))
+        check('core: routes to a server: its local address first, then the container\'s proxy; never another server, nor plain http over the internet or on a network this browser may not be on',
+              routes == ['proxy', None, 'local', None, 'insecure', 'insecure', 'insecure'] and asked and all('X-Plex-Token=' in u for u in asked), f'{routes} {asked}')
         unsigned = js(page, """() => import('./js/state.js').then(({ app }) => Promise.all(['', '?X-Plex-Token=' + encodeURIComponent(app.source.token)]
             .map((q) => fetch('%s/identity' + q, { headers: { Accept: 'application/json' }, credentials: 'omit' })
                 .then((r) => r.json()).then((j) => j.MediaContainer.machineIdentifier, () => 'refused'))))""" % MOCK)
