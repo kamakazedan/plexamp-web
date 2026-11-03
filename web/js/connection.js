@@ -24,18 +24,20 @@ export function connectionBack() {
 // A request (as plex.js throws them) that didn't reach a Plex server that
 // could answer it: no answer at all, or one from in between (the
 // container's /pms/ proxy while your Plex server is down or restarting, a
-// 502 or a 503, say), or a server not working (a 500).
-export const unreachable = (err) => !!err?.network || err?.status >= 500;
+// 502 or a 503, say, or an answer that isn't Plex's, as a Wi-Fi sign-in
+// page's isn't), or from another Plex server at its address (`other`: see
+// plex.js checkIdentity), or a server not working (a 500).
+export const unreachable = (err) => !!err?.network || !!err?.unreadable || !!err?.other || err?.status >= 500;
 
 // Whether the server answers right now: any answer from it, even a
-// refusal, says it's there (but not one from in between: see unreachable).
-// Not while the browser says it's offline (and never from the browser's
-// cache).
+// refusal, says it's there (but not one from in between, nor from another
+// server at its address: see unreachable). Not while the browser says it's
+// offline (and never from the browser's cache).
 export async function serverAnswers() {
   const s = app.server;
   if (navigator.onLine === false || !s) return false;
   try {
-    await s.identity({ timeout: 5000, cache: 'no-store' });
+    await s.checkIdentity({ timeout: 5000, cache: 'no-store' });
     return true;
   } catch (err) {
     return !unreachable(err);

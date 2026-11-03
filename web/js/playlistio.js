@@ -9,11 +9,13 @@
 // Also used for shared playlists (sharing.js): making a playlist hold a list
 // of tracks, with the fewest changes.
 import { app } from './state.js';
-import { norm, sameTitle, mapLimit, findArtist, titleWord } from './ai.js';
+import { mapLimit, findArtist, titleWord } from './ai.js';
+import { norm } from './missinglist.js';
 import { aliasesOf } from './mb.js';
-import { asides } from './releases.js';
+import { sameTitle, asides } from './releases.js';
 import { saveOrder } from './sorting.js';
 import { toCsv } from './missing.js';
+import { fmt } from './ui.js';
 
 export const FORMAT = 'plexamp-web-playlists';
 const VERSION = 1;
@@ -63,22 +65,18 @@ function cleanEntry(t) {
 
 // ---------- reading a playlist from Plex ----------
 
-// Every entry of a playlist, page by page (at most `limit`): { items, more }.
-// `server`: the Plex server it's on (the one in use, unless given).
-export async function playlistEntries(id, { limit = FILE_LIMITS.tracks, signal, server = app.server } = {}) {
-  const out = [];
-  let more = false;
-  for (let start = 0; ; start += 500) {
+// Every track of a playlist, page by page (at most `limit`): { items, more }
+// (see plex.js readPages). `server`: the Plex server it's on (the one in use,
+// unless given). `ids`: each entry's ids and no more (its track's, and its
+// own), for what needs no more than those.
+export async function playlistEntries(id, { limit = FILE_LIMITS.tracks, signal, server = app.server, ids = false } = {}) {
+  try {
+    const { items, more } = await server.readPlaylist(id, { limit, ids, signal });
+    return { items: items.filter((m) => m.type === 'track' || m.type === undefined), more };
+  } catch (err) {
     if (signal?.aborted) throw abortError();
-    const { items, total } = await server.playlistItems(id, { start, size: 500 });
-    out.push(...items.filter((m) => m.type === 'track' || m.type === undefined));
-    if (out.length >= limit) {
-      more = total > limit;
-      break;
-    }
-    if (!items.length || start + items.length >= total) break;
+    throw err;
   }
-  return { items: out.slice(0, limit), more };
 }
 
 const abortError = () => Object.assign(new Error('Stopped.'), { aborted: true });
@@ -335,16 +333,20 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
     return null;
   };
   const rest = entries.map((e, i) => [e, i]).filter(([, i]) => !out[i]);
-  await mapLimit(rest, 4, async ([e, i]) => {
-    if (signal?.aborted) return;
-    try {
-      out[i] = await lookUp(e);
-    } catch {
-      /* not found this time */
-    }
-    done += 1;
-    tick();
-  });
+  await mapLimit(
+    rest,
+    4,
+    async ([e, i]) => {
+      try {
+        out[i] = await lookUp(e);
+      } catch {
+        /* not found this time */
+      }
+      done += 1;
+      tick();
+    },
+    { signal },
+  );
   if (signal?.aborted) throw abortError();
   return out;
 }
@@ -372,7 +374,7 @@ export const entryLine = (e) => `${e.artist ? `${e.artist} — ` : ''}${e.title}
 export function entryWhere(e) {
   const place = [e.album, e.year].filter(Boolean).join(', ');
   const number = e.index !== undefined ? `${e.disc > 1 ? `disc ${e.disc}, ` : ''}track ${e.index}` : '';
-  const length = e.duration ? clock(e.duration / 1000) : '';
+  const length = e.duration ? fmt.clock(e.duration / 1000) : '';
   return [place, number, length].filter(Boolean).join(' · ');
 }
 
@@ -383,16 +385,8 @@ export const entryText = (e) => `${entryLine(e)}${e.album ? ` — ${e.album}${e.
 export const entriesCsv = (list) =>
   toCsv(
     ['Artist', 'Title', 'Album', 'Album artist', 'Year', 'Disc', 'Track', 'Length'],
-    list.map((e) => [e.artist, e.title, e.album, e.albumArtist, e.year ?? '', e.disc ?? '', e.index ?? '', e.duration ? clock(e.duration / 1000) : '']),
+    list.map((e) => [e.artist, e.title, e.album, e.albumArtist, e.year ?? '', e.disc ?? '', e.index ?? '', e.duration ? fmt.clock(e.duration / 1000) : '']),
   );
-
-const clock = (sec) => {
-  const t = Math.round(sec);
-  const h = Math.floor(t / 3600);
-  const m = Math.floor((t % 3600) / 60);
-  const ss = String(t % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
-};
 
 // ---------- changing a playlist from one list of tracks to another ----------
 
@@ -443,7 +437,7 @@ export function without(list, counts) {
 // account can't have), so the next look can tell what's changed since.
 export async function changePlaylist(id, from, to, { server = app.server, signal } = {}) {
   const s = server;
-  const read = async () => (await playlistEntries(id, { limit: 100000, signal, server: s })).items;
+  const read = async () => (await playlistEntries(id, { limit: 100000, signal, server: s, ids: true })).items;
   const { remove, add } = changesBetween(from, to);
   const entries = await read();
   const gone = new Set();

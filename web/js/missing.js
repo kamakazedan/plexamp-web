@@ -21,10 +21,12 @@
 // 'real'). Ones listed without being checked (before there was a
 // MusicBrainz to ask) can be checked from the list (checkMissingOnMusicBrainz).
 import { app } from './state.js';
-import { songInLibrary, artistInLibrary, aiSettings } from './ai.js';
+import { chunks } from './plex.js';
+import { songInLibrary, artistInLibrary, aiSettings, mapLimit } from './ai.js';
 import { MISSING_LIMITS, MISSING_LISTS, keyOf, idOf, listId, sourceOf, applyNote, applyForget, applyClear, applyVerdicts, applyRestore } from './missinglist.js';
 import { loadMissing as load, saveMissing as save, queueMissing, missingOthers, editMissingOthers, ownsServer, syncs } from './missingsync.js';
 import { aliasesOf } from './mb.js';
+import { serviceFetch } from './service.js';
 
 export { MISSING_LIMITS, MISSING_LISTS };
 
@@ -37,7 +39,6 @@ const libraryName = (src = app.source) => (src ? `${src.sectionTitle} (${src.ser
 const KEYS = 1000;
 const ITEMS = 250;
 const ENTRIES = 200;
-const chunks = (list, n) => Array.from({ length: Math.ceil(list.length / n) }, (_, i) => list.slice(i * n, (i + 1) * n));
 
 // Whether what's listed for the server in use is everyone's: the player
 // keeps them for each account, and says this one owns the server. Then
@@ -91,7 +92,13 @@ export function missingList() {
   return [...rows.values()].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
 }
 
-export const missingCount = () => missingList().length;
+// (How many there are, as missingList has them: without putting them in
+// order.)
+export function missingCount() {
+  const ids = new Set(load().filter((m) => sameServer(m)).map(idOf));
+  for (const o of missingOthers(serverOf())) ids.add(idOf(o));
+  return ids.size;
+}
 // This account's own, on the server in use.
 export const myMissingCount = () => load().filter((m) => sameServer(m)).length;
 
@@ -220,23 +227,28 @@ export function clearMissing() {
 // Looks for each of the server in use's again, in the library it was
 // missing from (after adding music), and lets go of what's there now: by
 // its artist's name, and (with the player's MusicBrainz features: see
-// mb.js) the other names MusicBrainz has for them. Resolves to how many
-// were found.
+// mb.js) the other names MusicBrainz has for them. A few at a time
+// (CHECK_AT_ONCE). Resolves to how many were found.
+const CHECK_AT_ONCE = 4;
 export async function checkMissingAgain({ signal, onProgress } = {}) {
   const todo = missingList();
   const found = [];
   let n = 0;
   const here = (m, artist, section) => (m.kind === 'artist' ? artistInLibrary(artist, signal, section) : songInLibrary({ artist, title: m.title }, signal, { section }));
-  for (const m of todo) {
-    if (signal?.aborted) break;
-    const section = m.section || app.source.sectionKey;
-    let there = await here(m, m.artist, section);
-    for (const alias of there || !m.artist ? [] : (await aliasesOf(m.artist)).slice(0, 3)) {
-      if (signal?.aborted || (there = await here(m, alias, section))) break;
-    }
-    if (there) found.push(idOf(m));
-    onProgress?.(++n, todo.length);
-  }
+  await mapLimit(
+    todo,
+    CHECK_AT_ONCE,
+    async (m) => {
+      const section = m.section || app.source.sectionKey;
+      let there = await here(m, m.artist, section);
+      for (const alias of there || !m.artist ? [] : (await aliasesOf(m.artist)).slice(0, 3)) {
+        if (signal?.aborted || (there = await here(m, alias, section))) break;
+      }
+      if (there) found.push(idOf(m));
+      onProgress?.(++n, todo.length);
+    },
+    { signal },
+  );
   forget(found);
   return found.length;
 }
@@ -306,6 +318,7 @@ export const mbOn = () => mbOffered() && aiSettings().musicbrainz !== false;
 export const mbWhere = () => (app.config.musicbrainz === 'own' ? 'the player’s own MusicBrainz server' : 'musicbrainz.org');
 
 const BATCH = 5;
+const CHECK_TIMEOUT = 40000; // how long a batch is waited on, at most
 
 // Which of an AI playlist's suggestions MusicBrainz knows, a few at a time
 // (through the player's service): in the same order, 'real', 'album' (an
@@ -315,37 +328,26 @@ const BATCH = 5;
 // onProgress(done, of).
 export async function checkSuggestions(list, { signal, onProgress } = {}) {
   const verdicts = list.map(() => null);
-  // Who's asking, checked by the player as for its shared AI model (people
-  // who can use its Plex server).
-  const headers = { 'Content-Type': 'application/json', 'X-Plex-Token': app.auth?.token || '' };
-  if (app.source?.token && app.source.token !== app.auth?.token) headers['X-Plex-Server-Token'] = app.source.token;
   for (let i = 0; i < list.length; i += BATCH) {
     if (signal?.aborted) break;
     const batch = list.slice(i, i + BATCH);
     let res;
-    let data = null;
     try {
-      res = await fetch('api/musicbrainz/check', {
+      // (Who's asking, checked by the player as for its shared AI model:
+      // people who can use its Plex server. See service.js.)
+      res = await serviceFetch('api/musicbrainz/check', {
         method: 'POST',
-        headers,
-        body: JSON.stringify({ items: batch.map((m) => ({ kind: m.kind, artist: m.artist, title: m.title })) }),
-        credentials: 'omit',
+        body: { items: batch.map((m) => ({ kind: m.kind, artist: m.artist, title: m.title })) },
         signal,
+        timeout: CHECK_TIMEOUT,
+        server: true,
       });
-      if (res.ok) data = await res.json();
     } catch {
       if (signal?.aborted) break;
       throw Object.assign(new Error('MusicBrainz couldn’t be asked: the player didn’t answer.'), { status: 0, verdicts });
     }
-    if (!res.ok) {
-      let message = '';
-      try {
-        message = (await res.json()).error || '';
-      } catch {
-        /* no explanation */
-      }
-      throw Object.assign(new Error(message || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, verdicts });
-    }
+    const { data } = res;
+    if (!res.ok) throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, verdicts });
     const results = Array.isArray(data?.results) ? data.results : [];
     batch.forEach((_, j) => {
       const v = results[j];

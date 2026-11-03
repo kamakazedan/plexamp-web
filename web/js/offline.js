@@ -11,28 +11,25 @@
 import { app, on, setAuth, setSource, signOut, proxyUri } from './state.js';
 import { PlexServer } from './plex.js';
 import { debugLog } from './debug.js';
+import { serviceFetch } from './service.js';
 
 const WATCH_EVERY = 15000;
+const CALL_TIMEOUT = 20000;
 
 // Whether the player has a /pms/ proxy, whose service says how plex.tv is
 // (and, with OFFLINE_PWD, takes the password).
 export const offlineAsked = () => !!app.config.serverProxy;
 
-async function api(path, { method = 'GET', body, token } = {}) {
-  const res = await fetch(`api/offline${path}`, {
-    method,
-    headers: { Accept: 'application/json', ...(token ? { 'X-Plex-Token': token } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-    credentials: 'omit',
-    cache: 'no-store',
-    signal: AbortSignal.timeout(20000),
-  });
-  let data = {};
+// (`token`: the password's session's, where there's one; no other sign-in
+// goes with these.)
+async function api(path, { method = 'GET', body, token = null, keepalive = false } = {}) {
+  let res;
   try {
-    data = await res.json();
+    res = await serviceFetch(`api/offline${path}`, { method, body, token, keepalive, timeout: CALL_TIMEOUT });
   } catch {
-    /* no body */
+    throw new Error('This player didn’t answer.');
   }
+  const data = res.data || {};
   if (!res.ok) throw Object.assign(new Error(data.error || `The player answered ${res.status}.`), { status: res.status, reason: data.reason || '' });
   return data;
 }
@@ -116,5 +113,5 @@ function stopWatching() {
 on('signing-out', () => {
   stopWatching();
   if (!app.auth?.offline) return;
-  fetch('api/offline/session', { method: 'DELETE', headers: { 'X-Plex-Token': app.auth.token }, credentials: 'omit', keepalive: true }).catch(() => {});
+  api('/session', { method: 'DELETE', token: app.auth.token, keepalive: true }).catch(() => {});
 });

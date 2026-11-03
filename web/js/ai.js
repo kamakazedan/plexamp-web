@@ -15,11 +15,14 @@
 // are built in two passes grounded in the library: the model first picks
 // tags, artists and songs that fit, the app finds matching tracks on the
 // Plex server, and the model then chooses and orders tracks from that list.
-import { app, on } from './state.js';
-import { normTrack } from './plex.js';
+import { app, on, DEFAULT_SETTINGS } from './state.js';
+import { normTrack, asArray } from './plex.js';
 import { debugLog } from './debug.js';
 import { norm, otherScript } from './missinglist.js';
+import { sameTitle, editDistance } from './releases.js';
 import { withoutDisliked } from './picks.js';
+import { shuffleArray } from './ui.js';
+import { serviceTokens, refuseServerToken } from './service.js';
 
 // How long to wait for the model to start answering (loading it, and
 // reading a long prompt, can take minutes) is a setting: Settings › AI ›
@@ -39,11 +42,12 @@ export class AIError extends Error {
 
 // ---------- configuration ----------
 
-// missing: keep a list of the songs and artists AI playlists suggest that
-// aren't in the library (Settings › AI › Show missing tracks); musicbrainz:
-// check them on MusicBrainz first, where the player has one to ask (see
-// missing.js). wait: minutes to wait for the model to start answering.
-const DEFAULTS = { mode: 'auto', url: '', apiKey: '', model: '', notes: '', missing: false, musicbrainz: true, wait: 5 };
+// As state.js has them to begin with, and: missing: keep a list of the songs
+// and artists AI playlists suggest that aren't in the library (Settings ›
+// AI › Show missing tracks); musicbrainz: check them on MusicBrainz first,
+// where the player has one to ask (see missing.js). wait: minutes to wait
+// for the model to start answering.
+const DEFAULTS = { ...DEFAULT_SETTINGS.ai, missing: false, musicbrainz: true, wait: 5 };
 
 export const aiSettings = () => ({ ...DEFAULTS, ...(app.settings.ai || {}) });
 export const WAIT_CHOICES = [2, 5, 10, 15, 30];
@@ -72,10 +76,9 @@ export function aiTarget(settings = aiSettings()) {
   const shared = sharedAI();
   if (!shared) return null;
   // The container checks these against Plex before passing a request on,
-  // and uses its own model whatever a request names.
-  const headers = {};
-  if (app.auth?.token) headers['X-Plex-Token'] = app.auth.token;
-  if (app.source?.token && app.source.token !== app.auth?.token && !skipServerToken) headers['X-Plex-Server-Token'] = app.source.token;
+  // and uses its own model whatever a request names (which sign-ins go:
+  // see service.js).
+  const headers = serviceTokens({ server: true });
   const base = new URL(shared.proxy, location.href).toString().replace(/\/+$/, '');
   return { kind: 'shared', base, model: sharedName, headers };
 }
@@ -139,18 +142,17 @@ export async function sharedStatus() {
   return { model: st?.model || null, ready: !!st?.ready, problem: st?.problem || null, loaded: typeof st?.loaded === 'boolean' ? st.loaded : null, loading: !!st?.loading };
 }
 
-// The container checks the token for the Plex server it fronts. If this app
-// is using a different server, that token won't work there, so after one
-// refusal only the account token is sent.
-let skipServerToken = false;
-
+// The container checks the server's sign-in against the Plex server it
+// fronts. If this app is using a different server, that one won't work
+// there, so after one refusal only the account's is sent (till another
+// server's chosen: see service.js).
 async function send(target, path, init) {
   const where = target.kind === 'shared' ? 'the shared model' : 'your own Ollama';
   let res;
   try {
     res = await fetch(`${target.base}${path}`, init);
     if (res.status === 401 && target.kind === 'shared' && init.headers['X-Plex-Server-Token']) {
-      skipServerToken = true;
+      refuseServerToken();
       const headers = { ...init.headers };
       delete headers['X-Plex-Server-Token'];
       res = await fetch(`${target.base}${path}`, { ...init, headers });
@@ -422,6 +424,9 @@ async function streamChat(target, body, signal, onProgress, onLoading) {
     clearTimeout(total);
     signal?.removeEventListener('abort', relay);
     setLoading(false);
+    // (Nothing more of an answer that stopped part-way, an error in it, say,
+    // is downloaded: once it's all in, this does nothing.)
+    ctrl.abort();
   }
   return { content, model: final.model || target.model, seconds: (performance.now() - started) / 1000 };
 }
@@ -494,7 +499,6 @@ export function describeAIError(err, target = aiTarget()) {
 
 // ---------- helpers ----------
 
-const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 const clean = (v, max = 120) =>
   String(v || '')
     .replace(/^["'“”\s]+|["'“”\s]+$/g, '')
@@ -510,11 +514,13 @@ export function describeTrack(t) {
   return `${t.artist || 'Unknown artist'} — ${t.title}${extra ? ` (${extra})` : ''}`;
 }
 
-export async function mapLimit(items, limit, fn) {
+// fn(item, i) for each item, `limit` at a time: the results, in order.
+// Once `signal` says stop, no more are started.
+export async function mapLimit(items, limit, fn, { signal } = {}) {
   const out = new Array(items.length);
   let next = 0;
   const worker = async () => {
-    while (next < items.length) {
+    while (next < items.length && !signal?.aborted) {
       const i = next++;
       out[i] = await fn(items[i], i);
     }
@@ -523,39 +529,34 @@ export async function mapLimit(items, limit, fn) {
   return out;
 }
 
-function shuffled(list) {
-  const a = list.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
 // ---------- library lookups ----------
 
-const vocabCache = new Map();
-
-async function libraryVocabulary() {
+// The library's tags, as the model chooses from them: kept with what else
+// is kept of the server (see plex.js memo), so they're read again once the
+// library changes (live.js), and at least every VOCAB_TTL.
+const VOCAB_TTL = 30 * 60000;
+function libraryVocabulary() {
   const s = app.server;
   const sec = app.source.sectionKey;
-  const key = `${s.uri}|${sec}`;
-  if (vocabCache.has(key)) return vocabCache.get(key);
   const shape = (list, cap) =>
     list
       .slice()
       .sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0))
       .slice(0, cap)
       .map((t) => ({ id: String(t.key), title: String(t.title) }));
-  const [genres, styles, moods, decades] = await Promise.all(['genre', 'style', 'mood', 'decade'].map((f) => s.tags(sec, f, 9).catch(() => [])));
-  const vocab = { genres: shape(genres, 150), styles: shape(styles, 300), moods: shape(moods, 250), decades: shape(decades, 20) };
-  vocabCache.set(key, vocab);
-  return vocab;
+  return s.memo(
+    `vocab:${sec}`,
+    async () => {
+      const [genres, styles, moods, decades] = await Promise.all(['genre', 'style', 'mood', 'decade'].map((f) => s.tags(sec, f, 9).catch(() => [])));
+      return { genres: shape(genres, 150), styles: shape(styles, 300), moods: shape(moods, 250), decades: shape(decades, 20) };
+    },
+    VOCAB_TTL,
+  );
 }
 
 function matchTags(names, list) {
   const out = [];
-  for (const name of asList(names)) {
+  for (const name of asArray(names)) {
     const n = norm(name).replace(/s$/, '');
     const hit = list.find((t) => norm(t.title).replace(/s$/, '') === n) || list.find((t) => norm(t.title) === n || norm(t.id) === n);
     if (hit && !out.includes(hit)) out.push(hit);
@@ -584,8 +585,8 @@ async function tracksMatching(filters, n, signal) {
   }
   const albumFilters = Object.fromEntries(Object.entries(filters).map(([k, v]) => [k.replace(/^album\./, ''), v]));
   const { items: albums } = await s.list(sec, 9, { sort: 'random', size: Math.max(4, Math.ceil(n / 5)), filters: albumFilters, signal });
-  const lists = await mapLimit(albums, 4, (a) => s.children(a.ratingKey).catch(() => []));
-  return shuffled(lists.flat().filter((m) => m.type === 'track')).slice(0, n);
+  const lists = await mapLimit(albums, 4, (a) => s.children(a.ratingKey).catch(() => []), { signal });
+  return shuffleArray(lists.flat().filter((m) => m.type === 'track')).slice(0, n);
 }
 
 export async function findArtist(name, signal, section = app.source.sectionKey) {
@@ -615,22 +616,6 @@ async function lookSong(song, signal, section = app.source.sectionKey) {
 
 async function findSong(song, signal) {
   return (await lookSong(song, signal)).track || null;
-}
-
-// Titles (normalised, see norm) that are the same song, near enough: "Out
-// of Space" and "Out Of Space (Remastered)", or a letter or two different
-// (not in Chinese, Japanese or Korean, where one character can be another
-// word, nor a number: Symphony No. 5 isn't No. 6).
-const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
-export function sameTitle(a, b) {
-  if (!a || !b) return false;
-  if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
-  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
-  // (Nor are titles with other numbers, in any script's digits: Symphony
-  // No. 5 isn't No. 6. No. 02 is No. 2.)
-  if (numbersOf(a) !== numbersOf(b)) return false;
-  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
 }
 
 // The word of a title it's looked for by among an artist's tracks (Plex's
@@ -839,7 +824,7 @@ export function focusOf(plan, prompt) {
       .split(' ')
       .filter((w) => w.length >= 4)
       .some((w) => words.some((x) => Math.abs(x.length - w.length) <= 2 && editDistance(w, x) <= (w.length > 6 ? 2 : 1)));
-  const tidy = (list) => asList(list).map((n) => clean(n, 100)).filter(Boolean);
+  const tidy = (list) => asArray(list).map((n) => clean(n, 100)).filter(Boolean);
   let artists = tidy(plan.focus_artists).filter((a) => named(a) || near(a));
   if (!artists.length) artists = tidy(plan.artists).filter(named);
   artists = [...new Map(artists.map((a) => [norm(a), a])).values()].slice(0, 6);
@@ -850,16 +835,6 @@ export function focusOf(plan, prompt) {
   if (scope === 'only' && like) scope = 'mostly';
   if (scope === 'any') scope = just && !like ? 'only' : 'mostly';
   return { artists, scope };
-}
-
-function editDistance(a, b) {
-  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    prev = cur;
-  }
-  return prev[b.length];
 }
 
 // Tracks by an artist, best known first (Plex's popularity, from Last.fm),
@@ -909,7 +884,7 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt, trackM
   // The artists the request is about: all their tracks are candidates.
   const focused = [];
   if (focus.artists.length) {
-    const looked = await mapLimit(focus.artists, 3, (name) => findArtist(name, signal));
+    const looked = await mapLimit(focus.artists, 3, (name) => findArtist(name, signal), { signal });
     focus.artists.forEach((name, i) => (looked[i] ? seen.artists.push(name) : lacking({ kind: 'artist', artist: name })));
     const found = looked.filter(Boolean);
     const done = new Set();
@@ -934,15 +909,20 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt, trackM
       if (trackMissing) {
         const theirs = focused.flat().map((c) => norm(c.track.title));
         const byFocus = (song) => !norm(song?.artist) || focus.artists.some((a) => norm(a) === norm(song.artist));
-        await mapLimit(asList(plan.tracks).slice(0, 12).filter(byFocus), 4, async (song) => {
-          const title = clean(song?.title, 120);
-          if (!title) return;
-          // (songInLibrary counts one of their albums as there: it isn't a
-          // missing song.)
-          const there = theirs.some((t) => sameTitle(t, norm(title))) || (await songInLibrary({ artist: song.artist || focus.artists[0], title }, signal));
-          if (there) seen.songs.push({ artist: song.artist || focus.artists[0], title });
-          else lacking({ kind: 'track', artist: clean(song.artist, 100) || focus.artists[0], title });
-        });
+        await mapLimit(
+          asArray(plan.tracks).slice(0, 12).filter(byFocus),
+          4,
+          async (song) => {
+            const title = clean(song?.title, 120);
+            if (!title) return;
+            // (songInLibrary counts one of their albums as there: it isn't a
+            // missing song.)
+            const there = theirs.some((t) => sameTitle(t, norm(title))) || (await songInLibrary({ artist: song.artist || focus.artists[0], title }, signal));
+            if (there) seen.songs.push({ artist: song.artist || focus.artists[0], title });
+            else lacking({ kind: 'track', artist: clean(song.artist, 100) || focus.artists[0], title });
+          },
+          { signal },
+        );
         if (signal?.aborted) throw new AIError('aborted', 'Stopped.');
       }
       // Nothing but them: their tracks, taking turns between artists.
@@ -963,43 +943,58 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt, trackM
   }
 
   const [byTag, byArtist, bySong] = await Promise.all([
-    mapLimit(queries, 3, async (q) => {
-      let items = await tracksMatching({ ...q.filters, ...era }, per, signal).catch(() => []);
-      if (!items.length && decades.length && Object.keys(q.filters).length) items = await tracksMatching(q.filters, per, signal).catch(() => []);
-      return items.map((m) => cand(m, 'tag', q.tags.map((t) => t.title).join(', ')));
-    }),
-    mapLimit(asList(plan.artists).slice(0, 12), 4, async (name) => {
-      if (focus.artists.some((f) => norm(f) === norm(name))) return [];
-      const artist = await findArtist(name, signal);
-      if (!artist) {
-        if (clean(name, 100)) lacking({ kind: 'artist', artist: clean(name, 100) });
+    mapLimit(
+      queries,
+      3,
+      async (q) => {
+        let items = await tracksMatching({ ...q.filters, ...era }, per, signal).catch(() => []);
+        if (!items.length && decades.length && Object.keys(q.filters).length) items = await tracksMatching(q.filters, per, signal).catch(() => []);
+        return items.map((m) => cand(m, 'tag', q.tags.map((t) => t.title).join(', ')));
+      },
+      { signal },
+    ),
+    mapLimit(
+      asArray(plan.artists).slice(0, 12),
+      4,
+      async (name) => {
+        if (focus.artists.some((f) => norm(f) === norm(name))) return [];
+        const artist = await findArtist(name, signal);
+        if (!artist) {
+          if (clean(name, 100)) lacking({ kind: 'artist', artist: clean(name, 100) });
+          return [];
+        }
+        seen.artists.push(name);
+        if (matchedArtists.includes(artist.title)) return [];
+        matchedArtists.push(artist.title);
+        let items = await s.popularTracks(sec, artist.ratingKey, 8).catch(() => []);
+        if (items.length < 4) {
+          const more = await s.list(sec, 10, { sort: 'random', size: 8, filters: { 'artist.id': artist.ratingKey }, signal }).catch(() => ({ items: [] }));
+          items = items.concat(more.items);
+        }
+        return items.map((m) => cand(m, 'artist'));
+      },
+      { signal },
+    ),
+    mapLimit(
+      asArray(plan.tracks).slice(0, 12),
+      4,
+      async (song) => {
+        const { track: m, album } = await lookSong(song, signal);
+        if (m) {
+          seen.songs.push(song);
+          return [cand(m, 'song', 'a close match for the request')];
+        }
+        // An album, named as if it were a song: not one to play, nor missing.
+        if (album) return [];
+        const title = clean(song?.title, 120);
+        if (trackMissing && title) {
+          if (await songInLibrary(song, signal, { searched: true })) seen.songs.push(song);
+          else lacking({ kind: 'track', artist: clean(song?.artist, 100), title });
+        }
         return [];
-      }
-      seen.artists.push(name);
-      if (matchedArtists.includes(artist.title)) return [];
-      matchedArtists.push(artist.title);
-      let items = await s.popularTracks(sec, artist.ratingKey, 8).catch(() => []);
-      if (items.length < 4) {
-        const more = await s.list(sec, 10, { sort: 'random', size: 8, filters: { 'artist.id': artist.ratingKey }, signal }).catch(() => ({ items: [] }));
-        items = items.concat(more.items);
-      }
-      return items.map((m) => cand(m, 'artist'));
-    }),
-    mapLimit(asList(plan.tracks).slice(0, 12), 4, async (song) => {
-      const { track: m, album } = await lookSong(song, signal);
-      if (m) {
-        seen.songs.push(song);
-        return [cand(m, 'song', 'a close match for the request')];
-      }
-      // An album, named as if it were a song: not one to play, nor missing.
-      if (album) return [];
-      const title = clean(song?.title, 120);
-      if (trackMissing && title) {
-        if (await songInLibrary(song, signal, { searched: true })) seen.songs.push(song);
-        else lacking({ kind: 'track', artist: clean(song?.artist, 100), title });
-      }
-      return [];
-    }),
+      },
+      { signal },
+    ),
   ]);
   if (signal?.aborted) throw new AIError('aborted', 'Stopped.');
 
@@ -1019,7 +1014,7 @@ async function findCandidates(plan, vocab, length, signal, focus, prompt, trackM
   // Songs and artists the model suggested, within the era asked for.
   bySong.flat().filter((c) => fitsEra(c.track)).forEach(add);
   // Take turns between artists and tag searches so no single source dominates.
-  const lanes = [...byArtist.map((l) => l.filter((c) => fitsEra(c.track))), ...byTag].filter((l) => l.length).map(shuffled);
+  const lanes = [...byArtist.map((l) => l.filter((c) => fitsEra(c.track))), ...byTag].filter((l) => l.length).map(shuffleArray);
   for (let added = true; added && pool.length < cap; ) {
     added = false;
     for (const lane of lanes) {
@@ -1099,7 +1094,7 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep, on
       });
       const reply = parseReply(ordered.content);
       const used = new Set();
-      for (const n of asList(reply.tracks)) {
+      for (const n of asArray(reply.tracks)) {
         const c = pool[Number(n) - 1];
         if (c && !used.has(c)) {
           used.add(c);
@@ -1113,7 +1108,7 @@ export async function generatePlaylist({ prompt, length = 25, signal, onStep, on
       chosen = []; // keep going without the ordering pass
     }
   }
-  if (!chosen.length) chosen = [...pool.filter((c) => c.source === 'song'), ...shuffled(pool.filter((c) => c.source !== 'song'))];
+  if (!chosen.length) chosen = [...pool.filter((c) => c.source === 'song'), ...shuffleArray(pool.filter((c) => c.source !== 'song'))];
   chosen = spreadAlbums(topUp(chosen, pool, Math.min(length, pool.length)).slice(0, length), pool, Math.min(length, pool.length));
 
   return {

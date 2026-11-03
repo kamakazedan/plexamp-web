@@ -13,6 +13,7 @@ import { live } from './live.js';
 import { parseHash, refresh, dropCached } from './router.js';
 import { toast, icon } from './ui.js';
 import { playlistEntries, changePlaylist } from './playlistio.js';
+import { serviceFetch } from './service.js';
 
 const API = 'api/shares';
 // While the app is open: a quick look for others' changes every minute, and
@@ -41,23 +42,11 @@ const keyNow = () => (sharingOn() ? `${app.source.serverId}|${app.auth.username 
 async function api(path = '', { method = 'GET', body, signal, token = app.auth?.token } = {}) {
   let res;
   try {
-    res = await fetch(`${API}${path}`, {
-      method,
-      cache: 'no-store',
-      credentials: 'omit',
-      headers: { Accept: 'application/json', 'X-Plex-Token': token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-      signal,
-    });
+    res = await serviceFetch(`${API}${path}`, { method, body, signal, token: token || null });
   } catch {
     throw Object.assign(new Error('Can’t reach this player’s server.'), { network: true, aborted: !!signal?.aborted });
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* empty or not JSON */
-  }
+  const { data } = res;
   if (!res.ok) {
     const fallback = res.status === 404 && !data ? 'Shared playlists aren’t available on this player.' : `Something went wrong (${res.status}).`;
     throw Object.assign(new Error(data?.error || fallback), { status: res.status });
@@ -190,13 +179,17 @@ async function syncOne(share, { force }) {
   const key = keyNow();
   const token = app.auth.token;
   const call = (path, opts) => api(path, { ...opts, token });
+  // Deleted only where Plex says so (404): an answer that doesn't say what
+  // it is, or says nothing of it, isn't taken for that (it would stop the
+  // share), and it's tried again next time.
   let pl = null;
   try {
     pl = await s.playlist(share.copy);
   } catch (err) {
     if (err?.status !== 404) throw err;
+    return keyNow() === key ? copyGone(share, token, key) : { changed: false };
   }
-  if (!pl) return keyNow() === key ? copyGone(share, token, key) : { changed: false };
+  if (!pl) throw new Error('Plex didn’t say what’s in your copy.');
   const seen = remembered(share.id);
   if (!force && seen && seen.v === share.version && seen.u === (pl.updatedAt || 0) && seen.n === (pl.leafCount || 0) && seen.t === pl.title) {
     return { changed: false };
@@ -292,7 +285,7 @@ async function unseenOf(ids, server) {
 
 // The tracks in a playlist (ids, in order), on `server`.
 async function tracksIn(id, server = app.server) {
-  return (await playlistEntries(id, { limit: 100000, server })).items.map((m) => String(m.ratingKey));
+  return (await playlistEntries(id, { limit: 100000, server, ids: true })).items.map((m) => String(m.ratingKey));
 }
 
 // Your copy was deleted (here or in another app): one shared with you

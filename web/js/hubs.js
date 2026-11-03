@@ -7,7 +7,8 @@
 // of the artist's albums is, by the hub it's in, the albums of theirs the
 // hubs have, and the albums of others' that the artist appears on.
 
-import { plexKind, norm } from './releases.js';
+import { plexKind } from './releases.js';
+import { norm } from './missinglist.js';
 
 // What a hub's identifier ("artist.albums.single"), context or title
 // ("Singles & EPs") says it holds, word by word: the first of these.

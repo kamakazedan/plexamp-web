@@ -11,6 +11,7 @@
 // Spotify.
 import { app } from './state.js';
 import { FILE_LIMITS } from './playlistio.js';
+import { serviceFetch } from './service.js';
 
 // The link (config.js: spotify), and the download's files (spotifyFiles).
 export const spotifyOffered = () => !!app.config?.spotify;
@@ -40,24 +41,20 @@ export function spotifyLinkKind(text) {
 
 // The playlist, as the service read it: { id, name, owner, tracks: [{
 // title, artist, artists?, album?, duration? }], capped }. Throws with the
-// service's own words for what went wrong.
+// service's own words for what went wrong. (Not waited on for longer than
+// READ_TIMEOUT: the service may have a short link to follow first.)
+const READ_TIMEOUT = 60000;
 export async function readSpotifyPlaylist(link, { signal } = {}) {
-  // Who's asking, checked by the player as for its shared AI model.
-  const headers = { 'Content-Type': 'application/json', 'X-Plex-Token': app.auth?.token || '' };
-  if (app.source?.token && app.source.token !== app.auth?.token) headers['X-Plex-Server-Token'] = app.source.token;
   let res;
   try {
-    res = await fetch('api/spotify/playlist', { method: 'POST', headers, body: JSON.stringify({ link: String(link).trim() }), credentials: 'omit', signal });
+    // (Who's asking, checked by the player as for its shared AI model: see
+    // service.js.)
+    res = await serviceFetch('api/spotify/playlist', { method: 'POST', body: { link: String(link).trim() }, signal, timeout: READ_TIMEOUT, server: true });
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new Error('This player didn’t answer. Check it’s still running, and try again.');
   }
-  let data = {};
-  try {
-    data = await res.json();
-  } catch {
-    /* no explanation */
-  }
+  const data = res.data || {};
   if (!res.ok) throw Object.assign(new Error(data.error || `The player couldn’t read it (HTTP ${res.status}).`), { status: res.status });
   const pl = data.playlist;
   if (!pl || !Array.isArray(pl.tracks)) throw new Error('The player’s answer wasn’t a playlist.');
