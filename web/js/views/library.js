@@ -564,23 +564,3 @@ export async function tagsView({ el, params, query, onDispose }) {
   });
   if (!list.children.length && !disposed) list.replaceWith(emptyState('Nothing here.'));
 }
-
-// Generic paged listing for any server path (e.g. a genre's albums).
-export async function itemsView({ el, query, onDispose }) {
-  const title = query.title || 'Browse';
-  const countEl = h('div.list-count');
-  el.append(backHeader(title, { fallback: '/search' }), countEl);
-  const r = renderer(query.type, title);
-  const container = r.wrap();
-  el.append(container);
-  pagedList(container, {
-    pageSize: r.pageSize,
-    fetchPage: (start, size) => app.server.byPath(query.path, { start, size }),
-    render: r.render,
-    onTotal: (n) => {
-      countEl.textContent = fmt.count(n, r.unit[0], r.unit[1]);
-      container.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
-    },
-    onDispose,
-  });
-}

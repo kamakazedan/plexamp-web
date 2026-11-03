@@ -6,7 +6,10 @@ import { ultraBlurOf, cleanColors } from './plex.js';
 import { unreachable } from './connection.js';
 
 const DEFAULT = { topLeft: '1c2233', topRight: '2b3752', bottomRight: '1e2638', bottomLeft: '131722' };
+// Albums' colours, the most recently used last: COLORS_KEPT of them at most
+// (a long session's Guest DJ or radio meets album after album).
 const albumColors = new Map();
+const COLORS_KEPT = 500;
 let layer = 0;
 let lastKey = null;
 
@@ -97,7 +100,12 @@ function apply(colors, artPath) {
 // from the album name so every album still gets its own tint.
 async function colorsFor(track) {
   const key = track.albumId || track.thumb || track.id;
-  if (albumColors.has(key)) return albumColors.get(key);
+  if (albumColors.has(key)) {
+    const kept = albumColors.get(key);
+    albumColors.delete(key);
+    albumColors.set(key, kept);
+    return kept;
+  }
   const s = app.server;
   let colors = null;
   let offline = false;
@@ -115,7 +123,12 @@ async function colorsFor(track) {
   }
   colors = cleanColors(colors);
   if (!colors) colors = hashColors(track.album || track.title);
-  if (!offline) albumColors.set(key, colors); // try the server again next time if it was unreachable
+  // (Not kept if the server was unreachable: it's asked again next time.)
+  if (!offline) {
+    albumColors.delete(key);
+    albumColors.set(key, colors);
+    while (albumColors.size > COLORS_KEPT) albumColors.delete(albumColors.keys().next().value);
+  }
   return colors;
 }
 

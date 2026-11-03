@@ -444,11 +444,6 @@ export function ultraBlurOf(item) {
   return cleanColors(asArray(item?.UltraBlurColors)[0]);
 }
 
-// Listings that may be opened from a link (see byPath).
-export function isListingPath(path) {
-  return typeof path === 'string' && /^\/library\/sections\/\d+\/all(\?[^#]*)?$/.test(path) && !path.includes('..');
-}
-
 export const TAG_FIELDS = new Set(['genre', 'style', 'mood', 'decade', 'year', 'studio', 'country']);
 const MEMO_LIMIT = 300;
 const TYPES_LIMIT = 5000; // albums' release types kept (see albumTypes)
@@ -609,15 +604,6 @@ export class PlexServer {
       'X-Plex-Container-Size': 0,
     });
     return mc.totalSize ?? mc.size ?? 0;
-  }
-
-  // Page through a library listing the server handed us (e.g. a genre's
-  // fastKey). These paths can arrive in a link, so only library listings
-  // are accepted: a crafted link can't send the server anywhere else.
-  async byPath(path, { start = 0, size = 60 } = {}) {
-    if (!isListingPath(path)) throw Object.assign(new Error('That isn’t a library listing.'), { status: 400 });
-    const mc = await this.get(path, { 'X-Plex-Container-Start': start, 'X-Plex-Container-Size': size });
-    return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0 };
   }
 
   // (`params`: { includeGuids: 1 } for the other services' ids for it, say:
@@ -799,21 +785,26 @@ export class PlexServer {
   }
 
   // Several items' details, kept as memo() keeps them (under `kind:id`, for
-  // `ttl`): those not asked about lately in one request. In the same order
-  // as `ids`, null for any Plex didn't give.
+  // `ttl`, the most recently used last): those not asked about lately in
+  // one request. In the same order as `ids`, null for any Plex didn't give.
+  // (What's to be given back is held here, so keeping no more than
+  // MEMO_LIMIT can't take any of it away first.)
   async manyKept(kind, ids, ttl) {
     const want = ids.map(String);
-    const fresh = (id) => {
-      const hit = this.cache.get(`${kind}:${id}`);
-      return hit && Date.now() - hit.at < ttl;
+    const found = new Map(); // id -> its details (a promise of them, as memo keeps them)
+    const keep = (id, entry) => {
+      this.cache.delete(`${kind}:${id}`);
+      this.cache.set(`${kind}:${id}`, entry);
+      found.set(id, entry.value);
     };
-    const ask = [...new Set(want.filter((id) => !fresh(id)))];
-    if (ask.length) {
-      const got = await this.metadataMany(ask);
-      for (const m of got) this.cache.set(`${kind}:${m.ratingKey}`, { at: Date.now(), value: Promise.resolve(m) });
-      while (this.cache.size > MEMO_LIMIT) this.cache.delete(this.cache.keys().next().value);
+    for (const id of new Set(want)) {
+      const hit = this.cache.get(`${kind}:${id}`);
+      if (hit && Date.now() - hit.at < ttl) keep(id, hit);
     }
-    return Promise.all(want.map((id) => (fresh(id) ? this.cache.get(`${kind}:${id}`).value : Promise.resolve(null)).catch(() => null)));
+    const ask = [...new Set(want)].filter((id) => !found.has(id));
+    if (ask.length) for (const m of await this.metadataMany(ask)) keep(String(m.ratingKey), { at: Date.now(), value: Promise.resolve(m) });
+    while (this.cache.size > MEMO_LIMIT) this.cache.delete(this.cache.keys().next().value);
+    return Promise.all(want.map((id) => (found.get(id) || Promise.resolve(null)).catch(() => null)));
   }
 
   // Tracks' full details (their streams' formats included), as trackDetail
@@ -927,21 +918,23 @@ export class PlexServer {
   // A picture (its bytes) becomes the item's.
   async uploadPoster(id, bytes) {
     await this.send('POST', `/library/metadata/${id}/posters`, {}, { body: bytes, discard: true, timeout: 90000 });
-    this.forgetPictures(id);
+    this.forgetPictures();
   }
 
   // One the item had before (from posters()).
   async selectPoster(id, poster) {
     await this.send('PUT', `/library/metadata/${id}/poster`, { url: poster }, { discard: true });
-    this.forgetPictures(id);
+    this.forgetPictures();
   }
 
   // Back to the picture Plex makes (for a playlist, its tracks' covers).
   async removePoster(id) {
     await this.send('DELETE', `/library/metadata/${id}/thumb`, {}, { discard: true });
-    this.forgetPictures(id);
+    this.forgetPictures();
   }
 
+  // (The lists of playlists and collections, with their pictures: nothing's
+  // kept of one on its own.)
   forgetPictures() {
     this.forgetPlaylists();
     for (const k of this.cache.keys()) if (k.startsWith('collections:')) this.cache.delete(k);
@@ -966,13 +959,16 @@ export class PlexServer {
 
   // Playlist entries have their own ids (playlistItemID): the same track can
   // be in a playlist twice. Removing an entry leaves the track in the library.
+  // (Never without its id: see idsOnly.)
   async removeFromPlaylist(id, itemId) {
+    idsOnly(id, itemId);
     await this.send('DELETE', `/playlists/${id}/items/${itemId}`);
     this.forgetPlaylists();
   }
 
   // Moves an entry to just after another one, or to the top without one.
   async movePlaylistItem(id, itemId, afterId = null) {
+    idsOnly(id, itemId, ...(afterId ? [afterId] : []));
     await this.send('PUT', `/playlists/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {}, { discard: true });
     this.forgetPlaylists();
   }
@@ -989,6 +985,7 @@ export class PlexServer {
   }
 
   async deletePlaylist(id) {
+    idsOnly(id);
     await this.send('DELETE', `/playlists/${id}`);
     this.forgetPlaylists();
   }
@@ -1009,12 +1006,14 @@ export class PlexServer {
   }
 
   async removeFromCollection(id, itemId) {
+    idsOnly(id, itemId);
     await this.send('DELETE', `/library/collections/${id}/items/${itemId}`);
     this.forgetCollections();
   }
 
   // Items keep a custom order only once the collection is sorted "custom".
   async moveCollectionItem(id, itemId, afterId = null) {
+    idsOnly(id, itemId, ...(afterId ? [afterId] : []));
     await this.send('PUT', `/library/collections/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {}, { discard: true });
   }
 
@@ -1028,6 +1027,7 @@ export class PlexServer {
   }
 
   async deleteCollection(id) {
+    idsOnly(id);
     await this.send('DELETE', `/library/collections/${id}`);
     this.forgetCollections();
   }
@@ -1143,7 +1143,7 @@ export class PlexServer {
       'X-Plex-Session-Identifier': playback || undefined,
     });
     // (Not waited on for ever: see outbox.js.)
-    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true, signal: AbortSignal.timeout(15000) }).then(
+    return fetch(url, { headers: { Accept: 'application/json' }, credentials: 'omit', keepalive: true, signal: AbortSignal.timeout(15000) }).then(
       (res) => res.status,
       () => 0,
     );

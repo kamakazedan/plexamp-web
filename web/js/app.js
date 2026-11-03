@@ -11,7 +11,7 @@ import { syncCurrent } from './components.js';
 import { pageShown, isSelecting } from './selection.js';
 import { forgetFormats } from './formats.js';
 import { homeView, recentView } from './views/home.js';
-import { browseView, playlistsView, tagsView, itemsView } from './views/library.js';
+import { browseView, playlistsView, tagsView } from './views/library.js';
 import { albumView, artistView, similarArtistsView, playlistView, collectionView } from './views/detail.js';
 import { searchView, topView, sonicPathView } from './views/search.js';
 import { aiPlaylistView } from './views/aiplaylist.js';
@@ -58,7 +58,6 @@ route('/library', () => navigate('/search', { replace: true }), { tab: 'search' 
 route('/library/playlists', () => navigate('/playlists', { replace: true }), { tab: 'playlists' });
 route('/browse/:kind', needsSource(browseView), { tab: 'search' });
 route('/tags/:field/:type', needsSource(tagsView), { tab: 'search' });
-route('/items', needsSource(itemsView), { tab: 'search' });
 route('/album/:id', needsSource(albumView));
 route('/artist/:id', needsSource(artistView));
 route('/artist/:id/similar', needsSource((ctx) => similarArtistsView({ ...ctx, kind: 'similar' })));
