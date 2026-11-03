@@ -424,15 +424,17 @@ function onPop(e) {
   } else if (!st.k || (st.t && st.t !== 'bare' && !(st.t in TAB_ROOTS))) {
     // A hash typed into the address bar (or an entry from a version of the
     // app with other tabs): a new page, in the tab it belongs to.
+    // (The page's key as it's made here: the browser may have refused to
+    // keep it in its record of the page.)
     const hash = location.hash || hashOf('/');
     const own = tabFor(hash);
+    const k = newKey();
     if (own === 'bare') {
       fresh = true;
-      setHistory('replaceState', { k: newKey(), t: 'bare', d: 0 }, hash);
+      setHistory('replaceState', { k, t: 'bare', d: 0 }, hash);
     } else {
       const tab = own || activeTab;
       const s = stackOf(tab);
-      const k = newKey();
       if (tab === activeTab) {
         s.entries.length = s.top + 1;
         s.entries.push({ k, hash });
@@ -444,7 +446,7 @@ function onPop(e) {
       setHistory('replaceState', { k, t: tab, d: stacks[tab].top }, hash);
       save();
     }
-    render(history.state.k, false);
+    render(k, false);
   } else {
     if (st.t && st.t !== 'bare') {
       const s = stacks[st.t];
@@ -462,18 +464,23 @@ function onPop(e) {
 
 // ---------- the page cache ----------
 
+function runDisposer(fn) {
+  try {
+    fn();
+  } catch {
+    /* a view's own clean-up failing shouldn't stop the others */
+  }
+}
+
+// (`dropped`: a clean-up the page's view adds after this, still loading,
+// runs at once: see render.)
 function dropEntry(k) {
   const entry = cache.get(k);
   if (!entry) return;
   cache.delete(k);
   scrolls.delete(k);
-  for (const fn of entry.disposers) {
-    try {
-      fn();
-    } catch {
-      /* a view's own clean-up failing shouldn't stop the others */
-    }
-  }
+  entry.dropped = true;
+  for (const fn of entry.disposers.splice(0)) runDisposer(fn);
 }
 
 export function clearViewCache() {
@@ -623,8 +630,9 @@ async function render(k, useCache, { same = false } = {}) {
 
   try {
     // onDispose: for a view's own listeners and timers, run when the page
-    // is no longer kept. onHide: run each time the page is put aside (a
-    // playlist unlocked for editing locks again, say).
+    // is no longer kept (at once, for a page let go while it was still
+    // loading: refreshed, say). onHide: run each time the page is put aside
+    // (a playlist unlocked for editing locks again, say).
     await m.view({
       params: m.params,
       query,
@@ -632,7 +640,7 @@ async function render(k, useCache, { same = false } = {}) {
       path,
       el,
       key: k,
-      onDispose: (fn) => entry.disposers.push(fn),
+      onDispose: (fn) => (entry.dropped ? runDisposer(fn) : entry.disposers.push(fn)),
       onHide: (fn) => entry.hiders.push(fn),
     });
   } catch (err) {
