@@ -25,6 +25,7 @@ import { songInLibrary, artistInLibrary, aiSettings } from './ai.js';
 import { MISSING_LIMITS, MISSING_LISTS, keyOf, idOf, listId, sourceOf, applyNote, applyForget, applyClear, applyVerdicts, applyRestore } from './missinglist.js';
 import { loadMissing as load, saveMissing as save, queueMissing, missingOthers, editMissingOthers, ownsServer, syncs } from './missingsync.js';
 import { aliasesOf } from './mb.js';
+import { serviceFetch } from './service.js';
 
 export { MISSING_LIMITS, MISSING_LISTS };
 
@@ -306,6 +307,7 @@ export const mbOn = () => mbOffered() && aiSettings().musicbrainz !== false;
 export const mbWhere = () => (app.config.musicbrainz === 'own' ? 'the player’s own MusicBrainz server' : 'musicbrainz.org');
 
 const BATCH = 5;
+const CHECK_TIMEOUT = 40000; // how long a batch is waited on, at most
 
 // Which of an AI playlist's suggestions MusicBrainz knows, a few at a time
 // (through the player's service): in the same order, 'real', 'album' (an
@@ -315,37 +317,26 @@ const BATCH = 5;
 // onProgress(done, of).
 export async function checkSuggestions(list, { signal, onProgress } = {}) {
   const verdicts = list.map(() => null);
-  // Who's asking, checked by the player as for its shared AI model (people
-  // who can use its Plex server).
-  const headers = { 'Content-Type': 'application/json', 'X-Plex-Token': app.auth?.token || '' };
-  if (app.source?.token && app.source.token !== app.auth?.token) headers['X-Plex-Server-Token'] = app.source.token;
   for (let i = 0; i < list.length; i += BATCH) {
     if (signal?.aborted) break;
     const batch = list.slice(i, i + BATCH);
     let res;
-    let data = null;
     try {
-      res = await fetch('api/musicbrainz/check', {
+      // (Who's asking, checked by the player as for its shared AI model:
+      // people who can use its Plex server. See service.js.)
+      res = await serviceFetch('api/musicbrainz/check', {
         method: 'POST',
-        headers,
-        body: JSON.stringify({ items: batch.map((m) => ({ kind: m.kind, artist: m.artist, title: m.title })) }),
-        credentials: 'omit',
+        body: { items: batch.map((m) => ({ kind: m.kind, artist: m.artist, title: m.title })) },
         signal,
+        timeout: CHECK_TIMEOUT,
+        server: true,
       });
-      if (res.ok) data = await res.json();
     } catch {
       if (signal?.aborted) break;
       throw Object.assign(new Error('MusicBrainz couldn’t be asked: the player didn’t answer.'), { status: 0, verdicts });
     }
-    if (!res.ok) {
-      let message = '';
-      try {
-        message = (await res.json()).error || '';
-      } catch {
-        /* no explanation */
-      }
-      throw Object.assign(new Error(message || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, verdicts });
-    }
+    const { data } = res;
+    if (!res.ok) throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), { status: res.status, verdicts });
     const results = Array.isArray(data?.results) ? data.results : [];
     batch.forEach((_, j) => {
       const v = results[j];

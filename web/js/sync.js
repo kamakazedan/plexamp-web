@@ -24,6 +24,7 @@
 import { app, on, saveSettings, DEFAULT_SETTINGS, SYNCED_BEFORE, SYNC_PENDING, SYNC_REV, plexAccount } from './state.js';
 import { store } from './plex.js';
 import { dropCached, refresh, parseHash } from './router.js';
+import { serviceFetch } from './service.js';
 
 export const SYNCED_SETTINGS = Object.freeze([
   'gapless',
@@ -74,6 +75,7 @@ export const DEVICE_SETTINGS = Object.freeze(['quality', 'route', 'shareDevices'
 const SYNCED = new Set(SYNCED_SETTINGS);
 
 const API = 'api/settings';
+const CALL_TIMEOUT = 15000;
 const SEND_AFTER = 800;
 const PULL_EVERY = 5 * 60000;
 const PULL_AGAIN = 30000; // at most this often when the app's shown again
@@ -110,24 +112,11 @@ async function call(method, body, { keepalive = false } = {}) {
   let res;
   try {
     // (For the server the app's on: they're kept for people who can use it.)
-    res = await fetch(`${API}?server=${encodeURIComponent(app.source?.serverId || '')}`, {
-      method,
-      cache: 'no-store',
-      credentials: 'omit',
-      keepalive,
-      headers: { Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(15000),
-    });
+    res = await serviceFetch(`${API}?server=${encodeURIComponent(app.source?.serverId || '')}`, { method, body, keepalive, timeout: CALL_TIMEOUT });
   } catch {
     throw Object.assign(new Error('Can’t reach this player’s server.'), { network: true });
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* empty or not JSON */
-  }
+  const { data } = res;
   if (!res.ok) throw Object.assign(new Error(data?.error || `Something went wrong (${res.status}).`), { status: res.status });
   sync.reached = true;
   return data || {};

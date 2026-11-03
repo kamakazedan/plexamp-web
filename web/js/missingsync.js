@@ -25,6 +25,7 @@
 import { app, on, emit, MISSING_OVER, plexAccount } from './state.js';
 import { store } from './plex.js';
 import { applyOp, idOf, listId, shortList, withShortLists, sourceOf } from './missinglist.js';
+import { serviceFetch } from './service.js';
 
 const LIST = 'aiMissing'; // the list here, every server's
 // Each change still to go: aiMissingOp.<when><n><tab>, in the order they
@@ -33,6 +34,7 @@ const OP = 'aiMissingOp.';
 const SYNCED = 'aiMissingSynced'; // whose the list here is, and each server's as last had: { account, servers: { id: rev } }
 
 const API = 'api/missing';
+const CALL_TIMEOUT = 20000;
 const SEND_AFTER = 800;
 const PULL_EVERY = 5 * 60000;
 const PULL_AGAIN = 30000; // at most this often when the app's shown again
@@ -196,24 +198,11 @@ async function call(method, { query = {}, body, keepalive = false } = {}) {
   const params = new URLSearchParams({ server: serverNow(), ...query });
   let res;
   try {
-    res = await fetch(`${API}?${params}`, {
-      method,
-      cache: 'no-store',
-      credentials: 'omit',
-      keepalive,
-      headers: { Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(20000),
-    });
+    res = await serviceFetch(`${API}?${params}`, { method, body, keepalive, timeout: CALL_TIMEOUT });
   } catch {
     throw Object.assign(new Error('Can’t reach this player’s server.'), { network: true });
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* empty or not JSON */
-  }
+  const { data } = res;
   if (!res.ok) throw Object.assign(new Error(data?.error || `Something went wrong (${res.status}).`), { status: res.status });
   ms.reached = true;
   return data || {};

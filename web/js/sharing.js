@@ -13,6 +13,7 @@ import { live } from './live.js';
 import { parseHash, refresh, dropCached } from './router.js';
 import { toast, icon } from './ui.js';
 import { playlistEntries, changePlaylist } from './playlistio.js';
+import { serviceFetch } from './service.js';
 
 const API = 'api/shares';
 // While the app is open: a quick look for others' changes every minute, and
@@ -41,23 +42,11 @@ const keyNow = () => (sharingOn() ? `${app.source.serverId}|${app.auth.username 
 async function api(path = '', { method = 'GET', body, signal, token = app.auth?.token } = {}) {
   let res;
   try {
-    res = await fetch(`${API}${path}`, {
-      method,
-      cache: 'no-store',
-      credentials: 'omit',
-      headers: { Accept: 'application/json', 'X-Plex-Token': token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-      signal,
-    });
+    res = await serviceFetch(`${API}${path}`, { method, body, signal, token: token || null });
   } catch {
     throw Object.assign(new Error('Can’t reach this player’s server.'), { network: true, aborted: !!signal?.aborted });
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* empty or not JSON */
-  }
+  const { data } = res;
   if (!res.ok) {
     const fallback = res.status === 404 && !data ? 'Shared playlists aren’t available on this player.' : `Something went wrong (${res.status}).`;
     throw Object.assign(new Error(data?.error || fallback), { status: res.status });
