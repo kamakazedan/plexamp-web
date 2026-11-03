@@ -15,6 +15,7 @@ import {
   clampText,
   pagedList,
   emptyState,
+  errorState,
   enableDrag,
   askText,
   confirmAction,
@@ -520,11 +521,20 @@ export async function artistView({ el, params, onDispose }) {
   const byTracks = new Map(); // album id -> its release group, checked by its tracks (null: being asked about, 0: none)
   let toCheck = [];
   let checkTimer = 0;
+  let paintFrame = 0;
   let gone = false;
-  onDispose?.(() => {
+  onDispose(() => {
     gone = true;
     clearTimeout(checkTimer);
+    cancelAnimationFrame(paintFrame);
   });
+  // (Painted again once a frame at most, however many years come in it.)
+  const paintSoon = () => {
+    paintFrame ||= requestAnimationFrame(() => {
+      paintFrame = 0;
+      if (!gone) paintAlbums();
+    });
+  };
   const checkLater = (x, ms = 0) => {
     toCheck.push(x);
     checkTimer ||= setTimeout(checkYears, ms);
@@ -566,11 +576,11 @@ export async function artistView({ el, params, onDispose }) {
         again(x);
         continue;
       }
-      const ok = g && typeof g === 'object' && g.checked && earlier(x.m, g) && !(await notThatRecording(x.m, g).catch(() => true));
+      const ok = g && typeof g === 'object' && g.checked && earlier(x.m, g) && !(await notThatRecording(x.m, g));
       byTracks.set(idOf(x.m), ok ? g : 0);
       if (ok) shownNow = true;
     }
-    if (shownNow && !gone) paintAlbums();
+    if (shownNow) paintSoon();
   }
   const placed = (albums) => {
     const groups = mb?.groups || [];
@@ -596,7 +606,7 @@ export async function artistView({ el, params, onDispose }) {
           tracksSay.set(id, null);
           notThatRecording(m, g).then((no) => {
             tracksSay.set(id, no);
-            if (!no) paintAlbums();
+            if (!no) paintSoon();
           });
         }
         if (tracksSay.get(id) !== false) was = null;
@@ -809,7 +819,7 @@ export async function artistView({ el, params, onDispose }) {
 
   // (Asked of the library the artist's in; let go of if the page is.)
   const ctrl = new AbortController();
-  onDispose?.(() => ctrl.abort());
+  onDispose(() => ctrl.abort());
   const listedP = s.artistAlbums(artist.librarySectionID ?? sec, artist.ratingKey, { signal: ctrl.signal, guids: mbOn('mbOriginalYears') }).catch(() => null);
   const properP = s.children(artist.ratingKey).catch(() => null);
   // (Once they're first shown: what comes after them waits for no more.)
@@ -843,7 +853,13 @@ export async function artistView({ el, params, onDispose }) {
     shown();
     await Promise.all([typesP.then(paintAlbums), rowsP.then(paintAlbums), mbIn.then(paintAlbums), all.then(paintAlbums)]);
   });
-  albumsP.finally(() => shown()).catch(() => {});
+  // (Where Plex couldn't say what albums they have, that says so, with
+  // the page again from Try again.)
+  albumsP
+    .finally(() => shown())
+    .catch(() => {
+      if (!gone) albumsBox.replaceChildren(errorState('Couldn’t load their albums.', () => refresh()));
+    });
 
   // Appears on: others' albums they're on, newest first, as Plex's rows
   // for the page have them (and the library's albums by them, where those
@@ -963,15 +979,15 @@ async function appearsInShelf(box, artist, signal) {
 
 // All of an artist's similar artists in the library (`kind`: 'similar',
 // Plex's; 'sonic', those that sound like it, further than the shelf goes).
+const SONIC_FURTHER = 0.4; // how unlike it they may sound on this page (the shelf has plex.js nearest's 0.25)
 export async function similarArtistsView({ el, params, kind }) {
   const s = app.server;
   const sec = app.source.sectionKey;
-  if (!/^\d+$/.test(String(params.id))) throw Object.assign(new Error('Not found'), { status: 404 });
   const artist = await s.metadata(params.id);
   if (!artist || artist.type !== 'artist') throw Object.assign(new Error('Not found'), { status: 404 });
   const sonic = kind === 'sonic';
   el.append(backHeader(sonic ? `Sounds like ${artist.title}` : `Similar to ${artist.title}`, { fallback: `/artist/${artist.ratingKey}` }));
-  const artists = sonic ? await sonicallySimilar(s, artist, { limit: ALL_ARTISTS, maxDistance: 0.4 }) : await similarInLibrary(s, sec, artist, ALL_ARTISTS);
+  const artists = sonic ? await sonicallySimilar(s, artist, { limit: ALL_ARTISTS, maxDistance: SONIC_FURTHER }) : await similarInLibrary(s, sec, artist, ALL_ARTISTS);
   el.append(
     h('p.lede', null, sonic ? `Artists in your library who sound like ${artist.title}.` : `Artists in your library that Plex says are like ${artist.title}.`),
     artists.length
