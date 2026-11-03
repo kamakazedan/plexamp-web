@@ -162,7 +162,7 @@ class Together extends EventTarget {
       res = await fetch(`${API}/${path}`, {
         method,
         cache: 'no-store',
-        credentials: 'same-origin',
+        credentials: 'omit',
         keepalive,
         headers: {
           Accept: 'application/json',

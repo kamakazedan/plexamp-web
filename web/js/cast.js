@@ -37,7 +37,7 @@ async function api(path, { method = 'GET', body } = {}) {
     res = await fetch(`api/cast/${path}`, {
       method,
       cache: 'no-store',
-      credentials: 'same-origin',
+      credentials: 'omit',
       headers: { Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(12000),
