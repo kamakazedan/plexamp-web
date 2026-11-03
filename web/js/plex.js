@@ -160,7 +160,17 @@ function withParams(url, params) {
   return u.toString();
 }
 
-const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+// A list as Plex gives one: a list, one thing on its own, or nothing.
+export const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+
+// `list` in parts of `size`.
+export const chunks = (list, size) => {
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+};
+
+const stoppedError = () => Object.assign(new Error('aborted'), { aborted: true, network: false });
 
 // `discard`: the answer isn't needed, so it isn't read (Plex can answer a
 // change with the whole list it changed: sorting a long playlist makes
@@ -168,7 +178,9 @@ const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 // `body`: bytes to send (a picture); they go without a Content-Type, as
 // Plex works out what they are, so the request needs no CORS preflight.
 // `cache`: the browser's cache mode for it ('no-store': never from there).
+// (Not sent at all once `signal` has said stop.)
 async function request(url, { method = 'GET', timeout = 20000, signal, discard = false, body, cache } = {}) {
+  if (signal?.aborted) throw stoppedError();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const onAbort = () => ctrl.abort();
@@ -443,12 +455,12 @@ const TYPES_LIMIT = 5000; // albums' release types kept (see albumTypes)
 const WRITE_BATCH = 200; // items per request when adding to a playlist or collection
 const HUB_COUNT = 100; // items in each of an artist's hubs (see artistHubs)
 const ARTIST_PAGE = 1000; // albums asked for at a time (see artistAlbums)
-// What's in a list as no more than each entry's id and whose it is (its
-// album's and artist's ids, and who a track's credited to), and the list's
-// size: Plex leaves the rest out, where it can (a server that can't sends
-// it all).
+// What's in a list as no more than each entry's id (a playlist's entries
+// have one of their own too) and whose it is (its album's and artist's ids,
+// and who a track's credited to), what it is, and the list's size: Plex
+// leaves the rest out, where it can (a server that can't sends it all).
 const LIGHT = {
-  includeFields: 'ratingKey,parentRatingKey,grandparentRatingKey,originalTitle,size,totalSize,offset,leafCount',
+  includeFields: 'ratingKey,playlistItemID,type,parentRatingKey,grandparentRatingKey,originalTitle,size,totalSize,offset,leafCount',
   excludeElements: 'Media,Genre,Mood,Style,Collection,Label,Guid,Field,Image,UltraBlurColors,Country',
 };
 // Albums' details as albumTypes asks for them: their release types, without
@@ -458,12 +470,49 @@ const TYPES_ONLY = {
   excludeElements: `${LIGHT.excludeElements},Review,Location,Similar`,
   excludeFields: 'summary',
 };
+const LIST_PAGE = 500; // a list's entries asked for at a time (see readPages)
 
-const chunks = (list, size) => {
-  const out = [];
-  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
-  return out;
-};
+// Every entry of a list (a playlist's, a collection's), a page at a time:
+// `read(start, size, ids)` gives a page as playlistItems and collectionItems
+// do ({ items, counted }). From `start`, at most `limit` of them, `size` at
+// a time, on until Plex's count of them, or a page short of what was asked
+// for where it gives none (one bigger than was asked for is a server that
+// gave them all at once, and the same page again one that doesn't page).
+// `ids`: each entry's ids and no more, as LIGHT asks (a server that leaves
+// even those out is read in full). Resolves to { items, more } (`more`:
+// there are more after those).
+export async function readPages(read, { start = 0, limit = Infinity, size = LIST_PAGE, ids = false, signal } = {}) {
+  const items = [];
+  let at = start;
+  let last = null;
+  for (;;) {
+    if (signal?.aborted) throw stoppedError();
+    const ask = Math.min(size, limit - items.length);
+    const page = await read(at, ask, ids);
+    if (ids && page.items.length && !page.items.some((m) => m?.ratingKey != null)) {
+      ids = false;
+      continue;
+    }
+    // (By each entry's own id where it has one: a playlist can have a track
+    // twice, a page apart.)
+    const sig = page.items.map((m) => m?.playlistItemID ?? m?.ratingKey).join(',');
+    if (at > start && sig === last) break;
+    last = sig;
+    items.push(...page.items);
+    at += page.items.length;
+    if (!page.items.length || page.items.length > ask || (page.counted != null ? at >= page.counted : page.items.length < ask)) break;
+    if (items.length >= limit) return { items: items.slice(0, limit), more: true };
+  }
+  return { items: items.slice(0, limit), more: items.length > limit };
+}
+
+// Ids that go into the address of a change (a removal, say) are numbers, so
+// one that's missing can't make it another address: DELETE
+// /playlists/{id}/items/ is the whole list's.
+const ID = /^\d+$/;
+function idsOnly(...ids) {
+  if (!ids.every((id) => ID.test(String(id ?? '')))) throw Object.assign(new Error('That isn’t an item on your server.'), { status: 400 });
+}
 
 // ---------- Plex Media Server ----------
 
@@ -612,8 +661,11 @@ export class PlexServer {
     return out;
   }
 
-  async allLeaves(id) {
-    return asArray((await this.get(`/library/metadata/${id}/allLeaves`)).Metadata);
+  // Every track of an artist's (or an album's), or (`size`) the first that
+  // many.
+  async allLeaves(id, { size } = {}) {
+    const first = size ? { 'X-Plex-Container-Start': 0, 'X-Plex-Container-Size': size } : null;
+    return asArray((await this.get(`/library/metadata/${id}/allLeaves`, first)).Metadata);
   }
 
   // Secondary listings: genre, style, mood, decade... filtered by item type.
@@ -683,6 +735,12 @@ export class PlexServer {
       { signal },
     );
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.leafCount ?? mc.size ?? 0, counted: mc.totalSize ?? mc.leafCount ?? null };
+  }
+
+  // A playlist's entries, from `start`, at most `limit`, as readPages reads
+  // them (`ids`: each entry's ids and no more): { items, more }.
+  readPlaylist(id, { start, limit, size, ids, signal } = {}) {
+    return readPages((at, n, light) => this.playlistItems(id, { start: at, size: n, ids: light, signal }), { start, limit, size, ids, signal });
   }
 
   // Plex's hubs for an artist's page (Plexamp's rows: their releases by

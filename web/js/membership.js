@@ -20,9 +20,11 @@
 // Plex doesn't link the same song on different albums either, so they're
 // found by the song's name and artist.
 import { app, on } from './state.js';
-import { norm, sameTitle } from './ai.js';
+import { readPages } from './plex.js';
+import { mapLimit } from './ai.js';
+import { norm } from './missinglist.js';
+import { sameTitle } from './releases.js';
 import { creditedTo } from './hubs.js';
-import { norm as nameOf } from './releases.js';
 
 export const SMART_LIMIT = 2000; // smart lists longer than this aren't read
 export const LIST_LIMIT = 10000; // nor are other lists longer than this
@@ -136,33 +138,16 @@ async function readList(s, kind, list, key, stamp, signal) {
   const counts = new Map();
   const owners = new Map();
   const of = kind === 'playlist' ? 'track' : list.subtype || 'album';
-  const size = PAGE[kind];
-  let ids = true;
-  let last = null;
-  // (Until Plex's count of them, or a page short of what was asked for
-  // where it gives none: a server that gives fewer at a time is read on.)
-  for (let start = 0; start < LIST_LIMIT; ) {
-    if (signal?.aborted) throw abortedError();
-    const page = kind === 'playlist' ? await s.playlistItems(list.ratingKey, { start, size, ids, signal }) : await s.collectionItems(list.ratingKey, { start, size, ids, signal });
-    // (A server that left even the ids out: read in full.)
-    if (ids && page.items.length && !page.items.some((m) => m?.ratingKey != null)) {
-      ids = false;
-      continue;
-    }
-    // (The same page again: a server that doesn't page, so that's all.)
-    const sig = page.items.map((m) => m?.ratingKey).join(',');
-    if (start && sig === last) break;
-    last = sig;
-    for (const m of page.items) {
-      const id = String(m.ratingKey);
-      counts.set(id, (counts.get(id) || 0) + 1);
-      const credit = of === 'track' && typeof m.originalTitle === 'string' ? m.originalTitle : '';
-      const own = `${whose(m, of)}|${credit}`;
-      owners.set(own, (owners.get(own) || 0) + 1);
-    }
-    start += page.items.length;
-    // (More than was asked for: a server that gave it all at once.)
-    if (!page.items.length || page.items.length > size || (page.counted != null ? start >= page.counted : page.items.length < size)) break;
+  // (Each entry's ids and no more, a page at a time: see plex.js readPages.)
+  const page = (start, size, ids) =>
+    kind === 'playlist' ? s.playlistItems(list.ratingKey, { start, size, ids, signal }) : s.collectionItems(list.ratingKey, { start, size, ids, signal });
+  const { items } = await readPages(page, { limit: LIST_LIMIT, size: PAGE[kind], ids: true, signal });
+  for (const m of items) {
+    const id = String(m.ratingKey);
+    counts.set(id, (counts.get(id) || 0) + 1);
+    const credit = of === 'track' && typeof m.originalTitle === 'string' ? m.originalTitle : '';
+    const own = `${whose(m, of)}|${credit}`;
+    owners.set(own, (owners.get(own) || 0) + 1);
   }
   const sizeIn = (v) => v.counts.size + v.owners.size;
   const got = { stamp, at: Date.now(), started, counts, owners };
@@ -185,7 +170,7 @@ async function readList(s, kind, list, key, stamp, signal) {
 }
 
 // How many of a list's entries (as contents has them) are an artist's
-// (`me`, their id; `want`, their name, as releases.js norm has it): by
+// (`me`, their id; `want`, their name, as norm has it): by
 // them, or credited to them (hubs.js creditedTo: the whole credit, or a
 // name either side of a featured one).
 function theirs(owners, me, want) {
@@ -357,7 +342,7 @@ export async function appearsIn(track, { signal, onFound, onProgress } = {}) {
 export async function artistAppearsIn(artist, { signal, onFound, onProgress } = {}) {
   const s = app.server;
   const me = String(artist?.ratingKey ?? '');
-  const want = nameOf(artist?.title);
+  const want = norm(artist?.title);
   if (!/^\d+$/.test(me)) return { playlists: [], collections: [], skipped: [], checked: 0 };
   const section = artist.librarySectionID ?? app.source.sectionKey;
   const [playlists, collections] = await Promise.all([s.playlists().catch(() => []), s.collections(section).catch(() => [])]);

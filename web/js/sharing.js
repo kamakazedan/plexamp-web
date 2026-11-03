@@ -296,7 +296,7 @@ async function unseenOf(ids, server) {
 
 // The tracks in a playlist (ids, in order), on `server`.
 async function tracksIn(id, server = app.server) {
-  return (await playlistEntries(id, { limit: 100000, server })).items.map((m) => String(m.ratingKey));
+  return (await playlistEntries(id, { limit: 100000, server, ids: true })).items.map((m) => String(m.ratingKey));
 }
 
 // Your copy was deleted (here or in another app): one shared with you

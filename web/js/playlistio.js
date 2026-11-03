@@ -63,22 +63,18 @@ function cleanEntry(t) {
 
 // ---------- reading a playlist from Plex ----------
 
-// Every entry of a playlist, page by page (at most `limit`): { items, more }.
-// `server`: the Plex server it's on (the one in use, unless given).
-export async function playlistEntries(id, { limit = FILE_LIMITS.tracks, signal, server = app.server } = {}) {
-  const out = [];
-  let more = false;
-  for (let start = 0; ; start += 500) {
+// Every track of a playlist, page by page (at most `limit`): { items, more }
+// (see plex.js readPages). `server`: the Plex server it's on (the one in use,
+// unless given). `ids`: each entry's ids and no more (its track's, and its
+// own), for what needs no more than those.
+export async function playlistEntries(id, { limit = FILE_LIMITS.tracks, signal, server = app.server, ids = false } = {}) {
+  try {
+    const { items, more } = await server.readPlaylist(id, { limit, ids, signal });
+    return { items: items.filter((m) => m.type === 'track' || m.type === undefined), more };
+  } catch (err) {
     if (signal?.aborted) throw abortError();
-    const { items, total } = await server.playlistItems(id, { start, size: 500 });
-    out.push(...items.filter((m) => m.type === 'track' || m.type === undefined));
-    if (out.length >= limit) {
-      more = total > limit;
-      break;
-    }
-    if (!items.length || start + items.length >= total) break;
+    throw err;
   }
-  return { items: out.slice(0, limit), more };
 }
 
 const abortError = () => Object.assign(new Error('Stopped.'), { aborted: true });
@@ -443,7 +439,7 @@ export function without(list, counts) {
 // account can't have), so the next look can tell what's changed since.
 export async function changePlaylist(id, from, to, { server = app.server, signal } = {}) {
   const s = server;
-  const read = async () => (await playlistEntries(id, { limit: 100000, signal, server: s })).items;
+  const read = async () => (await playlistEntries(id, { limit: 100000, signal, server: s, ids: true })).items;
   const { remove, add } = changesBetween(from, to);
   const entries = await read();
   const gone = new Set();

@@ -73,13 +73,10 @@ export async function tracksOf(items, { limit = TRACK_LIMIT } = {}) {
     const type = m.type || 'track';
     if (type === 'track') out.push(m.partKey !== undefined ? m : normTrack(m));
     else if (type === 'album') out.push(...(await s.children(m.ratingKey)).filter((x) => x.type === 'track').map(normTrack));
-    else if (type === 'artist') out.push(...(await s.allLeaves(m.ratingKey)).filter((x) => x.type === 'track').map(normTrack));
+    else if (type === 'artist') out.push(...(await s.allLeaves(m.ratingKey, { size: limit - out.length })).filter((x) => x.type === 'track').map(normTrack));
     else if (type === 'playlist') {
-      for (let start = 0; out.length < limit; start += 500) {
-        const { items: page, total } = await s.playlistItems(m.ratingKey, { start, size: 500 });
-        out.push(...page.filter((x) => x.type === 'track').map(normTrack));
-        if (!page.length || start + page.length >= total) break;
-      }
+      const { items: entries } = await s.readPlaylist(m.ratingKey, { limit: limit - out.length });
+      out.push(...entries.filter((x) => x.type === 'track').map(normTrack));
     } else if (type === 'collection') {
       const { items: kids } = await s.collection(m.ratingKey);
       out.push(...(await tracksOf(kids, { limit: limit - out.length })));
@@ -133,16 +130,12 @@ export async function addToPlaylist({ what, load, suggest = '', title = 'Add to 
   });
 }
 
-// Track ids already in a playlist (null for very long ones: not checked).
+// Track ids already in a playlist (null for very long ones: not checked),
+// read as their ids and no more.
 async function inPlaylist(pl) {
   if ((pl.leafCount || 0) > TRACK_LIMIT) return null;
-  const found = new Set();
-  for (let start = 0; start < TRACK_LIMIT; start += 500) {
-    const { items, total } = await app.server.playlistItems(pl.ratingKey, { start, size: 500 });
-    items.forEach((m) => found.add(String(m.ratingKey)));
-    if (!items.length || start + items.length >= total) break;
-  }
-  return found;
+  const { items } = await app.server.readPlaylist(pl.ratingKey, { limit: TRACK_LIMIT, ids: true });
+  return new Set(items.map((m) => String(m.ratingKey)));
 }
 
 // Tracks already in the playlist aren't added again.
