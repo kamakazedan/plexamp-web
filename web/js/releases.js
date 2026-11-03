@@ -330,6 +330,55 @@ export function exactAlbum(groups, title, { id = null, year = null, tracks = 0 }
 // an album.
 export const kindsAgree = (kind, g) => !kind || !g || kind === kindOf(g.primary, g.secondary);
 
+// ---------- an album's tracks, against a release's ----------
+
+// A track's title as it's compared with another's: its name, as norm has it
+// (without what's in brackets, nor after a dash), and the asides that say
+// another recording (a remix, live...), not those that only say which
+// edition, nor who's featured.
+export function trackKey(title) {
+  const head = norm(String(title || '').split(/\s+[-–—:]\s+/)[0]);
+  if (!head) return '';
+  return [head, ...asides(title).filter((a) => a.versioned).map((a) => a.text).sort()].join(' | ');
+}
+
+// Tracks the same lengths but for this many ms (a remaster's fade, say).
+export const SAME_LENGTH_MS = 7000;
+// Whether an album's tracks are a release's (each [{ title, ms }]: `ms`, the
+// track's length, 0 where it isn't known): nearly all of the release's
+// tracks (TRACKS_OF_RELEASE) are among the album's, each by its title (as
+// trackKey has it) and its length, where both are known; and half of the
+// album's at least (TRACKS_OF_ALBUM) are the release's. A deluxe edition is
+// its album's release, so, with more; a compilation of the same hits, or a
+// live album of the same songs (their lengths aren't), isn't. A single or
+// an EP (SHORT_RELEASE tracks or fewer) has all its tracks on the release:
+// one put out again with a new B-side isn't the first one. How many of the
+// album's tracks the release has, one for one, or 0 where they aren't its
+// tracks (an album that's two releases' tracks is the one with more of
+// them: see server/musicbrainz.js closestFirst).
+export const TRACKS_OF_RELEASE = 0.9;
+export const TRACKS_OF_ALBUM = 0.5;
+export function tracksInCommon(album, release) {
+  const a = (Array.isArray(album) ? album : []).map((t) => ({ key: trackKey(t?.title), ms: Number(t?.ms) || 0 })).filter((t) => t.key);
+  const r = (Array.isArray(release) ? release : []).map((t) => ({ key: trackKey(t?.title), ms: Number(t?.ms) || 0 })).filter((t) => t.key);
+  if (!a.length || !r.length) return 0;
+  const left = a.slice();
+  let same = 0;
+  for (const t of r) {
+    const i = left.findIndex((x) => x.key === t.key && (!x.ms || !t.ms || Math.abs(x.ms - t.ms) <= SAME_LENGTH_MS));
+    if (i < 0) continue;
+    left.splice(i, 1);
+    same += 1;
+  }
+  const enough = a.length <= SHORT_RELEASE ? same === a.length : same >= Math.ceil(a.length * TRACKS_OF_ALBUM);
+  return same > 0 && same >= Math.ceil(r.length * TRACKS_OF_RELEASE) && enough ? same : 0;
+}
+export const sameTracks = (album, release) => tracksInCommon(album, release) > 0;
+
+// How many tracks a release can have to be an album of `n` tracks, as
+// tracksInCommon has it: [fewest, most].
+export const releaseSizes = (n) => [n <= SHORT_RELEASE ? n : Math.max(1, Math.ceil(n * TRACKS_OF_ALBUM)), Math.floor(n / TRACKS_OF_RELEASE)];
+
 // Whether an album is another recording than its title says, by its tracks:
 // one of them says it's a remix, an edit, live... and the album's title
 // doesn't ("Yeah Yeah", of "Yeah Yeah (Chocolate Puma Remix)"). An album

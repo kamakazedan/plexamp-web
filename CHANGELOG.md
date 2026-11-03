@@ -3,6 +3,56 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.36.0 - 2026-11-03
+
+### Changed
+
+- **Years and genres to fix, with a MusicBrainz of your own, goes by each
+  album's tracks**: an album that would be fixed is checked against
+  MusicBrainz's releases of it, by its tracks' titles and lengths, and the
+  first release with those very tracks is when it first came out. A
+  re-recording, a remix package or another album of the same title isn't
+  given an earlier year, and a single, a live album or a compilation can be
+  found by its title alone, as its tracks say whether it's the one (a
+  single or an EP with all its tracks, so one put out again with a new
+  B-side isn't the first one; of two of a title with its tracks, a
+  compilation and a later one with more, the one with more of them).
+  Plex's MusicBrainz id for an album is looked up too, whether it's a
+  release's or a release group's. Only with a server of your own: an album
+  takes a few lookups there (more where it has several of its title), only
+  ids are sent, never titles, and the answers are kept for a month. With
+  musicbrainz.org, as before. An album's page (First released in…) and an
+  artist's page (Original release years) go by the tracks too, asked about
+  only where they'd show a year.
+- **Artists to merge says what's wrong and what to do**: those Plex links
+  to one artist on MusicBrainz (merge those in Plex), names of several
+  artists in one (fix the tag), those it can't tell (not all linked), and
+  different artists of one name (usually right: nothing to do, or Fix
+  Match in Plex where one has the other's albums), each with who
+  MusicBrainz says the artist Plex links is ("Nirvana (American grunge
+  band)"), linked to MusicBrainz.
+
+### Fixed
+
+- **The first track of a new queue converted to 320 kbps** on some
+  networks (an office's, say), saying the file didn't play, while the next
+  tracks played as they are: a file that comes but doesn't play as it
+  streams is now read in full and played from memory, as Load ahead plays
+  the next tracks, in its own quality; and once one has, each track is
+  read that way from the start on that connection (but a long mix, or one
+  too big to keep, which plays as it streams first). Only a file that won't
+  play from memory either is converted (a format this browser can't play),
+  and one too big to read in full that doesn't play as it streams, saying
+  so.
+- **Playback stopping with the screen locked**, the play button pulsing: a
+  track waiting for data was loaded again only once, after a wait a phone
+  can hold back while its screen is off. Now it's loaded again as long as
+  it waits, and straight away when the screen comes on, the browser lets
+  the page go on, or the connection's back.
+- **A MusicBrainz mirror whose search works taken for one whose search
+  finds no one** (some don't answer a search for an id), so its albums
+  couldn't be checked: fixed in 0.35.0, whose notes didn't say so.
+
 ## 0.35.0 - 2026-11-02
 
 ### Changed

@@ -47,7 +47,7 @@ import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
-import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf, exactAlbum, shortRelease, kindsAgree, notThatRecording } from '../mb.js';
+import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf, exactAlbum, shortRelease, kindsAgree, notThatRecording, mbOwnServer, albumTracks } from '../mb.js';
 import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
 import { artistAppearsIn } from '../membership.js';
 import { chooseMissingKinds, missingKinds } from './mbsettings.js';
@@ -110,6 +110,8 @@ function codecBadge(tracks) {
 // ---------- Album ----------
 
 const FIRST_WAIT = 3000; // ms the player may wait on MusicBrainz for when an album first came out
+const CHECK_WAIT = 10000; // ...and, on a MusicBrainz of your own, for that checked by its tracks
+const CHECK_TRIES = 3; // ...asked again this many times at most, on an artist's page, while it's being looked up
 
 export async function albumView({ el, params }) {
   const s = app.server;
@@ -184,11 +186,23 @@ export async function albumView({ el, params }) {
   // MusicBrainz id for it, or its exact title, and not where its tracks say
   // it's another recording than the title does, a remix single's, say.)
   if (mbOn('mbOriginalYears') && album.parentTitle && norm(album.parentTitle) !== 'various artists') {
-    albumsOnMB([{ artist: album.parentTitle, title: album.title, year: Number(year(album)) || null, albumId: mbidOf(album), tracks: tracks.length }], { wait: FIRST_WAIT, strict: true })
-      .then(async ([g]) => {
-        const was = firstYear(g && typeof g === 'object' ? g : null);
-        const own = Number(year(album)) || null;
-        if (!was || (own && was >= own)) return;
+    // (On a MusicBrainz of the player's own, by its very tracks too, asked
+    // with them only where the first answer would show a year, and shown
+    // only once they're checked: see mb.js albumsOnMB, `check`.)
+    const check = mbOwnServer();
+    const own = Number(year(album)) || null;
+    const item = { artist: album.parentTitle, title: album.title, year: own, albumId: mbidOf(album), tracks: tracks.length };
+    const ask = (more, wait) => albumsOnMB([{ ...item, ...more }], { wait, strict: true, check }).then(([g]) => (g && typeof g === 'object' ? g : null));
+    const earlier = (g) => (firstYear(g) && (!own || firstYear(g) < own) ? firstYear(g) : null);
+    ask({}, FIRST_WAIT)
+      .then(async (g) => {
+        if (!earlier(g)) return;
+        if (check) {
+          g = await ask({ trackList: tracks.map((t) => ({ title: t.title, ms: t.duration })) }, CHECK_WAIT);
+          if (!g?.checked) return;
+        }
+        const was = earlier(g);
+        if (!was) return;
         if (g.id !== mbidOf(album) && !kindsAgree(plexKind(album), g)) return;
         if (await notThatRecording(album, g, { tracks })) return;
         first.textContent = `First released in ${was}`;
@@ -497,12 +511,82 @@ export async function artistView({ el, params, onDispose }) {
   // single's, say: see mb.js notThatRecording. Those are read once each,
   // and the page painted again.)
   const tracksSay = new Map(); // album id -> whether its tracks say it's another recording (null: being read)
+  // (On a MusicBrainz of the player's own, as on the album's own page: what
+  // MusicBrainz has of each album asked about first, then, where that would
+  // show a year, checked by its very tracks, and shown only once it is.
+  // Those to ask about are asked about together, a few times at most while
+  // MusicBrainz is still looking. See mb.js albumsOnMB, `check`.)
+  const check = mbOwnServer();
+  const byTracks = new Map(); // album id -> its release group, checked by its tracks (null: being asked about, 0: none)
+  let toCheck = [];
+  let checkTimer = 0;
+  let gone = false;
+  onDispose?.(() => {
+    gone = true;
+    clearTimeout(checkTimer);
+  });
+  const checkLater = (x, ms = 0) => {
+    toCheck.push(x);
+    checkTimer ||= setTimeout(checkYears, ms);
+  };
+  const earlier = (m, g) => g && typeof g === 'object' && firstYear(g) && (!(Number(year(m)) || null) || firstYear(g) < Number(year(m)));
+  const itemOf = (m, more = {}) => ({ artist: artist.title, title: m.title, year: Number(year(m)) || null, artistId: mbidOf(artist), albumId: mbidOf(m), tracks: Number(m.leafCount) || 0, ...more });
+  async function checkYears() {
+    checkTimer = 0;
+    const these = toCheck;
+    toCheck = [];
+    if (gone || !these.length) return;
+    const again = (x) => (x.tries < CHECK_TRIES ? checkLater({ ...x, tries: x.tries + 1 }, CHECK_WAIT) : byTracks.set(idOf(x.m), 0));
+    let first = [];
+    try {
+      first = await albumsOnMB(these.map(({ m }) => itemOf(m)), { strict: true, check: true, wait: FIRST_WAIT });
+    } catch {
+      /* none shown, then */
+    }
+    const would = [];
+    these.forEach((x, n) => {
+      if (first[n] === 'pending') again(x);
+      else if (earlier(x.m, first[n])) would.push(x);
+      else byTracks.set(idOf(x.m), 0);
+    });
+    if (gone || !would.length) return;
+    const lists = await Promise.all(would.map(({ m }) => albumTracks(m).catch(() => null)));
+    const asking = would.map((x, n) => ({ ...x, list: lists[n] })).filter((x) => x.list?.length);
+    for (const x of would) if (!asking.some((y) => y.m === x.m)) byTracks.set(idOf(x.m), 0);
+    let got = [];
+    try {
+      got = asking.length && !gone ? await albumsOnMB(asking.map(({ m, list }) => itemOf(m, { trackList: list })), { strict: true, check: true, wait: CHECK_WAIT }) : [];
+    } catch {
+      /* none shown, then */
+    }
+    let shownNow = false;
+    for (const [n, x] of asking.entries()) {
+      const g = got[n];
+      if (g === 'pending') {
+        again(x);
+        continue;
+      }
+      const ok = g && typeof g === 'object' && g.checked && earlier(x.m, g) && !(await notThatRecording(x.m, g).catch(() => true));
+      byTracks.set(idOf(x.m), ok ? g : 0);
+      if (ok) shownNow = true;
+    }
+    if (shownNow && !gone) paintAlbums();
+  }
   const placed = (albums) => {
     const groups = mb?.groups || [];
     const origin = mbOn('mbOriginalYears');
     return albums.map((m) => {
       const kind = releaseKind(m, st);
       const own = Number(year(m)) || null;
+      if (origin && check) {
+        const id = idOf(m);
+        if (kind && !byTracks.has(id)) {
+          byTracks.set(id, null);
+          checkLater({ m, tries: 0 });
+        }
+        const g = byTracks.get(id);
+        return { m, kind, year: g && (g.id === mbidOf(m) || kindsAgree(kind, g)) ? firstYear(g) : own };
+      }
       const g = origin && groups.length ? exactAlbum(groups, m.title, { id: mbidOf(m), year: own, tracks: m.leafCount }) : null;
       let was = firstYear(g);
       if (!was || (own && was >= own) || (g.id !== mbidOf(m) && !kindsAgree(kind, g))) return { m, kind, year: own };

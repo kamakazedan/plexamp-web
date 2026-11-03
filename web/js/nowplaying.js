@@ -292,6 +292,12 @@ export function initPlayerBar(root) {
       ...(lower ? { action: 'Streaming quality', onAction: () => closeOverlays().then(() => navigate('/settings/playback')) } : {}),
     });
   });
+  // A file that doesn't play as it comes on this connection, and is more
+  // than can be read in full to play from memory: only converted can it
+  // play here (player.js load), and the player says so.
+  player.addEventListener('converted', (e) => {
+    toast(`“${e.detail.track.title}” doesn’t play as it streams here, and it’s too big to read in full first, so it’s converted, at ${e.detail.kbps} kbps.`, { timeout: 10000 });
+  });
   player.addEventListener('playerror', (e) => {
     const { track, remote } = e.detail;
     if (remote) {

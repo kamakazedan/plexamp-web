@@ -588,7 +588,8 @@ async function musicbrainzFeatures(req, res, what) {
   if (what === 'artist') {
     const timer = setTimeout(() => ctrl.abort(), MB_ADVANCED_LIMITS.artistMs);
     try {
-      const artist = await musicbrainz.artistInfo(name(body.name), { id: mbid(body.id), signal: ctrl.signal });
+      // (`note`: with MusicBrainz's word for telling them apart from others of the name.)
+      const artist = await musicbrainz.artistInfo(name(body.name), { id: mbid(body.id), signal: ctrl.signal, withNote: body.note === true });
       const groups = artist && body.groups !== false ? await musicbrainz.releaseGroups(artist.id, { signal: ctrl.signal }) : [];
       // (`capped`: they have more than are listed. `namesakes`: other artists of the name too, with their release
       // groups; `moreNamesakes`: there are more of those than are listed.)
@@ -612,9 +613,23 @@ async function musicbrainzFeatures(req, res, what) {
       artistId: mbid(it?.artistId),
       albumId: mbid(it?.albumId),
       tracks: Number.isSafeInteger(Number(it?.tracks)) && Number(it.tracks) > 0 ? Math.min(Number(it.tracks), 10000) : 0,
+      // (With `check`: its tracks, to go by on a MusicBrainz of the player's own: see musicbrainz.js checkedAlbum.)
+      trackList: Array.isArray(it?.trackList)
+        ? it.trackList
+            .slice(0, MB_ADVANCED_LIMITS.trackList)
+            .map((t) => ({ title: name(t?.title), ms: Number.isSafeInteger(Number(t?.ms)) && Number(t.ms) > 0 ? Math.min(Number(t.ms), 86400000) : 0 }))
+            .filter((t) => t.title)
+        : null,
     }));
-  // (`strict`: the very album or nothing, for its year and genres to be fixed: see musicbrainz.js album.)
-  const results = await musicbrainz.albums(items, { genres: body.genres === true, strict: body.strict === true, waitMs: Number(body.wait) || 0, signal: ctrl.signal, who: key });
+  // (`strict`: the very album or nothing, for its year and genres to be fixed; `check`: by its very tracks too: see musicbrainz.js album.)
+  const results = await musicbrainz.albums(items, {
+    genres: body.genres === true,
+    strict: body.strict === true,
+    check: body.check === true,
+    waitMs: Number(body.wait) || 0,
+    signal: ctrl.signal,
+    who: key,
+  });
   return send(res, 200, { results, ...(musicbrainz.searchBroken() ? { searchBroken: true } : {}) });
 }
 

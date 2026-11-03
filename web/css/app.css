@@ -3010,12 +3010,31 @@ body.np-open #toasts {
 }
 
 /* Settings › MusicBrainz › Artists to merge: each artist Plex has, to
-   open. */
+   open, and who MusicBrainz says it is. */
 .mb-merge-links {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
   margin-top: 4px;
+}
+
+.mb-merge-members {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.mb-merge-who {
+  color: var(--muted);
+}
+
+.mb-merge-who a {
+  color: inherit;
+}
+
+.mb-merge-hint {
+  margin-top: -4px;
 }
 
 .mb-merge-actions {

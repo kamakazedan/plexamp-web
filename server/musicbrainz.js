@@ -12,8 +12,9 @@
 // albums, by artist, kept on disk for a month.
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { norm } from './missinglist.js';
-import { albumKey, matchGroup, exactAlbum, exactKey } from './releases.js';
+import { albumKey, matchGroup, exactAlbum, exactKey, titlesAgree, trackKey, tracksInCommon, releaseSizes } from './releases.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org
@@ -136,7 +137,12 @@ export class MusicBrainz {
     // The advanced features (see advanced()): what's kept of them, and
     // what's waiting to be looked up in the background.
     this.adv = null;
-    this.todo = new Map(); // key -> { artist, title, genres, year, id, albumId, strict, who, tries }
+    this.todo = new Map(); // key -> { artist, title, genres, year, id, albumId, strict, tracks, check, trackList, who, tries }
+    // On a MusicBrainz of your own (see checkedAlbum): what's been read of
+    // release groups' releases and releases' tracks, a while, in memory.
+    this.releasesOf = new Map(); // release group id -> [{ id, date, tracks }]
+    this.tracksOf = new Map(); // release id -> [{ title, ms }]
+    this.albumIdsAre = null; // what Plex's ids for albums were last found as: 'release' or 'release-group' (see albumGroup)
     this.queuedBy = new Map(); // who -> how many of theirs are waiting
     this.working = false;
     this.downUntil = 0; // MusicBrainz didn't answer: the features don't ask it again until then
@@ -374,12 +380,15 @@ export class MusicBrainz {
   // MusicBrainz id where Plex has it (`id`): { id, name, aliases, genres },
   // or null where MusicBrainz has no such artist (or it's one of
   // MusicBrainz's special-purpose ones: Various Artists, [unknown]...).
-  async artistInfo(name, { id = null, signal, background = false } = {}) {
+  // (`withNote`: as kept, but asked again where what's kept is from before
+  // MusicBrainz's word for telling them apart was kept: see cleanArtist.)
+  async artistInfo(name, { id = null, signal, background = false, withNote = false } = {}) {
     const want = norm(name);
     if (!this.adv || (!want && !MBID.test(String(id)))) return null;
     const byId = MBID.test(String(id));
     const key = byId ? `artistid|${id}` : `artist|${want}`;
-    const kept = this.had(key);
+    let kept = this.had(key);
+    if (withNote && kept && kept.note === undefined) kept = undefined;
     // (An id MusicBrainz doesn't know, out of date in Plex: by name, then.
     // Not a special-purpose artist's, whose name a real artist may have.)
     if (kept === null && byId && want && !SPECIAL_ARTISTS.has(id)) return this.artistInfo(name, { signal, background });
@@ -407,7 +416,7 @@ export class MusicBrainz {
       return want ? this.artistInfo(name, { signal, background }) : null;
     }
     const names = [full.name, full['sort-name'], ...(Array.isArray(full.aliases) ? full.aliases : []).flatMap((a) => [a?.name, a?.['sort-name']])];
-    return this.adv.set(key, cleanArtist({ id: hit.id, name: full.name || hit.name, aliases: names, genres: topGenres(full.genres) }));
+    return this.adv.set(key, cleanArtist({ id: hit.id, name: full.name || hit.name, aliases: names, genres: topGenres(full.genres), note: typeof full.disambiguation === 'string' ? full.disambiguation : '' }));
   }
 
   // An artist's release groups, by their MusicBrainz id: [{ id, title,
@@ -486,7 +495,8 @@ export class MusicBrainz {
   // told). Plex's id for the album is looked for among the artist's: only
   // the artist's name, or their id, goes to MusicBrainz to find it.
   // (`id`: the artist's MusicBrainz id, where Plex has it: then no search.)
-  async album(artist, title, { genres = false, year = null, id = null, albumId = null, strict = false, tracks = 0, signal, background = false } = {}) {
+  async album(artist, title, { genres = false, year = null, id = null, albumId = null, strict = false, tracks = 0, check = false, trackList = null, signal, background = false } = {}) {
+    if (check && !this.public) return this.checkedAlbum(artist, title, { genres, id, albumId, trackList, signal, background });
     const info = await this.artistInfo(artist, { id, signal, background });
     if (!info) return null;
     const g = pickAlbum(await this.releaseGroups(info.id, { signal, background }), title, { year, albumId, strict, tracks });
@@ -495,21 +505,172 @@ export class MusicBrainz {
   }
 
   // ...as far as it's known now, without asking: undefined where it isn't.
-  knownAlbum(artist, title, { genres = false, year = null, id = null, albumId = null, strict = false, tracks = 0 } = {}) {
+  knownAlbum(artist, title, { genres = false, year = null, id = null, albumId = null, strict = false, tracks = 0, check = false, trackList = null } = {}) {
+    const groups = this.knownGroups(artist, id);
+    if (!groups) return groups;
+    if (check && !this.public) return this.knownChecked(groups, title, { genres, albumId, trackList });
+    const g = pickAlbum(groups, title, { year, albumId, strict, tracks });
+    if (!g || !genres) return g;
+    const got = this.had(`genres|${g.id}`);
+    return got === undefined ? undefined : { ...g, genres: got };
+  }
+
+  // An artist's release groups as far as they're known now (see knownAlbum):
+  // undefined where they aren't, null where there's no such artist.
+  knownGroups(artist, id) {
     const who = norm(artist);
     const byId = MBID.test(String(id));
-    if (!this.adv || (!who && !byId) || !albumKey(title)) return null;
+    if (!this.adv || (!who && !byId)) return null;
     if (byId ? SPECIAL_ARTISTS.has(id) : VARIOUS.has(who)) return null;
     // (An id MusicBrainz doesn't know: by name, as artistInfo goes.)
     let info = byId ? this.had(`artistid|${id}`) : this.had(`artist|${who}`);
     if (info === null && byId && who) info = this.had(`artist|${who}`);
     if (!info) return info;
     const groups = this.had(`groups|${info.id}`);
-    if (groups === undefined) return undefined;
-    const g = pickAlbum(groupList(groups), title, { year, albumId, strict, tracks });
-    if (!g || !genres) return g;
-    const got = this.had(`genres|${g.id}`);
-    return got === undefined ? undefined : { ...g, genres: got };
+    return groups === undefined ? undefined : groupList(groups);
+  }
+
+  // ---------- on a MusicBrainz of your own: an album, by its very tracks ----------
+  // For its year and genres to be fixed: the release group of an artist's
+  // that's this album (Plex's MusicBrainz id for it, a release group's or a
+  // release's, looked up where it isn't one of the artist's; or else those
+  // of its exact title, of any kind), by its tracks (`trackList`: [{ title,
+  // ms }], as Plex has them): the first of its releases with those very
+  // tracks (see firstOfTracks), whose date is when this album first came
+  // out: { ...group, date, release, checked: true }, or null where none of
+  // its releases has them (a re-recording, a remix package, another album
+  // of the title). Of several of its title with them, the closest (see
+  // closestFirst). Without its tracks: what's to be checked, the earliest of
+  // those of its title ({ ...group, toCheck: true }), for the app to ask
+  // again with its tracks where it would fix anything. Only of a MusicBrainz
+  // of your own: musicbrainz.org is asked about artists alone, by name or
+  // id (see album, `strict`).
+  async checkedAlbum(artist, title, { genres = false, id = null, albumId = null, trackList = null, signal, background = false } = {}) {
+    const info = await this.artistInfo(artist, { id, signal, background });
+    if (!info) return null;
+    const groups = await this.releaseGroups(info.id, { signal, background });
+    let candidates = [];
+    if (MBID.test(String(albumId))) {
+      const g = groups.find((x) => x.id === albumId) || (await this.albumGroup(albumId, { signal, background }));
+      candidates = g && titlesAgree(g, title) ? [g] : [];
+    } else candidates = sameTitled(groups, title);
+    if (!candidates.length) return null;
+    const withGenres = async (g) => (genres ? { ...g, genres: await this.groupGenres(g.id, { signal, background }) } : g);
+    if (!Array.isArray(trackList) || !trackList.length) return withGenres({ ...candidates[0], toCheck: true });
+    const found = [];
+    for (const g of candidates) found.push({ g, first: await this.firstOfTracks(g.id, trackList, { signal, background }) });
+    const best = closestFirst(found);
+    return best ? withGenres({ ...best.g, date: best.first.date, release: best.first.release, checked: true }) : null;
+  }
+
+  // ...as far as it's known now (see knownAlbum).
+  knownChecked(groups, title, { genres = false, albumId = null, trackList = null } = {}) {
+    let candidates = [];
+    if (MBID.test(String(albumId))) {
+      const g = groups.find((x) => x.id === albumId) || this.had(`album|${albumId}`);
+      if (g === undefined) return undefined;
+      candidates = g && titlesAgree(g, title) ? [g] : [];
+    } else candidates = sameTitled(groups, title);
+    if (!candidates.length) return null;
+    const withGenres = (g) => {
+      if (!genres) return g;
+      const got = this.had(`genres|${g.id}`);
+      return got === undefined ? undefined : { ...g, genres: got };
+    };
+    if (!Array.isArray(trackList) || !trackList.length) return withGenres({ ...candidates[0], toCheck: true });
+    const sig = tracksSig(trackList);
+    const found = [];
+    for (const g of candidates) {
+      const first = this.had(`checked|${g.id}|${sig}`);
+      if (first === undefined) return undefined;
+      found.push({ g, first });
+    }
+    const best = closestFirst(found);
+    return best ? withGenres({ ...best.g, date: best.first.date, release: best.first.release, checked: true }) : null;
+  }
+
+  // Plex's MusicBrainz id for an album, looked up: the release group it's
+  // the id of, or that of the release it's the id of (Plex can have
+  // either), asked as the last one found was first. Null where MusicBrainz
+  // knows neither. Kept for a month.
+  async albumGroup(albumId, { signal, background = false } = {}) {
+    if (!this.adv || this.public || !MBID.test(String(albumId))) return null;
+    const key = `album|${albumId}`;
+    const kept = this.had(key);
+    if (kept !== undefined) return kept;
+    this.resting();
+    const kinds = this.albumIdsAre === 'release-group' ? ['release-group', 'release'] : ['release', 'release-group'];
+    for (const kind of kinds) {
+      let data;
+      try {
+        data = await this.ask(`/ws/2/${kind}/${albumId}`, kind === 'release' ? { inc: 'release-groups' } : {}, signal, { background });
+      } catch (err) {
+        if (err?.answered === 404 || err?.answered === 400) continue;
+        throw err;
+      }
+      const g = cleanGroup(kind === 'release' ? data?.['release-group'] : data);
+      if (!g) continue;
+      this.albumIdsAre = kind;
+      return this.adv.set(key, g);
+    }
+    return this.adv.set(key, null);
+  }
+
+  // A release group's releases: [{ id, date, tracks }] (`tracks`: how many,
+  // on all its media), RELEASE_PAGES of 100 at most. Kept a while in memory
+  // only (what's kept on disk is each album's answer: see firstOfTracks).
+  async groupReleases(gid, { signal, background = false } = {}) {
+    const had = this.releasesOf.get(gid);
+    if (had) return had;
+    const out = [];
+    for (let page = 0; page < MB_ADVANCED_LIMITS.releasePages; page += 1) {
+      const data = await this.ask('/ws/2/release', { 'release-group': gid, inc: 'media', limit: '100', offset: String(page * 100) }, signal, { background });
+      const list = Array.isArray(data?.releases) ? data.releases : [];
+      for (const r of list) {
+        if (!MBID.test(String(r?.id))) continue;
+        const date = text(r.date, 10);
+        const tracks = (Array.isArray(r.media) ? r.media : []).reduce((n, m) => n + (Number(m?.['track-count']) || 0), 0);
+        out.push({ id: r.id, date: DATE.test(date) ? date : '', tracks });
+      }
+      if (list.length < 100 || (page + 1) * 100 >= (Number(data?.['release-count']) || 0)) break;
+    }
+    return remembered(this.releasesOf, gid, out, MB_ADVANCED_LIMITS.releasesKept);
+  }
+
+  // A release's tracks: [{ title, ms }], kept a while in memory.
+  async releaseTracks(rid, { signal, background = false } = {}) {
+    const had = this.tracksOf.get(rid);
+    if (had) return had;
+    const data = await this.ask(`/ws/2/release/${rid}`, { inc: 'recordings' }, signal, { background });
+    const out = (Array.isArray(data?.media) ? data.media : [])
+      .flatMap((m) => (Array.isArray(m?.tracks) ? m.tracks : []))
+      .map((t) => ({ title: text(t?.title || t?.recording?.title, 300), ms: Number(t?.length ?? t?.recording?.length) || 0 }))
+      .filter((t) => t.title)
+      .slice(0, 500);
+    return remembered(this.tracksOf, rid, out, MB_ADVANCED_LIMITS.tracksKept);
+  }
+
+  // The first release of a release group with an album's very tracks (see
+  // releases.js tracksInCommon): of its releases of about as many tracks
+  // (see releaseSizes), with a date, the earliest first, CHECKED_RELEASES of
+  // them at most: { date, release, same } (`same`: how many of the album's
+  // tracks it has), or null where none of those has them. Kept for a month,
+  // by the release group and the album's tracks.
+  async firstOfTracks(gid, trackList, { signal, background = false } = {}) {
+    const key = `checked|${gid}|${tracksSig(trackList)}`;
+    const kept = this.had(key);
+    if (kept !== undefined) return kept;
+    this.resting();
+    const [fewest, most] = releaseSizes(trackList.length);
+    const releases = (await this.groupReleases(gid, { signal, background }))
+      .filter((r) => r.date && r.tracks >= fewest && r.tracks <= most)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(0, MB_ADVANCED_LIMITS.checkedReleases);
+    for (const r of releases) {
+      const same = tracksInCommon(trackList, await this.releaseTracks(r.id, { signal, background }));
+      if (same) return this.adv.set(key, { date: r.date, release: r.id, same });
+    }
+    return this.adv.set(key, null);
   }
 
   // Albums to look up in the background (an owner looking through their
@@ -517,15 +678,18 @@ export class MusicBrainz {
   // anything else. At most MB_ADVANCED_LIMITS.queued waiting, and
   // queuedEach of any one account's (`who`): false if there's no room for
   // this one now (nor while MusicBrainz isn't answering).
-  later(artist, title, { genres = false, year = null, who = '', id = null, albumId = null, strict = false, tracks = 0 } = {}) {
+  later(artist, title, { genres = false, year = null, who = '', id = null, albumId = null, strict = false, tracks = 0, check = false, trackList = null } = {}) {
     if (!this.adv || !norm(artist) || !albumKey(title) || this.down()) return false;
     const byId = MBID.test(String(id)) ? id : null;
     const byAlbum = MBID.test(String(albumId)) ? albumId : null;
     const count = Math.max(0, Math.min(10000, Math.floor(Number(tracks) || 0)));
-    const key = `${norm(artist)}|${strict ? exactKey(title) : albumKey(title)}|${Number(year) || ''}|${genres ? 1 : 0}|${byId || ''}|${byAlbum || ''}|${strict ? `1|${count}` : 0}`;
+    const checking = !!check && !this.public;
+    const list = checking && Array.isArray(trackList) && trackList.length ? trackList : null;
+    const how = checking ? `c|${list ? tracksSig(list) : ''}` : strict ? `1|${count}` : 0;
+    const key = `${norm(artist)}|${strict || checking ? exactKey(title) : albumKey(title)}|${Number(year) || ''}|${genres ? 1 : 0}|${byId || ''}|${byAlbum || ''}|${how}`;
     if (this.todo.has(key)) return true;
     if (this.todo.size >= MB_ADVANCED_LIMITS.queued || (this.queuedBy.get(who) || 0) >= MB_ADVANCED_LIMITS.queuedEach) return false;
-    this.todo.set(key, { artist: String(artist), title: String(title), genres: !!genres, year: Number(year) || null, id: byId, albumId: byAlbum, strict: !!strict, tracks: count, who, tries: 0 });
+    this.todo.set(key, { artist: String(artist), title: String(title), genres: !!genres, year: Number(year) || null, id: byId, albumId: byAlbum, strict: !!strict, tracks: count, check: checking, trackList: list, who, tries: 0 });
     this.queuedBy.set(who, (this.queuedBy.get(who) || 0) + 1);
     this.work();
     return true;
@@ -555,7 +719,7 @@ export class MusicBrainz {
           continue;
         }
         try {
-          await this.album(it.artist, it.title, { genres: it.genres, year: it.year, id: it.id, albumId: it.albumId, strict: it.strict, tracks: it.tracks, background: true });
+          await this.album(it.artist, it.title, { genres: it.genres, year: it.year, id: it.id, albumId: it.albumId, strict: it.strict, tracks: it.tracks, check: it.check, trackList: it.trackList, background: true });
           this.done(key);
         } catch (err) {
           // Only a search could find it, and searching finds no one: let go
@@ -587,19 +751,21 @@ export class MusicBrainz {
   // where it isn't yet: looked up in the background, for `who`), waiting
   // up to `waitMs` for those, and 'unchecked' where only a search could
   // find it while searching finds no one (see searchCheck). (Items: {
-  // artist, title, year, artistId, albumId, tracks }: the artist's and the
-  // album's MusicBrainz ids, where Plex has them, so no search is needed,
-  // and how many tracks Plex has of it.) `strict`: as album has it.
-  async albums(items, { genres = false, waitMs = 0, signal, who = '', strict = false } = {}) {
+  // artist, title, year, artistId, albumId, tracks, trackList }: the
+  // artist's and the album's MusicBrainz ids, where Plex has them, so no
+  // search is needed, how many tracks Plex has of it, and with `check`,
+  // those tracks.) `strict` and `check`: as album has them.
+  async albums(items, { genres = false, waitMs = 0, signal, who = '', strict = false, check = false } = {}) {
     const bySearch = (it) => !MBID.test(String(it.artistId)) || this.had(`artistid|${it.artistId}`) === null;
+    const how = (it) => ({ genres, year: it.year, id: it.artistId, albumId: it.albumId, strict, tracks: it.tracks, check, trackList: it.trackList || null });
     const answer = () =>
       items.map((it) => {
-        const v = this.knownAlbum(it.artist, it.title, { genres, year: it.year, id: it.artistId, albumId: it.albumId, strict, tracks: it.tracks });
+        const v = this.knownAlbum(it.artist, it.title, how(it));
         if (v !== undefined) return v;
         return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
       });
     let out = answer();
-    out.forEach((v, i) => v === 'pending' && this.later(items[i].artist, items[i].title, { genres, year: items[i].year, who, id: items[i].artistId, albumId: items[i].albumId, strict, tracks: items[i].tracks }));
+    out.forEach((v, i) => v === 'pending' && this.later(items[i].artist, items[i].title, { ...how(items[i]), who }));
     const until = Date.now() + Math.max(0, Math.min(Number(waitMs) || 0, MB_ADVANCED_LIMITS.waitMs));
     while (out.includes('pending') && Date.now() < until && !signal?.aborted) {
       await new Promise((r) => setTimeout(r, 200));
@@ -623,6 +789,12 @@ export const MB_ADVANCED_LIMITS = {
   perRequest: 200, // albums asked about in one request from the app
   waitMs: 10000, // how long a request from the app may wait for answers
   groupPages: 5, // of an artist's release groups, 100 to a page
+  // On a MusicBrainz of your own (see checkedAlbum):
+  trackList: 200, // tracks of an album, asked about with them
+  releasePages: 3, // of a release group's releases, 100 to a page
+  checkedReleases: 6, // ...whose tracks are read, to find the first of an album's, at most
+  releasesKept: 500, // release groups' releases kept in memory
+  tracksKept: 3000, // ...and releases' tracks
   namesakes: 3, // other artists of an artist's name, looked at for their page
   artistMs: 30000, // how long one artist's lookups may take for the app
   restMs: 30000, // after MusicBrainz doesn't answer, in the background
@@ -699,6 +871,49 @@ function cleanNamesake(a) {
   return { id: a.id, name: text(a.name, 200), note: text(a.disambiguation ?? a.note, 120) };
 }
 
+// Of an artist's release groups, those of an album's exact title (as
+// releases.js exactKey has it), of any kind, the earliest first: three at
+// most (see checkedAlbum, which goes by their tracks).
+function sameTitled(groups, title) {
+  const want = exactKey(title);
+  if (!want) return [];
+  return (Array.isArray(groups) ? groups : [])
+    .filter((g) => g && exactKey(g.title) === want)
+    .sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'))
+    .slice(0, 3);
+}
+
+// Of an album's title's release groups, each with the first of its
+// releases with the album's tracks (firstOfTracks: [{ g, first }], `first`
+// null where none), the one most like it: with the most of its tracks (an
+// album of 18 is the compilation of those 18, not an earlier one of 14 of
+// them), then the earliest. Null where none has them.
+function closestFirst(found) {
+  let best = null;
+  for (const x of found) {
+    if (!x.first) continue;
+    const same = x.first.same || 0;
+    const had = best ? best.first.same || 0 : -1;
+    if (same > had || (same === had && x.first.date < best.first.date)) best = x;
+  }
+  return best;
+}
+
+// An album's tracks, as a short hash, by what's compared of them (see
+// releases.js tracksInCommon: their titles and lengths, in any order).
+function tracksSig(trackList) {
+  const keys = (Array.isArray(trackList) ? trackList : []).map((t) => `${trackKey(t?.title)}~${Math.round((Number(t?.ms) || 0) / 1000)}`).sort();
+  return createHash('sha256').update(keys.join('\n')).digest('hex').slice(0, 20);
+}
+
+// A map kept to `most` entries, the oldest going first: `v`, set.
+function remembered(map, key, v, most) {
+  map.delete(key);
+  map.set(key, v);
+  while (map.size > most) map.delete(map.keys().next().value);
+  return v;
+}
+
 // An album's release group among its artist's (see MusicBrainz album).
 function pickAlbum(groups, title, { year = null, albumId = null, strict = false, tracks = 0 } = {}) {
   const id = MBID.test(String(albumId)) ? albumId : null;
@@ -719,7 +934,11 @@ function cleanGroup(g) {
 function cleanArtist(a) {
   if (!a || !MBID.test(String(a.id))) return null;
   const list = (v, n, each) => [...new Set((Array.isArray(v) ? v : []).map((x) => text(x, each)).filter(Boolean))].slice(0, n);
-  return { id: a.id, name: text(a.name, 200), aliases: list(a.aliases, 40, 200), genres: list(a.genres, 5, 60) };
+  // (`note`: MusicBrainz's word for telling them apart from others of the
+  // name, "American grunge band", say; not there in what was kept before
+  // 0.36.0.)
+  const note = typeof (a.note ?? a.disambiguation) === 'string' ? { note: text(a.note ?? a.disambiguation, 120) } : {};
+  return { id: a.id, name: text(a.name, 200), aliases: list(a.aliases, 40, 200), genres: list(a.genres, 5, 60), ...note };
 }
 
 // MusicBrainz's genres, as Plex names them ("alternative rock": Alternative
@@ -755,6 +974,12 @@ function cleanKept(key, v) {
   if (key.startsWith('groups|')) {
     if (Array.isArray(v)) return v.map(cleanGroup).filter(Boolean);
     return v?.capped === true && Array.isArray(v.groups) ? { capped: true, groups: v.groups.map(cleanGroup).filter(Boolean) } : undefined;
+  }
+  if (key.startsWith('album|')) return v === null ? null : cleanGroup(v) || undefined;
+  if (key.startsWith('checked|')) {
+    if (v === null) return null;
+    const same = Number(v?.same);
+    return MBID.test(String(v?.release)) && DATE.test(String(v?.date)) && Number.isSafeInteger(same) && same > 0 && same <= 500 ? { date: v.date, release: v.release, same } : undefined;
   }
   if (key.startsWith('genres|')) return Array.isArray(v) ? v.map((x) => text(x, 60)).filter(Boolean).slice(0, 5) : undefined;
   if (key.startsWith('namesakes|')) return Array.isArray(v) ? v.map(cleanNamesake).filter(Boolean).slice(0, 10) : undefined;

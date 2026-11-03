@@ -1029,6 +1029,100 @@ test('MusicBrainz features: for its year and genres to be fixed, an album is the
   assert.equal((await mb.albums([{ artist: 'Bob Sinclar', title: 'Gym Tonic', year: 2021, artistId: B }]))[0].date, '1998-01-01');
 });
 
+test('MusicBrainz features: on a MusicBrainz of your own, an album is checked by its very tracks: the first release with them is when it first came out', async () => {
+  const B = MB_ID(9);
+  const track = (title, s) => ({ title, length: s * 1000 });
+  const ten = 'ABCDEFGHIJ'.split('').map((x, i) => track(`Song ${x}`, 200 + i * 10));
+  const groups = [
+    { id: MB_ID(91), title: 'Hearthstone', 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '1998-03-01' },
+    { id: MB_ID(92), title: 'Glass Rain', 'primary-type': 'Single', 'secondary-types': [], 'first-release-date': '2004-06-01' },
+    { id: MB_ID(93), title: 'Christmas', 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '1994-11-01' },
+    { id: MB_ID(94), title: 'Greatest Hits', 'primary-type': 'Album', 'secondary-types': ['Compilation'], 'first-release-date': '1990-04-01' },
+    { id: MB_ID(95), title: 'Greatest Hits', 'primary-type': 'Album', 'secondary-types': ['Compilation'], 'first-release-date': '2005-09-01' },
+    { id: MB_ID(96), title: 'Paper Moon', 'primary-type': 'Single', 'secondary-types': [], 'first-release-date': '1998-02-01' },
+  ];
+  const hits = Array.from({ length: 14 }, (_, i) => track(`Hit ${i + 1}`, 200 + i));
+  const newer = [...hits, ...Array.from({ length: 4 }, (_, i) => track(`New ${i + 1}`, 230 + i))];
+  const releases = {
+    [MB_ID(91)]: [
+      { id: MB_ID(911), date: '1998-03-01', tracks: ten },
+      { id: MB_ID(912), date: '2015-05-01', tracks: [...ten, track('Bonus One', 180), track('Bonus Two', 190)] },
+    ],
+    [MB_ID(92)]: [
+      { id: MB_ID(921), date: '2004-06-01', tracks: [track('Glass Rain', 220)] },
+      { id: MB_ID(922), date: '2019-02-01', tracks: [track('Glass Rain', 250)] },
+    ],
+    [MB_ID(93)]: [{ id: MB_ID(931), date: '1994-11-01', tracks: Array.from({ length: 12 }, (_, i) => track(`Carol ${i + 1}`, 180)) }],
+    [MB_ID(94)]: [{ id: MB_ID(941), date: '1990-04-01', tracks: hits }],
+    [MB_ID(95)]: [{ id: MB_ID(951), date: '2005-09-01', tracks: newer }],
+    [MB_ID(96)]: [
+      { id: MB_ID(961), date: '1998-02-01', tracks: [track('Paper Moon', 200)] },
+      { id: MB_ID(962), date: '2021-03-01', tracks: [track('Paper Moon', 200), track('New Song', 190)] },
+    ],
+  };
+  const groupOf = (rid) => Object.keys(releases).find((g) => releases[g].some((r) => r.id === rid));
+  const asked = [];
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    asked.push(`${u.pathname}?${u.searchParams}`);
+    const id = u.pathname.split('/').pop();
+    let body = null;
+    if (u.pathname === `/ws/2/artist/${B}`) body = { id: B, name: 'Juniper & Ash', aliases: [], genres: [] };
+    else if (u.pathname === '/ws/2/release-group' && u.searchParams.get('artist') === B) body = { 'release-group-count': groups.length, 'release-groups': groups };
+    else if (u.pathname === '/ws/2/release' && releases[u.searchParams.get('release-group')]) {
+      const list = releases[u.searchParams.get('release-group')];
+      body = { 'release-count': list.length, releases: list.map((r) => ({ id: r.id, date: r.date, media: [{ 'track-count': r.tracks.length }] })) };
+    } else if (u.pathname.startsWith('/ws/2/release/') && groupOf(id)) {
+      const r = releases[groupOf(id)].find((x) => x.id === id);
+      body = { id, date: r.date, 'release-group': groups.find((g) => g.id === groupOf(id)), media: [{ 'track-count': r.tracks.length, tracks: r.tracks }] };
+    } else if (u.pathname.startsWith('/ws/2/release-group/')) body = { id, genres: [{ name: 'folk', count: 2 }] };
+    return body ? { ok: true, status: 200, json: async () => body } : { ok: false, status: 404, json: async () => ({}) };
+  };
+  const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+  const plexTracks = (list) => list.map((t) => ({ title: t.title, ms: t.length }));
+  const ask = { id: B, check: true };
+  // A reissue (Plex's id for it: its own release's), its tracks the first release's and two more: when that came out
+  const deluxe = plexTracks([...ten, track('Bonus One', 181), track('Bonus Two', 190)]);
+  const toCheck = await mb.album('Juniper & Ash', 'Hearthstone (Deluxe Edition)', { ...ask, albumId: MB_ID(912) });
+  assert.equal(toCheck.toCheck, true, 'without its tracks: what\'s to be checked');
+  const checked = await mb.album('Juniper & Ash', 'Hearthstone (Deluxe Edition)', { ...ask, albumId: MB_ID(912), trackList: deluxe, genres: true });
+  assert.deepEqual([checked.id, checked.date, checked.release, checked.checked, checked.genres], [MB_ID(91), '1998-03-01', MB_ID(911), true, ['Folk']]);
+  // ...the same known without asking, now
+  assert.equal(mb.knownAlbum('Juniper & Ash', 'Hearthstone (Deluxe Edition)', { ...ask, albumId: MB_ID(912), trackList: deluxe }).date, '1998-03-01');
+  // A single of a title (no id): its tracks a re-recording's (not the first's length), so when that came out, not the original's
+  const rain = await mb.album('Juniper & Ash', 'Glass Rain', { ...ask, trackList: [{ title: 'Glass Rain', ms: 250000 }] });
+  assert.deepEqual([rain.date, rain.release], ['2019-02-01', MB_ID(922)]);
+  assert.equal((await mb.album('Juniper & Ash', 'Glass Rain', { ...ask, trackList: [{ title: 'Glass Rain', ms: 221000 }] })).date, '2004-06-01');
+  // Another album of the title (MusicBrainz has one Christmas of theirs, not these tracks): none
+  assert.equal(await mb.album('Juniper & Ash', 'Christmas', { ...ask, trackList: Array.from({ length: 12 }, (_, i) => ({ title: `Noel ${i + 1}`, ms: 180000 })) }), null);
+  // Two compilations of a title, the later one the earlier's tracks and four more: an album of all 18 is the later one,
+  // not the earlier (whose 14 it has too); one of the 14, the earlier
+  assert.equal((await mb.album('Juniper & Ash', 'Greatest Hits', { ...ask, trackList: plexTracks(newer) })).date, '2005-09-01');
+  assert.equal((await mb.album('Juniper & Ash', 'Greatest Hits', { ...ask, trackList: plexTracks(hits) })).date, '1990-04-01');
+  assert.equal(mb.knownAlbum('Juniper & Ash', 'Greatest Hits', { ...ask, trackList: plexTracks(newer) }).date, '2005-09-01');
+  // A single put out again with a new B-side: when that came out, not the first one (its A-side alone: not all its tracks)
+  assert.equal((await mb.album('Juniper & Ash', 'Paper Moon', { ...ask, trackList: plexTracks([track('Paper Moon', 200), track('New Song', 190)]) })).date, '2021-03-01');
+  assert.equal((await mb.album('Juniper & Ash', 'Paper Moon', { ...ask, trackList: plexTracks([track('Paper Moon', 200)]) })).date, '1998-02-01');
+  assert.equal(await mb.album('Juniper & Ash', 'Paper Moon', { ...ask, trackList: plexTracks([track('Paper Moon', 200), track('Other Song', 170)]) }), null);
+  // As the app asks: what's to be checked, then those checked by their tracks, kept
+  const items = [
+    { artist: 'Juniper & Ash', title: 'Hearthstone (Deluxe Edition)', year: 2015, artistId: B, albumId: MB_ID(912), tracks: 12, trackList: deluxe },
+    { artist: 'Juniper & Ash', title: 'Christmas', year: 2012, artistId: B, tracks: 12, trackList: Array.from({ length: 12 }, (_, i) => ({ title: `Noel ${i + 1}`, ms: 180000 })) },
+  ];
+  assert.deepEqual((await mb.albums(items, { check: true, waitMs: 3000 })).map((g) => g && g.date), ['1998-03-01', null]);
+  const before = asked.length;
+  assert.deepEqual((await mb.albums(items, { check: true })).map((g) => g && g.date), ['1998-03-01', null], 'kept: nothing asked again');
+  assert.equal(asked.length, before);
+  // Only tracks' and releases' ids went to MusicBrainz, never a title of the library's
+  assert.ok(!asked.some((x) => /Hearthstone|Glass|Christmas|Noel|Song|Greatest|Hit|Paper|Moon/i.test(decodeURIComponent(x))), asked.join(' '));
+  // ...and musicbrainz.org is never asked about an album: there, as `strict` has it
+  const pub = [];
+  const org = new MusicBrainz({ fetchImpl: async (url) => (pub.push(url), fetchImpl(url)), gapMs: 0 }).advanced(new MBKept());
+  const byTitle = await org.album('Juniper & Ash', 'Hearthstone (Deluxe Edition)', { ...ask, albumId: MB_ID(912), trackList: deluxe, strict: true, tracks: 12 });
+  assert.deepEqual([byTitle.id, byTitle.checked], [MB_ID(91), undefined], 'the studio album of its exact title, not checked');
+  assert.ok(!pub.some((x) => /\/ws\/2\/release(\/|\?)/.test(x)), pub.join(' '));
+});
+
 test('MusicBrainz features: when MusicBrainz doesn\'t answer, nothing new is asked of it for a minute (what\'s kept is still answered)', async () => {
   const { fetchImpl: answers } = fakeMusicBrainz();
   let down = false;
@@ -1082,7 +1176,7 @@ test('MusicBrainz features: an artist by name or other name, their other names a
   const { asked, fetchImpl } = fakeMusicBrainz();
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const a = await mb.artistInfo('Sigur Ros');
-  assert.deepEqual(a, { id: MB_ID(1), name: 'Sigur Rós', aliases: ['Sigur Rós', 'Sigur Ros'], genres: ['Post-Rock', 'Ambient'] });
+  assert.deepEqual(a, { id: MB_ID(1), name: 'Sigur Rós', aliases: ['Sigur Rós', 'Sigur Ros'], genres: ['Post-Rock', 'Ambient'], note: '' });
   assert.equal((await mb.artistInfo('Mumiy Troll')).name, 'Мумий Тролль');
   assert.equal(await mb.artistInfo('Nobody At All'), null);
   const n = asked.length;
@@ -1094,6 +1188,17 @@ test('MusicBrainz features: an artist by name or other name, their other names a
   const off = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 });
   assert.equal(await off.artistInfo('Sigur Ros'), null);
   assert.equal(asked.length, n);
+  // Kept before MusicBrainz's word for telling them apart was (0.36.0): asked again for it, where it's wanted.
+  const kept = new MBKept();
+  kept.set(`artistid|${MB_ID(1)}`, { id: MB_ID(1), name: 'Sigur Rós', aliases: [], genres: [] });
+  const older = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(kept);
+  const m = asked.length;
+  assert.equal((await older.artistInfo('', { id: MB_ID(1) })).note, undefined, 'as kept');
+  assert.equal(asked.length, m);
+  assert.equal((await older.artistInfo('', { id: MB_ID(1), withNote: true })).note, '');
+  assert.equal(asked.length, m + 1);
+  assert.equal((await older.artistInfo('', { id: MB_ID(1), withNote: true })).note, '', 'kept with it now');
+  assert.equal(asked.length, m + 1);
 });
 
 test('MusicBrainz features: an artist\'s release groups (100 to a page) and an album\'s, with its genres, by artist', async () => {
@@ -1205,11 +1310,26 @@ test('MusicBrainz features: what\'s looked up is kept in a file only the service
     // What doesn't check out is left out; a month on, it's all gone.
     const data = JSON.parse(readFileSync(file, 'utf8'));
     data.kept.push(['artist|evil', { id: '../../etc', name: 'x' }, now], ['groups|x', 'not a list', now], ['made up|y', 1, now], ['genres|' + MB_ID(9), ['Fine'], now + 86400000]);
+    // (On a MusicBrainz of your own: albums by Plex's ids, and what their tracks said.)
+    data.kept.push(
+      ['album|' + MB_ID(7), { id: MB_ID(8), title: 'Fine', primary: 'Album', secondary: [], date: '1998' }, now],
+      ['album|' + MB_ID(6), null, now],
+      ['album|' + MB_ID(5), { id: 'nope', title: 'x' }, now],
+      [`checked|${MB_ID(8)}|abc`, { date: '1998-03-01', release: MB_ID(4), same: 11 }, now],
+      [`checked|${MB_ID(8)}|def`, null, now],
+      [`checked|${MB_ID(8)}|ghi`, { date: 'yesterday', release: MB_ID(4), same: 11 }, now],
+      [`checked|${MB_ID(8)}|jkl`, { date: '1998-03-01', release: MB_ID(4), same: 'all' }, now],
+    );
     writeFileSync(file, JSON.stringify(data));
     const read = new MBKept({ dir, now: () => now });
     assert.equal(read.get('artist|evil'), undefined);
     assert.equal(read.get('groups|x'), undefined);
     assert.equal(read.get('made up|y'), undefined);
+    assert.deepEqual([read.get('album|' + MB_ID(7))?.id, read.get('album|' + MB_ID(6)), read.get('album|' + MB_ID(5))], [MB_ID(8), null, undefined]);
+    assert.deepEqual(
+      [read.get(`checked|${MB_ID(8)}|abc`), read.get(`checked|${MB_ID(8)}|def`), read.get(`checked|${MB_ID(8)}|ghi`), read.get(`checked|${MB_ID(8)}|jkl`)],
+      [{ date: '1998-03-01', release: MB_ID(4), same: 11 }, null, undefined, undefined],
+    );
     assert.equal(read.get(`genres|${MB_ID(9)}`), undefined, 'not from the future');
     assert.ok(read.get('artist|sigur ros'));
     now += 32 * 86400000;

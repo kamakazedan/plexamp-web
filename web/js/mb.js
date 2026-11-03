@@ -30,6 +30,10 @@ import { RELEASE_KINDS, kindOf, plexKind, shortRelease, versionedTracks } from '
 
 // The player has them.
 export const mbFeatures = () => !!app.config.musicbrainzAdvanced;
+// ...with a MusicBrainz of its own (a mirror), which albums are looked up on
+// too, by their tracks (see albumsOnMB, `check`): musicbrainz.org is asked
+// about artists alone.
+export const mbOwnServer = () => mbFeatures() && app.config.musicbrainz === 'own';
 // ...and this one's on (each is on to begin with).
 export const mbOn = (setting) => mbFeatures() && app.settings[setting] !== false;
 // Skip live tracks and demos (Settings › Playback): on where it's been
@@ -117,13 +121,14 @@ async function call(path, body, { signal, background = false, now = false } = {}
 }
 
 // An artist on MusicBrainz, by name (or by their MusicBrainz id, `id`,
-// where Plex has it): { artist: { id, name, aliases, genres } | null,
+// where Plex has it): { artist: { id, name, aliases, genres, note? } | null,
 // groups: [{ id, title, primary, secondary, date }], capped, namesakes,
 // moreNamesakes } (`groups`: false, without those; `namesakes`: true, with
 // the other artists of the name too, [{ id, name, note, groups }]: see
 // apartFromNamesakes, and `moreNamesakes` where MusicBrainz has more of the
-// name than those), kept while the app's open (a failure isn't, to be
-// asked again).
+// name than those; `note`: with MusicBrainz's word for telling the artist
+// apart from others of the name), kept while the app's open (a failure
+// isn't, to be asked again).
 const artists = new Map();
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -134,15 +139,15 @@ export const mbidOf = (item) =>
     .map((g) => String(g?.id || ''))
     .find((g) => /^mbid:\/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(g))
     ?.slice(7) || null;
-export function artistOnMB(name, { groups = true, id = null, namesakes = false, background = false, now = false } = {}) {
+export function artistOnMB(name, { groups = true, id = null, namesakes = false, background = false, now = false, note = false } = {}) {
   const byId = MBID.test(String(id)) ? id : null;
-  const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${byId || norm(name)}`;
+  const key = `${groups ? 1 : 0}|${namesakes ? 1 : 0}|${note ? 1 : 0}|${byId || norm(name)}`;
   if (!mbFeatures() || (!norm(name) && !byId)) return Promise.resolve({ artist: null, groups: [], capped: false, namesakes: [], moreNamesakes: false });
   // (One a page looking through the library is still waiting on isn't
   // shared with someone waiting themselves: they ask for it on their own.)
   const had = artists.get(key);
   if (!had || (had.background && !background && !had.done)) {
-    const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}) }, { background, now }).then(
+    const job = call('artist', { name: String(name || '').slice(0, 200), groups, ...(byId ? { id: byId } : {}), ...(namesakes ? { namesakes: true } : {}), ...(note ? { note: true } : {}) }, { background, now }).then(
       (r) => ({
         artist: r.artist || null,
         groups: Array.isArray(r.groups) ? r.groups : [],
@@ -166,6 +171,9 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false, 
   return artists.get(key);
 }
 
+const ALBUMS_ASKED = 200; // albums to a request, at most (as the player takes them)...
+const ALBUMS_BYTES = 160 * 1024; // ...and its size, at most (the player takes 256 KB)
+
 // Albums' release groups ([{ artist, title, year, artistId, albumId,
 // tracks }]: `year`, the year Plex has for it, tells albums of one title
 // apart; `artistId` and `albumId`, the artist's and the album's MusicBrainz
@@ -179,36 +187,59 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false, 
 // doesn't know yet (ms). `strict`: the very album or nothing, for its year
 // or genres to be shown or fixed (Plex's id for it, where its title agrees,
 // or else, for a studio album, its exact title: see releases.js
-// exactAlbum).
-export async function albumsOnMB(items, { genres = false, wait = 0, signal, background = false, now = false, strict = false } = {}) {
+// exactAlbum). `check`, on a MusicBrainz of the player's own (mbOwnServer):
+// by its very tracks too (`trackList`: [{ title, ms }]), the first of its
+// releases with them (see server/musicbrainz.js checkedAlbum); without its
+// tracks, what's to be checked (`toCheck`).
+export async function albumsOnMB(items, { genres = false, wait = 0, signal, background = false, now = false, strict = false, check = false } = {}) {
   if (!mbFeatures() || !items.length) return items.map(() => null);
   const out = [];
-  for (let i = 0; i < items.length; i += 200) {
-    const part = items.slice(i, i + 200).map((it) => ({
-      artist: String(it.artist || '').slice(0, 200),
-      title: String(it.title || '').slice(0, 200),
-      year: Number(it.year) || null,
-      ...(MBID.test(String(it.artistId)) ? { artistId: it.artistId } : {}),
-      ...(MBID.test(String(it.albumId)) ? { albumId: it.albumId } : {}),
-      ...(Number(it.tracks) > 0 ? { tracks: Math.floor(Number(it.tracks)) } : {}),
-    }));
-    const r = await call('albums', { items: part, genres, wait, ...(strict ? { strict: true } : {}) }, { signal, background, now });
-    const results = Array.isArray(r.results) ? r.results : [];
-    out.push(...part.map((_, j) => results[j] ?? null));
-    if (r.searchBroken === true) out.searchBroken = true;
+  const asked = items.map((it) => ({
+    artist: String(it.artist || '').slice(0, 200),
+    title: String(it.title || '').slice(0, 200),
+    year: Number(it.year) || null,
+    ...(MBID.test(String(it.artistId)) ? { artistId: it.artistId } : {}),
+    ...(MBID.test(String(it.albumId)) ? { albumId: it.albumId } : {}),
+    ...(Number(it.tracks) > 0 ? { tracks: Math.floor(Number(it.tracks)) } : {}),
+    ...(check && Array.isArray(it.trackList) ? { trackList: it.trackList.slice(0, 200).map((t) => ({ title: String(t?.title || '').slice(0, 200), ms: Math.max(0, Math.round(Number(t?.ms) || 0)) })) } : {}),
+  }));
+  const how = { genres, wait, ...(strict ? { strict: true } : {}), ...(check ? { check: true } : {}) };
+  // A request at a time of ALBUMS_ASKED at most, and of no more than
+  // ALBUMS_BYTES (albums with their tracks: fewer to a request). One the
+  // player says is too large anyway is asked about in halves; an album too
+  // large alone isn't on MusicBrainz, as far as this goes.
+  const ask = async (part) => {
+    try {
+      const r = await call('albums', { items: part, ...how }, { signal, background, now });
+      const results = Array.isArray(r.results) ? r.results : [];
+      return { results: part.map((_, j) => results[j] ?? null), searchBroken: r.searchBroken === true };
+    } catch (err) {
+      if (err?.status !== 413) throw err;
+      if (part.length === 1) return { results: [null], searchBroken: false };
+      const half = Math.ceil(part.length / 2);
+      const a = await ask(part.slice(0, half));
+      const b = await ask(part.slice(half));
+      return { results: [...a.results, ...b.results], searchBroken: a.searchBroken || b.searchBroken };
+    }
+  };
+  const size = new TextEncoder();
+  for (let i = 0; i < asked.length; ) {
+    const part = [];
+    let bytes = 0;
+    while (i < asked.length && part.length < ALBUMS_ASKED) {
+      const n = size.encode(JSON.stringify(asked[i])).length + 1;
+      if (part.length && bytes + n > ALBUMS_BYTES) break;
+      part.push(asked[i]);
+      bytes += n;
+      i += 1;
+    }
+    const r = await ask(part);
+    out.push(...r.results);
+    if (r.searchBroken) out.searchBroken = true;
   }
   return out;
 }
 
-// Whether a short album's tracks say it's another recording than the
-// release group of its title (releases.js versionedTracks: its one track
-// "Yeah Yeah (Chocolate Puma Remix)", of "Yeah Yeah"), whose first year is
-// then the original's, not its own: looked at only for a short one
-// (releases.js shortRelease), its tracks (`tracks`, where they're to hand)
-// read from Plex otherwise, a few at a time, and kept while the app's open.
-// Where they can't be read, it's taken as another (and read again next
-// time): nothing's said of it.
-const tracksSaid = new Map(); // server|album id -> Promise<boolean>
 const TRACK_READS = 4; // at once
 let trackReads = 0;
 const trackReadsWaiting = [];
@@ -228,22 +259,42 @@ function readTracks(server, id) {
     else trackReadsWaiting.push(go);
   });
 }
+
+// An album's tracks as Plex has them, for MusicBrainz's to be compared with:
+// [{ title, ms }], read from Plex a few at a time, kept while the app's
+// open (where they can't be read: rejected, and read again next time).
+const tracksRead = new Map(); // server|album id -> Promise<[{ title, ms }]>
+export function albumTracks(album, { server = app.server } = {}) {
+  const key = `${app.source?.serverId || ''}|${album?.ratingKey}`;
+  if (!tracksRead.has(key)) {
+    const job = readTracks(server, album.ratingKey).then(
+      (list) => (Array.isArray(list) ? list : []).filter((t) => t?.type === 'track' || t?.title).map((t) => ({ title: String(t.title || ''), ms: Number(t.duration) || 0 })),
+      (err) => {
+        if (tracksRead.get(key) === job) tracksRead.delete(key);
+        throw err;
+      },
+    );
+    tracksRead.set(key, job);
+    while (tracksRead.size > 5000) tracksRead.delete(tracksRead.keys().next().value);
+  }
+  return tracksRead.get(key);
+}
+
+// Whether a short album's tracks say it's another recording than the
+// release group of its title (releases.js versionedTracks: its one track
+// "Yeah Yeah (Chocolate Puma Remix)", of "Yeah Yeah"), whose first year is
+// then the original's, not its own: looked at only for a short one
+// (releases.js shortRelease), its tracks (`tracks`, where they're to hand)
+// read from Plex otherwise (see albumTracks).
+// Where they can't be read, it's taken as another (and read again next
+// time): nothing's said of it.
 export function notThatRecording(album, g, { server = app.server, tracks = null } = {}) {
   if (!album || !g || !shortRelease(tracks ? tracks.length : album.leafCount, g)) return Promise.resolve(false);
   if (tracks) return Promise.resolve(versionedTracks(album.title, tracks.map((t) => t?.title)));
-  const key = `${app.source?.serverId || ''}|${album.ratingKey}`;
-  if (!tracksSaid.has(key)) {
-    const job = readTracks(server, album.ratingKey).then(
-      (list) => versionedTracks(album.title, (Array.isArray(list) ? list : []).map((t) => t?.title)),
-      () => {
-        if (tracksSaid.get(key) === job) tracksSaid.delete(key);
-        return true;
-      },
-    );
-    tracksSaid.set(key, job);
-    while (tracksSaid.size > 5000) tracksSaid.delete(tracksSaid.keys().next().value);
-  }
-  return tracksSaid.get(key);
+  return albumTracks(album, { server }).then(
+    (list) => versionedTracks(album.title, list.map((t) => t.title)),
+    () => true,
+  );
 }
 
 // The other names MusicBrainz has for an artist (spellings, scripts, what

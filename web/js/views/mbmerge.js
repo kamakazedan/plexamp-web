@@ -1,21 +1,23 @@
 // Settings › MusicBrainz › Artists to merge, for the server's owner: for
 // their information only, the library's artists that Plex may have more than
-// once, with what Plex itself says of each, and nothing changed (merging, if
-// they're one, is theirs to do in Plex). Two kinds:
+// once, with what Plex itself says of each, what's wrong and what to do, and
+// nothing changed (merging, if they're one, is theirs to do in Plex):
 //   - artists of the very same name (Plex makes two of one from files
-//     tagged otherwise): how many albums each has, and whether Plex links
-//     them to the same artist on MusicBrainz, or hasn't linked them (Plex's
-//     MusicBrainz ids for them: only Plex's own match, and nothing is
-//     looked up); those it links to different artists, most likely
-//     different artists of one name, last, apart;
+//     tagged otherwise), by what Plex's MusicBrainz ids for them say (Plex's
+//     own match): one artist (merge them), can't tell (some not linked), or
+//     different artists of one name (usually right), each with how many
+//     albums Plex has of theirs, and who MusicBrainz says the one Plex links
+//     is (looked up by that id: its name, and its word for telling them
+//     apart);
 //   - artists whose name is several in one ("Alphabeat;FORCE": the files'
 //     album artist tag has several artists joined by ";", which Plex takes
 //     for one name), where the library has an artist of one of those names.
-// Each opens the artist's page in the app. Nothing here asks MusicBrainz.
+// Each opens the artist's page in the app.
 import { app } from '../state.js';
 import { describeError } from '../router.js';
 import { h, backHeader, sectionHeader, emptyState, fmt, spinner } from '../ui.js';
-import { mbFeatures, mbidOf } from '../mb.js';
+import { artistOnMB, mbFeatures, mbidOf } from '../mb.js';
+import { mbWhere } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
 import { joinedParts } from '../releases.js';
@@ -83,7 +85,7 @@ export async function mbMergeView({ el, onDispose }) {
   const actions = h('div.pad.button-row.mb-merge-actions');
   const lists = h('div.mb-merge-lists');
   el.append(
-    h('p.lede', null, 'Artists Plex may have more than once. Nothing’s changed here: if they’re the same, merge them in Plex.'),
+    h('p.lede', null, 'Artists Plex may have more than once, and what to do about each. Nothing’s changed here.'),
     status,
     actions,
     lists,
@@ -111,15 +113,32 @@ export async function mbMergeView({ el, onDispose }) {
       const hit = parts?.find((p) => byName.has(norm(p)));
       if (hit) joined.push({ kind: 'joined', name: byName.get(norm(hit))[0].title, members: byName.get(norm(hit)), joined: a, with: parts.filter((p) => norm(p) !== norm(hit)) });
     }
-    // (Those Plex links to one artist on MusicBrainz first, then those it
-    // hasn't linked; those it links to different artists apart.)
+    // (By what Plex's links to MusicBrainz say: one artist, can't tell,
+    // different artists.)
     const byTitle = (a, b) => a.name.localeCompare(b.name) || String(a.joined?.title || '').localeCompare(String(b.joined?.title || ''));
-    twice.sort((a, b) => a.link.order - b.link.order || byTitle(a, b));
-    return { twice: twice.filter((g) => g.link.order < 2), apart: twice.filter((g) => g.link.order === 2), joined: joined.sort(byTitle) };
+    twice.sort(byTitle);
+    return { twice: twice.filter((g) => g.link.order === 0), unsure: twice.filter((g) => g.link.order === 1), apart: twice.filter((g) => g.link.order === 2), joined: joined.sort(byTitle) };
   }
 
   const albumsText = (a) => (counts.has(String(a.ratingKey)) ? fmt.count(counts.get(String(a.ratingKey)), 'album', 'albums') : 'albums');
   const openLink = (a, text) => h('a.link-btn.mb-merge-open', { href: `#/artist/${encodeURIComponent(a.ratingKey)}` }, text);
+  // Who MusicBrainz says each one Plex links is (its name, and its word for
+  // telling them apart: "American grunge band", say), as it's looked up.
+  const onMB = new Map(); // MusicBrainz id -> { name, note } | null
+  const whoOnMB = (a) => {
+    const id = mbidOf(a);
+    if (!id) return h('span.mb-merge-who', null, ' · not linked to MusicBrainz');
+    const who = onMB.get(id);
+    if (!who) return null;
+    return h(
+      'span.mb-merge-who',
+      null,
+      ' · ',
+      h('a', { href: `https://musicbrainz.org/artist/${id}`, target: '_blank', rel: 'noopener noreferrer' }, who.name),
+      who.note ? ` (${who.note})` : '',
+    );
+  };
+  const member = (a, text = albumsText(a)) => h('div.mb-merge-member', null, openLink(a, text), whoOnMB(a));
 
   function rowOf(g) {
     if (g.kind === 'joined') {
@@ -130,35 +149,33 @@ export async function mbMergeView({ el, onDispose }) {
           'div.row-main',
           null,
           h('div.row-title', null, g.joined.title),
-          h('div.row-sub', null, `${albumsText(g.joined)}, with ${listOf(g.with)}. One tag with several names: fix it, or merge into ${g.name} in Plex.`),
+          h('div.row-sub', null, `${albumsText(g.joined)}, with ${listOf(g.with)}.`),
           h('div.mb-merge-links', null, openLink(g.joined, 'Open'), ...g.members.map((a) => openLink(a, `${a.title} (${albumsText(a)})`))),
         ),
       );
     }
+    const cls = ['mb-merge-twice', 'mb-merge-unsure', 'mb-merge-apart'][g.link.order];
     return h(
-      `div.row.mb-merge-row.${g.link.order === 2 ? 'mb-merge-apart' : 'mb-merge-twice'}`,
+      `div.row.mb-merge-row.${cls}`,
       null,
-      h(
-        'div.row-main',
-        null,
-        h('div.row-title', null, g.name),
-        h('div.row-sub', null, `${fmt.number(g.members.length)} in Plex. ${g.link.text}`),
-        h('div.mb-merge-links', null, g.members.map((a) => openLink(a, albumsText(a)))),
-      ),
+      h('div.row-main', null, h('div.row-title', null, g.name), h('div.row-sub', null, `${fmt.number(g.members.length)} in Plex. ${g.link.text}`), h('div.mb-merge-members', null, g.members.map((a) => member(a)))),
     );
   }
 
-  let found = { twice: [], apart: [], joined: [] };
-  const howMany = () => found.twice.length + found.apart.length + found.joined.length;
+  let found = { twice: [], unsure: [], apart: [], joined: [] };
+  const howMany = () => found.twice.length + found.unsure.length + found.apart.length + found.joined.length;
   function render() {
     if (gone) return;
-    const block = (title, list) => (list.length ? h('section.block', null, sectionHeader(`${title} (${fmt.number(list.length)})`), h('div.rows.mb-merge-rows', null, list.map(rowOf))) : null);
+    // (Each with what's wrong, and what to do.)
+    const block = (title, hint, list) =>
+      list.length ? h('section.block', null, sectionHeader(`${title} (${fmt.number(list.length)})`), h('p.hint.pad.mb-merge-hint', null, hint), h('div.rows.mb-merge-rows', null, list.map(rowOf))) : null;
     lists.replaceChildren(
       ...[
         !howMany() ? emptyState('No artist appears more than once here.') : null,
-        block('Same name, more than once', found.twice),
-        block('Several artists in one name', found.joined),
-        block('Same name, different artists', found.apart),
+        block('One artist, more than once', 'Plex links two or more to the same MusicBrainz artist. Merge those in Plex.', found.twice),
+        block('Several artists in one name', 'One album artist tag with several names. Fix the tag, or merge it in Plex.', found.joined),
+        block('Can’t tell', 'Plex hasn’t linked them all to MusicBrainz. If they’re one artist, merge them in Plex.', found.unsure),
+        block('Different artists, same name', 'Usually right: different artists who share a name. If one has the other’s albums, use Fix Match on it in Plex.', found.apart),
       ].filter(Boolean),
     );
   }
@@ -186,7 +203,8 @@ export async function mbMergeView({ el, onDispose }) {
     found = groupsOf(all);
     counts.clear();
     render();
-    const listed = [...new Map([...found.twice, ...found.apart].flatMap((g) => g.members).concat(found.joined.flatMap((g) => [g.joined, ...g.members])).map((a) => [String(a.ratingKey), a])).values()];
+    const named = [...found.twice, ...found.unsure, ...found.apart];
+    const listed = [...new Map(named.flatMap((g) => g.members).concat(found.joined.flatMap((g) => [g.joined, ...g.members])).map((a) => [String(a.ratingKey), a])).values()];
     if (listed.length) busy('Counting their albums…');
     await inTurn(listed, COUNTS_AT_ONCE, async (a) => {
       if (gone) return;
@@ -197,9 +215,27 @@ export async function mbMergeView({ el, onDispose }) {
       }
     });
     if (gone) return;
+    render();
+    // Who MusicBrainz says each one Plex links is, by the id Plex has (one
+    // at a time on musicbrainz.org, its rule; kept a month by the player).
+    const ids = [...new Set(named.flatMap((g) => g.members.map(mbidOf)).filter((id) => id && !onMB.has(id)))];
+    let n = 0;
+    if (ids.length) busy(`Looking up ${fmt.count(ids.length, 'artist', 'artists')} on ${mbWhere()}…`);
+    await inTurn(ids, app.config.musicbrainz === 'own' ? 4 : 1, async (id) => {
+      if (gone) return;
+      try {
+        const { artist } = await artistOnMB('', { id, groups: false, note: true, background: true });
+        onMB.set(id, artist && artist.id === id ? { name: artist.name, note: artist.note || '' } : null);
+      } catch {
+        /* said without */
+      }
+      n += 1;
+      if (!gone && ids.length > 1 && n % 5 === 0) render();
+    });
+    if (gone) return;
     again.disabled = false;
-    const n = howMany();
-    status.replaceChildren(`Checked ${fmt.count(all.length, 'artist', 'artists')}${n ? `: ${fmt.number(n)} to look at` : ''}.`);
+    const n2 = howMany();
+    status.replaceChildren(`Checked ${fmt.count(all.length, 'artist', 'artists')}${n2 ? `: ${fmt.number(n2)} to look at` : ''}.`);
     render();
   }
 

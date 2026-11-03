@@ -4085,7 +4085,7 @@ with sync_playwright() as pw:
         # come, too): where it doesn't come (a weak signal, say), a drop,
         # never converted.
         not_supported = "Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED }) })"
-        first_load = 'p.asIs = null, p.drops = null, p.asIsAgain = null, p.fileFails = null'
+        first_load = 'p.asIs = null, p.drops = null, p.fileFails = null'
         play_track(4, 2)
         wait_for(lambda: now()['t'] > 1, 10, 0.2)
         page.route('**/library/parts/**', lambda route: route.abort('connectionreset'))
@@ -4097,14 +4097,26 @@ with sync_playwright() as pw:
         as_is = rate()
         check('stream: a file the browser says it can\'t play, that doesn\'t come (no answer to it), is a drop: loaded again as it is, never converted',
               kept_as_is and on_as_is and not as_is['isHls'] and as_is['forced'] is False and not play_errors(), f'{kept_as_is} {as_is}')
-        # One that came but couldn't be decoded: converted (as before).
+        # One that came but couldn't be decoded: read in full and played from
+        # memory first (as Load ahead plays tracks); only one that won't
+        # play from memory either is converted (a file this browser can't
+        # play as it is).
+        from_memory = "p.deck.prefetched?.qid === p.current?.qid"
+        player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_DECODE }) }), p.onError(), true)")
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        in_memory = wait_for(lambda: player(page, f"{from_memory} && p.state === 'playing' && !p.deck.isHls && !p.deck.forced"), 25, 0.25)
         player(page, "(Object.defineProperty(p.audio, 'error', { configurable: true, get: () => ({ code: MediaError.MEDIA_ERR_DECODE }) }), p.onError(), true)")
         decoded = wait_for(lambda: rate()['isHls'] and rate()['forced'] is True and rate()['state'] == 'playing', 20, 0.25)
         player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
-        check('stream: ...one that came but couldn\'t be decoded is converted, as before', decoded and not play_errors(), str(rate()))
+        check('stream: ...one that came but couldn\'t be decoded is read in full and played from memory first, and converted only if it won\'t play from there either',
+              in_memory and decoded and not play_errors(), str(rate()))
+        # (A connection where files play as they stream again, for the next.)
+        player(page, '(p.readInFull = false, true)')
         # One the server hands over (asked for it, without a range: the
-        # player's own request) but that still doesn't play: as it is once
-        # more (the connection may have been gone a moment), then converted.
+        # player's own request) but that doesn't play as it comes, its parts
+        # not coming either (as some networks treat a player's stream): read
+        # whole, and played from memory, in its own quality (never converted
+        # for the network).
         play_track(4, 3)
         wait_for(lambda: now()['t'] > 1, 10, 0.2)
         asked = {'probe': 0, 'media': 0}
@@ -4117,11 +4129,52 @@ with sync_playwright() as pw:
             return route.continue_()
         page.route('**/library/parts/**', media_fails)
         player(page, f"({not_supported}, {first_load}, p.onError(), true)")
-        converted = wait_for(lambda: rate()['isHls'] and rate()['forced'] is True and rate()['state'] == 'playing', 25, 0.25)
-        page.unroute('**/library/parts/**')
         player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
-        check('stream: ...whereas one the server hands over, that still doesn\'t play once loaded again as it is, is converted (as a format the browser can\'t play is)',
-              converted and asked['probe'] >= 2 and asked['media'] >= 1 and not play_errors(), f'{rate()} {asked}')
+        whole = wait_for(lambda: player(page, f"{from_memory} && p.state === 'playing' && p.time > 0.5 && !p.deck.isHls && !p.deck.forced"), 30, 0.25)
+        check('stream: ...one the server hands over, that doesn\'t play as it comes, is read in full and played from memory, never converted for the network',
+              whole and asked['probe'] >= 2 and asked['media'] >= 1 and not play_errors(), f'{rate()} {asked}')
+        # ...and once one has, the next track's read in full from the start on
+        # that connection (not failing as it streams first).
+        player(page, "(p.__errors = 0, p.onError = function (e) { p.__errors += 1; return Object.getPrototypeOf(p).onError.call(this, e); }, true)")
+        in_full = player(page, 'p.readInFull')
+        play_track(4, 4)
+        carried = wait_for(lambda: player(page, f"{from_memory} && !!p.deck.prefetched.now && p.state === 'playing' && p.time > 0.5 && !p.deck.isHls"), 30, 0.25)
+        fails = player(page, 'p.__errors')
+        page.unroute('**/library/parts/**')
+        check('stream: ...and once one has, the next track\'s read in full from the start on that connection (not failing as it streams first)',
+              in_full and carried and fails == 0 and not play_errors(), f'{in_full} {carried} {fails} {rate()}')
+        # ...but a long mix, or a file too big to keep (here, as if so: by its
+        # bitrate, or as it's read), plays as it streams first: never
+        # converted for that.
+        streams = "p.state === 'playing' && p.time > 0.5 && !p.deck.isHls && !p.deck.forced && !(p.audio.getAttribute('src') || '').startsWith('blob:')"
+        kept_was = js(page, "() => import('./js/state.js').then(({ app }) => ({ loadAhead: app.settings.loadAhead, keepPlayed: app.settings.keepPlayed }))")
+        settings(page, {'loadAhead': 0, 'keepPlayed': 0})
+        player(page, '(p.ahead.canReadInFull = () => false, true)')
+        play_track(4, 1)
+        too_long = wait_for(lambda: player(page, streams), 20, 0.25)
+        player(page, "(delete p.ahead.canReadInFull, p.ahead.now = () => Promise.reject(Object.assign(new Error('More than can be kept.'), { tooBig: true })), true)")
+        play_track(4, 0)
+        too_big = wait_for(lambda: player(page, streams), 20, 0.25)
+        check('stream: ...but a long mix, or a file too big to keep, plays as it streams first (never converted for that)',
+              too_long and too_big and player(page, 'p.readInFull && p.__errors === 0') and not play_errors(), f'{too_long} {too_big} {rate()}')
+        # One too big to read in full that doesn't play as it streams: only
+        # converted can it play here, and the player says so.
+        player(page, f"({not_supported}, {first_load}, p.onError(), true)")
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        big = wait_for(lambda: rate()['isHls'] and rate()['forced'] is True and rate()['state'] == 'playing', 20, 0.25)
+        said_big = wait_for(lambda: page.locator('.toast:has-text("too big to read in full")').count() > 0, 5, 0.2)
+        player(page, '(delete p.ahead.now, delete p.onError, true)')
+        check('stream: ...and one too big to read in full that doesn\'t play as it streams is converted, the player saying so',
+              big and said_big and not play_errors(), f'{big} {said_big} {rate()}')
+        # Files are tried as they stream again once the connection's back, or
+        # it's another kind (Wi-Fi to mobile data), not as only how fast it is
+        # changes, which Chrome says often.
+        flags = player(page, """(() => { const got = []; p.readInFull = true;
+            navigator.connection?.dispatchEvent(new Event('change')); got.push(p.readInFull);
+            window.dispatchEvent(new Event('online')); got.push(p.readInFull); return got; })()""")
+        check('stream: ...read in full still as only the connection\'s speed changes, and as they stream again once it\'s back',
+              flags == [True, False], str(flags))
+        settings(page, kept_was)
         # One the server keeps failing (an answer of 500, asked for it three
         # times at least, over half a minute at least): a track that won't
         # play here, skipped, saying so.
@@ -4586,12 +4639,37 @@ with sync_playwright() as pw:
         mock(f'/__mock/config?stall={tid}&bytes=500000')
         player(spg, 'Object.assign(p.stallLimits, { say: 1000, reload: 3000 })')
         row.locator('.track-main').click()
-        snow = lambda: player(spg, '({ id: String(p.current?.id), t: p.time, state: p.state, again: p.stallRetry != null && p.stallRetry === p.current?.qid })')
+        snow = lambda: player(spg, '({ id: String(p.current?.id), t: p.time, state: p.state, again: p.stallRetry?.qid === p.current?.qid ? p.stallRetry.n : 0 })')
         stuck = wait_for(lambda: player(spg, "p.state === 'loading' && p.time > 5"), 25, 0.2)
         stuck_at = snow()['t']
         resumed = wait_for(lambda: snow()['state'] == 'playing' and snow()['t'] > stuck_at + 2, 20, 0.25)
         check('stream: an original file that stops coming part-way is loaded again from where it got to, and plays on',
-              stuck and resumed and snow()['id'] == str(tid) and snow()['again'] and 8 < stuck_at < 13, f'{stuck} {stuck_at} {snow()}')
+              stuck and resumed and snow()['id'] == str(tid) and snow()['again'] == 1 and 8 < stuck_at < 13, f'{stuck} {stuck_at} {snow()}')
+        # ...and when it stops coming again, again (as long as it waits, a
+        # longer while each time), and straight away once the connection's
+        # back, the page is looked at again, or the browser lets it go on (a
+        # phone whose screen was off). (Each a track of another album: one
+        # played already, or started loading as the one before it ended, is
+        # kept by the browser, and comes whole.)
+        kicks = []
+        for n, (target, event) in enumerate([('window', 'online'), ('document', 'visibilitychange'), ('document', 'resume')]):
+            player(spg, 'p.pause()')
+            spg.goto(APP + '#/browse/albums')
+            spg.wait_for_selector('.grid .card')
+            spg.locator('.grid .card').nth(6 + n).click()
+            spg.wait_for_selector('.hero-album')
+            row = spg.locator('.track').nth(1)
+            tid = row.get_attribute('data-track-id')
+            mock(f'/__mock/config?stall={tid}&bytes=500000')
+            player(spg, 'Object.assign(p.stallLimits, { say: 1000, reload: 60000 })')
+            row.locator('.track-main').click()
+            stuck = wait_for(lambda: player(spg, "p.state === 'loading' && p.time > 5 && performance.now() - p.deck.waitingSince > 4500 && p.deck.waitingSince > 0"), 30, 0.2)
+            stuck_at = snow()['t']
+            player(spg, f"({target}.dispatchEvent(new Event('{event}')), true)")
+            kicked = wait_for(lambda: snow()['state'] == 'playing' and snow()['t'] > stuck_at + 2, 15, 0.25)
+            kicks.append({'event': event, 'stuck': stuck, 'kicked': kicked, 'same': snow()['id'] == str(tid), 'again': snow()['again']})
+        check('stream: ...and loaded again straight away once the connection\'s back, the page is looked at again, or the browser lets it go on (not only when its wait is up)',
+              len(kicks) == 3 and all(k['stuck'] and k['kicked'] and k['same'] and k['again'] == 1 for k in kicks), str(kicks))
         mock('/__mock/config?stall=')
         player(spg, 'p.pause()')
         sctx.close()
@@ -7864,11 +7942,11 @@ with sync_playwright() as pw:
             c = page.locator('.view section[data-group="Albums"] .card', has_text='Hearthstone')
             return c.locator('.card-sub').inner_text() if c.count() else ''
         artist_page('Juniper & Ash', '.view section[data-group="Albums"] .card')
-        wait_for(lambda: hearthstone_year() == '1998', 10, 0.3)
+        wait_for(lambda: hearthstone_year() == '1998', 25, 0.3)
         first_year = hearthstone_year()
         page.locator('.view section[data-group="Albums"] .card', has_text='Hearthstone').locator('.card-title').click()
         page.wait_for_selector('.hero-album')
-        page.wait_for_selector('.hero-first:not([hidden])', timeout=10000)
+        page.wait_for_selector('.hero-first:not([hidden])', timeout=20000)
         first_line = page.locator('.hero-first').inner_text()
         shot(page, 'mb-03-album')
         settings(page, {'mbOriginalYears': False})
@@ -7994,14 +8072,21 @@ with sync_playwright() as pw:
 
         # Only the very album (from 0.35.0): a single Plex has as its single
         # on MusicBrainz, its one track a remix, isn't given the single's
-        # year (nor on its page, nor its artist's); a single matched by its
-        # title alone isn't matched at all; a first year after Plex's isn't
-        # shown; and a single Plex has by its id, its track as its title
-        # says, is given its year.
+        # year (nor on its page, nor its artist's); a first year after
+        # Plex's isn't shown; and a single Plex has by its id, its track as
+        # its title says, is given its year. On a MusicBrainz of the
+        # player's own, as here, by its very tracks too (from 0.36.0): the
+        # first release with them is when it first came out, so a single by
+        # its title alone is found by its tracks, while one re-recorded since
+        # (MusicBrainz's first of it another length) isn't the first's; and
+        # Plex's id for an album that's a release's, not its release
+        # group's, is looked up.
         extra = [mock(f'/__mock/add-artist?{q}')['MediaContainer']['Metadata'][0] for q in (
-            'name=Signal%20Drift&albums=Night%20Swim:2019&format=Single&first=2005-06-01&guids=1&tracks=Night%20Swim%20(Club%20Remix)',
+            'name=Signal%20Drift&albums=Night%20Swim:2019&format=Single&first=2005-06-01&guids=1&tracks=Night%20Swim%20(Club%20Remix)&firsttracks=Night%20Swim:200',
             'name=Signal%20Bloom&albums=Glass%20Rain:2019&format=Single&first=2004-06-01&guids=1&tracks=Glass%20Rain',
             'name=Signal%20Hollow&albums=Hollow%20Bell:2019&format=Single&first=2003-06-01&tracks=Hollow%20Bell',
+            'name=Signal%20Echo&albums=Echo%20Field:2018&format=Single&first=2002-06-01&tracks=Echo%20Field&firsttracks=Echo%20Field:200',
+            'name=Signal%20Coast&albums=Low%20Coast:2017&first=2001-06-01&guids=release&tracks=Shore|Reef|Tide|Swell|Spray|Surf|Sand',
             'name=Late%20Light&albums=Early%20Hours:2010&first=2014-01-01&guids=1&tracks=Dawn|Noon|Dusk|Night|Late|Later|Latest',
         )]
         try:
@@ -8012,41 +8097,55 @@ with sync_playwright() as pw:
             years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
             bloom_line = page.locator('.mb-year-row', has_text='Glass Rain').inner_text()
             said = page.locator('.mb-review-status').inner_text()
-            check('mb: years to fix: only the very album: a single Plex has by its id, its track as its title says, is given its year',
-                  '2019 in Plex, 2004 on MusicBrainz' in bloom_line and 'matched exactly' in said, f'{bloom_line!r} {said!r}')
-            check('mb: ...not a single whose one track is a remix (the single\'s first year is the original\'s), nor a single by its title alone, nor a first year after Plex\'s',
-                  not {'Night Swim', 'Hollow Bell', 'Early Hours'} & set(years_listed) and not page.locator('.mb-later').count(), str(years_listed))
+            check('mb: years to fix: only the very album: a single Plex has by its id, its track as its title says, is given its year (and on a MusicBrainz of your own, the albums found are counted, not those matched exactly: those with nothing to fix aren\'t checked by their tracks)',
+                  '2019 in Plex, 2004 on MusicBrainz' in bloom_line and 'found on MusicBrainz' in said and 'matched exactly' not in said, f'{bloom_line!r} {said!r}')
+            check('mb: ...not a single whose one track is a remix (the single\'s first year is the original\'s), nor a first year after Plex\'s',
+                  not {'Night Swim', 'Early Hours'} & set(years_listed) and not page.locator('.mb-later').count(), str(years_listed))
+            lines = {t: page.locator('.mb-year-row', has_text=t).inner_text() for t in ('Hollow Bell', 'Low Coast') if t in years_listed}
+            check('mb: ...on a MusicBrainz of your own, by its very tracks: a single by its title alone, its tracks the first release\'s, and an album Plex has by its release\'s id, are given their first years; a single re-recorded since isn\'t',
+                  '2019 in Plex, 2003 on MusicBrainz' in lines.get('Hollow Bell', '') and '2017 in Plex, 2001 on MusicBrainz' in lines.get('Low Coast', '')
+                  and 'Echo Field' not in years_listed, f'{lines} {years_listed}')
+            # (Once MusicBrainz has done: nothing more asked of it a while.)
+            def mb_settled():
+                n = mock('/__mock/musicbrainz')['MediaContainer']['requests']
+                time.sleep(1.5)
+                return mock('/__mock/musicbrainz')['MediaContainer']['requests'] == n
             albums_now = albums_of()
             page.goto(APP_MB + f"#/album/{albums_now['Glass Rain']['ratingKey']}")
-            page.wait_for_selector('.hero-first:not([hidden])', timeout=15000)
+            page.wait_for_selector('.hero-first:not([hidden])', timeout=20000)
             bloom_first = page.locator('.hero-first').inner_text()
             page.goto(APP_MB + f"#/album/{albums_now['Night Swim']['ratingKey']}")
             page.wait_for_selector('.hero-album')
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(1500)
+            wait_for(mb_settled, 20, 0.1)
             check('mb: ...and an album\'s page says so too: when the single first came out, but not for the remix',
                   bloom_first == 'First released in 2004' and page.locator('.hero-first:not([hidden])').count() == 0, bloom_first)
-            card_year = lambda name, title: (artist_page(name, until='.view .card'), page.wait_for_timeout(2500),
+            # (On an artist's page, as on the album's: checked by its tracks,
+            # and shown once MusicBrainz has done.)
+            card_year = lambda name, title: (artist_page(name, until='.view .card'), page.wait_for_timeout(1500), wait_for(mb_settled, 20, 0.1), page.wait_for_timeout(500),
                                              page.locator('.view .card', has_text=title).locator('.card-sub').inner_text())[-1]
             named.update({a['title']: a for a in extra})
-            on_pages = [card_year('Signal Bloom', 'Glass Rain'), card_year('Signal Drift', 'Night Swim'), card_year('Signal Hollow', 'Hollow Bell')]
-            check('mb: ...as an artist\'s page does (Original release years)', on_pages == ['2004', '2019', '2019'], str(on_pages))
+            on_pages = [card_year('Signal Bloom', 'Glass Rain'), card_year('Signal Drift', 'Night Swim'), card_year('Signal Hollow', 'Hollow Bell'), card_year('Signal Echo', 'Echo Field')]
+            check('mb: ...as an artist\'s page does (Original release years), by its tracks too on a MusicBrainz of your own: a single by its title alone is found, a remix or one re-recorded since isn\'t',
+                  on_pages == ['2004', '2019', '2003', '2018'], str(on_pages))
         finally:
             for a in extra:
                 mock(f"/__mock/add-artist?remove={a['ratingKey']}")
 
         # For the server's owner: the artists Plex may have more than once,
-        # for their information only: nothing merged, nothing asked of
-        # MusicBrainz, only what Plex says. Here a second Glass Harbour
-        # (Plex links both to the one artist on MusicBrainz), a second
-        # Juniper & Ash (Plex hasn't linked it), a second Northbound Static
-        # (Plex links it to another artist of the name), and "Glass
+        # for their information only, what's wrong and what to do: nothing
+        # merged, and of MusicBrainz, only who the artists Plex links are,
+        # by their ids. Here a second Glass Harbour (Plex links both to the
+        # one artist on MusicBrainz), a second Juniper & Ash (Plex hasn't
+        # linked it), a second Northbound Static (Plex links it to another
+        # artist of the name: MusicBrainz's Norwegian one), and "Glass
         # Harbour;Kilo Meridian", a name of several artists' in one, as
         # files can be tagged.
         merges = lambda: mock('/__mock/merges')['MediaContainer']['merges']
         mock('/__mock/merges?reset=1')
         added = [mock(f'/__mock/add-artist?name={urllib.parse.quote(n)}&albums={urllib.parse.quote(a)}{more}')['MediaContainer']['Metadata'][0]
                  for n, a, more in [('Glass Harbour', 'Sea Glass:2016', '&guids=1'), ('Juniper & Ash', 'Unknown Rooms:2022', ''),
-                                    ('Northbound Static', 'Frost Engine:2019', '&guids=1&mbid=Northbound%20Static%202'),
+                                    ('Northbound Static', 'Frost Engine:2019', '&guids=1&mbid=Northbound%20Static%7C2'),
                                     ('Glass Harbour;Kilo Meridian', 'Harbour Remixes:2021', '')]]
         try:
             # (Once what the pages before asked of MusicBrainz is done.)
@@ -8063,19 +8162,22 @@ with sync_playwright() as pw:
             rows = lambda cls: [(page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(), page.locator(f'.{cls}').nth(i).inner_text(),
                                  page.locator(f'.{cls}').nth(i).locator('a.mb-merge-open').evaluate_all('as => as.map((a) => a.getAttribute("href"))'))
                                 for i in range(page.locator(f'.{cls}').count())]
-            twice, joined, apart = rows('mb-merge-twice'), rows('mb-merge-joined'), rows('mb-merge-apart')
+            twice, unsure, joined, apart = rows('mb-merge-twice'), rows('mb-merge-unsure'), rows('mb-merge-joined'), rows('mb-merge-apart')
             status_text = page.locator('.mb-merge-status').inner_text()
-            heads = page.locator('.view .block h2').all_inner_texts()
-            check('mb: artists to merge: those of one name, Plex\'s links to MusicBrainz said (the same artist first, then not linked; those it links to different artists last, apart)',
-                  [t for t, *_ in twice] == ['Glass Harbour', 'Juniper & Ash'] and [t for t, *_ in apart] == ['Northbound Static']
-                  and 'Plex links both to the same artist on MusicBrainz' in twice[0][1] and 'Plex links only one of them to MusicBrainz' in twice[1][1]
+            sections = page.locator('.view .mb-merge-lists .block').evaluate_all("bs => bs.map((b) => [b.querySelector('h2')?.textContent || '', b.querySelector('.mb-merge-hint')?.textContent || ''])")
+            check('mb: artists to merge: in sections by what Plex\'s links to MusicBrainz say, each saying what to do (one artist more than once: merge those; can\'t tell; different artists: usually right)',
+                  [t for t, *_ in twice] == ['Glass Harbour'] and [t for t, *_ in unsure] == ['Juniper & Ash'] and [t for t, *_ in apart] == ['Northbound Static']
+                  and 'Plex links both to the same artist on MusicBrainz' in twice[0][1] and 'Plex links only one of them to MusicBrainz' in unsure[0][1]
                   and 'Plex links them to different artists on MusicBrainz' in apart[0][1] and '1 album' in twice[0][1] and '4 to look at' in status_text
-                  and [x.upper() for x in heads][-1].startswith('SAME NAME, DIFFERENT ARTISTS'),
-                  f'{twice} {apart} {heads} {status_text!r}')
-            check('mb: ...each one Plex has to open (its page)',
-                  sorted(twice[0][2]) == sorted([f"#/artist/{named['Glass Harbour']['ratingKey']}", f"#/artist/{added[0]['ratingKey']}"]), str(twice[0][2]))
+                  and [h.upper().split(' (')[0] for h, _ in sections] == ['ONE ARTIST, MORE THAN ONCE', 'SEVERAL ARTISTS IN ONE NAME', 'CAN’T TELL', 'DIFFERENT ARTISTS, SAME NAME']
+                  and 'Merge those in Plex' in sections[0][1] and 'Usually right' in sections[3][1] and 'use Fix Match on it in Plex' in sections[3][1],
+                  f'{twice} {unsure} {apart} {sections} {status_text!r}')
+            check('mb: ...each one Plex has to open (its page), with who MusicBrainz says it is (its word for telling them apart too), or that it isn\'t linked',
+                  sorted(twice[0][2]) == sorted([f"#/artist/{named['Glass Harbour']['ratingKey']}", f"#/artist/{added[0]['ratingKey']}"])
+                  and 'Norwegian black metal band' in apart[0][1] and 'not linked to MusicBrainz' in unsure[0][1]
+                  and page.locator('.mb-merge-apart a[href^="https://musicbrainz.org/artist/"]').count() == 2, f'{twice[0][2]} {apart} {unsure}')
             check('mb: ...and a name of several artists\' in one, with the artist of its name the library has',
-                  [t for t, *_ in joined] == ['Glass Harbour;Kilo Meridian'] and 'with Kilo Meridian' in joined[0][1] and 'merge into Glass Harbour in Plex' in joined[0][1]
+                  [t for t, *_ in joined] == ['Glass Harbour;Kilo Meridian'] and 'with Kilo Meridian' in joined[0][1] and 'Fix the tag' in sections[1][1]
                   and f"#/artist/{added[3]['ratingKey']}" in joined[0][2], str(joined))
             said_of = js(page, """() => import('./js/views/mbmerge.js').then((m) => [['a', 'a', 'b', 'b'], ['a', 'a', 'a', 'b', 'b'], ['a', 'a', 'b', 'b', 'c'], ['a', 'a', 'b'], ['a', 'a', null], ['a', 'b', null]]
                 .map((ids) => m.linkOf(ids.map((id) => ({ Guid: id ? [{ id: `mbid://${id.repeat(8)}-0000-4000-8000-${id.repeat(12)}` }] : [] }))).text))""")
@@ -8084,9 +8186,11 @@ with sync_playwright() as pw:
                               'Plex links 2 of them to one artist on MusicBrainz, 2 to another, 1 to another.', 'Plex links 2 of them to the same artist on MusicBrainz, 1 to another.',
                               'Plex links 2 of them to the same artist on MusicBrainz; 1 isn’t linked.', 'Plex links 2 of them to different artists on MusicBrainz; 1 isn’t linked.'],
                   str(said_of))
-            check('mb: ...for information only: nothing to tick or merge, nothing merged, nothing asked of MusicBrainz',
+            seen_mb = mock('/__mock/musicbrainz')['MediaContainer']
+            asked = [urllib.parse.unquote_plus(a) for a in seen_mb['asked'][len(seen_mb['asked']) - (seen_mb['requests'] - mb_before):]] if seen_mb['requests'] > mb_before else []
+            check('mb: ...for information only: nothing to tick or merge, nothing merged, and of MusicBrainz only the artists Plex links, by their ids',
                   page.locator('.view input[type=checkbox], .view .mb-merge-go').count() == 0 and merges() == []
-                  and mock('/__mock/musicbrainz')['MediaContainer']['requests'] == mb_before, f'{merges()}')
+                  and all(re.match(r'^/ws/2/artist/[0-9a-f-]{36}\?', a) for a in asked), f'{merges()} {asked[:6]}')
         finally:
             mock('/__mock/merges?reset=1')
             for a in added:
@@ -8113,13 +8217,12 @@ with sync_playwright() as pw:
 
         # What went to MusicBrainz: artists' names, never an album's title.
         asked = [urllib.parse.unquote_plus(a) for a in mock('/__mock/musicbrainz')['MediaContainer']['asked']]
-        # (Plex's MusicBrainz ids for the library's albums: but Tidal Lines', whose genres were asked for, by the id MusicBrainz has for it.)
+        # (On a MusicBrainz of the player's own, as here, albums are asked about too, by their ids: never by their titles, nor their tracks'.)
         with_ids = mock('/library/sections/1/all?type=9&includeGuids=1&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata']
-        plex_album_ids = [g['id'][len('mbid://'):] for al in with_ids if al['title'] != 'Tidal Lines' for g in al.get('Guid', [])]
-        check('mb: only artists\' names went to MusicBrainz, never an album\'s title, nor Plex\'s MusicBrainz id for one',
-              asked and plex_album_ids and any('Glass Harbour' in a for a in asked)
-              and not any(t in a for a in asked for t in ('Sea Glass', 'Tidal Lines', 'Hearthstone', 'Harbour Lights Live', 'Glass Rain', 'Night Swim'))
-              and not any(i in a for a in asked for i in plex_album_ids),
+        plex_album_ids = [g['id'][len('mbid://'):] for al in with_ids for g in al.get('Guid', [])]
+        check('mb: artists\' names went to MusicBrainz, and on a server of your own albums\' ids, never an album\'s title nor a track\'s',
+              asked and plex_album_ids and any('Glass Harbour' in a for a in asked) and any(i in a for a in asked for i in plex_album_ids)
+              and not any(t in a for a in asked for t in ('Sea Glass', 'Tidal Lines', 'Hearthstone', 'Harbour Lights Live', 'Glass Rain', 'Night Swim', 'Hollow Bell', 'Club Remix')),
               str(asked[:6]))
 
         # A MusicBrainz server of your own whose search finds no one (its
@@ -8138,7 +8241,7 @@ with sync_playwright() as pw:
             shot(page, 'mb-07-review-no-search')
             years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
             check('mb: with a MusicBrainz whose search finds no one, albums are still found by their artist\'s MusicBrainz id, and those Plex hasn\'t matched are unchecked, saying why',
-                  'Hearthstone' in years_listed and 'matched exactly' in said and 'couldn’t be checked' in said and 'search indexes' in said, f'{said!r} {years_listed}')
+                  'Hearthstone' in years_listed and 'found on MusicBrainz' in said and 'couldn’t be checked' in said and 'search indexes' in said, f'{said!r} {years_listed}')
         finally:
             mock('/__mock/config?mbsearch=on')
             mock(f"/__mock/add-artist?remove={unmatched['ratingKey']}")

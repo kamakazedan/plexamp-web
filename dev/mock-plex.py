@@ -69,7 +69,8 @@ testing, these endpoints need no token:
         smartcollection=1|0: a smart collection (Electronic picks) listed,
         whose items carry no tag for it, or not
     /__mock/add-artist?name=...[&eps=N][&noalbum=1][&albums=T:Y,...][&mb=0]
-                       [&format=Single][&tracks=T|T][&first=YYYY-MM-DD][&guids=1]
+                       [&format=Single][&tracks=T|T][&first=YYYY-MM-DD][&firsttracks=T:SECS|T:SECS]
+                       [&guids=1|release]
                                   adds an artist with an album and a track of
                                   their own (and N EPs, a track on each;
                                   noalbum: no album, only those; albums:
@@ -78,10 +79,14 @@ testing, these endpoints need no token:
                                   from files tagged otherwise; format: of
                                   that kind; tracks: with tracks of these
                                   titles; first: MusicBrainz has them first
-                                  out then), without a MusicBrainz id
+                                  out then; firsttracks: their first release
+                                  has these tracks, not the library's),
+                                  without a MusicBrainz id
                                   (guids=1: with one for them and their
                                   albums, as Plex has for those it's
-                                  matched, mbid=NAME: the artist's that of
+                                  matched; guids=release: the albums' their
+                                  own release's, not their release group's;
+                                  mbid=NAME: the artist's that of
                                   another of that name; mb=0: and the mock's MusicBrainz
                                   doesn't have them, nor their albums);
                                   ?remove=ID takes them away again
@@ -881,6 +886,10 @@ MB_FIRST_DATES = {'Hearthstone': '1998-03-01'}  # (the library's is a reissue)
 # self-titled album can have: Weezer has six): the library's isn't that one.
 MB_SAME_TITLE = {'Northbound Static': [('Interference', 'Album', [], '2009-06-01')]}
 MB_GROUP_GENRES = {'Tidal Lines': [('ambient', 3), ('downtempo', 1)], 'Hearthstone': [('folk', 2), ('singer-songwriter', 1)]}
+# An album's first release's tracks, where they aren't the library's (a
+# re-recording of it since, say): [(title, seconds)], by its title. See
+# mb_releases, and /__mock/add-artist's firsttracks.
+MB_FIRST_TRACKS = {}
 # Other artists of the same name as one of the library's, as MusicBrainz has
 # them, whose albums Plex has under the library's artist (as it does when
 # two artists share a name): Long Way North is the other Northbound
@@ -909,6 +918,54 @@ def mb_artists():
                     'aliases': [{'name': x, 'sort-name': x} for x in MB_ALIASES.get(a['title'], [])],
                     'genres': [{'name': g, 'count': n} for g, n in MB_GENRES.get(a['title'], [])]})
     return out
+
+
+def mb_group_by_id(gid):
+    """A release group, by its id: (artist's name, group), or (None, None)."""
+    for a in artists:
+        if a.get('_noMB'):
+            continue
+        for g in mb_groups(a['title']):
+            if g['id'] == gid:
+                return a['title'], g
+    for a, gs in mb_namesakes():
+        for g in gs:
+            if g['id'] == gid:
+                return a['name'], g
+    return None, None
+
+
+def mb_releases(gid):
+    """A release group's releases, each { id, title, date, tracks: [(title, seconds)] }:
+    its first (when the group first came out: with the library album's tracks,
+    or those MB_FIRST_TRACKS has for it), and, where the library's album is
+    of another year, the library's own (with its tracks). A group of none of
+    the library's albums: a release of its own, of tracks of its own."""
+    who, g = mb_group_by_id(gid)
+    if not g:
+        return []
+    al = next((a for a in albums if not a.get('_noMB') and a['parentTitle'] == who and mb_id('group|' + who + '|' + a['title']) == gid), None)
+    first = g['first-release-date']
+    if not al:
+        return [{'id': mb_id('release|' + gid + '|first'), 'title': g['title'], 'date': first, 'tracks': [(g['title'] + ' Part ' + str(i + 1), 200 + i) for i in range(6)]}]
+    own = [(t['title'], t['duration'] // 1000) for t in sorted((t for t in tracks if t['parentRatingKey'] == al['ratingKey']), key=lambda t: (t.get('parentIndex') or 1, t.get('index') or 0))]
+    out = [{'id': mb_id('release|' + gid + '|first'), 'title': g['title'], 'date': first, 'tracks': MB_FIRST_TRACKS.get(al['title'], own)}]
+    if str(al.get('year')) != first[:4]:
+        out.append({'id': mb_id('release|' + gid + '|own'), 'title': al['title'], 'date': f"{al['year']}-05-01", 'tracks': own})
+    return out
+
+
+def mb_release(rid):
+    """A release, by its id: (group, release), or (None, None). (The library's
+    albums' groups, and the other groups their artists have.)"""
+    for a in artists:
+        if a.get('_noMB'):
+            continue
+        for g in mb_groups(a['title']):
+            for r in mb_releases(g['id']):
+                if r['id'] == rid:
+                    return g, r
+    return None, None
 
 
 def mb_groups(artist_name):
@@ -1760,8 +1817,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json_plain({'release-group-count': len(groups), 'release-groups': groups[start:start + size]})
         if p.startswith('/ws/2/release-group/'):
             gid = parts_of(p)[-1]
+            _, group = mb_group_by_id(gid)
+            if not group:
+                return self.not_found()
             title = next((al['title'] for al in albums if mb_id('group|' + al['parentTitle'] + '|' + al['title']) == gid), None)
-            return self.send_json_plain({'id': gid, 'genres': [{'name': g, 'count': n} for g, n in MB_GROUP_GENRES.get(title, [])]})
+            return self.send_json_plain(dict(group, genres=[{'name': g, 'count': n} for g, n in MB_GROUP_GENRES.get(title, [])]))
+        # (A server of the player's own: an album's releases, and a
+        # release's tracks, to compare its tracks with: see
+        # musicbrainz.js checkedAlbum.)
+        if p == '/ws/2/release' and 'release-group' in q and not query:
+            rs = mb_releases(q['release-group'][0])
+            return self.send_json_plain({'release-count': len(rs), 'releases': [
+                {'id': r['id'], 'title': r['title'], 'date': r['date'], 'media': [{'position': 1, 'track-count': len(r['tracks'])}]} for r in rs]})
+        if p.startswith('/ws/2/release/'):
+            group, r = mb_release(parts_of(p)[-1])
+            if not r:
+                return self.not_found()
+            return self.send_json_plain({'id': r['id'], 'title': r['title'], 'date': r['date'], 'release-group': group,
+                                         'media': [{'position': 1, 'track-count': len(r['tracks']),
+                                                    'tracks': [{'position': i + 1, 'title': t, 'length': secs * 1000} for i, (t, secs) in enumerate(r['tracks'])]}]})
         if p == '/ws/2/artist':
             name = field('artist')
             hit = name in artists_ or f'the {name}' in artists_
@@ -2162,12 +2236,15 @@ class Handler(BaseHTTPRequestHandler):
                      thumb=f'/library/metadata/{k}/thumb/1', art=f'/library/metadata/{k}/art/1', summary='')
             for f in ('Guid', 'Similar', 'Style'):
                 a.pop(f, None)
-            with_ids = q.get('guids', [''])[0] in ('1', 'true')
+            with_ids = q.get('guids', [''])[0] in ('1', 'true', 'release')
             if with_ids:  # (mbid=...: another artist's MusicBrainz id, as Plex can have for one of a name)
                 a['Guid'] = [{'id': 'mbid://' + mb_id('artist|' + q.get('mbid', [name])[0])}]
             fmt_asked = q.get('format', [''])[0] or None
             titles_asked = [t for t in q.get('tracks', [''])[0].split('|') if t]
             first_asked = q.get('first', [''])[0]
+            # (firsttracks=T:SECS|...: the first release's tracks, not the library's.)
+            first_tracks = [(t.rsplit(':', 1)[0], int(t.rsplit(':', 1)[1])) for t in q.get('firsttracks', [''])[0].split('|') if ':' in t]
+            release_ids = q.get('guids', [''])[0] == 'release'
             no_mb = q.get('mb', ['1'])[0] == '0'
             if no_mb:
                 a['_noMB'] = True
@@ -2186,9 +2263,12 @@ class Handler(BaseHTTPRequestHandler):
                           year=year or 2020 + n, originallyAvailableAt=f'{year or 2020 + n}-05-01', Format=[{'tag': fmt}], Subformat=[])
                 al.pop('Guid', None)
                 if with_ids:
-                    al['Guid'] = [{'id': 'mbid://' + mb_id('group|' + name + '|' + title)}]
+                    gid = mb_id('group|' + name + '|' + title)
+                    al['Guid'] = [{'id': 'mbid://' + (mb_id('release|' + gid + '|own') if release_ids else gid)}]
                 if first_asked:
                     MB_FIRST_DATES[title] = first_asked
+                if first_tracks:
+                    MB_FIRST_TRACKS[title] = first_tracks
                 if no_mb:
                     al['_noMB'] = True
                 items[ak] = al

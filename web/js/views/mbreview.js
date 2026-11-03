@@ -11,7 +11,7 @@
 import { app } from '../state.js';
 import { describeError } from '../router.js';
 import { h, icon, backHeader, row, sectionHeader, emptyState, toast, fmt, confirmAction, download, fileDate, spinner } from '../ui.js';
-import { albumsOnMB, firstYear, mbFeatures, mbidOf, notThatRecording, kindsAgree, plexKind } from '../mb.js';
+import { albumsOnMB, albumTracks, firstYear, mbFeatures, mbOwnServer, mbidOf, notThatRecording, kindsAgree, plexKind } from '../mb.js';
 import { mbWhere, toCsv } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
@@ -114,22 +114,33 @@ export async function mbReviewView({ el, onDispose }) {
   // MusicBrainz finds no one.)
   const found = albums.map(() => 'pending');
   const fixed = new Map(); // album id -> what was done: 'year' | 'genres' (and what it was before)
+  // (On a MusicBrainz of the player's own, those that would be fixed are
+  // checked by their very tracks too: see mb.js albumsOnMB, `check`.)
+  const check = mbOwnServer();
+  const itemOf = (j) => ({
+    artist: albums[j].parentTitle,
+    title: albums[j].title,
+    year: plexYear(albums[j]),
+    artistId: artistIds.get(String(albums[j].parentRatingKey)),
+    albumId: mbidOf(albums[j]),
+    tracks: Number(albums[j].leafCount) || 0,
+  });
   async function ask(indexes) {
     for (const withGenres of [true, false]) {
       const these = indexes.filter((j) => !genresOf(albums[j]).length === withGenres);
       for (let i = 0; i < these.length && !gone; i += ASK) {
         const part = these.slice(i, i + ASK);
-        const got = await albumsOnMB(
-          part.map((j) => ({
-            artist: albums[j].parentTitle,
-            title: albums[j].title,
-            year: plexYear(albums[j]),
-            artistId: artistIds.get(String(albums[j].parentRatingKey)),
-            albumId: mbidOf(albums[j]),
-            tracks: Number(albums[j].leafCount) || 0,
-          })),
-          { genres: withGenres, background: true, strict: true },
-        );
+        const got = await albumsOnMB(part.map(itemOf), { genres: withGenres, background: true, strict: true, check });
+        // ...by their tracks, as Plex has them (those that can't be read
+        // aren't fixed).
+        const toCheck = check ? part.map((j, k) => ({ j, k, g: got[k] })).filter(({ j, g }) => g && typeof g === 'object' && g.toCheck && differs(albums[j], g)) : [];
+        if (toCheck.length && !gone) {
+          const lists = await Promise.all(toCheck.map(({ j }) => albumTracks(albums[j], { server: s }).catch(() => null)));
+          const asking = toCheck.map((x, n) => ({ ...x, list: lists[n] })).filter((x) => x.list?.length);
+          const byTracks = asking.length ? await albumsOnMB(asking.map(({ j, list }) => ({ ...itemOf(j), trackList: list })), { genres: withGenres, background: true, strict: true, check }) : [];
+          for (const { k } of toCheck) got[k] = null;
+          asking.forEach(({ k }, n) => (got[k] = byTracks[n] ?? null));
+        }
         // Of those that would be fixed: not one found by its title whose
         // kind Plex has as another (a live album as a studio one, a single
         // as an album: Plex's release types, read for those), nor a short
@@ -290,7 +301,10 @@ export async function mbReviewView({ el, onDispose }) {
     const ys = yearRows();
     const gs = genreRows();
     status.classList.remove('warn');
+    // (On a MusicBrainz of your own, those with nothing to fix aren't
+    // checked by their tracks: found, not matched exactly.)
     const known = found.filter((g) => g && typeof g === 'object').length;
+    const matched = check ? 'found on MusicBrainz' : 'matched exactly on MusicBrainz';
     const unchecked = found.filter((g) => g === 'unchecked').length;
     const cantSearch = unchecked
       ? ` ${fmt.count(unchecked, 'album', 'albums')} couldn’t be checked: searching your MusicBrainz server finds no one (its search indexes may not be built).`
@@ -300,10 +314,10 @@ export async function mbReviewView({ el, onDispose }) {
         ? [spinner('Looking'), h('span', null, ` Checking your albums on ${mbWhere()}… ${fmt.number(albums.length - pending)} of ${fmt.number(albums.length)}`)]
         : [
             known
-              ? `Checked ${fmt.count(albums.length, 'album', 'albums')}: ${known === albums.length ? 'all' : fmt.number(known)} matched exactly on MusicBrainz.${cantSearch}`
+              ? `Checked ${fmt.count(albums.length, 'album', 'albums')}: ${known === albums.length ? 'all' : fmt.number(known)} ${matched}.${cantSearch}`
               : unchecked
                 ? cantSearch.trim()
-                : `None of your ${fmt.count(albums.length, 'album', 'albums')} matched exactly on MusicBrainz, so there’s nothing to compare.`,
+                : `None of your ${fmt.count(albums.length, 'album', 'albums')} ${check ? 'were found' : 'matched exactly'} on MusicBrainz, so there’s nothing to compare.`,
           ]),
     );
     if (!pending && (unchecked || !known)) status.classList.add('warn');

@@ -79,6 +79,14 @@ const END_SLACK = 5;
 // to after `reload` ms with nothing more come in, once a track. One fading
 // out as the next track fades in: on to that one after `fade` ms.
 const STALL = { say: 8000, reload: 30000, fade: 3000 };
+// ...loaded again as long as it waits, each time this many times longer
+// after the last (to four times as long at most).
+const STALL_AGAIN = 2;
+const STALL_LONGEST = 4;
+// A track that's waited this long for data (ms) is loaded again straight
+// away when the page is looked at again, or the connection's back (a phone
+// whose screen was off may have held the browser back meanwhile).
+const STALL_KICK = 4000;
 // A track whose connection drops again, after playing on this many seconds
 // since it last did, is as one whose connection drops the first time (see
 // dropped).
@@ -245,6 +253,7 @@ export class Deck {
     // as it is here (see couldntPlay).
     this.forced = false;
     this.stall = null; // debug mode: playback waiting for data, since when
+    this.waitingSince = 0; // performance.now() since it's been waiting for data (0: not waiting)
     this.prefetched = null; // what was loaded ahead for its track, played from memory (see prefetch.js)
     this.recording = null; // ...or, a converted stream coming in, what's kept of it as it comes (to play again)
     this.gen = 0;
@@ -326,6 +335,7 @@ export class Deck {
     this.played = false;
     this.forced = false;
     this.stall = null;
+    this.waitingSince = 0;
     this.prefetched = null;
     this.recording = null;
   }
@@ -358,8 +368,12 @@ class Player extends EventTarget {
     this.rescueGo = null;
     this.drops = null; // { qid, n, at }: how many times the connection to a track's stream has dropped (see dropped)
     this.asIs = null; // the track whose file has played as it is here (see couldntPlay)
-    this.asIsAgain = null; // ...the one whose file was loaded as it is once more, the server handing it over
     this.fileFails = null; // { qid, n }: how many times the server failed a track's file, asked for it (see couldntPlay)
+    // A file that didn't play as it came has played read in full (see
+    // fromMemoryOrConverted): files are read in full from then on, on this
+    // connection (a network that doesn't pass a player's stream won't for
+    // the next track either).
+    this.readInFull = false;
     this.stallRetry = null; // the one loaded again after waiting for data too long (see watchStall)
     this.stallLimits = { ...STALL };
     this.restoredAt = 0;
@@ -410,6 +424,25 @@ class Player extends EventTarget {
     });
     this.applyVolume();
     this.setupMediaSession();
+    // (A phone's screen on again, the page back from being frozen, the
+    // connection back or changed: see kickStalled. The connection back, or
+    // another kind of one, Wi-Fi to mobile data, say: files are tried as
+    // they come again, see readInFull. Not as only how fast it is changes,
+    // which Chrome says often.)
+    document.addEventListener('visibilitychange', () => !document.hidden && this.kickStalled('the page was looked at again'));
+    document.addEventListener('resume', () => this.kickStalled('the browser let the page go on again'));
+    window.addEventListener('online', () => {
+      this.readInFull = false;
+      this.kickStalled('the connection came back');
+    });
+    let connectionType = navigator.connection?.type;
+    navigator.connection?.addEventListener?.('change', () => {
+      if (navigator.connection.type !== connectionType) {
+        connectionType = navigator.connection.type;
+        this.readInFull = false;
+      }
+      this.kickStalled('the connection changed');
+    });
     window.addEventListener('pagehide', () => {
       if (this.persistPending) this.persist(true);
       this.savePosition();
@@ -523,7 +556,9 @@ class Player extends EventTarget {
       // (A next track starts playing before it's the current one.)
       deck.played = true;
       if (this.rescue && this.rescue.qid === deck.qid) this.rescue.played = true;
+      deck.waitingSince = 0;
       if (!mine()) return;
+      if (deck.prefetched?.now) this.readInFull = true;
       this.switching = false;
       this.errorsInRow = 0;
       this.noteStall(deck, true);
@@ -551,6 +586,7 @@ class Player extends EventTarget {
     });
     el.addEventListener('waiting', () => {
       if (!mine() || this.endReached(deck, 1)) return;
+      deck.waitingSince ||= performance.now();
       this.noteStall(deck);
       this.watchStall(deck);
       this.setState('loading');
@@ -662,8 +698,11 @@ class Player extends EventTarget {
   // `transcode`: converted whatever Streaming quality says (see
   // Deck.forced); `resume`: the same track again, as the same playback (a
   // stream started again, or the server converting a file that didn't play
-  // as it is).
-  async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true, resume = false } = {}) {
+  // as it is); `viaMemory`: its file read in full first, and played from
+  // memory (it came, but didn't play as it came: see fromMemoryOrConverted);
+  // `asStream`: as it comes, even on a connection where files are read in
+  // full (one that's more than can be kept: see readInFull).
+  async load(index, { autoplay = true, startAt = 0, transcode = false, reportPrev = true, resume = false, viaMemory = false, asStream = false } = {}) {
     this.cancelTransition();
     this.cancelRescue();
     for (const d of this.decks) this.unwatchStall(d);
@@ -671,7 +710,6 @@ class Player extends EventTarget {
     if (!resume) {
       this.rescue = null;
       this.drops = null;
-      this.asIsAgain = null;
       this.fileFails = null;
       this.stallRetry = null;
     }
@@ -694,12 +732,18 @@ class Player extends EventTarget {
     // Loaded ahead, or kept once played (prefetch.js): from memory, as the
     // playback it was loaded ahead as (or, played again, another). Not to
     // start a track again, which goes back to its stream.
-    const pre = !resume && !transcode ? this.ahead.ready(track, this.sourceFor(track, false)) : null;
+    let pre = !resume && !transcode ? this.ahead.ready(track, this.sourceFor(track, false)) : null;
     const playback =
       (pre && this.ahead.playbackFor(pre)) || (resume && this.deck.qid === track.qid && this.deck.playback) || (resume && held?.qid === track.qid && held.playback) || playbackId();
-    const src = pre?.src || this.sourceFor(track, transcode, playback);
-    this.triedTranscode = src.hls;
-    this.transcoding = src.hls;
+    // (Read in full first: its file, as it is. So too, on a connection where
+    // a file's had to be (see readInFull), but for a long mix, or one more
+    // than can be kept, which plays as it comes first, as Load ahead has
+    // them: see Prefetcher.canReadInFull.)
+    const inFull = viaMemory || (this.readInFull && !asStream && this.ahead.canReadInFull(track) && !this.remote && !this.cast && !this.routed && !this.sourceFor(track, false).hls);
+    const memory = inFull && !pre && !transcode;
+    let src = memory ? null : pre?.src || this.sourceFor(track, transcode, playback);
+    this.triedTranscode = !!src?.hls;
+    this.transcoding = !!src?.hls;
     this.restoredAt = 0;
     if (!startAt && !this.remote) startAt = this.savedProgress(track);
     this.setPendingSeek(resolve(startAt) > 0 ? startAt : null);
@@ -711,6 +755,32 @@ class Player extends EventTarget {
     this.setState('loading');
     this.emit('track');
     this.updateMediaSession();
+    if (memory) {
+      this.deck.el.pause();
+      try {
+        pre = await this.ahead.now(track, playback);
+      } catch (err) {
+        if (token !== this.loadToken) return;
+        this.loadingQid = null;
+        debugLog('player', `couldn’t read “${track.title}” in full to play it from memory: ${err?.tooBig ? 'more than can be kept' : err?.message || err?.name}`, 'warn');
+        // More than can be kept: read in full as files are on this
+        // connection, as it comes instead; one that's come but didn't play
+        // as it came, converted (it can't play here otherwise), saying so.
+        // Not there: a drop.
+        if (err?.tooBig && !viaMemory) this.load(this.index, { autoplay, startAt, reportPrev: false, resume: true, asStream: true });
+        else if (err?.tooBig) {
+          this.emit('converted', { track, kbps: this.sourceFor(track, true).kbps });
+          this.load(this.index, { autoplay, startAt, transcode: true, reportPrev: false, resume: true });
+        } else this.dropped(track, { at: resolve(startAt) || 0, autoplay, startAt });
+        return;
+      }
+      if (token !== this.loadToken) return;
+      src = pre.src;
+      debugLog(
+        'player',
+        `“${track.title}” ${viaMemory ? 'didn’t play as it came, so it was' : 'was'} read in full and plays from memory (${Math.round(pre.bytes / 1048576)} MB)${viaMemory ? '' : ': files don’t play as they come on this connection'}`,
+      );
+    }
 
     const spare = this.spare;
     if (!transcode && !this.routed && spare.qid === track.qid && sameSource(spare, src)) {
@@ -899,8 +969,9 @@ class Player extends EventTarget {
 
   // An original file waiting for data: said once it's waited a while (debug
   // mode), and if nothing more has come in after a longer while, it's loaded
-  // again from where it got to (once a track: past that, the browser's own
-  // retries). Converted streams have their own (see onStreamError).
+  // again from where it got to, and again as long as it waits, a longer
+  // while each time (STALL_AGAIN). Converted streams have their own (see
+  // onStreamError).
   watchStall(deck) {
     this.unwatchStall(deck);
     const el = deck.el;
@@ -930,19 +1001,40 @@ class Player extends EventTarget {
       if (!now.paused && now.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) this.setState('playing');
     }, this.stallLimits.fade);
     if (deck.isHls) return;
+    const tries = this.stallRetry?.qid === qid ? this.stallRetry.n : 0;
+    const after = this.stallLimits.reload * STALL_AGAIN ** Math.min(tries, Math.log(STALL_LONGEST) / Math.log(STALL_AGAIN));
     deck.stallReload = setTimeout(() => {
-      const track = this.current;
-      if (!waiting() || !track || track.qid !== qid || this.stallRetry === qid) return;
       // Offline: watched again once it's back.
-      if (navigator.onLine === false) return addEventListener('online', () => waiting() && this.watchStall(deck), { once: true });
-      if (bufferedEnd(el, el.currentTime) > got + 0.5) return this.watchStall(deck); // something came in: wait again
-      this.stallRetry = qid;
-      const at = el.currentTime;
-      debugLog('player', `nothing more of “${track.title}” came in for ${this.stallLimits.reload / 1000} s: loading the file again from ${at.toFixed(1)} s`, 'warn');
-      // (In a Play Together session, from where the session has got to.)
-      const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? at : at;
-      this.load(this.index, { startAt, reportPrev: false, resume: true });
-    }, this.stallLimits.reload);
+      if (navigator.onLine === false) return waiting() && addEventListener('online', () => waiting() && this.watchStall(deck), { once: true });
+      if (bufferedEnd(el, el.currentTime) > got + 0.5) return waiting() && this.watchStall(deck); // something came in: wait again
+      this.reloadStalled(deck, `nothing more of it came in for ${Math.round(after / 1000)} s`);
+    }, after);
+  }
+
+  // A track waiting for data, loaded again from where it got to (see
+  // watchStall), if it's still this load of it, still waiting.
+  reloadStalled(deck, why) {
+    const track = this.current;
+    const el = deck.el;
+    if (!track || deck !== this.deck || deck.qid !== track.qid || this.state !== 'loading' || el.paused || this.transition || deck.isHls) return false;
+    const n = (this.stallRetry?.qid === track.qid ? this.stallRetry.n : 0) + 1;
+    this.stallRetry = { qid: track.qid, n };
+    const at = el.currentTime;
+    debugLog('player', `“${track.title}” waited for data (${why}): loading the file again from ${at.toFixed(1)} s (${n === 1 ? 'the first time' : `${n} times now`})`, 'warn');
+    // (In a Play Together session, from where the session has got to.)
+    const startAt = this.remote ? () => this.remote?.expectedTime(track.sid) ?? at : at;
+    this.load(this.index, { startAt, reportPrev: false, resume: true });
+    return true;
+  }
+
+  // The page looked at again, or the connection back, or another one (a
+  // phone whose screen was off, say: the browser may have been held back
+  // meanwhile): a track that's waited a while for data is loaded again now,
+  // rather than when its watch says (which a page in the background may not
+  // have kept to).
+  kickStalled(why) {
+    const deck = this.deck;
+    if (deck.waitingSince && performance.now() - deck.waitingSince >= STALL_KICK) this.reloadStalled(deck, why);
   }
 
   unwatchStall(deck) {
@@ -1565,12 +1657,12 @@ class Player extends EventTarget {
     // server's asked for it first (fileComes): a file that's played as it
     // is here, or whose connection's dropped, is never converted for this,
     // only loaded again (a drop); one that hasn't played here yet, that the
-    // server hands over, is loaded as it is once more (the connection may
-    // have been gone a moment), and only then, failing again so, converted
-    // (as a file of a format this browser can't play is). A file the server
-    // keeps failing (an answer of 500 or more: FILE_FAILS): a track that
-    // won't play here. Another error (it came, but couldn't be decoded):
-    // converted, as before.
+    // server hands over, is read in full and played from memory, and only
+    // then, failing again so, converted (as a file of a format this browser
+    // can't play is: see fromMemoryOrConverted). A file the server keeps
+    // failing (an answer of 500 or more: FILE_FAILS): a track that won't
+    // play here. Another error (it came, but couldn't be decoded): the same,
+    // from memory first.
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
       const asIs = this.asIs === track.qid;
       const dropping = this.drops?.qid === track.qid;
@@ -1589,19 +1681,28 @@ class Player extends EventTarget {
             return;
           }
         } else if (comes === true && !asIs && !dropping) {
-          if (this.asIsAgain === track.qid) {
-            this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
-          } else {
-            this.asIsAgain = track.qid;
-            this.load(this.index, { startAt, reportPrev: false, resume: true });
-          }
+          this.fromMemoryOrConverted(track, { startAt });
           return;
         }
         this.dropped(track, { at, autoplay, startAt });
       });
       return;
     }
-    this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
+    this.fromMemoryOrConverted(track, { startAt });
+  }
+
+  // A file that came, but didn't play as it came: read in full, and played
+  // from memory, as Load ahead plays tracks (some networks, an office's,
+  // say, pass a file read a part at a time, but not as a player streams
+  // it). Only once that doesn't play either is it a file this browser can't
+  // play as it is, which the server converts (as it does a file of a format
+  // it can't play: see sourceFor). Never another quality for the network.
+  fromMemoryOrConverted(track, { startAt }) {
+    if (this.deck.prefetched?.qid === track.qid) {
+      this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
+      return;
+    }
+    this.load(this.index, { startAt, reportPrev: false, resume: true, viaMemory: true });
   }
 
   // The connection to a track's stream dropped, or it didn't come: the same

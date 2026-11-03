@@ -334,6 +334,8 @@ export class Prefetcher {
     const inUse = this.inUse();
     const streamed = this.streamed();
     for (const e of [...this.entries.values()]) {
+      // (The track playing, read now for its player: see now.)
+      if (e.now && e.qid === this.player.current?.qid) continue;
       // A track that was loading ahead, played (or gone past) before it was
       // all in: what's still to come would only be kept. A file of a track
       // played, to keep (Keep played tracks), goes on as a file read again
@@ -467,7 +469,7 @@ export class Prefetcher {
   // more is read, which holds back what's on its way), or (`until`)
   // something else comes first.
   async room(e, until = null) {
-    const waiting = () => !e.ctrl.signal.aborted && !this.player.roomToFetch() && !until?.();
+    const waiting = () => !e.ctrl.signal.aborted && !e.now && !this.player.roomToFetch() && !until?.();
     if (waiting()) {
       e.waitingSince = performance.now();
       try {
@@ -484,7 +486,7 @@ export class Prefetcher {
   // long as restAfter says, or until it's no longer held back, or
   // (`stop`) something else comes first).
   async pace(e, bytes, ms, stop = null) {
-    if (!bytes || this.player.aheadUnlimited()) return;
+    if (!bytes || e.now || this.player.aheadUnlimited()) return;
     const until = performance.now() + restAfter(bytes, ms, this.player.playingBitrate());
     e.restingSince = performance.now();
     try {
@@ -499,7 +501,7 @@ export class Prefetcher {
   }
 
   request(e, url, headers) {
-    return fetch(url, { signal: e.ctrl.signal, cache: 'no-store', credentials: 'omit', priority: 'low', ...(headers ? { headers } : {}) });
+    return fetch(url, { signal: e.ctrl.signal, cache: 'no-store', credentials: 'omit', priority: e.now ? 'high' : 'low', ...(headers ? { headers } : {}) });
   }
 
   async get(e, url, kind) {
@@ -530,15 +532,22 @@ export class Prefetcher {
       const at = e.bytes;
       await this.room(e, givesWay);
       if (givesWay()) throw parked();
-      const part = this.player.aheadUnlimited() ? FILE_PART : FILE_PART_HELD;
+      const part = e.now || this.player.aheadUnlimited() ? FILE_PART : FILE_PART_HELD;
       const t = performance.now();
       let res;
       let body = null;
       try {
-        res = await this.request(e, e.src.url, { Range: `bytes=${at}-${at + part - 1}` });
+        // (The track playing, read now, whose parts don't come: whole, as
+        // the server sends it to a request for all of it, which may.)
+        res = await this.request(e, e.src.url, e.whole ? null : { Range: `bytes=${at}-${at + part - 1}` });
         if (res.status === 206) body = new Uint8Array(await res.arrayBuffer());
       } catch (err) {
-        if (e.ctrl.signal.aborted || ++tries > RESUMES) throw err;
+        if (e.ctrl.signal.aborted) throw err;
+        if (e.now && !e.whole && at === 0 && tries >= 1) {
+          e.whole = true;
+          continue;
+        }
+        if (++tries > RESUMES) throw err;
         await new Promise((r) => setTimeout(r, tries * 1000));
         continue;
       }
@@ -593,6 +602,44 @@ export class Prefetcher {
     }
     e.blob = new Blob(chunks, { type: e.type });
     e.chunks = null;
+  }
+
+  // Whether a track's file is one to read in full to play (see now, and
+  // player.readInFull): not a long mix, which plays as it comes in, nor
+  // one more than can be kept, as far as its bitrate says (where it
+  // doesn't, that's known as it's read).
+  canReadInFull(track) {
+    const ms = Number(track?.duration) || 0;
+    const bytes = (((Number(track?.bitrate) || 0) * 1000) / 8) * (ms / 1000);
+    return !!track?.partKey && ms < LONG_FORM_MS && bytes < LOAD_AHEAD_BYTES;
+  }
+
+  // The track playing, read in full now, as a track ahead is (its file came
+  // when it was asked for, but didn't play as it came: some networks pass a
+  // file read a part at a time, but not as a player streams it, see
+  // player.couldntPlay), to play from memory: ahead of anything loading
+  // ahead (which waits for the player meanwhile), as fast as the connection
+  // allows, and whole where its parts don't come. Kept as a track ahead is,
+  // while it's played (see inUse).
+  async now(track, playback = playbackId()) {
+    const src = this.player.sourceFor(track, false, playback);
+    if (src.hls) throw new Error('A converted stream plays as it comes.');
+    const had = this.ready(track, src);
+    if (had) return had;
+    const old = this.entries.get(track.qid);
+    if (old) this.drop(old);
+    const e = this.entry(track, src, playback, 'loading');
+    e.now = true;
+    this.entries.set(track.qid, e);
+    try {
+      await this.loadFile(e);
+    } catch (err) {
+      if (this.entries.get(e.qid) === e) this.drop(e);
+      throw err;
+    }
+    if (this.entries.get(e.qid) !== e) throw stopped();
+    e.state = 'done';
+    return e;
   }
 
   // A converted stream: its playlists (as the server gives them), then each
