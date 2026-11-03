@@ -451,10 +451,12 @@ async function yourServerAt(uri, servers) {
   if (listed.length > 1) throw new Error('Several of your servers have that address, so it wasn’t used.');
   const [mine] = listed;
   const typed = { uri, local: routesHere(mine).some((c) => c.local), relay: false, protocol: new URL(uri).protocol.slice(0, -1) };
-  const [route] = await probeConnections({ id: mine.id, token: mine.token, connections: [typed] }, { timeout: ADDRESS_WAIT });
+  // (As the server plex.tv lists, whose it is and all: the rules for routes
+  // go by that.)
+  const [route] = await probeConnections({ ...mine, connections: [typed] }, { timeout: ADDRESS_WAIT });
   if (route.ok) return mine;
   if (route.why === 'http') throw new Error('This page is https, so it can’t use an http address.');
-  if (route.why === 'insecure') throw new Error('That’s plain http over the internet, so it wasn’t used.');
+  if (route.why === 'insecure') throw new Error('That’s plain http, unencrypted, so it wasn’t used.');
   if (route.why === 'other') throw new Error('Another server answers at that address.');
   if (route.why === 'status') throw Object.assign(new Error(`HTTP ${route.status}`), { status: route.status });
   throw Object.assign(new Error('unreachable'), { unreachable: true });
@@ -834,7 +836,7 @@ function routeResult(r) {
   if (r.ok) return `${fmt.number(r.ms)} ms`;
   return {
     http: 'Can’t be used from this secure (https) page',
-    insecure: 'Not used: unencrypted over the internet',
+    insecure: 'Not used: plain http, unencrypted',
     timeout: 'No answer within 6 seconds',
     network: 'No answer',
     status: `Answered with an error (${r.status})`,
