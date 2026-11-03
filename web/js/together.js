@@ -15,6 +15,10 @@ import { debugLog } from './debug.js';
 
 const API = 'api/together';
 const WAIT_SECONDS = 25;
+// An answer this quick (ms) saying nothing's changed: this device has other
+// requests waiting already, so it waits this long before asking again.
+const QUICK_ANSWER_MS = 500;
+const UNCHANGED_PAUSE_MS = 3000;
 const INVITES_VISIBLE = 30000;
 const INVITES_HIDDEN = 120000;
 const clientNow = () => performance.timeOrigin + performance.now();
@@ -83,7 +87,9 @@ class Together extends EventTarget {
       pause: () => this.pause(),
       toggle: () => this.toggle(),
       seek: (sec) => this.seek(sec),
-      command: (cmd) => this.command(cmd),
+      // (Tracks go as the session needs them, nothing else of them: not
+      // your plays and ratings. Here, as player.js can't import this.)
+      command: (cmd) => this.command(cmd.tracks ? { ...cmd, tracks: cmd.tracks.map(slimTrack) } : cmd),
       ended: (track) => this.command({ type: 'ended', sid: track.sid }, { quiet: true }),
       expectedTime: (sid) => this.expectedTime(sid),
       sleep: () => this.leave({ why: 'sleep' }),
@@ -455,6 +461,7 @@ class Together extends EventTarget {
     let backoff = 1000;
     while (gen === this.gen && this.active) {
       try {
+        const asked = clientNow();
         const { data } = await this.api(`sessions/${this.session.id}?since=${this.session.version}&wait=${WAIT_SECONDS}`, {
           timeout: (WAIT_SECONDS + 15) * 1000,
           signal: this.ctrl.signal,
@@ -466,6 +473,9 @@ class Together extends EventTarget {
         }
         backoff = 1000;
         if (!data.unchanged) this.apply(data);
+        // An answer at once with nothing new (this device has other
+        // requests waiting already): a moment before asking again.
+        else if (clientNow() - asked < QUICK_ANSWER_MS) await sleep(UNCHANGED_PAUSE_MS);
       } catch (err) {
         if (gen !== this.gen || err.aborted) return;
         if (err.status === 404 || err.status === 410) return this.ended('The session has ended.');

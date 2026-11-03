@@ -20,6 +20,10 @@ import { debugLog } from './debug.js';
 
 const API = 'api/devices';
 const WAIT_SECONDS = 25;
+// An answer this quick (ms) with nothing new: this device has other requests
+// waiting already, so it waits this long before asking again.
+const QUICK_ANSWER_MS = 500;
+const UNCHANGED_PAUSE_MS = 3000;
 const HEARTBEAT_MS = 20000;
 const REPORT_DELAY = 250;
 // Paused this long, a device stops being the one that plays, so another can
@@ -325,7 +329,7 @@ class Devices extends EventTarget {
         this.apply(view, { first: wait === 0 });
         // An answer at once with nothing new (this device has other
         // requests waiting already): a moment before asking again.
-        if (wait && view.version === before && clientNow() - asked < 500) await sleep(3000);
+        if (wait && view.version === before && clientNow() - asked < QUICK_ANSWER_MS) await sleep(UNCHANGED_PAUSE_MS);
         wait = WAIT_SECONDS;
       } catch (err) {
         if (gen !== this.gen || err.aborted) return;
