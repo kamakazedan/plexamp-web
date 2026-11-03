@@ -1111,6 +1111,10 @@ function aiView({ el, onDispose }) {
   // the list is shown with AI off on this device as well.)
   onDispose?.(on('missing', () => (missing.hidden = chosen() === 'off' && !missingCount())));
 
+  // (Which loadModels is the latest: what one before it gets back, from an
+  // Ollama asked about before, isn't shown.)
+  let modelsAsked = 0;
+
   el.append(
     h(
       'p.lede',
@@ -1139,6 +1143,7 @@ function aiView({ el, onDispose }) {
     sharedBox.replaceChildren(...(mode === 'auto' ? sharedParts() : []));
     customBox.replaceChildren(...(mode === 'custom' ? customForm(aiSettings()) : []));
     modelBox.replaceChildren();
+    modelsAsked += 1;
     waitBox.hidden = mode === 'off';
     notes.hidden = mode === 'off';
     missing.hidden = mode === 'off' && !missingCount();
@@ -1236,6 +1241,7 @@ function aiView({ el, onDispose }) {
   }
 
   async function loadModels() {
+    const mine = ++modelsAsked;
     const s = aiSettings();
     const target = aiTarget(s);
     if (!target) return;
@@ -1244,14 +1250,16 @@ function aiView({ el, onDispose }) {
     let models;
     try {
       const [version, list] = await Promise.all([aiVersion(target).catch(() => ''), listModels(target)]);
+      if (mine !== modelsAsked) return;
       models = list;
       status.textContent = `Connected${version ? ` to Ollama ${version}` : ''}. ${fmt.count(models.length, 'model', 'models')} installed.`;
     } catch (err) {
+      if (mine !== modelsAsked) return;
       status.textContent = describeAIError(err, target);
       status.classList.add('warn');
       return;
     }
-    if (!el.isConnected) return;
+    // (Shown on a page put aside meanwhile too, for when it's back.)
     if (!models.length) {
       status.textContent += ' Install one with “ollama pull”, for example ollama pull llama3.1:8b.';
       return;
