@@ -440,6 +440,28 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
     # oneAddress in server/plex.js.)
     PMS_NS=""
     if [ -n "$PMS_RESOLVER" ]; then PMS_NS="$(nameserver | tr -d '[]')"; fi
+    # Where the server's address is known as nginx starts, it keeps its
+    # connections to it open between requests (and, for https://, their
+    # TLS). Not at a name it looks up for each request: that takes an
+    # upstream that looks names up itself, which Debian's nginx can't.
+    PMS_UPSTREAM=""
+    PMS_PASS="$PMS_URL"
+    if [ -z "$PMS_RESOLVER" ]; then
+        pms_at="${UP_URL#*://}"
+        pms_port=80
+        case "$UP_URL" in https://*) pms_port=443 ;; esac
+        case "$pms_at" in
+            \[*\]) pms_at="$pms_at:$pms_port" ;;
+            \[*) ;;
+            *:*) ;;
+            *) pms_at="$pms_at:$pms_port" ;;
+        esac
+        PMS_UPSTREAM="upstream plexamp_web_pms {
+    server ${pms_at};
+    keepalive 16;
+}"
+        PMS_PASS="${UP_URL%%://*}://plexamp_web_pms${UP_PATH}"
+    fi
     # The service checks each request: nothing goes through that the Plex
     # server would take for its owner's, unless it's theirs (see pmsAuth in
     # server/index.js). The server's notification streams are checked as
@@ -547,7 +569,7 @@ location /pms/ {
     # Every request to Plex carries a token; refuse the rest here.
     if (\$pms_has_token = 0) { return 401; }
     ${PMS_AUTH}
-    proxy_pass ${PMS_URL}\$pms_path_sent;
+    proxy_pass ${PMS_PASS}\$pms_path_sent;
     ${PMS_PROXY}
 }
 # The server's notification streams (a WebSocket, or an event stream), by
@@ -555,7 +577,7 @@ location /pms/ {
 location ~* ^/pms/:/[^?]*(?:websocket|eventsource|notification) {
     if (\$pms_has_token = 0) { return 401; }
     ${PMS_AUTH_STREAM}
-    proxy_pass ${PMS_URL}\$pms_path;
+    proxy_pass ${PMS_PASS}\$pms_path;
     ${PMS_PROXY}
 }
 # The playlists and segments of a stream Plex converts are fetched from
@@ -564,7 +586,7 @@ location ~* ^/pms/:/[^?]*(?:websocket|eventsource|notification) {
 # matched them (the normalised path), so a path that only looks like one of
 # these can't reach anything else.
 location ~ ^/pms/(audio|music)/:/transcode/universal/session/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+$ {
-    proxy_pass ${PMS_URL}\$pms_uri\$is_args\$args;
+    proxy_pass ${PMS_PASS}\$pms_uri\$is_args\$args;
     ${PMS_PROXY}
 }
 CONF
@@ -610,16 +632,18 @@ CONF
     # service (and nginx, and root) can reach this socket: see "start the
     # service".
     # (A name is looked up by one resolver, for all of it: one answer kept for
-    # everything that reaches the server, the service's requests too.)
+    # everything that reaches the server, the service's requests too. An
+    # address is one upstream, for both.)
     cat >"$PMS_PROBE_CONF" <<CONF
 ${PMS_RESOLVER}
+${PMS_UPSTREAM}
 server {
     listen unix:${PMS_PROBE_SOCKET};
     server_name _;
     access_log off;
     set \$pms_offline "";
     location / {
-        proxy_pass ${PMS_URL}\$request_uri;
+        proxy_pass ${PMS_PASS}\$request_uri;
         ${PMS_PROXY}
     }
 }
