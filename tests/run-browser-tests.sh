@@ -109,12 +109,19 @@ case "$log" in
     *"plexamp-web browser"*"answered 404"*) echo "PASS debug: browser problems are in the container log" ;;
     *) annotate "FAIL debug: browser problems are in the container log"; status=1 ;;
 esac
-if printf '%s' "$log" | grep -Eq 'X-Plex-Token=t2?([^A-Za-z0-9_.~-]|$)'; then
-    annotate "FAIL debug: a token reached the container log"
-    status=1
-else
-    echo "PASS debug: no tokens in the container log"
-fi
+# Nothing anyone signs in with reaches any app's log, debug mode or not: the
+# mock's Plex tokens (in an address, a header or JSON), an offline-password
+# session's (pwoff-…), or the offline password.
+for n in pwb-web pwb-web2 pwb-web3 pwb-web4 pwb-web5 pwb-web6; do
+    found="$(docker logs "$n" 2>&1 | grep -Eo -e '[Xx]-[Pp]lex-[Tt]oken(=|: ?)t[2-5]?([^A-Za-z0-9_.~-]|$)' -e '"authToken": ?"t[2-5]?"' \
+        -e 'pwoff-[0-9a-f]+' -e 'offline-pwd-for-tests' | head -n 3 | tr '\n' ' ' || true)"
+    if [ -n "$found" ]; then
+        annotate "FAIL $n: a sign-in reached the container log ($found)"
+        status=1
+    else
+        echo "PASS $n: no sign-ins in the container log"
+    fi
+done
 
 if [ "$status" -ne 0 ]; then
     for n in pwb-web pwb-web3 pwb-web5 pwb-web6; do
