@@ -9,6 +9,7 @@ import { navigate } from '../router.js';
 import { h, icon, backHeader, iconButton, toast, fmt } from '../ui.js';
 import { trackRow, numberedList } from '../components.js';
 import { addToPlaylist, addToCollection, isAdminNow } from '../editing.js';
+import { radioArrowKeys } from './common.js';
 
 const SUGGESTIONS = [
   'Late-night drive: moody electronic and trip-hop that slowly builds.',
@@ -249,22 +250,24 @@ export async function aiPlaylistView({ el, onDispose }) {
     input,
     clear,
   );
-  const lengthRow = h(
-    'div.chips',
-    { role: 'radiogroup', 'aria-label': 'Playlist length' },
-    LENGTHS.map((n) =>
-      h(
-        'button.chip',
-        {
-          type: 'button',
-          role: 'radio',
-          'aria-checked': String(n === length),
-          onclick: (e) => {
-            length = n;
-            lengthRow.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-checked', String(c === e.currentTarget)));
+  const lengthRow = radioArrowKeys(
+    h(
+      'div.chips',
+      { role: 'radiogroup', 'aria-label': 'Playlist length' },
+      LENGTHS.map((n) =>
+        h(
+          'button.chip',
+          {
+            type: 'button',
+            role: 'radio',
+            'aria-checked': String(n === length),
+            onclick: (e) => {
+              length = n;
+              lengthRow.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-checked', String(c === e.currentTarget)));
+            },
           },
-        },
-        `${n} tracks`,
+          `${n} tracks`,
+        ),
       ),
     ),
   );

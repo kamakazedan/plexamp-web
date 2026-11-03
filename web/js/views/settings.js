@@ -16,6 +16,7 @@ import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
 import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.js';
 import { keptCount } from '../outbox.js';
+import { joinWithAnd, radioArrowKeys, SECRET_INPUT } from './common.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -666,32 +667,34 @@ function playbackView({ el }) {
   }
 }
 
-// options: [[value, title, subtitle]]
+// options: [[value, title, subtitle]]. (Changed in place, so what has the
+// keyboard's focus keeps it: see common.js radioArrowKeys.)
 function radioRows(label, options, current, onChange) {
-  const list = h('div.rows', { role: 'radiogroup', 'aria-label': label });
   let value = current;
-  const render = () =>
-    list.replaceChildren(
-      ...options.map(([v, title, sub]) =>
-        h(
-          'button.row.radio-row',
-          {
-            type: 'button',
-            role: 'radio',
-            'aria-checked': String(v === value),
-            onclick: () => {
-              value = v;
-              render();
-              onChange(v);
-            },
-          },
-          h('div.row-main', null, h('div.row-title', null, title), sub ? h('div.row-sub', null, sub) : null),
-          v === value ? icon('check', 24, 'radio-check') : h('span.radio-empty'),
-        ),
-      ),
-    );
-  render();
-  return list;
+  const mark = (v) => (v === value ? icon('check', 24, 'radio-check') : h('span.radio-empty'));
+  const buttons = options.map(([v, title, sub]) =>
+    h(
+      'button.row.radio-row',
+      {
+        type: 'button',
+        role: 'radio',
+        'aria-checked': String(v === value),
+        onclick: () => {
+          value = v;
+          paint();
+          onChange(v);
+        },
+      },
+      h('div.row-main', null, h('div.row-title', null, title), sub ? h('div.row-sub', null, sub) : null),
+      mark(v),
+    ),
+  );
+  const paint = () =>
+    buttons.forEach((b, i) => {
+      b.setAttribute('aria-checked', String(options[i][0] === value));
+      b.lastChild.replaceWith(mark(options[i][0]));
+    });
+  return radioArrowKeys(h('div.rows', { role: 'radiogroup', 'aria-label': label }, buttons));
 }
 
 // ---------- Connection / diagnostics ----------
@@ -1075,7 +1078,7 @@ function aiView({ el, onDispose }) {
 
   function customForm(s) {
     const url = h('input', { type: 'url', placeholder: 'http://localhost:11434', autocomplete: 'url', value: s.url, required: true });
-    const key = h('input', { type: 'password', placeholder: 'Optional', autocomplete: 'off', value: s.apiKey });
+    const key = h('input', { type: 'password', placeholder: 'Optional', value: s.apiKey, ...SECRET_INPUT });
     const insecure = () => location.protocol === 'https:' && /^http:\/\//i.test(url.value) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url.value);
     const warn = h('p.hint.warn', { hidden: !insecure() }, 'Browsers block http addresses here, except localhost. Use https.');
     url.addEventListener('input', () => (warn.hidden = !insecure()));
