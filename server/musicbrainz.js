@@ -17,6 +17,7 @@ import { norm } from './missinglist.js';
 import { albumKey, matchGroup, exactAlbum, exactKey, sameTitle, titlesAgree, trackKey, tracksInCommon, releaseSizes } from './releases.js';
 import { ServiceError } from './errors.js';
 import { CONTROL_CHARACTERS } from './clean.js';
+import { readCapped } from './plex.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org
@@ -41,6 +42,7 @@ export const MB_LIMITS = {
   perUser: 2, // requests from the app under way, for each person
   checks: 4, // and for everyone (each waits for the others' turns)
   timeoutMs: 15000,
+  answerBytes: 8 * 1024 * 1024, // an answer read, at most (a box set's tracks are a few hundred KB)
 };
 
 // Whoever asked has gone: what's left isn't checked.
@@ -163,8 +165,11 @@ export class MusicBrainz {
       const stop = () => ctrl.abort();
       signal?.addEventListener('abort', stop, { once: true });
       try {
+        // (Never followed elsewhere: what's asked goes to this MusicBrainz,
+        // and the answer is its own.)
         const res = await this.fetch(url, {
           headers: { Accept: 'application/json', 'User-Agent': this.agent },
+          redirect: 'error',
           signal: ctrl.signal,
         });
         const took = Date.now() - started;
@@ -184,7 +189,7 @@ export class MusicBrainz {
         if (res.status >= 500) this.unwell();
         // (A server of your own needs its search indexes for these.)
         if (!res.ok) throw Object.assign(new MusicBrainzError(502, this.public ? `MusicBrainz answered ${res.status}.` : `The player’s MusicBrainz server answered ${res.status}. Searching it needs its search indexes.`), { answered: res.status });
-        return await res.json();
+        return JSON.parse(await readCapped(res, MB_LIMITS.answerBytes));
       } catch (err) {
         if (err instanceof MusicBrainzError) throw err;
         if (signal?.aborted) throw new Gone();

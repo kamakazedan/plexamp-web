@@ -669,6 +669,9 @@ test('the shared AI model: what Ollama turned down once is left out from then on
   assert.equal(errorText('{"error":"model requires more system memory (12.3 GiB) than is available"}'), 'model requires more system memory (12.3 GiB) than is available');
 });
 
+// An answer of JSON, as fetch gives it (MusicBrainz's, say).
+const jsonAnswer = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+
 test('MusicBrainz: real songs and artists, albums taken for songs, and made-up ones', async () => {
   const asked = [];
   const known = {
@@ -688,7 +691,7 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
   const fetchImpl = async (url, init) => {
     const u = new URL(url);
     asked.push({ path: u.pathname, query: u.searchParams.get('query'), fmt: u.searchParams.get('fmt'), agent: init.headers['User-Agent'], at: Date.now() });
-    return { ok: true, status: 200, json: async () => answer(u.pathname, u.searchParams.get('query')) };
+    return jsonAnswer(answer(u.pathname, u.searchParams.get('query')));
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 60 });
   const results = await mb.check([
@@ -710,14 +713,14 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
   await mb.check([{ kind: 'track', artist: 'Groove Armada', title: 'At "the" River' }]);
   assert.ok(asked.filter((a) => a.query.includes('River')).every((a) => (a.query.match(/"/g) || []).length === 4), asked.map((a) => a.query).join(' | '));
   // MusicBrainz busy, or unreachable: said so, not taken for "made up".
-  const busy = new MusicBrainz({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }), gapMs: 0 });
+  const busy = new MusicBrainz({ fetchImpl: async () => jsonAnswer({}, 503), gapMs: 0 });
   await assert.rejects(busy.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 503);
   const down = new MusicBrainz({ fetchImpl: async () => { throw new Error('ECONNREFUSED'); }, gapMs: 0 });
   await assert.rejects(down.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502);
   // Busy part way: what it found so far, the rest unchecked (null).
   let calls = 0;
   const tiring = new MusicBrainz({
-    fetchImpl: async () => (++calls > 1 ? { ok: false, status: 503, json: async () => ({}) } : { ok: true, status: 200, json: async () => ({ artists: [{ name: 'A', score: 100 }] }) }),
+    fetchImpl: async () => (++calls > 1 ? jsonAnswer({}, 503) : jsonAnswer({ artists: [{ name: 'A', score: 100 }] })),
     gapMs: 0,
   });
   assert.deepEqual(await tiring.check([{ kind: 'artist', artist: 'A' }, { kind: 'artist', artist: 'B' }, { kind: 'artist', artist: 'C' }]), ['real', null, null]);
@@ -728,9 +731,9 @@ test('MusicBrainz: an artist in another script, and their songs, are checked by 
     const u = new URL(url);
     // Whatever's asked for: an artist in the same script, and someone
     // else's song of that title.
-    if (u.pathname === '/ws/2/artist') return { ok: true, status: 200, json: async () => ({ artists: [{ name: 'Кино', score: 100 }] }) };
-    if (u.pathname === '/ws/2/recording') return { ok: true, status: 200, json: async () => ({ recordings: [{ title: 'First Love', score: 100, 'artist-credit': [{ name: 'Someone Else' }] }] }) };
-    return { ok: true, status: 200, json: async () => ({ 'release-groups': [] }) };
+    if (u.pathname === '/ws/2/artist') return jsonAnswer({ artists: [{ name: 'Кино', score: 100 }] });
+    if (u.pathname === '/ws/2/recording') return jsonAnswer({ recordings: [{ title: 'First Love', score: 100, 'artist-credit': [{ name: 'Someone Else' }] }] });
+    return jsonAnswer({ 'release-groups': [] });
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 });
   assert.deepEqual(
@@ -743,7 +746,7 @@ test('MusicBrainz: musicbrainz.org once a second, your own server ten times a se
   const seen = [];
   const fetchImpl = async (url, init) => {
     seen.push({ host: new URL(url).host, at: Date.now(), agent: init.headers['User-Agent'] });
-    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+    return jsonAnswer({ artists: [] });
   };
   const items = ['A', 'B', 'C'].map((artist) => ({ kind: 'artist', artist }));
   assert.ok(isPublic('https://musicbrainz.org') && isPublic('https://beta.musicbrainz.org/') && !isPublic('http://192.168.1.30:5000') && !isPublic('https://musicbrainz.org.example.com'));
@@ -759,7 +762,7 @@ test('MusicBrainz: musicbrainz.org once a second, your own server ten times a se
   assert.ok(seen.slice(1).every((s, i) => s.at - seen[i].at >= 1000), seen.map((s) => s.at - t0).join(','));
   assert.equal(seen[0].agent, 'plexamp-web ( https://github.com/kamakazedan/plexamp-web )');
   // Your own server failing a search: most likely its search indexes.
-  const noIndexes = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+  const noIndexes = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async () => jsonAnswer({}, 503) });
   await assert.rejects(noIndexes.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502 && /search indexes/.test(e.message));
 });
 
@@ -776,7 +779,7 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   const starts = [];
   const quick = async () => {
     starts.push(Date.now());
-    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+    return jsonAnswer({ artists: [] });
   };
   const own = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: quick });
   await Promise.all([1, 2, 3, 4].map((i) => own.ask('/ws/2/artist', { query: `a${i}` })));
@@ -792,7 +795,7 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
       fetchImpl: async () => {
         times.push(Date.now());
         if (times.length === 1) await new Promise((r) => setTimeout(r, 150));
-        return { ok: true, status: 200, json: async () => ({}) };
+        return jsonAnswer({});
       },
     });
     await slow.ask('/ws/2/artist', { query: 'x' });
@@ -804,7 +807,7 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   }
   // "Too many requests" (429): nothing new asked of it for as long as it said, and the features say so, with how long.
   let n = 0;
-  const busy = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (n++, { ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '45' : null) }, json: async () => ({}) }) }).advanced(new MBKept());
+  const busy = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (n++, jsonAnswer({}, 429, { 'retry-after': '45' })) }).advanced(new MBKept());
   await assert.rejects(busy.artistInfo('Somebody'), (e) => e instanceof MusicBrainzError && e.status === 503 && /busy/.test(e.message));
   await assert.rejects(busy.artistInfo('Somebody Else'), (e) => e instanceof MusicBrainzError && e.status === 503 && e.retryAfter > 40 && e.retryAfter <= 45);
   assert.equal(n, 1);
@@ -817,12 +820,12 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   // server of your own answers) is it being busy too; a search's is its
   // search indexes (above).
   let m = 0;
-  const limited = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (m++, { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) }) });
+  const limited = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (m++, jsonAnswer({}, 503)) });
   await assert.rejects(limited.ask('/ws/2/artist/0383dadf-2a4e-4d10-a46a-e9e041da8eb3', { inc: 'aliases' }), (e) => e.status === 503 && /busy/.test(e.message) && e.retryAfter === 60);
   await assert.rejects(limited.ask('/ws/2/release-group', { artist: '0383dadf-2a4e-4d10-a46a-e9e041da8eb3' }), (e) => e.status === 503 && /busy/.test(e.message));
   assert.equal(m, 1);
   // A longer wait is said in minutes.
-  const later = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => ({ ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '240' : null) }, json: async () => ({}) }) });
+  const later = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => jsonAnswer({}, 429, { 'retry-after': '240' }) });
   await assert.rejects(later.ask('/ws/2/artist', { query: 'x' }), (e) => /in 4 minutes/.test(e.message) && e.retryAfter === 240);
 });
 
@@ -830,7 +833,7 @@ test('MusicBrainz: a check stops when whoever asked has gone, or its time is up'
   const asked = [];
   const fetchImpl = async (url) => {
     asked.push(new URL(url).searchParams.get('query'));
-    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+    return jsonAnswer({ artists: [] });
   };
   const items = ['A', 'B', 'C', 'D', 'E'].map((artist) => ({ kind: 'artist', artist }));
   // Gone after the second request: nothing more is asked.
@@ -862,6 +865,35 @@ test('MusicBrainz: a check stops when whoever asked has gone, or its time is up'
   await first;
 });
 
+test('MusicBrainz: its answers are read up to a limit, and a redirect is never followed (what\'s asked goes to that MusicBrainz alone)', async () => {
+  const asked = [];
+  const srv = createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    asked.push(u.pathname);
+    const name = /"(.*)"/.exec(u.searchParams.get('query') || '')?.[1] || '';
+    if (name === 'Moved') {
+      res.writeHead(302, { Location: `/elsewhere${u.pathname}${u.search}` });
+      return res.end();
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ artists: [{ name, score: 100, disambiguation: name === 'Big' ? 'x'.repeat(5000) : '' }] }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const was = MB_LIMITS.answerBytes;
+  try {
+    // (Each its own, as one that doesn't answer is given a rest.)
+    const mb = () => new MusicBrainz({ base: `http://127.0.0.1:${srv.address().port}`, gapMs: 0 });
+    await assert.rejects(mb().artist('Moved'), (e) => e instanceof MusicBrainzError && e.status === 502);
+    assert.ok(!asked.some((p) => p.startsWith('/elsewhere')), asked.join(' '));
+    MB_LIMITS.answerBytes = 2000;
+    await assert.rejects(mb().artist('Big'), (e) => e instanceof MusicBrainzError && e.status === 502);
+    assert.equal(await mb().artist('Small'), 'real');
+  } finally {
+    MB_LIMITS.answerBytes = was;
+    srv.close();
+  }
+});
+
 // ---------- the MusicBrainz features (MUSICBRAINZ_ADVANCED) ----------
 
 const MB_ID = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -885,7 +917,7 @@ function fakeMusicBrainz({ groups = 3, fail = () => false } = {}) {
   const fetchImpl = async (url, init) => {
     const u = new URL(url);
     asked.push({ path: u.pathname, query: u.searchParams.get('query'), offset: u.searchParams.get('offset'), inc: u.searchParams.get('inc'), at: Date.now(), agent: init.headers['User-Agent'] });
-    if (fail(u)) return { ok: false, status: 503, json: async () => ({}) };
+    if (fail(u)) return jsonAnswer({}, 503);
     let body = {};
     if (u.pathname === '/ws/2/artist') {
       const names = [...(u.searchParams.get('query') || '').matchAll(/:"([^"]*)"/g)].map((m) => m[1].toLowerCase());
@@ -899,7 +931,7 @@ function fakeMusicBrainz({ groups = 3, fail = () => false } = {}) {
     } else if (u.pathname.startsWith('/ws/2/release-group/')) {
       body = { genres: u.pathname.endsWith(MB_ID(101)) ? [{ name: 'post-rock', count: 3 }, { name: 'dream pop', count: 1 }] : [] };
     }
-    return { ok: true, status: 200, json: async () => body };
+    return jsonAnswer(body);
   };
   return { asked, fetchImpl };
 }
@@ -967,7 +999,7 @@ test('MusicBrainz features: an album of a title the artist has more of, by the y
     let body = {};
     if (u.pathname === '/ws/2/artist') body = { artists: [{ id: W, name: 'Weezer', score: 100 }, { id: VA, name: 'Various Artists', score: 100, aliases: [{ name: 'Compilation Hits' }] }] };
     else if (u.pathname === `/ws/2/artist/${W}`) body = { id: W, name: 'Weezer', aliases: [], genres: [] };
-    else if (u.pathname.startsWith('/ws/2/artist/')) return { ok: false, status: 404, json: async () => ({}) };
+    else if (u.pathname.startsWith('/ws/2/artist/')) return jsonAnswer({}, 404);
     else if (u.pathname === '/ws/2/release-group') {
       body = {
         'release-group-count': 3,
@@ -978,7 +1010,7 @@ test('MusicBrainz features: an album of a title the artist has more of, by the y
         ],
       };
     }
-    return { ok: true, status: 200, json: async () => body };
+    return jsonAnswer(body);
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   assert.equal((await mb.album('Weezer', 'Weezer', { year: 2001 })).date, '2001-05-15');
@@ -1032,8 +1064,8 @@ test('MusicBrainz features: for its year and genres to be fixed, an album is the
     if (u.pathname === `/ws/2/artist/${B}`) body = { id: B, name: 'Bob Sinclar', aliases: [], genres: [] };
     else if (u.pathname === '/ws/2/release-group' && u.searchParams.get('artist') === B) body = { 'release-group-count': groups.length, 'release-groups': groups };
     else if (u.pathname.startsWith('/ws/2/release-group/')) body = { id: u.pathname.split('/').pop(), genres: [{ name: 'house', count: 3 }] };
-    else return { ok: false, status: 404, json: async () => ({}) };
-    return { ok: true, status: 200, json: async () => body };
+    else return jsonAnswer({}, 404);
+    return jsonAnswer(body);
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const strict = { id: B, strict: true };
@@ -1121,7 +1153,7 @@ test('MusicBrainz features: on a MusicBrainz of your own, an album is checked by
       const r = releases[groupOf(id)].find((x) => x.id === id);
       body = { id, date: r.date, 'release-group': groups.find((g) => g.id === groupOf(id)), media: [{ 'track-count': r.tracks.length, tracks: r.tracks }] };
     } else if (u.pathname.startsWith('/ws/2/release-group/')) body = { id, genres: [{ name: 'folk', count: 2 }] };
-    return body ? { ok: true, status: 200, json: async () => body } : { ok: false, status: 404, json: async () => ({}) };
+    return body ? jsonAnswer(body) : jsonAnswer({}, 404);
   };
   const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const plexTracks = (list) => list.map((t) => ({ title: t.title, ms: t.length }));
@@ -1416,7 +1448,7 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
       const any = works && query === CHECKS[u.pathname];
       body = { [index]: any ? [{ id: MB_ID(index === 'recordings' ? 301 : 302), title: 'Anything' }] : [] };
     }
-    return { ok: true, status: 200, json: async () => body };
+    return jsonAnswer(body);
   };
   const log = { warned: [], warn(m) { this.warned.push(m); }, info() {}, debug() {} };
   const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0, log, checkSearch: true }).advanced(new MBKept());
@@ -3320,7 +3352,7 @@ test('MusicBrainz features: other artists of a name, and their release groups, l
     } else if (u.pathname === '/ws/2/release-group') {
       body = { 'release-group-count': 1, 'release-groups': [{ id: '44444444-4444-4444-8444-444444444444', title: u.searchParams.get('artist') === ids.b ? 'Cocaine' : 'Bloom', 'primary-type': 'Album', 'first-release-date': '2026-01-01' }] };
     }
-    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    return jsonAnswer(body);
   };
   const mb = new MusicBrainz({ base: 'http://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const others = await mb.namesakes('Maduk', { but: ids.a });
