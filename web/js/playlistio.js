@@ -11,6 +11,7 @@
 import { app } from './state.js';
 import { norm, sameTitle, mapLimit, findArtist, titleWord } from './ai.js';
 import { aliasesOf } from './mb.js';
+import { asides } from './releases.js';
 import { saveOrder } from './sorting.js';
 import { toCsv } from './missing.js';
 
@@ -178,8 +179,24 @@ const sameName = (want, have) => {
   return !!w && !!n && (w === n || n.includes(w) || w.includes(n));
 };
 const byArtist = (e, m) => (!e.artist && !e.albumArtist) || [m.originalTitle, m.grandparentTitle].some((a) => sameName(e.artist, a) || sameName(e.albumArtist, a));
-// The same song: the same title (near enough) by the same artist.
-const sameSong = (e, m) => (m?.type === 'track' || m?.type === undefined) && sameTitle(norm(m.title), norm(e.title)) && byArtist(e, m);
+// The other recording a title says it is: what's in its brackets or after a
+// dash that says a remix, a live take, another mix ("Calibre Remix", "Live",
+// "VIP", "Taylor's Version"), as releases.js asides has them; not what only
+// says which cut of the recording it is ("Radio Edit", "Single Version",
+// "Original Mix", "Extended Mix"), which a copy's title often leaves out.
+// ("Acoustic" and "Acoustic Version" are one.)
+const CUT_ONLY = /^(?:(?:radio|single|album|original|short|full|extended|main|clean|explicit)\s+)?(?:edit|version|mix|cut)$|^original$/;
+const recordingOf = (title) =>
+  asides(title)
+    .filter((a) => a.versioned && !CUT_ONLY.test(a.text))
+    .map((a) => a.text.replace(/ (?:version|mix)$/, ''))
+    .sort()
+    .join(' | ');
+// The same song: the same title (near enough) by the same artist, and the
+// same recording, as the titles say (a remix isn't the song it remixes, nor
+// another remix of it; nor a live take the studio one).
+const sameRecording = (e, m) => recordingOf(e.title) === recordingOf(m.title);
+const sameSong = (e, m) => (m?.type === 'track' || m?.type === undefined) && sameTitle(norm(m.title), norm(e.title)) && byArtist(e, m) && sameRecording(e, m);
 
 // How alike a track in the library is to an entry, beyond being the same
 // song: Plex's id for the recording, the exact title, the album, the length,
@@ -223,7 +240,7 @@ const sameAlbum = (e, a) =>
 // differently there ("Song - 2011 Remaster"), the same disc and number and
 // the same length near enough.
 const onAlbum = (e, tracks) =>
-  tracks.find((m) => sameTitle(norm(m.title), norm(e.title))) ||
+  tracks.find((m) => sameTitle(norm(m.title), norm(e.title)) && sameRecording(e, m)) ||
   tracks.find(
     (m) =>
       e.index !== undefined &&

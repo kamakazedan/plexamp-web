@@ -6674,6 +6674,42 @@ with sync_playwright() as pw:
             app.server.forgetPlaylists();
             for (const p of await app.server.playlists()) if (['Liked Songs', 'Old favourites', 'Road songs', 'Twice'].includes(p.title.replace(/ \\(from Spotify( \\d+)?\\)$/, ''))) await app.server.deletePlaylist(p.ratingKey);
         })""")
+        # Spotify's titles say which recording a track is ("Song - Calibre
+        # Remix", "Song - Live"): a remix comes over only as that very remix
+        # (never the song it remixes, nor another remix of it), a live take
+        # only as one, while what only says which cut it is ("Radio Edit")
+        # doesn't count. (An artist of their own, with a song and a remix of
+        # it.)
+        lanterns = mock('/__mock/add-artist?name=Lantern%20Fold&albums=Paper%20Lanterns:2019&tracks=Paper%20Lantern|Paper%20Lantern%20(Glasswork%20Remix)|Tin%20Bell')['MediaContainer']['Metadata'][0]
+        try:
+            versions = json.dumps({'playlists': [{'name': 'Versions', 'lastModifiedDate': '2026-10-22', 'collaborators': [], 'numberOfFollowers': 0, 'items': [
+                item('Paper Lantern - Glasswork Remix', 'Lantern Fold', 'Paper Lanterns'),
+                item('Paper Lantern - Ferro Remix', 'Lantern Fold', 'Paper Lanterns Remixed'),
+                item('Paper Lantern - Radio Edit', 'Lantern Fold', 'Paper Lanterns'),
+                item('Tin Bell - Live', 'Lantern Fold', 'Live at the Pier'),
+            ]}]}).encode()
+            guide()
+            choose_files([('Playlist4.json', versions)])
+            page.wait_for_selector('.spotify-choose-form')
+            page.uncheck('.spotify-choose-form .spotify-keep input')
+            page.click('.spotify-choose-form .btn-primary')
+            page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+            versions_done = page.locator('.import-form:not(.spotify-choose-form)').inner_text()
+            page.click('.dialog-close')
+            page.wait_for_timeout(400)
+            versions_made = js(page, """() => import('./js/state.js').then(async ({ app }) => {
+                app.server.forgetPlaylists();
+                const p = (await app.server.playlists()).find((x) => x.title === 'Versions');
+                if (!p) return null;
+                const { items } = await app.server.playlistItems(p.ratingKey, { start: 0, size: 50 });
+                await app.server.deletePlaylist(p.ratingKey);
+                return items.map((m) => [m.title, m.parentTitle]);
+            })""")
+            check('spotify: a remix comes over only as that very remix (not the song it remixes, nor another remix), a live take only as one; a radio edit as the song',
+                  versions_made == [['Paper Lantern (Glasswork Remix)', 'Paper Lanterns'], ['Paper Lantern', 'Paper Lanterns']] and '2 tracks found' in versions_done and '2 not' in versions_done,
+                  f'{versions_made} {versions_done!r}')
+        finally:
+            mock(f"/__mock/add-artist?remove={lanterns['ratingKey']}")
         # What's read at once is bounded, and the list says what was cut
         # short (here, with the bounds lowered): a file too big is passed
         # over, a playlist past the most tracks has its first ones, and one
