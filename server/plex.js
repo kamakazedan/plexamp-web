@@ -164,6 +164,9 @@ class TTLCache {
     if (this.map.size >= this.max) this.map.delete(this.map.keys().next().value);
     this.map.set(key, { value, exp: Date.now() + ttl });
   }
+  delete(key) {
+    this.map.delete(key);
+  }
 }
 
 // Accounts whose sign-ins and servers are kept checked (see identify and
@@ -173,6 +176,7 @@ const ACCOUNTS_KEPT = 20000;
 // sign-in it's asked about: see serverAccepts).
 const KEPT_MS = {
   user: 15 * 60000, // whose a sign-in is
+  taken: 24 * 3600000, // ...and that plex.tv took it, so asking again isn't a new sign-in (see knows)
   refused: 60000, // ...or that it's no sign-in
   servers: 10 * 60000, // the servers an account can use
   resources: 60000, // its devices, with their connections (for Play on)
@@ -239,6 +243,7 @@ export class PlexAuth {
     // seen, whatever's asked meanwhile.)
     if (this.pmsName) setInterval(() => this.lookUpAddresses(), 5000).unref();
     this.users = new TTLCache(ACCOUNTS_KEPT);
+    this.taken = new TTLCache(ACCOUNTS_KEPT); // token hash -> true: sign-ins plex.tv took lately (see knows)
     this.denied = new TTLCache();
     this.access = new TTLCache(); // `pms|${token hash}`: whether the server at PLEX_SERVER_URL accepts the token (see serverAccepts)
     this.serverLists = new TTLCache(ACCOUNTS_KEPT); // token hash -> Map(server id -> owned): the servers the account can use
@@ -306,12 +311,16 @@ export class PlexAuth {
     if (this.tv.down && Date.now() - Math.max(this.tv.tried, this.tv.pinged) > PLEX_TV_TIMING.pingMs) this.pingPlexTv();
   }
 
-  // Whether this token has been checked lately (or is being checked now):
-  // asking again costs plex.tv nothing.
+  // Whether this token has been checked lately (or is being checked now),
+  // so asking again costs plex.tv nothing, or plex.tv took it in the last
+  // day: then it's asked again, but isn't counted as a new sign-in from its
+  // address (see index.js checkable). Only made-up sign-ins need counting,
+  // and one plex.tv took isn't made up: so behind a reverse proxy, where
+  // everyone's one address, those in use aren't held up every 15 minutes.
   knows(token) {
     if (!validToken(token)) return true;
     const key = hash(token);
-    return this.users.get(key) !== undefined || this.denied.get(key) !== undefined || this.identifying.has(key);
+    return this.users.get(key) !== undefined || this.taken.get(key) !== undefined || this.denied.get(key) !== undefined || this.identifying.has(key);
   }
 
   // At most PLEX_TV_AT_ONCE questions for plex.tv at a time, and a limited
@@ -471,9 +480,13 @@ export class PlexAuth {
           thumb: safeThumb(u.thumb),
         };
         this.users.set(key, user, KEPT_MS.user);
+        this.taken.set(key, true, KEPT_MS.taken);
         return user;
       } catch (err) {
-        if (err instanceof AuthError) this.denied.set(key, true, KEPT_MS.refused);
+        if (err instanceof AuthError) {
+          this.denied.set(key, true, KEPT_MS.refused);
+          this.taken.delete(key);
+        }
         throw err;
       }
     })().finally(() => this.identifying.delete(key));

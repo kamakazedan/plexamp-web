@@ -286,6 +286,46 @@ test('sign-ins: checked once however many requests ask at once, and remembered',
   }
 });
 
+test('sign-ins: one plex.tv took in the last day isn\'t a new sign-in when it\'s checked again, and one it then refuses is', async () => {
+  let takes = true;
+  let asked = 0;
+  const tv = createServer((req, res) => {
+    asked += 1;
+    res.writeHead(takes ? 200 : 401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(takes ? { id: 7, uuid: 'u7', username: 'sam' } : {}));
+  });
+  await new Promise((r) => tv.listen(0, '127.0.0.1', r));
+  const realNow = Date.now;
+  let later = 0;
+  Date.now = () => realNow() + later;
+  try {
+    const auth = new PlexAuth({ plexTvUrl: `http://127.0.0.1:${tv.address().port}` });
+    const token = 'sam-token-1234567890';
+    assert.equal(auth.knows(token), false, 'never seen: a new sign-in, counted');
+    await auth.identify(token);
+    assert.equal(auth.knows(token), true);
+    // An hour on, whose it is is asked of plex.tv again, but it isn't counted as new
+    later = 3600000;
+    assert.equal(auth.knows(token), true);
+    await auth.identify(token);
+    assert.equal(asked, 2);
+    // More than a day after plex.tv last took it, it's new again
+    later += 25 * 3600000;
+    assert.equal(auth.knows(token), false);
+    // Taken again, then refused (signed out on plex.tv, say): once the refusal's minute is up, it's counted
+    await auth.identify(token);
+    later += 3600000;
+    takes = false;
+    await assert.rejects(auth.identify(token), (e) => e.status === 401);
+    assert.equal(auth.knows(token), true, 'refused a moment ago: nothing to ask plex.tv');
+    later += 2 * 60000;
+    assert.equal(auth.knows(token), false);
+  } finally {
+    Date.now = realNow;
+    tv.close();
+  }
+});
+
 test('sign-ins: the servers an account can use are asked about once, whatever ids are asked for; and the checks in use stay kept', async () => {
   const asked = { user: 0, resources: 0 };
   const tv = createServer((req, res) => {
