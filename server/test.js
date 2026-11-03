@@ -2106,8 +2106,10 @@ test('missing tracks: a change sent again after another device\'s is made once (
   asOwner(st, Array.from({ length: 40 }, (_, i) => noteOp([song('Z', `Z${i}`)])));
   asOwner(st, [clear]);
   assert.ok(mineOf(st, dan.id).some((m) => m.title === 'Two'));
-  const later = store({ now: () => (AT + 50 * 86400) * 1000 });
-  asOwner(later, [clear]);
+  let at = AT * 1000;
+  const later = store({ now: () => at });
+  asOwner(later, [noteOp([song('A', 'One')]), clear]);
+  at += 50 * 86400 * 1000;
   asOwner(later, [noteOp([song('B', 'Two')], { at: AT + 50 * 86400 })]);
   asOwner(later, [clear]);
   assert.ok(mineOf(later, dan.id).some((m) => m.title === 'Two'), 'remembered for 50 days');
@@ -2115,6 +2117,71 @@ test('missing tracks: a change sent again after another device\'s is made once (
   const one = store();
   asOwner(one, [noteOp([{ kind: 'album', artist: 'X', title: 'Y' }, song('C', 'Three')])]);
   assert.deepEqual(mineOf(one, dan.id).map((m) => m.title), ['Three']);
+});
+
+test('missing tracks: nothing\'s kept for an account with no list, and a list cleared goes once it remembers no changes (counted till then)', () => {
+  let at = AT * 1000;
+  const st = store({ now: () => at });
+  const kept = (who) => st.servers.get(SRV)?.accounts.has(who.id) ?? false;
+  asOwner(st, [noteOp([song('A', 'One')])]);
+  // Changes that do nothing, to a list the account hasn't got: nothing's kept for it (once, 2,000 of their ids were).
+  asFriend(st, sam, [{ type: 'clear', id: opId() }, { type: 'forget', id: opId(), ids: [idOf({ ...song('A', 'One'), section: '1' })] }, { type: 'mb', id: opId(), real: [], dropped: [] }]);
+  assert.equal(kept(sam), false);
+  // One cleared remembers its changes (each made once), and is counted as a list while it does...
+  asFriend(st, eve, [noteOp([song('B', 'Two')]), { type: 'clear', id: opId() }]);
+  assert.deepEqual(mineOf(st, eve.id), []);
+  assert.equal(st.view(eve.id, SRV).done.length, 2);
+  const rev = st.revs(SRV, eve.id).mine;
+  const was = MISSING_STORE_LIMITS.accounts;
+  MISSING_STORE_LIMITS.accounts = 2;
+  try {
+    const one = noteOp([song('C', 'Three')]);
+    assert.deepEqual(asFriend(st, sam, [one]).refused, [one.id]);
+    assert.equal(kept(sam), false, 'nor for a change refused');
+    // ...for 60 days: then it goes, and so does what it counted for.
+    at += MISSING_STORE_LIMITS.doneMs + 1000;
+    asFriend(st, sam, [noteOp([song('C', 'Three')], { at: AT + 61 * 86400 })]);
+    assert.deepEqual([kept(eve), kept(sam)], [false, true]);
+  } finally {
+    MISSING_STORE_LIMITS.accounts = was;
+  }
+  // (A list made again for it has none of the revs it had.)
+  asFriend(st, eve, [noteOp([song('D', 'Four')], { at: AT + 61 * 86400 })]);
+  assert.notEqual(st.revs(SRV, eve.id).mine, rev);
+});
+
+test('missing tracks: a full list\'s changes are quick (each entry\'s name worked out once, the list changed as one copy)', () => {
+  const st = store();
+  const many = (n, p, extra) => noteOp(Array.from({ length: n }, (_, i) => song(`Artist ${p}${i} and the Band`, `A Fairly Long Song Title Number ${i} (Live at Somewhere)`)), extra);
+  asOwner(st, [many(MISSING_LIMITS.ai, 'a')]);
+  asOwner(st, [many(MISSING_LIMITS.spotify, 's', { via: 'spotify', list: listId('Gym') })]);
+  assert.equal(st.total, MISSING_LIMITS.ai + MISSING_LIMITS.spotify);
+  const nothing = Array.from({ length: MISSING_STORE_LIMITS.ops }, () => ({ type: 'forget', id: opId(), ids: [] }));
+  const notes = Array.from({ length: MISSING_STORE_LIMITS.ops }, (_, i) => noteOp([song('New', `New ${i}`)]));
+  const before = st.revs(SRV, dan.id).mine;
+  const started = Date.now();
+  asOwner(st, nothing);
+  assert.equal(st.revs(SRV, dan.id).mine, before, 'nothing changed, so no new rev');
+  asOwner(st, notes);
+  const took = Date.now() - started;
+  // (Each change copied the list, worked every name out twice and compared each entry as JSON: 0.5 and 1.4 s.)
+  assert.ok(took < 400, `${took} ms`);
+  const mine = mineOf(st, dan.id);
+  assert.equal(mine.length, MISSING_LIMITS.ai + MISSING_LIMITS.spotify);
+  assert.equal(mine.filter((m) => m.artist === 'New').length, MISSING_STORE_LIMITS.ops, 'the latest of each kept, the oldest gone');
+  assert.notEqual(st.revs(SRV, dan.id).mine, before);
+  // ...and one refused for want of room leaves the list as it was, as the change before it in the request left it.
+  const few = store();
+  const was = MISSING_STORE_LIMITS.entries;
+  MISSING_STORE_LIMITS.entries = 3;
+  try {
+    asOwner(few, [noteOp([song('A', 'One')])]);
+    const big = noteOp([song('A', 'One'), song('X', '1'), song('X', '2'), song('X', '3')]);
+    assert.deepEqual(asOwner(few, [noteOp([song('A', 'One')]), big]).refused, [big.id]);
+    assert.deepEqual(mineOf(few, dan.id).map((m) => [m.title, m.times]), [['One', 2]]);
+  } finally {
+    MISSING_STORE_LIMITS.entries = was;
+  }
 });
 
 test('missing tracks: the app sends what fits in one request (names in other scripts are bigger)', () => {

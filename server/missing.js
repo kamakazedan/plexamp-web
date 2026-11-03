@@ -27,7 +27,7 @@ import { ServiceError } from './errors.js';
 import { userId, SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 export const MISSING_STORE_LIMITS = {
-  accounts: 500, // with a list on this player (on any server)
+  accounts: 500, // with a list on this player (on any server: one cleared counts while it remembers changes, see kept)
   servers: 10, // that one account has lists for
   entries: 100000, // on all the lists together
   ops: 50, // changes in one request
@@ -138,7 +138,18 @@ export function cleanOp(raw, now) {
 // Entries as they're sent and kept: without the server (it's the list's).
 const bare = ({ server, ...e }) => e;
 const copy = (m) => ({ ...m, ...(Array.isArray(m.lists) ? { lists: [...m.lists] } : {}) });
-const same = (a, b) => a.length === b.length && a.every((m, i) => JSON.stringify(m) === JSON.stringify(b[i]));
+// Whether two lists have the same entries, field for field.
+function sameEntry(a, b) {
+  const fields = Object.keys(a);
+  if (fields.length !== Object.keys(b).length) return false;
+  return fields.every((k) => {
+    const x = a[k];
+    const y = b[k];
+    if (x === y) return Object.hasOwn(b, k);
+    return Array.isArray(x) && Array.isArray(y) && x.length === y.length && x.every((v, i) => v === y[i]);
+  });
+}
+const same = (a, b) => a.length === b.length && a.every((m, i) => m === b[i] || sameEntry(m, b[i]));
 
 export class MissingStore {
   constructor({ dir = null, log = null, writeDelayMs = 1500, now = () => Date.now() } = {}) {
@@ -194,15 +205,18 @@ export class MissingStore {
           this.prune(rec);
           this.total += entries.length;
         }
+        // (Never behind one of its lists' own: see record.)
         const kept = this.servers.get(server);
-        if (kept) kept.rev = Number.isSafeInteger(s.rev) && s.rev > 0 ? s.rev : 1;
+        if (kept) kept.rev = Math.max(Number.isSafeInteger(s.rev) && s.rev > 0 ? s.rev : 1, ...[...kept.accounts.values()].map((a) => a.rev));
       }
     } catch (err) {
       this.log?.warn(`missing tracks: couldn't read ${this.file} (${err.message}); starting without them`);
     }
   }
 
-  // An account's list for a server (made, with `create`).
+  // An account's list for a server (made, with `create`). (A new one's revs
+  // go on from the server's, so one made again after its account's went
+  // never has a rev that one had: see tidy.)
   record(server, uid, { create = false } = {}) {
     let s = this.servers.get(server);
     if (!s) {
@@ -212,28 +226,40 @@ export class MissingStore {
     }
     let a = s.accounts.get(uid);
     if (!a && create) {
-      a = { rev: 0, entries: [], done: [] };
+      a = { rev: s.rev, entries: [], done: [] };
       s.accounts.set(uid, a);
     }
     return a || null;
   }
 
+  // Whether an account's list for a server is kept: it has entries, or it
+  // remembers changes made to it lately (one just cleared, say: see apply).
+  // Counted in the limits either way.
+  kept(a) {
+    return !!a && (a.entries.length > 0 || a.done.at(-1)?.[1] >= this.now() - MISSING_STORE_LIMITS.doneMs);
+  }
+
   // Whether there's room for this account to have a list for this server
   // (it has one, or neither it nor the player has as many as it can).
   room(server, uid) {
-    const kept = (a) => a.entries.length > 0;
-    const have = this.servers.get(server)?.accounts.get(uid);
-    if (have && kept(have)) return true;
+    if (this.kept(this.servers.get(server)?.accounts.get(uid))) return true;
     let mine = 0;
     const everyone = new Set();
     for (const [, s] of this.servers) {
       for (const [id, a] of s.accounts) {
-        if (!kept(a)) continue;
+        if (!this.kept(a)) continue;
         everyone.add(id);
         if (id === uid) mine += 1;
       }
     }
     return mine < MISSING_STORE_LIMITS.servers && (everyone.has(uid) || everyone.size < MISSING_STORE_LIMITS.accounts);
+  }
+
+  // Lists that aren't kept any more (no entries, and no changes made lately
+  // remembered) go.
+  tidy(server) {
+    const s = this.servers.get(server);
+    for (const [uid, a] of s?.accounts || []) if (!this.kept(a)) s.accounts.delete(uid);
   }
 
   revs(server, uid) {
@@ -288,10 +314,9 @@ export class MissingStore {
     return [...rows.values()];
   }
 
-  // A list changed: its new entries, counted.
+  // A list changed: its new entries (counted already: see apply).
   commit(server, rec, list) {
     if (same(rec.entries, list)) return false;
-    this.total += list.length - rec.entries.length;
     rec.entries = list;
     rec.rev += 1;
     this.servers.get(server).rev += 1;
@@ -316,6 +341,9 @@ export class MissingStore {
   // change that can't be read, or that isn't theirs to make, is left out
   // (`skipped`), as is one that needs more room than the player has left
   // (`refused`, by id; `full`). Returns the revs from before and after.
+  // (Each list changed is changed as one copy, kept once, at the end:
+  // `work`, its entries as changed so far, and how many more there are on
+  // all the lists now.)
   apply(uid, server, ops, { owner = false } = {}) {
     const id = userId(uid);
     if (!id || !SERVER_ID.test(server) || !Array.isArray(ops)) throw unreadable();
@@ -324,6 +352,7 @@ export class MissingStore {
     const before = this.revs(server, id);
     let skipped = 0;
     const refused = [];
+    const work = { lists: new Map(), grown: 0 };
     for (const raw of ops) {
       const op = cleanOp(raw, now);
       if (!op || (op.everyone && !owner)) {
@@ -331,37 +360,63 @@ export class MissingStore {
         continue;
       }
       if (this.record(server, id)?.done.some(([d]) => d === op.id)) continue;
-      const done = op.everyone ? this.everyone(server, op) : this.own(server, id, op);
+      const done = op.everyone ? this.everyone(server, op, work) : this.own(server, id, op, work);
       if (done === 'full') {
         refused.push(op.id);
         continue;
       }
       // (Sent again, say as the page went, it's made once: even one that
-      // takes some off, which would take off what's been added since.)
-      this.remember(this.record(server, id, { create: true }), op.id);
+      // takes some off, which would take off what's been added since. Not
+      // one that did nothing, to a list the account doesn't have: a list
+      // would be kept for it.)
+      const rec = this.record(server, id, { create: op.everyone && done === 'done' && this.room(server, id) });
+      if (rec) this.remember(rec, op.id);
     }
+    for (const [rec, list] of work.lists) this.commit(server, rec, list);
+    this.total += work.grown;
+    this.tidy(server);
     return { before, rev: this.revs(server, id), skipped, refused, full: refused.length > 0 };
   }
 
+  // A list as this request has it so far, a copy of its own (changes are
+  // made to some of its entries in place): see apply.
+  working(rec, work) {
+    if (!work.lists.has(rec)) work.lists.set(rec, rec.entries.map(copy));
+    return work.lists.get(rec);
+  }
+
   // A change to the account's own list.
-  own(server, uid, op) {
-    const adds = (op.type === 'note' && op.items.length) || ((op.type === 'merge' || op.type === 'restore') && op.entries.length);
+  own(server, uid, op, work) {
+    // (How many it could add, at most.)
+    const adds = op.type === 'note' ? op.items.length : op.type === 'merge' || op.type === 'restore' ? op.entries.length : 0;
     let rec = this.record(server, uid);
-    if (!rec?.entries.length && !adds) return 'same';
-    if (!rec?.entries.length && !this.room(server, uid)) return 'full';
+    const has = rec ? (work.lists.get(rec) ?? rec.entries).length : 0;
+    if (!has && !adds) return 'same';
+    if (!this.room(server, uid)) return 'full';
+    const list = rec ? this.working(rec, work) : [];
+    // (One that could add more than there's room left for is made on
+    // another copy, so one refused leaves the list as it was.)
+    const left = MISSING_STORE_LIMITS.entries - this.total - work.grown;
+    const next = applyOp(adds > left ? list.map(copy) : list, op, { server });
+    const grows = next.length - list.length;
+    if (grows > 0 && grows > left) return 'full';
     rec ||= this.record(server, uid, { create: true });
-    const list = applyOp(rec.entries.map(copy), op, { server });
-    if (list.length > rec.entries.length && this.total + list.length - rec.entries.length > MISSING_STORE_LIMITS.entries) return 'full';
-    this.commit(server, rec, list);
+    work.grown += grows;
+    work.lists.set(rec, next);
     return 'done';
   }
 
   // The server's owner's change to everyone's list for it: taking some off
   // (taken off, or found in the library now), or clearing it.
-  everyone(server, op) {
+  everyone(server, op, work) {
     const s = this.servers.get(server);
     if (!s) return 'same';
-    for (const [, rec] of s.accounts) this.commit(server, rec, op.type === 'clear' ? [] : applyForget(rec.entries, op.ids, { server }));
+    for (const [, rec] of s.accounts) {
+      const list = op.type === 'clear' ? (work.lists.get(rec) ?? rec.entries) : this.working(rec, work);
+      const next = op.type === 'clear' ? [] : applyForget(list, op.ids, { server });
+      work.grown += next.length - list.length;
+      work.lists.set(rec, next);
+    }
     return 'done';
   }
 
