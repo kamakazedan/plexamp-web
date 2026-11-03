@@ -338,7 +338,10 @@ with sync_playwright() as pw:
         # sign-in: like a real Plex server, the mock only lets a page on
         # another address read who it is when the request has one.
         asked = []
-        page.on('request', lambda r: asked.append(r.url) if r.url.startswith(MOCK + '/identity') else None)
+        # (This page carries on into the next sections: the listener goes at
+        # the end of this one.)
+        to_identity = lambda r: asked.append(r.url) if r.url.startswith(MOCK + '/identity') else None
+        page.on('request', to_identity)
         routes = js(page, """() => Promise.all([import('./js/plex.js'), import('./js/state.js')]).then(async ([p, s]) => {
             const srv = { id: s.app.source.serverId, token: s.app.source.token, connections: [
                 { uri: 'http://127.0.0.1:9', local: true, relay: false, protocol: 'http' },
@@ -354,6 +357,7 @@ with sync_playwright() as pw:
                 .then((r) => r.json()).then((j) => j.MediaContainer.machineIdentifier, () => 'refused'))))""" % MOCK)
         check('core: ...which is why the question carries it (asked without, the mock answers as a real server would)',
               unsigned == ['refused', 'mock-server-1'], str(unsigned))
+        page.remove_listener('request', to_identity)
 
     # ---------- ws: live updates over a WebSocket ----------
     if run('ws'):
@@ -656,13 +660,13 @@ with sync_playwright() as pw:
         # Another artist each time: other artists' best-known songs, in the
         # genre of the track it started with.
         with urllib.request.urlopen(f'{OLLAMA}/__mock/config', timeout=20) as r:
-            asked = json.loads(r.read()).get('dj_prompt', '')
-        playing = (re.search(r'^Now playing: (.*?) — ', asked, re.M) or [None, None])[1]
-        offered = [x.split('. ', 1)[1] for x in asked.splitlines() if re.match(r'^\d+\. ', x)]
+            dj_prompt = json.loads(r.read()).get('dj_prompt', '')
+        playing = (re.search(r'^Now playing: (.*?) — ', dj_prompt, re.M) or [None, None])[1]
+        offered = [x.split('. ', 1)[1] for x in dj_prompt.splitlines() if re.match(r'^\d+\. ', x)]
         q = player(page, '({ cur: p.current.artist, next: p.queue[p.index + 1] && p.queue[p.index + 1].artist })')
         check('dj: ...never the artist playing', q['next'] and q['next'] != q['cur'], str(q))
         check('dj: ...choosing from other artists\' popular songs, in the station\'s genre',
-              playing and offered and not any(o.startswith(f'{playing} — ') for o in offered) and '(popular)' in asked and 'The station plays ' in asked, asked[-700:])
+              playing and offered and not any(o.startswith(f'{playing} — ') for o in offered) and '(popular)' in dj_prompt and 'The station plays ' in dj_prompt, dj_prompt[-700:])
         undone = js(page, "() => import('./js/dj.js').then(m => m.guestDJ.set(null))")
         check('dj: turned off, its pick comes out of the queue', not nxt() and undone['removed'] == 1, f'{nxt()} {undone}')
         page.keyboard.press('Escape')
