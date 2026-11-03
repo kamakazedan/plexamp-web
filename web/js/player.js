@@ -635,6 +635,12 @@ class Player extends EventTarget {
     const forget = () => (el.pausedHere = false);
     el.addEventListener('play', forget);
     el.addEventListener('emptied', forget);
+    // (A change of track paused part-way goes on as it plays again: see
+    // driveTransition.)
+    el.addEventListener('play', () => {
+      const tr = this.transition;
+      if (tr && !this.fadeTimer && (tr.out === deck || tr.inn === deck)) this.driveTransition();
+    });
     // A next track that fails to load ahead of its turn (or as it fades in:
     // the change is called off): it's loaded again when it's due, and not
     // ahead of its turn again for a while (see maybePreload).
@@ -664,9 +670,11 @@ class Player extends EventTarget {
       if (el.ended || this.switching) return;
       const tr = this.transition;
       if (tr) {
-        // During a change of track it's paused once both tracks are.
+        // During a change of track it's paused once both tracks are (and
+        // the change waits: see driveTransition).
         if (tr.out.el.paused && tr.inn.el.paused) {
           if (!here) this.noteWhy(this.notHere(el), { warn: true });
+          this.holdTransition();
           this.setState('paused');
           this.saveProgress(true);
         }
@@ -1352,15 +1360,30 @@ class Player extends EventTarget {
     this.applyVolume();
     this.applySpeed();
     inn.el.play()?.catch(() => this.transition?.inn === inn && this.cancelTransition());
-    if (plan.kind === 'fade') {
+    this.driveTransition();
+  }
+
+  // What moves the change under way on: a fade's steps; for a gapless
+  // change, which the current track's end completes (onEnded), a guard in
+  // case its end never comes. Stopped while both tracks are paused (see
+  // holdTransition), and started again as either plays (see bind).
+  driveTransition() {
+    const tr = this.transition;
+    this.holdTransition();
+    if (!tr) return;
+    if (tr.plan.kind === 'fade') {
+      // (The first step at once: it may finish the change, and its timer with it.)
+      this.fadeTimer = setInterval(() => this.stepFade(), FADE_STEP_MS);
       this.stepFade();
-      this.fadeTimer = setInterval(() => this.stepFade(), 40);
     } else {
-      // Gapless: the current track's end completes the change (onEnded);
-      // this is in case its end never comes.
-      const left = (this.duration - now) / (out.el.playbackRate || 1);
-      this.fadeTimer = setTimeout(() => !this.transition?.out.el.paused && this.finishTransition(), (left + 2) * 1000);
+      const left = (this.duration - tr.out.el.currentTime) / (tr.out.el.playbackRate || 1);
+      this.fadeTimer = setTimeout(() => !this.transition?.out.el.paused && this.finishTransition(), (left + GAPLESS_GUARD) * 1000);
     }
+  }
+
+  holdTransition() {
+    clearInterval(this.fadeTimer);
+    this.fadeTimer = null;
   }
 
   // Equal-power crossfade, driven by how far the outgoing track has played
@@ -1540,8 +1563,10 @@ class Player extends EventTarget {
     this.transitionTimer = null;
     this.audio.pause();
     if (this.transition) {
-      // Both tracks pause, and the fade carries on from here.
+      // Both tracks pause, and the fade carries on from here (once played
+      // again: see driveTransition).
       this.transition.inn.el.pause();
+      this.holdTransition();
       this.setState('paused');
       this.saveProgress(true);
     }

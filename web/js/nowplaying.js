@@ -18,6 +18,7 @@ import { rateTrack, ratingEvents, ratingMode, isDownRating, LOVED, LOVED_TITLE }
 import { formatOf, audioStream } from './formats.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const QUEUE_SHOWN = 200; // Up next shows this many tracks at most (the one playing first)
 
 // Things that work differently in a Play Together session.
 function sessionOnly(what) {
@@ -944,19 +945,28 @@ function buildNowPlaying() {
     listeners.setAttribute('aria-label', `${text}. Open Play Together.`);
   }
 
+  // What Up next shows, as it was last built (see renderQueue).
+  let queueShown = '';
   function renderQueue() {
     if (!root.classList.contains('show-queue') && !window.matchMedia('(min-width: 960px)').matches) return;
     const from = player.index;
-    const items = player.queue.slice(from, from + 200);
-    queueCount.textContent = player.upcoming.length ? fmt.count(player.upcoming.length, 'track', 'tracks') : '';
+    const items = player.queue.slice(from, from + QUEUE_SHOWN);
+    const left = player.upcomingCount;
     const you = together.session?.you;
     const added = (t) => (t.addedBy ? `added by ${t.addedBy.id === you ? 'you' : t.addedBy.title}` : '');
+    const subtitle = (t) => [t.artist, t.dj ? djName(t.dj) : t.djMoved ? `moved up by ${djName(t.djMoved)}` : added(t)].filter(Boolean).join(' · ');
+    // (Not built again when none of it has changed: a Play Together
+    // session's news, say, that didn't change the queue.)
+    const shown = JSON.stringify([from, left, !!player.remote, items.map((t) => [t.qid, t.id, t.title, t.thumb, t.duration, subtitle(t)])]);
+    if (shown === queueShown) return;
+    queueShown = shown;
+    queueCount.textContent = left ? fmt.count(left, 'track', 'tracks') : '';
     queueList.replaceChildren(
       ...items.map((t, i) =>
         trackRow(t, {
           showArt: true,
           queueIndex: from + i,
-          subtitle: [t.artist, t.dj ? djName(t.dj) : t.djMoved ? `moved up by ${djName(t.djMoved)}` : added(t)].filter(Boolean).join(' · '),
+          subtitle: subtitle(t),
           onPlay: () => player.jump(from + i),
         }),
       ),
@@ -983,8 +993,18 @@ function buildNowPlaying() {
     },
   };
 
+  // (Once for changes made one after another: a Guest DJ turned off takes
+  // its picks out one at a time, say.)
+  let queueSoon = false;
   player.addEventListener('track', () => state.isOpen && (renderTrack(), renderQueue()));
-  player.addEventListener('queue', () => state.isOpen && renderQueue());
+  player.addEventListener('queue', () => {
+    if (!state.isOpen || queueSoon) return;
+    queueSoon = true;
+    queueMicrotask(() => {
+      queueSoon = false;
+      if (state.isOpen) renderQueue();
+    });
+  });
   player.addEventListener('state', () => setPlayButton(play, 38));
   player.addEventListener('mode', renderModes);
   player.addEventListener('sleep', renderModes);
