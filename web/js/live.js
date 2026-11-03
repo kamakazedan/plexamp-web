@@ -45,8 +45,16 @@ class LiveUpdates extends EventTarget {
     this.pending = { library: false, playlists: new Set(), items: new Set() };
     this.flushTimers = {};
 
-    on('source', () => this.start());
-    on('signout', () => this.stop());
+    // (Another server's notifications still to be passed on go with it:
+    // their ids are its own.)
+    on('source', ({ serverChanged }) => {
+      if (serverChanged) this.dropPending();
+      this.start();
+    });
+    on('signout', () => {
+      this.dropPending();
+      this.stop();
+    });
     document.addEventListener('visibilitychange', () => !document.hidden && this.wakeFn?.());
     window.addEventListener('online', () => this.mode !== 'off' && this.start());
   }
@@ -413,6 +421,13 @@ class LiveUpdates extends EventTarget {
   queueItem(id) {
     this.pending.items.add(id);
     this.flushLater('items', 1500);
+  }
+
+  // What's waiting to be passed on (see flushLater), let go of.
+  dropPending() {
+    for (const timer of Object.values(this.flushTimers)) clearTimeout(timer);
+    this.flushTimers = {};
+    this.pending = { library: false, playlists: new Set(), items: new Set() };
   }
 
   flushLater(kind, ms) {

@@ -151,6 +151,10 @@ class Devices extends EventTarget {
       stop: () => this.stop(),
     };
 
+    // Signing out (or switching to someone else in your Plex Home), while
+    // the sign-in still works: the others can carry on at once, rather
+    // than waiting for this one to go quiet.
+    on('signing-out', () => this.role === 'active' && this.post('release', {}, { keepalive: true }).catch(() => {}));
     on('signout', () => this.stop({ release: false }));
     on('source', () => this.update());
     on('settings', () => this.update());

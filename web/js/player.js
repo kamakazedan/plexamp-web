@@ -517,13 +517,25 @@ class Player extends EventTarget {
       }
       this.kickStalled('the connection changed');
     });
+    // (Plex hears the track's playback here has stopped, paused too: its
+    // dashboard would show it going on a while otherwise.)
     window.addEventListener('pagehide', () => {
       if (this.persistPending) this.persist(true);
       this.savePosition();
       this.saveProgress(true);
-      if (this.state === 'playing') this.report('stopped', this.current, this.time, true);
+      this.endHere(this.current);
     });
-    on('source', ({ serverChanged }) => serverChanged && this.restore());
+    // Another server: what's known of tracks by their ids goes (they're
+    // each server's own), and its own queue comes back.
+    on('source', ({ serverChanged }) => {
+      if (!serverChanged) return;
+      this.spans.clear();
+      this.history = [];
+      this.restore();
+    });
+    // Signing out (or switching to someone else in your Plex Home), while
+    // the sign-in still works: so too.
+    on('signing-out', () => this.endHere(this.current));
     on('signout', () => {
       this.mediaToken = null;
       this.useMediaToken = false;
@@ -1291,11 +1303,13 @@ class Player extends EventTarget {
 
   async learn(track) {
     if (!track?.id || this.spans.has(track.id) || !app.server) return;
+    const server = app.source?.serverId;
     this.spans.set(track.id, null); // asked once; null until known (or for good, if it isn't analysed)
     while (this.spans.size > SPANS_KEPT) this.spans.delete(this.spans.keys().next().value);
     try {
       const values = await loudnessOf(track);
-      if (values && this.spans.has(track.id)) this.spans.set(track.id, audibleSpan(values, (track.duration || 0) / 1000));
+      // (Not for another server, chosen meanwhile: its track of that id is another.)
+      if (values && app.source?.serverId === server && this.spans.has(track.id)) this.spans.set(track.id, audibleSpan(values, (track.duration || 0) / 1000));
     } catch {
       /* no analysis: the change happens at the end of the file */
     }
@@ -2337,37 +2351,49 @@ class Player extends EventTarget {
 
   // ---------- long-form progress ----------
   // With "long-form controls" on, tracks over 20 minutes remember where you
-  // stopped (per track, on this device) and start there next time.
+  // stopped (per track, on this device) and start there next time. Each is
+  // kept by its server and its id (Plex's ids are each server's own); those
+  // kept by the id alone, before, can't be told to be this server's, so
+  // they go.
 
   progressStore() {
     return store.get('progress', {});
   }
 
+  progressKey(track) {
+    const server = app.source?.serverId || app.source?.uri;
+    return server && track?.id != null ? `${server}|${track.id}` : null;
+  }
+
   savedProgress(track) {
-    if (!app.settings.longForm || !track || (track.duration || 0) < LONG_FORM_MS) return 0;
-    const sec = Number(this.progressStore()[track.id]) || 0;
-    return sec > 15 && sec < track.duration / 1000 - 30 ? sec : 0;
+    const key = this.progressKey(track);
+    if (!app.settings.longForm || !key || (track.duration || 0) < LONG_FORM_MS) return 0;
+    const sec = Number(this.progressStore()[key]) || 0;
+    return sec > PROGRESS_FROM && sec < track.duration / 1000 - PROGRESS_BEFORE_END ? sec : 0;
   }
 
   saveProgress(now = false) {
     const t = this.current;
-    if (!app.settings.longForm || this.remote || !t || (t.duration || 0) < LONG_FORM_MS || !this.deck.hasSource()) return;
+    const key = this.progressKey(t);
+    if (!app.settings.longForm || this.remote || !key || (t.duration || 0) < LONG_FORM_MS || !this.deck.hasSource()) return;
     const at = Date.now();
     if (!now && at - this.lastProgress < SAVE_POSITION_EVERY_MS) return;
     this.lastProgress = at;
     const all = this.progressStore();
-    delete all[t.id];
-    all[t.id] = Math.round(this.time);
+    for (const k of Object.keys(all)) if (!k.includes('|')) delete all[k];
+    delete all[key];
+    all[key] = Math.round(this.time);
     const keys = Object.keys(all);
     if (keys.length > PROGRESS_KEPT) for (const k of keys.slice(0, keys.length - PROGRESS_KEPT)) delete all[k];
     store.set('progress', all);
   }
 
   clearProgress(track) {
-    if (!track) return;
+    const key = this.progressKey(track);
+    if (!key) return;
     const all = this.progressStore();
-    if (all[track.id] === undefined) return;
-    delete all[track.id];
+    if (all[key] === undefined) return;
+    delete all[key];
     store.set('progress', all);
   }
 

@@ -90,6 +90,12 @@ class Together extends EventTarget {
       blocked: () => this.setBlocked(true),
     };
 
+    // Signing out (or switching to someone else in your Plex Home), while
+    // the sign-in still works: out of the session, so the others don't see
+    // you in it any more.
+    on('signing-out', () => {
+      if (this.active) this.api(`sessions/${this.session.id}/leave`, { method: 'POST', keepalive: true }).catch(() => {});
+    });
     on('signout', () => {
       this.detach();
       this.invites = [];
@@ -127,7 +133,8 @@ class Together extends EventTarget {
 
   // ---------- requests ----------
 
-  async api(path, { method = 'GET', body, timeout = 15000, signal } = {}) {
+  // `keepalive`: it goes even as the page does.
+  async api(path, { method = 'GET', body, timeout = 15000, signal, keepalive = false } = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     const abort = () => ctrl.abort();
@@ -139,6 +146,7 @@ class Together extends EventTarget {
         method,
         cache: 'no-store',
         credentials: 'same-origin',
+        keepalive,
         headers: {
           Accept: 'application/json',
           'X-Plex-Token': app.auth?.token || '',
