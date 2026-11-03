@@ -421,6 +421,9 @@ function waveform() {
   let progress = 0;
   let dragging = false;
   let frame = 0;
+  // What's played is drawn in the tint (backdrop.js), looked up once for
+  // each tint rather than for every frame.
+  let playedColor = null;
 
   function draw() {
     frame = 0;
@@ -437,7 +440,8 @@ function waveform() {
     const ctx = canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, ht);
-    const played = getComputedStyle(document.documentElement).getPropertyValue('--tint-hi').trim() || '#a3b65a';
+    playedColor ||= getComputedStyle(document.documentElement).getPropertyValue('--tint-hi').trim() || '#a3b65a';
+    const played = playedColor;
     const mid = ht / 2;
     const x = Math.max(0, Math.min(w, progress * w));
     const style = app.settings.seekbarStyle || 'smooth';
@@ -517,7 +521,10 @@ function waveform() {
     player.seek(player.time + (e.key === 'ArrowRight' ? 5 : -5));
   });
   if ('ResizeObserver' in window) new ResizeObserver(redraw).observe(track);
-  document.addEventListener('tintchange', redraw);
+  document.addEventListener('tintchange', () => {
+    playedColor = null;
+    redraw();
+  });
 
   return {
     el: h('div.np-wave', null, cur, track, total),

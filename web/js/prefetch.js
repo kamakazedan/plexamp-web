@@ -47,7 +47,10 @@ export const LOAD_AHEAD_BYTES = (() => {
   const touch = !!globalThis.matchMedia?.('(pointer: coarse)').matches;
   return (touch ? 256 : 384) * 1024 * 1024;
 })();
-const LONG_FORM_MS = 20 * 60000; // long mixes play as they come in (and what's after them waits)
+// Tracks at least this long count as long-form (DJ mixes, audiobooks: see
+// player.js, which takes it from here). Long mixes play as they come in
+// (and what's after them waits).
+export const LONG_FORM_MS = 20 * 60000;
 const RETRY_AFTER = 60000; // a track that didn't load is tried again after this long
 const CHECK_EVERY = 3000;
 const WAIT_EVERY = 500; // waiting for the connection, it's looked at this often

@@ -478,7 +478,7 @@ class Cast extends EventTarget {
   setShuffle(on) {
     player.shuffle = on;
     player.emit('mode');
-    if (!on || player.upcoming.length < 2) return;
+    if (!on || player.upcomingCount < 2) return;
     const q = player.queue;
     const i = player.index;
     this.resend([...q.slice(0, i + 1), ...shuffleArray(q.slice(i + 1))], i);
