@@ -332,8 +332,29 @@ test('plex.tv: never followed elsewhere, and answers read up to a limit', async 
     await assert.rejects(auth.identify('good-token'), (e) => e.network === true);
     await assert.rejects(readCapped(await fetch(`${base}/big`), 1000), (e) => e.code === 'TOO_LONG');
     assert.equal((await readCapped(await fetch(`${base}/big`), 10000)).length, 5000);
+    // (One that can't be read a piece at a time is read as a whole: not cut short either.)
+    await assert.rejects(readCapped({ text: async () => 'x'.repeat(2000) }, 1000), (e) => e.code === 'TOO_LONG');
+    assert.equal(await readCapped({ text: async () => 'é'.repeat(400) }, 1000), 'é'.repeat(400));
   } finally {
     tv.close();
+  }
+});
+
+test('the Plex server: an answer that trickles in is given up on in time, as one that never comes', { timeout: 10000 }, async () => {
+  const pms = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const drip = setInterval(() => res.write(' '), 50);
+    res.on('close', () => clearInterval(drip));
+  });
+  await new Promise((r) => pms.listen(0, '127.0.0.1', r));
+  try {
+    const auth = new PlexAuth({ plexTvUrl: 'https://plex.tv.invalid', plexServerUrl: `http://127.0.0.1:${pms.address().port}` });
+    const started = Date.now();
+    await assert.rejects(auth.pmsAnswer('/identity', null, { timeout: 400 }), (e) => e.network === true && /TimeoutError/.test(e.message));
+    assert.ok(Date.now() - started < 1500, `${Date.now() - started} ms`);
+  } finally {
+    pms.closeAllConnections?.();
+    pms.close();
   }
 });
 
