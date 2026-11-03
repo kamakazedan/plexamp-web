@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Runs proxmox/install.sh (what the Proxmox script installs in its
 # container) in Debian 12 and 13 containers, from this checkout, then starts
-# what systemd would and checks the app answers. Used by CI; needs Docker.
+# what systemd would and checks the app answers, and that updates download
+# one commit, and put the version from before back when the new one won't
+# start. Used by CI; needs Docker.
 #
 #   bash tests/proxmox-install-test.sh [debian release ...]
 set -euo pipefail
@@ -76,6 +78,7 @@ for release in "${releases[@]}"; do
             expect "pct exec finds $cmd" env -i PATH=/sbin:/bin:/usr/sbin:/usr/bin sh -c "test -x \"\$(command -v $cmd)\""
         done
         expect "systemd units are written" grep -q "SERVICE_START=false" "$config"
+        expect "...the service waiting for the network to be up" grep -qx "Wants=network-online.target" "$unit"
         service_ids() {
             local p
             for p in /proc/[0-9]*; do
@@ -110,15 +113,19 @@ w=""
 prev=""
 for a in "$@"; do
     case "$prev" in -o) out="$a" ;; -w) w=1 ;; esac
-    case "$a" in https://raw.githubusercontent.com/*/proxmox/install.sh) url="$a" ;; esac
+    case "$a" in https://raw.githubusercontent.com/*/proxmox/install.sh | https://api.github.com/repos/*/commits/* | https://github.com/*/archive/*.tar.gz) url="$a" ;; esac
     prev="$a"
 done
-if [ -n "$url" ]; then
-    cp /src/proxmox/install.sh "$out"
-    if [ -n "$w" ]; then printf 200; fi
-    exit 0
-fi
-exec /usr/bin/curl "$@"
+sha=0123456789abcdef0123456789abcdef01234567
+case "$url" in
+    "") exec /usr/bin/curl "$@" ;;
+    https://api.github.com/*) printf "%s" "$sha" >"$out" ;;
+    https://github.com/*) mkdir -p "/tmp/archive/plexamp-web-$sha" && tar -C /src --exclude=.git -cf - . | tar -C "/tmp/archive/plexamp-web-$sha" -xf - && tar -C /tmp/archive -czf "$out" "plexamp-web-$sha" && rm -rf /tmp/archive ;;
+    *) cp /src/proxmox/install.sh "$out" ;;
+esac
+echo "$url" >>/tmp/stub.log
+if [ -n "$w" ]; then printf 200; fi
+exit 0
 STUB
         chmod 755 /tmp/stub/curl
         # update [VAR=value ...] update-plexamp-web [option]: an update, its output in /tmp/update.log.
@@ -135,6 +142,8 @@ STUB
         # them, keeping their values (the start-up script stops at the old
         # names), and 0.30.0'"'"'s words about them. (One with spaces before
         # it, which systemd doesn'"'"'t mind.)
+        # (With PLEX_SERVER_URL, which offline mode needs: each update checks the settings.)
+        sed -i "s#^PLEX_SERVER_URL=\$#PLEX_SERVER_URL=http://127.0.0.1:32400#" /etc/plexamp-web/plexamp-web.env
         printf "%s\n" "# Where the offline key can be used from: private (your own networks), any," "OFFLINE_KEY=offline-pwd-for-tests" "  OFFLINE_FROM=private" >>/etc/plexamp-web/plexamp-web.env
         expect "an update renames 0.30.0'"'"'s OFFLINE_KEY and OFFLINE_FROM" update update-plexamp-web
         expect "...saying so" grep -q "OFFLINE_KEY and OFFLINE_FROM are called OFFLINE_PWD and OFFLINE_NETWORKS now" /tmp/update.log
@@ -144,7 +153,7 @@ STUB
         expect "...with the words about them as they are now" grep -qx "# Where the offline password can be used from: private (your own networks), any," /etc/plexamp-web/plexamp-web.env
         expect "...keeping the rest as it was" grep -q "^DISABLE_WEBSOCKETS=true$" /etc/plexamp-web/plexamp-web.env
         expect "...and readable by root only" test "$(stat -c %a /etc/plexamp-web/plexamp-web.env)" = 600
-        expect "...and the app starts with them" configure PLEX_SERVER_URL=http://127.0.0.1:32400
+        expect "...and the app starts with them" configure
         expect "an update after that changes nothing more" sh -c "cp /etc/plexamp-web/plexamp-web.env /tmp/settings.before && env PATH=\"/tmp/stub:\$PATH\" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1 && cmp -s /tmp/settings.before /etc/plexamp-web/plexamp-web.env && ! grep -q \"are called OFFLINE_PWD\" /tmp/update.log"
         sed -i -e "/^# Where the offline password can be used from:/d" -e "/^OFFLINE_PWD=/d" -e "/^[[:space:]]*OFFLINE_NETWORKS=/d" /etc/plexamp-web/plexamp-web.env
         configure >/dev/null
@@ -155,10 +164,42 @@ STUB
         expect "update-plexamp-web --verbose finishes" update update-plexamp-web --verbose
         expect "...showing each step" grep -q "^    The installer, https://raw.githubusercontent.com/.*: HTTP 200$" /tmp/update.log
         expect "...with the tools'"'"' own output (apt-get'"'"'s here)" grep -q "^      Reading package lists" /tmp/update.log
-        expect "...and the checksum hls.js matched" grep -q "^    Its checksum, as the registry gives it: sha512-" /tmp/update.log
+        expect "...and the checksum hls.js matched, the Dockerfile'"'"'s" grep -q "^    Its checksum, the Dockerfile'"'"'s: sha512-" /tmp/update.log
+        expect "...and what upgrading Debian'"'"'s packages did" grep -qE "^      [0-9]+ upgraded, " /tmp/update.log
         expect "without it, an update is as quiet as before" quiet_update
         install -m 755 /src/tests/update-plexamp-web-0.15.0.sh /usr/local/bin/update-plexamp-web
         expect "PW_VERBOSE=1 shows each step from an older update-plexamp-web too" env_verbose_update
+        # From GitHub, as updates are: which commit stable is, then that commit,
+        # installed with that commit'"'"'s own installer.
+        github_update() { env PATH="/tmp/stub:$PATH" PW_NO_SYSTEMD=1 update-plexamp-web "$@" >/tmp/update.log 2>&1; }
+        : >/tmp/stub.log
+        expect "an update from GitHub works" github_update
+        expect "...asking which commit stable is" grep -q "^https://api.github.com/repos/kamakazedan/plexamp-web/commits/stable$" /tmp/stub.log
+        expect "...then downloading that commit" grep -q "^https://github.com/kamakazedan/plexamp-web/archive/0123456789abcdef0123456789abcdef01234567.tar.gz$" /tmp/stub.log
+        expect "...and installing it with its own installer" grep -q "Downloaded plexamp-web .* (kamakazedan/plexamp-web, stable at 0123456)" /tmp/update.log
+        expect "...saying what it upgraded of Debian'"'"'s" grep -qE "Debian'"'"'s packages are up to date|Upgraded [0-9]+ of Debian'"'"'s packages" /tmp/update.log
+        # A setting the new version won'"'"'t take (here, one an older version,
+        # without the check of names, took): the version from before is put back.
+        sed -i "/rename or take out:/d" /opt/plexamp-web/app/docker/40-plexamp-web.sh
+        touch /opt/plexamp-web/app/.older
+        echo "SYNC_SETING=false" >>/etc/plexamp-web/plexamp-web.env
+        expect "an update that won'"'"'t start with the settings stops" sh -c "! env PATH=\"/tmp/stub:\$PATH\" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1"
+        expect "...saying which setting" grep -q "SYNC_SETING isn'"'"'t a setting: did you mean SYNC_SETTINGS?" /tmp/update.log
+        expect "...and that the version from before is back" grep -q "is back, as it was" /tmp/update.log
+        expect "...as it was" test -f /opt/plexamp-web/app/.older
+        expect "...with nothing left beside it" sh -c "! ls -d /opt/plexamp-web/*.old /opt/plexamp-web/*.new 2>/dev/null"
+        sed -i "/^SYNC_SETING=/d" /etc/plexamp-web/plexamp-web.env
+        expect "...and once it'"'"'s fixed, the update goes through" update update-plexamp-web
+        expect "...the new version in place" test ! -f /opt/plexamp-web/app/.older
+        # One install or update at a time.
+        if command -v flock >/dev/null 2>&1; then
+            flock /run/lock/plexamp-web-install.lock sleep 4 &
+            holder=$!
+            sleep 1
+            expect "an update while another runs stops, saying so" sh -c "! env PATH=\"/tmp/stub:\$PATH\" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1 && grep -q \"Another install or update of plexamp-web is running\" /tmp/update.log"
+            # (Only that: the service started above runs on.)
+            wait "$holder"
+        fi
     ' >"$LOG" 2>&1; then
         cat "$LOG"
         echo "Debian $release: OK"
