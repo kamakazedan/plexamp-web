@@ -1671,7 +1671,10 @@ if (config.port) {
   server.listen(config.socket, started);
 }
 
-for (const sig of ['SIGTERM', 'SIGINT']) {
+// Asked to stop: what's waiting to be written is written first. systemd
+// asks with SIGTERM; the container with SIGQUIT (its stop signal, which
+// tini passes on to nginx and this alike).
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGQUIT']) {
   process.on(sig, () => {
     shares?.flush();
     accountSettings?.flush();
@@ -1682,3 +1685,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     process.exit(0);
   });
 }
+// What's meant for nginx (HUP to read its settings again, USR2 to upgrade
+// itself), which tini passes on to this too, does nothing here, rather
+// than stopping it; and USR1 never opens Node's inspector.
+for (const sig of ['SIGHUP', 'SIGUSR1', 'SIGUSR2']) process.on(sig, () => {});

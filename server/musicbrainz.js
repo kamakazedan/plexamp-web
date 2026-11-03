@@ -1049,9 +1049,8 @@ export class MBKept {
   }
 
   // Written soon after the first change since the service started, then at
-  // most every writeDelayMs (a burst of changes, once). In a container the
-  // service stops without being told (nginx is PID 1), so what's waiting to
-  // be written then is lost; a stop systemd asks for is written first.
+  // most every writeDelayMs (a burst of changes, once), and as the service
+  // is asked to stop (see index.js).
   changed() {
     if (!this.file || this.timer) return;
     // (Never longer than writeDelayMs, should the clock be put back.)
