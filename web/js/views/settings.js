@@ -1,7 +1,7 @@
 import { app, on, saveSettings, setSource, signOut, switchAccount, proxyUri } from '../state.js';
 import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, switchHomeUser, getUser, store } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
-import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, askText, avatar as personAvatar } from '../ui.js';
+import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, askText, avatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, sharedModelName, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
@@ -22,11 +22,6 @@ const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
 // ---------- Settings index ----------
 
-function badge(text) {
-  return h('span.badge-circle', { 'aria-hidden': 'true' }, (text || '?').trim().charAt(0).toUpperCase());
-}
-
-const avatar = (url, name) => personAvatar(url, name);
 // Who's signed in: their Plex picture, or the offline password's lock.
 const authAvatar = (auth, size = 24) => (auth.offline ? h('span.badge-circle', { 'aria-hidden': 'true' }, icon('lock', size)) : avatar(auth.thumb, auth.username));
 
@@ -46,7 +41,7 @@ export async function settingsView({ el }) {
         subtitle: auth.offline ? 'Signed in with the offline password' : auth.username || 'Signed in',
         right: authAvatar(auth),
       }),
-      row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: badge(src?.serverName) }),
+      row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: avatar(null, src?.serverName) }),
       row({ href: '/settings/experience', lead: lead('sliders'), title: 'Experience', subtitle: 'Appearance, player, Home screen and more' }),
       row({
         href: '/settings/playback',
@@ -811,8 +806,10 @@ function radioRows(label, options, current, onChange) {
 // ---------- Connection / diagnostics ----------
 
 // The routes to a server (see plex.js ROUTE_RANKS), as Settings › Connection
-// names them.
-const ROUTE_NAMES = { local: 'On your network', proxy: 'Through this app', remote: 'Over the internet', relay: 'Plex relay (slow)' };
+// names them (and an address you entered), and as a sentence has them
+// ("Now connected on your network").
+const ROUTE_NAMES = { local: 'On your network', proxy: 'Through this app', remote: 'Over the internet', relay: 'Plex relay (slow)', manual: 'Address you entered' };
+const ROUTE_WORDS = { local: 'on your network', proxy: 'through this app', remote: 'over the internet', relay: 'through Plex’s relay' };
 const ROUTE_CHOICES = [
   ['best', 'Best that works', 'Tries your network, this app, the internet, then Plex’s relay.'],
   ['container', 'Through this app', 'Always through this app.'],
@@ -872,10 +869,8 @@ async function noAnswer(err, took, src, timeout) {
 function debugView({ el, onDispose }) {
   const src = app.source || {};
   const kv = (k, v) => h('div.kv', null, h('div.kv-k', null, k), h('div.kv-v', null, v ?? '—'));
-  const kinds = { local: 'On your network', remote: 'Over the internet', relay: 'Plex relay (slow)', manual: 'Address you entered', proxy: 'Through this app' };
-  // Every route to the server, tried (a server of the account's only).
   // Every route to the server, tried when the connection is tested (not
-  // each time the page opens).
+  // each time the page opens; a server of the account's only).
   const routeList = h('div.rows.route-rows');
   const routeHint = h('p.hint.route-hint');
   const routes = h('div.routes', { hidden: true });
@@ -917,7 +912,7 @@ function debugView({ el, onDispose }) {
     try {
       const srv = (await listServers(app.auth.token)).find((x) => x.id === src.serverId);
       const conn = srv && (await pickConnection(srv, { proxy: proxyUri(), prefer }));
-      const words = (kind) => (kind === 'proxy' ? 'through this app' : kind === 'local' ? 'on your network' : kind === 'remote' ? 'over the internet' : 'through Plex’s relay');
+      const words = (kind) => ROUTE_WORDS[kind] || ROUTE_WORDS.relay;
       if (conn && conn.uri !== app.source?.uri && app.source === src) {
         setSource({ ...src, uri: conn.uri, kind: conn.kind, token: srv.token, connections: srv.connections });
         toast(`Now connected ${words(conn.kind)}`);
@@ -961,7 +956,7 @@ function debugView({ el, onDispose }) {
       kv('Server', src.serverName),
       kv('Library', src.sectionTitle),
       kv('Address', src.uri),
-      h('div.kv', null, h('div.kv-k', null, 'Connection'), h('div.kv-v', null, kinds[src.kind] || src.kind || '—'), h('div.kv-note.route-note', null, routeNote(src))),
+      h('div.kv', null, h('div.kv-k', null, 'Connection'), h('div.kv-v', null, ROUTE_NAMES[src.kind] || src.kind || '—'), h('div.kv-note.route-note', null, routeNote(src))),
       h('div.kv', null, h('div.kv-k', null, 'Response time'), status),
       h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
