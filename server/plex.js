@@ -154,12 +154,15 @@ class TTLCache {
 // serverAccess): enough for every account a busy player has in use.
 const ACCOUNTS_KEPT = 20000;
 
+// (A character's number past the last there is, as &#99999999; says, is
+// left as it's written: it's no character.)
+const LAST_CODE_POINT = 0x10ffff;
 const decodeXml = (s) =>
   s.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (m, e) => {
     const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e.toLowerCase()];
     if (named) return named;
     const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-    return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+    return code <= LAST_CODE_POINT ? String.fromCodePoint(code) : m;
   });
 
 export function attrs(tag) {

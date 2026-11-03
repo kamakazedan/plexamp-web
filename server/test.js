@@ -5,7 +5,7 @@ import { Together, cleanTrack, TogetherError } from './together.js';
 import { redact, oneLine } from './log.js';
 import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
-import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped, PLEX_TV_TIMING } from './plex.js';
+import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped, attrs, PLEX_TV_TIMING } from './plex.js';
 import { OwnerSignIns, OWNER_LIMITS } from './owners.js';
 import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
@@ -432,6 +432,14 @@ test('timelines are read for the music, and nothing else', async () => {
   assert.deepEqual(parseTimeline('<html>login</html>'), { state: 'stopped' });
   assert.equal(parseTimeline('{"MediaContainer":{"Timeline":[{"type":"music","state":"paused","time":"5"}]}}').state, 'paused');
   assert.equal(parseTimeline('<Timeline type="music" state="evil" ratingKey="1;rm"/>').ratingKey, null);
+});
+
+test('characters written as numbers are read as they are, and one past the last there is left as written (it threw: a player\'s timeline failed, and friends answered 503)', async () => {
+  assert.deepEqual(attrs('title="Caf&#xE9; &#233; &amp; &#99999999; &#x110000;"'), { title: 'Café é & &#99999999; &#x110000;' });
+  assert.deepEqual(parseTimeline('<MediaContainer><Timeline type="music" state="&#99999999;" time="5"/></MediaContainer>').time, 5);
+  const auth = new PlexAuth({ plexTvUrl: 'https://plex.tv.invalid' });
+  auth.fetchJSON = async () => '<MediaContainer><User id="5" title="Odd &#99999999; name" username="odd"><Server machineIdentifier="srv-1"/></User></MediaContainer>';
+  assert.deepEqual((await auth.friends('some-token')).map((f) => [f.id, f.title, f.servers]), [[5, 'Odd &#99999999; name', ['srv-1']]]);
 });
 
 // ---------- your devices ----------
