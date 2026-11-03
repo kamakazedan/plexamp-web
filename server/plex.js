@@ -8,16 +8,14 @@ import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import { isIP } from 'node:net';
 import { checkServerIdentity } from 'node:tls';
 import { log } from './log.js';
+import { ServiceError } from './errors.js';
+import { CONTROL_CHARACTERS } from './clean.js';
 
 const CLIENT_ID = `plexamp-web-service-${randomBytes(6).toString('hex')}`;
 const TOKEN_SHAPE = /^[A-Za-z0-9_.~-]{1,200}$/;
 
-export class AuthError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+// plex.tv didn't accept a sign-in (401).
+export class AuthError extends ServiceError {}
 
 export const validToken = (t) => typeof t === 'string' && TOKEN_SHAPE.test(t);
 const hash = (t) => createHash('sha256').update(t).digest('hex');
@@ -171,7 +169,7 @@ export function attrs(tag) {
 }
 
 const safeThumb = (url) => (typeof url === 'string' && /^https:\/\/([a-z0-9-]+\.)*plex\.tv\//i.test(url) ? url.slice(0, 500) : null);
-const cleanName = (s) => String(s || '').replace(/[\u0000-\u001f]/g, '').slice(0, 80);
+const cleanName = (s) => String(s || '').replace(CONTROL_CHARACTERS, '').slice(0, 80);
 
 export class PlexAuth {
   // pmsProbe: nginx's socket for the service's own requests to the Plex

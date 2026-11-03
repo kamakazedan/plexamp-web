@@ -14,7 +14,9 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { norm } from './missinglist.js';
-import { albumKey, matchGroup, exactAlbum, exactKey, titlesAgree, trackKey, tracksInCommon, releaseSizes } from './releases.js';
+import { albumKey, matchGroup, exactAlbum, exactKey, sameTitle, titlesAgree, trackKey, tracksInCommon, releaseSizes } from './releases.js';
+import { ServiceError } from './errors.js';
+import { CONTROL_CHARACTERS } from './clean.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org
@@ -54,12 +56,7 @@ export function retryAfterMs(header, now = Date.now()) {
   return Math.min(MB_LIMITS.busyMaxMs, Math.max(5000, ms));
 }
 
-export class MusicBrainzError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class MusicBrainzError extends ServiceError {}
 
 // Names are compared as the app compares them (missinglist.js norm, a copy
 // of the app's): case, accents, "the" and punctuation aside, and a name in
@@ -73,31 +70,10 @@ const phrase = (v) => `"${String(v).replace(/["\\]/g, ' ').replace(/\s+/g, ' ').
 // The names in an artist credit ("Underworld & Gabriel Yared").
 const credited = (credit) => (Array.isArray(credit) ? credit : []).flatMap((c) => [c?.name, c?.artist?.name]).filter(Boolean).map(norm);
 
-function editDistance(a, b) {
-  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    prev = cur;
-  }
-  return prev[b.length];
-}
-
-// Close enough to be the same title: "Out of Space" and "Out Of Space
-// (Remastered)", or a letter or two different (as the app judges it: not
-// in Chinese, Japanese or Korean, where one character can be another word,
-// nor a number).
-const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
-export function sameTitle(a, b) {
-  if (!a || !b) return false;
-  if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
-  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
-  // (Nor are titles with other numbers, in any script's digits: Symphony
-  // No. 5 isn't No. 6. No. 02 is No. 2.)
-  if (numbersOf(a) !== numbersOf(b)) return false;
-  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
-}
+// Songs' titles are close enough to be the same as releases.js sameTitle
+// has it ("Out of Space" and "Out Of Space (Remastered)", or a letter or two
+// different, but not in Chinese, Japanese or Korean, nor another number), as
+// the app judges them.
 
 // musicbrainz.org itself (or one of its own names), as opposed to a server
 // of your own.
@@ -844,7 +820,7 @@ const VARIOUS = new Set([
   'разные исполнители',
 ]);
 const DATE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
-const text = (v, n) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, n) : '');
+const text = (v, n) => (typeof v === 'string' ? v.replace(CONTROL_CHARACTERS, ' ').trim().slice(0, n) : '');
 
 // The artist among MusicBrainz's search results: one of that name, or else
 // one with it among their other names, and a good match either way (never

@@ -11,6 +11,10 @@
 // who asked, or their library. The page is read with a time limit and a size
 // limit, from a fixed address, following redirects only within it, and only
 // plain text and numbers come out of it. What it said is kept for 10 minutes.
+import { ServiceError } from './errors.js';
+import { CONTROL_CHARACTERS } from './clean.js';
+import { readCapped } from './plex.js';
+
 export const SPOTIFY_LIMITS = {
   timeoutMs: 15000,
   bytes: 5 * 1024 * 1024, // the page
@@ -22,12 +26,7 @@ export const SPOTIFY_LIMITS = {
   shown: 100, // the most the page lists
 };
 
-export class SpotifyError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class SpotifyError extends ServiceError {}
 
 const ID = /^[A-Za-z0-9]{22}$/;
 const NOT_A_LINK = 'That isn’t a link to a Spotify playlist. In Spotify, choose Share › Copy link to playlist, and paste that.';
@@ -127,7 +126,7 @@ export function embedPlaylist(html) {
 const plain = (v, n) =>
   typeof v === 'string'
     ? v
-        .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+        .replace(CONTROL_CHARACTERS, ' ')
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, n)
@@ -252,26 +251,15 @@ export class Spotify {
   }
 }
 
-// A response's text, at most `limit` bytes of it (the rest isn't read).
+// A response's text, up to `limit` bytes of it (a bigger one isn't read on:
+// see readCapped in plex.js).
 async function readUpTo(res, limit) {
-  if (!res.body?.getReader) {
-    const text = await res.text();
-    return text.slice(0, limit);
+  try {
+    return await readCapped(res, limit);
+  } catch (err) {
+    if (err.code === 'TOO_LONG') throw new SpotifyError(502, 'Spotify’s page for that playlist was far bigger than expected.');
+    throw err;
   }
-  const reader = res.body.getReader();
-  const chunks = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size > limit) {
-      reader.cancel().catch(() => {});
-      throw new SpotifyError(502, 'Spotify’s page for that playlist was far bigger than expected.');
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
 }
 
 export { NOT_A_LINK };

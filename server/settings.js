@@ -10,6 +10,8 @@
 // isn't either, until it's added here.
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { ServiceError } from './errors.js';
+import { userId } from './clean.js';
 
 export const SETTINGS_LIMITS = {
   bytes: 16 * 1024, // one account's settings, as JSON
@@ -68,19 +70,13 @@ export const SYNCED_SETTINGS = Object.freeze({
   home: 'layout', // { '*': { order, hidden, options, seen } }
 });
 
-export class SettingsError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class SettingsError extends ServiceError {}
 
 const KEY = /^[A-Za-z0-9_*:.-]{1,120}$/;
 const CHOICE = /^[A-Za-z0-9_.-]{0,40}$/;
 const UNSAFE = new Set(['__proto__', 'constructor', 'prototype']);
 const unreadable = () => new SettingsError(400, 'Those settings couldn’t be read.');
-const userId = (v) => (Number.isSafeInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
-const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const own =(o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
 // A value as it's kept: plain JSON (true/false, numbers, text, lists and
 // objects of them), no bigger or deeper than the limits allow.

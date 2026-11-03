@@ -11,6 +11,8 @@
 import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { attrs, readCapped } from './plex.js';
+import { ServiceError } from './errors.js';
+import { SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 // Plex players listen on 32500 (Plexamp, the mobile apps) and older ones on
 // 3005 or 32433.
@@ -19,12 +21,7 @@ const TIMEOUT = 5000;
 const ID = /^[A-Za-z0-9_.-]{1,100}$/;
 const TOKEN = /^[A-Za-z0-9_.~-]{8,200}$/;
 
-export class CastError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class CastError extends ServiceError {}
 
 // Home-network addresses: 10/8, 172.16/12, 192.168/16, 100.64/10 (Tailscale
 // and other carrier-grade NAT) and IPv6 unique-local (fc00::/7). Not
@@ -43,7 +40,7 @@ export function privateAddress(host, { loopback = false } = {}) {
   return false;
 }
 
-const cleanName = (s, max = 80) => String(s || '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max);
+const cleanName = (s, max = 80) => String(s || '').replace(CONTROL_CHARACTERS, '').slice(0, max);
 const int = (v, min, max) => {
   const n = Math.round(Number(v));
   if (!Number.isFinite(n) || n < min || n > max) throw new CastError(400, 'That command isn’t right.');
@@ -178,7 +175,7 @@ export class Cast {
     const playQueueID = int(body.playQueueID, 1, 1e12);
     const offset = int(body.offset || 0, 0, 24 * 3600 * 1000);
     const serverId = String(body.serverId || '');
-    if (!/^[A-Za-z0-9-]{8,64}$/.test(serverId)) throw new CastError(400, 'That command isn’t right.');
+    if (!SERVER_ID.test(serverId)) throw new CastError(400, 'That command isn’t right.');
     const temp = String(body.token || '');
     if (!TOKEN.test(temp)) throw new CastError(400, 'That command isn’t right.');
     const server = await this.serverConnection(token, serverId);

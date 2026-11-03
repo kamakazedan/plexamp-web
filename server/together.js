@@ -6,6 +6,8 @@
 // works through proxies that block WebSockets. Positions are worked out from
 // the clock, so tracks advance on time even if nobody is sending anything.
 import { randomBytes } from 'node:crypto';
+import { ServiceError } from './errors.js';
+import { SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 export const LIMITS = {
   sessions: 100,
@@ -20,16 +22,10 @@ export const LIMITS = {
   waitMs: 25000,
 };
 
-export class TogetherError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class TogetherError extends ServiceError {}
 
 const ID = /^\d{1,12}$/;
-const SERVER_ID = /^[A-Za-z0-9._:-]{1,100}$/;
-const str = (v, max) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max);
+const str = (v, max) => String(v ?? '').replace(CONTROL_CHARACTERS, '').slice(0, max);
 const int = (v, max) => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && n >= 0 && n <= max ? n : 0;

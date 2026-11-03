@@ -8,6 +8,8 @@
 // own player is in charge, with its crossfades, Guest DJ and the rest, and
 // this only passes its state and commands along. Held in memory only.
 import { cleanTrack } from './together.js';
+import { ServiceError } from './errors.js';
+import { SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 export const LIMITS = {
   homes: 2000, // accounts × servers
@@ -21,19 +23,13 @@ export const LIMITS = {
   waitMs: 25000,
 };
 
-export class DevicesError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class DevicesError extends ServiceError {}
 
-const SERVER_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const DEVICE_ID = /^[A-Za-z0-9_-]{8,64}$/;
 const QID = /^[A-Za-z0-9:_-]{1,40}$/;
 const HREF = /^\/(?!\/)[A-Za-z0-9/_-]{0,80}$/;
 const REPEAT = new Set(['off', 'all', 'one']);
-const str = (v, max) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max);
+const str = (v, max) => String(v ?? '').replace(CONTROL_CHARACTERS, '').slice(0, max);
 const int = (v, max) => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && n >= 0 && n <= max ? n : 0;

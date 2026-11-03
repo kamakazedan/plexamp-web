@@ -6,6 +6,7 @@
 // Ollama server, and its settings, stay out of reach.
 import http from 'node:http';
 import https from 'node:https';
+import { ServiceError } from './errors.js';
 
 export const AI_LIMITS = {
   body: 4 * 1024 * 1024, // a chat request
@@ -19,12 +20,7 @@ export const AI_LIMITS = {
   sayLoadingMs: 1500, // loading for longer than this is said to the app
 };
 
-export class AIRequestError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class AIRequestError extends ServiceError {}
 
 const ROLES = new Set(['system', 'user', 'assistant']);
 
@@ -90,13 +86,15 @@ const chatModel = (m) => !/embed/i.test(m?.name || '') && !(m?.details?.families
 // "llama3.1" is "llama3.1:latest" to Ollama.
 const sameModel = (a, b) => a === b || `${a}:latest` === b || a === `${b}:latest`;
 
-function readAll(res, limit) {
+// An answer from another server (Ollama's), up to `limit` bytes: more is an
+// error, not cut short (as readCapped in plex.js has it).
+export function readAnswer(res, limit) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     res.on('data', (c) => {
       size += c.length;
-      if (size > limit) res.destroy(new Error('answer too large'));
+      if (size > limit) res.destroy(Object.assign(new Error('answer too long'), { code: 'TOO_LONG' }));
       else chunks.push(c);
     });
     res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
@@ -183,7 +181,7 @@ export class SharedModel {
     this.listing ||= (async () => {
       try {
         const res = await this.request('/api/tags', { idleMs: 10000 });
-        const text = await readAll(res, 4 * 1024 * 1024);
+        const text = await readAnswer(res, 4 * 1024 * 1024);
         if (res.statusCode !== 200) throw new Error(`the AI server answered ${res.statusCode}`);
         const names = (JSON.parse(text).models || [])
           .filter(chatModel)
@@ -224,7 +222,7 @@ export class SharedModel {
     try {
       if (!this.ps || Date.now() - this.ps.at > 5000) {
         const res = await this.request('/api/ps', { idleMs: 10000 });
-        const text = await readAll(res, 1024 * 1024);
+        const text = await readAnswer(res, 1024 * 1024);
         if (res.statusCode !== 200) return null;
         this.ps = { names: (JSON.parse(text).models || []).map((m) => String(m.name || m.model || '')), at: Date.now() };
       }
@@ -252,7 +250,7 @@ export class SharedModel {
       } catch (err) {
         throw Object.assign(new AIRequestError(502, 'The AI server didn’t answer. Check that Ollama is running.'), { detail: err.message });
       }
-      const text = await readAll(res, 1024 * 1024);
+      const text = await readAnswer(res, 1024 * 1024);
       if (res.statusCode !== 200) {
         // "model 'x' not found" is a 404; what else Ollama said is for the log.
         const detail = errorText(text) || `the AI server answered ${res.statusCode}`;

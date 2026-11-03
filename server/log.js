@@ -1,5 +1,6 @@
 // Logging for the service. Every line goes through redact(), so tokens and
 // keys never reach the container log, even when a message quotes a URL.
+import { CONTROL_CHARACTERS } from './clean.js';
 
 let debugOn = false;
 
@@ -35,7 +36,7 @@ export function redact(text) {
 // what's kept is still found whole).
 export function oneLine(text, max = 500) {
   const s = redact(String(text ?? '').slice(0, max + 1000))
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .replace(CONTROL_CHARACTERS, ' ')
     .trim();
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }

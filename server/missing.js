@@ -23,6 +23,8 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { MISSING_LIMITS, MISSING_LISTS, applyOp, applyForget, idOf, shortList, shortLists, sourceOf, trimMissing } from './missinglist.js';
+import { ServiceError } from './errors.js';
+import { userId, SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 export const MISSING_STORE_LIMITS = {
   accounts: 500, // with a list on this player (on any server)
@@ -41,22 +43,15 @@ export const MISSING_STORE_LIMITS = {
 // The file's: 2 since 0.25.0 (see load).
 const MISSING_FILE_VERSION = 2;
 
-export class MissingError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class MissingError extends ServiceError {}
 
-export const SERVER_ID = /^[A-Za-z0-9._-]{1,100}$/;
 const SECTION = /^[A-Za-z0-9_.:-]{1,40}$/;
 const LIST = /^[a-z0-9]{1,8}$/;
 const OP_ID = /^[a-f0-9]{8,32}$/;
 const KEY_MAX = 400;
 const KINDS = new Set(['track', 'artist']);
-const userId = (v) => (Number.isSafeInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
 // Text as it's kept: at most `n` characters, no control characters.
-const text = (v, n) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, n) : '');
+const text = (v, n) => (typeof v === 'string' ? v.replace(CONTROL_CHARACTERS, ' ').slice(0, n) : '');
 // A time in seconds: since 2001, and not more than a day ahead.
 const when = (v, now) => (Number.isSafeInteger(v) && v > 1e9 && v <= now + 86400 ? v : null);
 const counted = (v) => (Number.isSafeInteger(v) && v >= 1 && v <= 1e6 ? v : 1);
