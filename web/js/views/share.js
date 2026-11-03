@@ -5,6 +5,7 @@ import { app } from '../state.js';
 import { h, sheet, toast, avatar, fmt, confirmAction, row, iconTile } from '../ui.js';
 import { navigate } from '../router.js';
 import { friends, sharePlaylist, setMembers, stopSharing, shareOf, addShared, declineShared, leaveShared } from '../sharing.js';
+import { joinWithAnd } from './common.js';
 
 const ROLES = [
   ['', 'Not shared'],
@@ -12,14 +13,12 @@ const ROLES = [
   ['edit', 'Can edit'],
 ];
 
-const names = (list) => (list.length < 3 ? list.join(' and ') : `${list.slice(0, -1).join(', ')} and ${list.at(-1)}`);
-
 // "Shared with Sam and Alex (invited)", or "Shared by Dan · you can edit it".
 export function shareLine(share) {
   if (!share) return '';
   if (share.role === 'owner') {
     const who = (share.members || []).map((m) => (m.joined ? m.title : `${m.title} (invited)`));
-    return who.length ? `Shared with ${names(who)}` : 'Shared';
+    return who.length ? `Shared with ${joinWithAnd(who)}` : 'Shared';
   }
   return `Shared by ${share.owner.title} · you can ${share.role === 'edit' ? 'edit it' : 'view it, not edit it'}`;
 }

@@ -27,6 +27,7 @@ import {
 } from '../missing.js';
 import { pullMissing, missingPlayerFull } from '../missingsync.js';
 import { aiSettings } from '../ai.js';
+import { joinWithAnd } from './common.js';
 
 // Whose one of everyone's is (for the server's owner): you and their names,
 // as your Plex friends have them, and how many others (who aren't any more).
@@ -35,7 +36,7 @@ export function whose(m) {
   const names = [...(m.mine ? ['you'] : []), ...(m.others.who || [])];
   const unknown = Math.max(0, (m.others.people || 0) - (m.others.who?.length || 0));
   if (unknown) names.push(`${fmt.number(unknown)} ${unknown === 1 ? 'other' : 'others'}`);
-  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0] || '';
+  return joinWithAnd(names);
 }
 
 export function missingTracksView({ el, onDispose }) {

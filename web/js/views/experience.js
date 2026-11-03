@@ -6,6 +6,7 @@ import { popOverlay, dropCached } from '../router.js';
 import { h, icon, backHeader, row, sheet, toast, toggleRow, choiceRow, enableDrag } from '../ui.js';
 import { homeLayout, saveHomeLayout, resetHomeLayout, sectionById } from '../home-sections.js';
 import { ratingMode } from '../ratings.js';
+import { joinWithAnd } from './common.js';
 
 const set = (key) => (v) => saveSettings({ [key]: v });
 // Home and lists read these settings when they're built, so cached pages
@@ -63,7 +64,7 @@ export function experienceView({ el }) {
       if (secs.length < 2) return;
       const here = app.source.sectionTitle;
       const others = secs.filter((x) => String(x.key) !== String(app.source.sectionKey)).map((x) => x.title);
-      const list = others.length === 1 ? others[0] : `${others.slice(0, -1).join(', ')} and ${others.at(-1)}`;
+      const list = joinWithAnd(others);
       libraries.replaceChildren(
         toggleRow({
           title: 'Search all music libraries',

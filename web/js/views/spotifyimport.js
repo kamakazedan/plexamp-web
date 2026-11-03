@@ -12,24 +12,20 @@ import { app } from '../state.js';
 import { popOverlay } from '../router.js';
 import { h, sheet, fmt, icon } from '../ui.js';
 import { readSpotifyPlaylist, spotifyLinkKind, spotifyEntries, spotifyOffered, spotifyFilesOffered, sortSpotifyFiles, readSpotifyFiles, SPOTIFY_PRIVACY_URL, LIKED_SONGS } from '../spotify.js';
-import { runImport } from './playlistfiles.js';
+import { runImport, nameKey, libraryName, pickFiles } from './playlistfiles.js';
 import { missingKeptNote } from '../missing.js';
 import { FILE_LIMITS } from '../playlistio.js';
-
-const where = () => app.source?.sectionTitle || 'this library';
-// Playlists by name ("Late night" and "late night " are one name).
-const nameKey = (t) => String(t || '').trim().toLowerCase();
+import { joinWithAnd } from './common.js';
 
 const NOT_A_LINK = 'That isn’t a link to a Spotify playlist. In Spotify, choose Share › Copy link to playlist, and paste that.';
 
 // ---------- from Spotify's download of your data ----------
 
-// The files named, for what's said about them ("Userdata.json and
-// Payments.json").
-const names = (list) => (list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}` : list[0] || '');
+// What's said of the files that weren't opened, or are too big to read,
+// each named ("Userdata.json and Payments.json weren't opened, …").
 const notOpened = (refused) =>
-  refused.length ? `${names(refused)} ${refused.length === 1 ? 'wasn’t opened, as it isn’t a playlist file' : 'weren’t opened, as they aren’t playlist files'}.` : '';
-const notRead = (tooBig) => (tooBig.length ? `${names(tooBig)} ${tooBig.length === 1 ? 'is' : 'are'} too big to read (over ${FILE_LIMITS.bytes / 1024 / 1024} MB).` : '');
+  refused.length ? `${joinWithAnd(refused)} ${refused.length === 1 ? 'wasn’t opened, as it isn’t a playlist file' : 'weren’t opened, as they aren’t playlist files'}.` : '';
+const notRead = (tooBig) => (tooBig.length ? `${joinWithAnd(tooBig)} ${tooBig.length === 1 ? 'is' : 'are'} too big to read (over ${FILE_LIMITS.bytes / 1024 / 1024} MB).` : '');
 const sentences = (...list) => list.filter(Boolean).join(' ');
 
 export function importFromSpotify() {
@@ -42,7 +38,7 @@ export function importFromSpotify() {
   let closed = false;
   let reading = false;
   const status = h('p.ask-message.spotify-status', { role: 'status' });
-  const choose = h('button.btn.btn-primary.spotify-choose', { type: 'button', onclick: () => pickFiles(gotFiles) }, 'Choose the playlist files…');
+  const choose = h('button.btn.btn-primary.spotify-choose', { type: 'button', onclick: () => pickFiles(gotFiles, { multiple: true }) }, 'Choose the playlist files…');
   const linkBtn = spotifyOffered()
     ? h(
         'button.btn.btn-secondary.spotify-by-link',
@@ -144,7 +140,7 @@ export function importFromSpotify() {
     try {
       const read = await readSpotifyFiles(wanted);
       if (closed) return;
-      if (!read.playlists.some((p) => p.of)) return say(sentences(`There are no tracks in ${names(read.files)}.`, notRead(read.tooBig), notOpened(refused)), true);
+      if (!read.playlists.some((p) => p.of)) return say(sentences(`There are no tracks in ${joinWithAnd(read.files)}.`, notRead(read.tooBig), notOpened(refused)), true);
       // The names of the playlists you have, to choose by (null: they
       // couldn't be had).
       let have = null;
@@ -162,27 +158,6 @@ export function importFromSpotify() {
       busy(false);
     }
   }
-}
-
-// The file picker, for several at once (it only opens from a tap: call it
-// straight from one).
-let picker = null;
-function pickFiles(then) {
-  picker?.remove();
-  picker = h('input.file-picker', { type: 'file', multiple: true, accept: '.json,application/json', hidden: true });
-  const input = picker;
-  const done = () => {
-    input.remove();
-    if (picker === input) picker = null;
-  };
-  input.addEventListener('change', () => {
-    const files = [...(input.files || [])];
-    done();
-    if (files.length) then(files);
-  });
-  input.addEventListener('cancel', done);
-  document.body.append(input);
-  input.click();
 }
 
 // A name of its own here: the playlist's, unless you have one by it, then
@@ -272,7 +247,7 @@ function choosePlaylists({ playlists, tooBig, more, moreIn, moreAlone, files, re
     notOpened(refused),
     notRead(tooBig),
     more ? `${fmt.count(more, 'more playlist isn’t', 'more playlists aren’t')} listed: there are more than can be read at once.` : '',
-    more && moreAlone && moreIn.length ? `Choose ${moreIn.length === 1 ? moreIn[0] : `each of ${names(moreIn)}`} on its own for ${more === 1 ? 'it' : 'them'}.` : '',
+    more && moreAlone && moreIn.length ? `Choose ${moreIn.length === 1 ? moreIn[0] : `each of ${joinWithAnd(moreIn)}`} on its own for ${more === 1 ? 'it' : 'them'}.` : '',
   );
   sheet({
     title: 'Your playlists from Spotify',
@@ -283,7 +258,7 @@ function choosePlaylists({ playlists, tooBig, more, moreIn, moreAlone, files, re
       h(
         'p.ask-message',
         null,
-        `Their tracks are looked for in ${where()} by title, artist and album, and those found make a playlist here, in the same order.${have ? ' Ones with the name of a playlist you have already aren’t chosen to begin with.' : ''}`,
+        `Their tracks are looked for in ${libraryName()} by title, artist and album, and those found make a playlist here, in the same order.${have ? ' Ones with the name of a playlist you have already aren’t chosen to begin with.' : ''}`,
       ),
       passed ? h('p.spotify-refused', null, passed) : null,
       usable.length > 1 ? all : null,
@@ -393,7 +368,7 @@ function fromLink() {
       h(
         'p.ask-message',
         null,
-        `Each is looked for in ${where()} by its title, artist and length, and those found make a playlist here, in the same order.` +
+        `Each is looked for in ${libraryName()} by its title, artist and length, and those found make a playlist here, in the same order.` +
           (pl.capped ? ' Spotify’s public page lists a playlist’s first 100 tracks, so any after those aren’t in it.' : '') +
           (taken ? ` You have a playlist called “${pl.name}” already.` : ''),
       ),
