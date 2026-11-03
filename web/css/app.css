@@ -1774,7 +1774,7 @@ a.hero-link:hover {
 /* ---------- settings pages ---------- */
 
 .account-card,
-.about {
+.about-page {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1848,7 +1848,7 @@ a.hero-link:hover {
   color: var(--muted);
 }
 
-.about p {
+.about-page p {
   max-width: 46ch;
   color: var(--muted);
 }

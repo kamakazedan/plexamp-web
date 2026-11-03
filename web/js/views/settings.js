@@ -1344,7 +1344,7 @@ function aboutView({ el }) {
   el.append(
     backHeader('About', { fallback: '/settings' }),
     h(
-      'div.about',
+      'div.about-page',
       null,
       h('img.about-mark', { src: 'icons/icon.svg', alt: '', width: 72, height: 72 }),
       h('div.about-name', null, APP_INFO.product),
