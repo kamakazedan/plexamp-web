@@ -1068,7 +1068,7 @@ export class MBKept {
     // (Tried again no sooner than the next time it would be written.)
     this.wrote = Date.now();
     try {
-      writeDataFile(this.file, { version: 2, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) });
+      writeDataFile(this.file, { version: 2, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) }, { durable: false });
     } catch (err) {
       this.log?.error(`musicbrainz: couldn't save what was looked up to ${this.file}: ${err.message}`);
     }

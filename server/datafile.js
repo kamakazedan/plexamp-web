@@ -37,13 +37,17 @@ export function readDataFile(file, use, { log = null, what }) {
 
 // `data` written to `file` as JSON, readable by the service only: to a file
 // beside it first, and onto the disk, before it takes the file's place.
-export function writeDataFile(file, data) {
+// With `durable` false (for what's only kept to save asking again, and can
+// be tens of MB), it isn't waited for onto the disk: on a slow SD card that
+// would hold up every request meanwhile, for seconds. A power cut can then
+// leave it unreadable, and it's kept aside as any is (see readDataFile).
+export function writeDataFile(file, data, { durable = true } = {}) {
   const text = JSON.stringify(data);
   const tmp = `${file}.tmp`;
   const fd = openSync(tmp, 'w', 0o600);
   try {
     writeFileSync(fd, text);
-    fsyncSync(fd);
+    if (durable) fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
