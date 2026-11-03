@@ -130,7 +130,8 @@ export async function readCapped(res, max) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-// A small cache with expiry and a size cap.
+// A small cache with expiry and a size cap: full, the one asked for least
+// lately goes (so those in use stay, however many come and go).
 class TTLCache {
   constructor(max = 2000) {
     this.max = max;
@@ -139,17 +140,21 @@ class TTLCache {
   get(key) {
     const hit = this.map.get(key);
     if (!hit) return undefined;
-    if (hit.exp < Date.now()) {
-      this.map.delete(key);
-      return undefined;
-    }
+    this.map.delete(key);
+    if (hit.exp < Date.now()) return undefined;
+    this.map.set(key, hit);
     return hit.value;
   }
   set(key, value, ttl) {
+    this.map.delete(key);
     if (this.map.size >= this.max) this.map.delete(this.map.keys().next().value);
     this.map.set(key, { value, exp: Date.now() + ttl });
   }
 }
+
+// Accounts whose sign-ins and servers are kept checked (see identify and
+// serverAccess): enough for every account a busy player has in use.
+const ACCOUNTS_KEPT = 20000;
 
 const decodeXml = (s) =>
   s.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (m, e) => {
@@ -202,9 +207,10 @@ export class PlexAuth {
     // (Looked up every few seconds, so a time it had more than one address is
     // seen, whatever's asked meanwhile.)
     if (this.pmsName) setInterval(() => this.lookUpAddresses(), 5000).unref();
-    this.users = new TTLCache();
+    this.users = new TTLCache(ACCOUNTS_KEPT);
     this.denied = new TTLCache();
-    this.access = new TTLCache();
+    this.access = new TTLCache(); // `pms|${token hash}`: whether the server at PLEX_SERVER_URL accepts the token (see serverAccepts)
+    this.serverLists = new TTLCache(ACCOUNTS_KEPT); // token hash -> Map(server id -> owned): the servers the account can use
     this.friendLists = new TTLCache(200);
     this.resourceLists = new TTLCache(500);
     this.serverId = null;
@@ -215,7 +221,7 @@ export class PlexAuth {
     // asked anything.
     this.tv = { down: false, since: Date.now(), tried: 0, pinged: 0 };
     this.askingOwnersOnly = new Map(); // token hash -> the server being asked (see showsOwnersOnly)
-    this.accessAsking = new Map(); // `${token hash}|${server}` -> plex.tv being asked (see serverAccess)
+    this.serversAsking = new Map(); // token hash -> plex.tv being asked for its servers (see serversOf)
     // The Plex server, as last found (see ownersOnlyShown), and said.
     this.cantTellUntil = 0;
     this.tellsTroubleUntil = 0;
@@ -448,21 +454,31 @@ export class PlexAuth {
   // account own it? { ok, owned }
   async serverAccess(token, serverId) {
     if (!serverId) return { ok: false, owned: false };
-    const key = `${hash(token)}|${serverId}`;
-    const hit = this.access.get(key);
-    if (hit !== undefined) return hit;
-    // (Asked once, however many requests wait for it.)
-    if (this.accessAsking.has(key)) return this.accessAsking.get(key);
+    const servers = await this.serversOf(token);
+    return { ok: servers.has(serverId), owned: servers.get(serverId) === true };
+  }
+
+  // The Plex servers an account can use, as plex.tv lists them: Map(server
+  // id -> whether it owns it). Asked once a sign-in, whatever servers it's
+  // asked about (an id made up isn't another question for plex.tv), however
+  // many requests wait for it, and kept ten minutes.
+  async serversOf(token) {
+    const key = hash(token);
+    const hit = this.serverLists.get(key);
+    if (hit) return hit;
+    if (this.serversAsking.has(key)) return this.serversAsking.get(key);
     const job = (async () => {
+      // (All of them: an account that's used Plex a long time can have
+      // hundreds of devices listed, more than resources keeps.)
       const list = await this.fetchJSON(`${this.plexTv}/api/v2/resources?includeHttps=1`, token);
-      const r = (Array.isArray(list) ? list : []).find(
-        (x) => x?.clientIdentifier === serverId && String(x.provides || '').split(',').includes('server'),
-      );
-      const access = { ok: !!r, owned: !!r?.owned };
-      this.access.set(key, access, 10 * 60000);
-      return access;
-    })().finally(() => this.accessAsking.delete(key));
-    this.accessAsking.set(key, job);
+      const servers = new Map();
+      for (const x of Array.isArray(list) ? list : []) {
+        if (x?.clientIdentifier && String(x.provides || '').split(',').includes('server')) servers.set(String(x.clientIdentifier), !!x.owned);
+      }
+      this.serverLists.set(key, servers, 10 * 60000);
+      return servers;
+    })().finally(() => this.serversAsking.delete(key));
+    this.serversAsking.set(key, job);
     return job;
   }
 
@@ -488,7 +504,7 @@ export class PlexAuth {
   ownerLately(token) {
     if (!this.serverId || !validToken(token)) return false;
     const key = hash(token);
-    return this.users.get(key) !== undefined && this.access.get(`${key}|${this.serverId}`)?.owned === true;
+    return this.users.get(key) !== undefined && this.serverLists.get(key)?.get(this.serverId) === true;
   }
 
   // ---------- the Plex server, as nginx reaches it ----------

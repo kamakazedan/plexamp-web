@@ -270,6 +270,43 @@ test('sign-ins: checked once however many requests ask at once, and remembered',
   }
 });
 
+test('sign-ins: the servers an account can use are asked about once, whatever ids are asked for; and the checks in use stay kept', async () => {
+  const asked = { user: 0, resources: 0 };
+  const tv = createServer((req, res) => {
+    const token = String(req.headers['x-plex-token'] || '');
+    const n = /^tok(\d+)$/.exec(token)?.[1];
+    res.writeHead(n ? 200 : 401, { 'Content-Type': 'application/json' });
+    if (req.url.startsWith('/api/v2/user')) {
+      asked.user += 1;
+      return res.end(JSON.stringify({ id: Number(n), uuid: `u${n}`, username: `user${n}` }));
+    }
+    asked.resources += 1;
+    return res.end(JSON.stringify([{ clientIdentifier: `srv${n}`, provides: 'server', owned: true }, { clientIdentifier: `player${n}`, provides: 'player', owned: true }]));
+  });
+  await new Promise((r) => tv.listen(0, '127.0.0.1', r));
+  try {
+    const auth = new PlexAuth({ plexTvUrl: `http://127.0.0.1:${tv.address().port}` });
+    // Made-up server ids, however many: one question for plex.tv
+    const ids = Array.from({ length: 50 }, (_, i) => `made-up-${i}`);
+    assert.deepEqual(await Promise.all(ids.map((id) => auth.canUseServer('tok1', id))), ids.map(() => false));
+    assert.deepEqual(await auth.serverAccess('tok1', 'srv1'), { ok: true, owned: true });
+    assert.equal(await auth.canUseServer('tok1', 'player1'), false, 'a player isn\'t a server');
+    assert.equal(asked.resources, 1);
+    // A sign-in asked about all along stays checked while others come and go
+    // (here past the most kept): the one least lately asked about goes.
+    await auth.identify('tok1');
+    for (let n = 2; n <= 20001; n += 1) {
+      auth.users.set(`other-${n}`, { id: n }, 60000);
+      if (n % 5000 === 0) await auth.identify('tok1');
+    }
+    const before = asked.user;
+    await auth.identify('tok1');
+    assert.equal(asked.user, before, 'tok1 was still kept');
+  } finally {
+    tv.close();
+  }
+});
+
 test('plex.tv: never followed elsewhere, and answers read up to a limit', async () => {
   const tv = createServer((req, res) => {
     if (req.url.startsWith('/api/v2/user')) {

@@ -220,6 +220,8 @@ function readBody(req, limit = 256 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
+    // (A request whose sender went before it all came: never answered.)
+    req.on('close', () => !req.complete && reject(new HttpError(400, 'That request ended before it all came.')));
     req.on('data', (c) => {
       size += c.length;
       if (size > limit) {
@@ -359,8 +361,13 @@ async function aiRoute(req, res, parts) {
 }
 
 async function aiChat(req, res, who) {
+  // (Gone before it's counted, while its request was read or the model
+  // looked up: nothing is counted, nor asked of the model.)
+  let gone = false;
+  res.on('close', () => !res.writableFinished && (gone = true));
   const body = await readBody(req, AI_LIMITS.body);
   const chat = cleanChat(body, await sharedModel.model());
+  if (gone) return undefined;
   const mine = aiBusy.get(who.key) || 0;
   if (mine >= AI_LIMITS.perUser || aiChats >= AI_LIMITS.total) {
     throw new HttpError(429, 'The AI model is busy with other requests. Try again in a moment.');
@@ -985,11 +992,11 @@ async function friendsOf(user, token, serverId) {
 // account can use. With PLEX_SERVER_URL set, only for people who can use
 // that server (on it, or another of theirs): this service is theirs, not
 // anyone's with a Plex account.
-async function serverAllowed(token, serverId, { strict = false } = {}) {
-  // `strict`: plex.tv not answering is said (503), rather than taken as no.
+async function serverAllowed(token, serverId) {
+  // (plex.tv not answering is said, 503, never taken as no: a device would
+  // stop looking for the others, a shared playlist would seem gone.)
   const can = (id) =>
     auth.canUseServer(token, id).catch((err) => {
-      if (!strict) return false;
       if (err instanceof AuthError) throw new HttpError(401, err.message);
       throw new HttpError(503, 'plex.tv didn’t answer just now. Try again in a minute.');
     });
@@ -1369,7 +1376,7 @@ async function settingsRoute(req, res, parts, url) {
   const { user, token } = await signedIn(req);
   if (!allow(`set|${user.id}`, 120)) throw new HttpError(429, 'Too many changes in a short time. Wait a minute.');
   // (A brief plex.tv outage isn't a no: the app tries again later.)
-  if (!(await serverAllowed(token, String(url.searchParams.get('server') || ''), { strict: true })))
+  if (!(await serverAllowed(token, String(url.searchParams.get('server') || ''))))
     throw new HttpError(403, 'Settings are kept for Plex accounts that can use this player’s Plex server, and yours can’t.');
   try {
     if (req.method === 'GET') return send(res, 200, accountSettings.get(user.id));
