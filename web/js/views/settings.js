@@ -119,14 +119,15 @@ function accountButtons() {
   const auth = app.auth || {};
   const switchBtn = h('button.btn.btn-secondary.account-switch', { type: 'button', hidden: true }, icon('switchUser', 20), h('span', null, 'Switch user'));
   if (!auth.manual && auth.token) {
-    Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null)])
-      .then(([users, me]) => {
+    // (Your servers too, for who owns the one this is on: see chooseHomeUser.)
+    Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null), listServers(auth.token).catch(() => [])])
+      .then(([users, me, servers]) => {
         if (app.auth?.token !== auth.token || !me?.uuid) return;
         // (Which of them is you, by plex.tv's id for you: never offered
         // yourself, as switching to you would clear what's kept for you.)
         const mine = (u) => u.uuid === String(me.uuid);
         if (users.length < 2 || !users.some(mine)) return;
-        switchBtn.onclick = () => chooseHomeUser(users, mine, String(me.uuid));
+        switchBtn.onclick = () => chooseHomeUser(users, mine, String(me.uuid), servers);
         switchBtn.hidden = false;
       })
       .catch(() => {});
@@ -204,28 +205,40 @@ function accountSyncRows() {
 // ---------- Plex Home: switching to someone else in it ----------
 
 // The people in your Plex Home (`mine`: which is you, `myId`: your Plex
-// account's id), to switch to.
-function chooseHomeUser(users, mine, myId) {
+// account's id), to switch to. Never, without a PIN, the Home's admin, or
+// the owner of the server this is on, where that's known (`servers`: yours,
+// as plex.tv lists them, which say who shares one with you: by their id,
+// where plex.tv's list has it, else by their name): nobody gets into the
+// server owner's account with a tap. For them: a PIN in Plex, or signing in
+// as them.
+function chooseHomeUser(users, mine, myId, servers = []) {
+  const server = servers.find((s) => s.id === app.source?.serverId);
+  const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  const owns = (u) => !!server && !server.owned && (server.ownerId != null ? String(server.ownerId) === u.id : !!server.sharedBy && sameName(server.sharedBy, u.title));
   const list = h('div.rows.home-users');
+  const notOffered = [];
   let panel = null;
   for (const u of users) {
     const you = mine(u);
-    const what = [you ? 'You' : null, u.admin ? 'Admin' : u.guest ? 'Guest' : u.restricted ? 'Managed user' : null, u.protected && !you ? 'Has a PIN' : null]
+    const offLimits = !you && !u.protected && (u.admin || owns(u));
+    if (offLimits) notOffered.push(u.title);
+    const what = [you ? 'You' : null, u.admin ? 'Admin' : u.guest ? 'Guest' : u.restricted ? 'Managed user' : null, offLimits ? 'Needs a PIN' : u.protected && !you ? 'Has a PIN' : null]
       .filter(Boolean)
       .join(' · ');
     list.append(
       row({
-        onClick: you
-          ? null
-          : async () => {
-              await panel?.close();
-              switchToHomeUser(u, myId);
-            },
+        onClick:
+          you || offLimits
+            ? null
+            : async () => {
+                await panel?.close();
+                switchToHomeUser(u, myId);
+              },
         lead: avatar(u.thumb, u.title),
         title: u.title,
         subtitle: what,
         right: you ? icon('check', 22, 'home-user-you') : null,
-        chevron: !you,
+        chevron: !you && !offLimits,
         cls: 'home-user',
       }),
     );
@@ -237,6 +250,7 @@ function chooseHomeUser(users, mine, myId) {
       'div',
       null,
       list,
+      notOffered.length ? h('p.home-users-note.home-users-pin', null, `To switch to ${joinWithAnd(notOffered)}, set a PIN for them in Plex, or sign in as them.`) : null,
       h(
         'p.home-users-note',
         null,
@@ -248,10 +262,11 @@ function chooseHomeUser(users, mine, myId) {
 
 // To them: their PIN first, where they have one. Then plex.tv's token for
 // them, the server and library this is on (where they can use those), and
-// the page afresh as them (state.js switchAccount).
+// the page afresh as them (state.js switchAccount). (Never the Home's admin
+// without a PIN: see chooseHomeUser.)
 let switching = false;
 async function switchToHomeUser(u, myId) {
-  if (switching) return;
+  if (switching || (u.admin && !u.protected)) return;
   let pin = null;
   if (u.protected) {
     pin = await askText({ title: `Switch to ${u.title}`, label: 'Their PIN', confirm: 'Switch', maxLength: 4, type: 'password', inputMode: 'numeric', secret: true, message: `${u.title} has a PIN on Plex.` });
