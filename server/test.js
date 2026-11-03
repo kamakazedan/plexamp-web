@@ -610,6 +610,11 @@ test('the shared AI model: its name, whether it is ready and loaded, nothing els
     assert.equal(await first.model(), 'llama3.1:8b');
     assert.ok(seen.every((l) => l.startsWith('GET /api/tags') || l.startsWith('GET /api/ps')), seen.join('; '));
     assert.ok(seen[0].endsWith('Bearer sk-1'));
+    // Whether it's in memory, asked by many at once: asked once.
+    const many = new SharedModel({ url, model: 'llama3.1:8b' });
+    const before = seen.filter((l) => l.startsWith('GET /api/ps')).length;
+    assert.deepEqual(await Promise.all([1, 2, 3].map(() => many.loaded('llama3.1:8b'))), [true, true, true]);
+    assert.equal(seen.filter((l) => l.startsWith('GET /api/ps')).length, before + 1);
   } finally {
     ollama.close();
   }

@@ -40,6 +40,7 @@ const OPTIONS = {
 export const contextFor = (chars) => Math.min(32768, Math.max(8192, 2 ** Math.ceil(Math.log2(chars / 3 + 1500))));
 const KEEP_ALIVE = '15m';
 const RETRY_FOR_MS = 3600000; // what Ollama turned down isn't asked for again for this long
+const PS_KEPT_MS = 5000; // what Ollama says is in memory, taken as it is for this long
 
 // An answer format (a JSON schema) is kept small and shallow: the app's own
 // are a few hundred bytes.
@@ -124,6 +125,7 @@ export class SharedModel {
     this.pickedSaid = null;
     this.loads = new Map(); // `${model}|${num_ctx}` -> the load under way
     this.ps = null; // { names, at }: the models in memory
+    this.psAsking = null; // ...being asked
     // What this Ollama turned down lately, and so isn't asked for for an
     // hour (in case it's updated meanwhile): "think" (models or versions
     // without it), answer formats as schemas (Ollama before 0.5 only knows
@@ -217,19 +219,31 @@ export class SharedModel {
   }
 
   // Whether the model is in memory now (Ollama's /api/ps, asked at most every
-  // five seconds); null if that couldn't be told.
+  // PS_KEPT_MS, and once however many ask meanwhile); null if that couldn't
+  // be told.
   async loaded(model) {
     try {
-      if (!this.ps || Date.now() - this.ps.at > 5000) {
-        const res = await this.request('/api/ps', { idleMs: 10000 });
-        const text = await readAnswer(res, 1024 * 1024);
-        if (res.statusCode !== 200) return null;
-        this.ps = { names: (JSON.parse(text).models || []).map((m) => String(m.name || m.model || '')), at: Date.now() };
+      let ps = this.ps;
+      if (!ps || Date.now() - ps.at > PS_KEPT_MS) {
+        this.psAsking ||= this.inMemory().finally(() => {
+          this.psAsking = null;
+        });
+        ps = await this.psAsking;
       }
-      return this.ps.names.some((n) => sameModel(n, model));
+      return ps ? ps.names.some((n) => sameModel(n, model)) : null;
     } catch {
       return null;
     }
+  }
+
+  // The models in memory, as Ollama's /api/ps says: { names, at }, or null
+  // where it didn't say.
+  async inMemory() {
+    const res = await this.request('/api/ps', { idleMs: 10000 });
+    const text = await readAnswer(res, 1024 * 1024);
+    if (res.statusCode !== 200) return null;
+    this.ps = { names: (JSON.parse(text).models || []).map((m) => String(m.name || m.model || '')), at: Date.now() };
+    return this.ps;
   }
 
   // Loads the model (a moment if it's in memory already), the way a chat
