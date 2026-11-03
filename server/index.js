@@ -147,8 +147,6 @@ let owners = null; // the owner's sign-ins, as fingerprints (see owners.js)
 const buckets = new Map(); // key -> { at, n }, oldest first
 const MAX_BUCKETS = 20000;
 const everyone = new Map(); // limits for everyone together: never dropped
-const waiting = new Map(); // user id -> long-polls open
-const deviceWaits = new Map(); // `${user id}|${device id}` -> long-polls open
 // `n`: how many this counts for. Too many keys at once (many addresses or
 // accounts) drops the oldest minutes first, never everyone's.
 function allow(key, perMinute, n = 1, map = buckets) {
@@ -174,6 +172,37 @@ function allow(key, perMinute, n = 1, map = buckets) {
 function againIn(key, map = buckets) {
   const b = map.get(key);
   return b ? Math.max(1, Math.ceil((b.at + 60000 - Date.now()) / 1000)) : 60;
+}
+
+// Long-polls (Play Together's, and your devices'): each waits for news up to
+// waitMs (?wait=, in seconds), and ends as soon as whoever's waiting has gone
+// (a page reloaded, say). A few at once from each person (several tabs),
+// each kind counted apart, so one can't use up the other's: past that, one
+// is answered straight away.
+const LONG_POLLS = {
+  waitMs: 25000,
+  together: 4, // Play Together's, for each person
+  device: 2, // your devices', for each device
+  devices: 24, // ...and for each person, all their devices' together
+};
+const togetherWaits = new Map(); // user id -> Play Together's long-polls open
+const deviceWaits = new Map(); // `${user id}|${device id}` -> that device's long-polls open
+const accountDeviceWaits = new Map(); // user id -> long-polls open of all their devices
+const waitOf = (url) => Math.max(0, Math.min(Number(url.searchParams.get('wait') || 0) * 1000 || 0, LONG_POLLS.waitMs));
+// One more (or one fewer) open for `key` (none left: it goes).
+const opened = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+function closed(map, key) {
+  const n = (map.get(key) || 1) - 1;
+  if (n > 0) map.set(key, n);
+  else map.delete(key);
+}
+
+// Aborted once whoever sent the request `res` answers has gone, before it's
+// answered.
+function whenGone(res) {
+  const ctrl = new AbortController();
+  res.on('close', () => !res.writableFinished && ctrl.abort());
+  return ctrl.signal;
 }
 
 // A sign-in this service hasn't seen lately is checked with plex.tv. Made-up
@@ -1058,27 +1087,24 @@ async function togetherRoute(req, res, parts, url) {
     if (!together.roleOf(s, user.id)) throw new HttpError(403, 'You haven’t been invited to this session.');
     together.seen(s, user.id);
     const since = Number(url.searchParams.get('since') || 0);
-    const wait = Math.max(0, Math.min(Number(url.searchParams.get('wait') || 0), 25)) * 1000;
+    const wait = waitOf(url);
     const unchanged = () => send(res, 200, { version: s.version, now: Date.now(), unchanged: true });
     if (together.settle(s)) together.bump(s);
-    if (wait && (waiting.get(user.id) || 0) >= 4) {
+    if (wait && (togetherWaits.get(user.id) || 0) >= LONG_POLLS.together) {
       // Enough waiting requests from this person already (several tabs):
       // answer this one straight away.
       return since >= s.version ? unchanged() : send(res, 200, together.view(s, user.id));
     }
     if (wait) {
-      let gone = false;
-      res.on('close', () => !res.writableFinished && (gone = true));
-      waiting.set(user.id, (waiting.get(user.id) || 0) + 1);
+      const gone = whenGone(res);
+      opened(togetherWaits, user.id);
       let changed;
       try {
-        changed = await together.wait(s, since, wait);
+        changed = await together.wait(s, since, wait, { signal: gone });
       } finally {
-        const n = (waiting.get(user.id) || 1) - 1;
-        if (n > 0) waiting.set(user.id, n);
-        else waiting.delete(user.id);
+        closed(togetherWaits, user.id);
       }
-      if (gone) return undefined;
+      if (gone.aborted) return undefined;
       together.seen(s, user.id);
       if (!changed) return unchanged();
     } else if (since >= s.version && together.roleOf(s, user.id) !== 'invited') {
@@ -1188,25 +1214,19 @@ async function devicesRoute(req, res, parts, url) {
   if (!parts[0] && method === 'GET') {
     devices.seen(h, device);
     const since = Number(q.get('since') || 0);
-    const wait = Math.max(0, Math.min(Number(q.get('wait') || 0), 25)) * 1000;
+    const wait = waitOf(url);
     const key = `${user.id}|${deviceId}`;
-    const mine = deviceWaits.get(key) || 0;
-    if (wait && since >= h.version && mine < 2 && (waiting.get(user.id) || 0) < 24) {
-      let gone = false;
-      res.on('close', () => !res.writableFinished && (gone = true));
-      deviceWaits.set(key, mine + 1);
-      waiting.set(user.id, (waiting.get(user.id) || 0) + 1);
+    if (wait && since >= h.version && (deviceWaits.get(key) || 0) < LONG_POLLS.device && (accountDeviceWaits.get(user.id) || 0) < LONG_POLLS.devices) {
+      const gone = whenGone(res);
+      opened(deviceWaits, key);
+      opened(accountDeviceWaits, user.id);
       try {
-        await devices.wait(h, since, wait);
+        await devices.wait(h, since, wait, { signal: gone });
       } finally {
-        const n = (deviceWaits.get(key) || 1) - 1;
-        if (n > 0) deviceWaits.set(key, n);
-        else deviceWaits.delete(key);
-        const u = (waiting.get(user.id) || 1) - 1;
-        if (u > 0) waiting.set(user.id, u);
-        else waiting.delete(user.id);
+        closed(deviceWaits, key);
+        closed(accountDeviceWaits, user.id);
       }
-      if (gone) return undefined;
+      if (gone.aborted) return undefined;
       devices.seen(h, device);
     }
     return send(res, 200, view());

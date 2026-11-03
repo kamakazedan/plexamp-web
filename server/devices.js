@@ -264,17 +264,23 @@ export class Devices {
     return quiet;
   }
 
-  wait(h, since, ms) {
+  // Resolves when anything changes after `since` (true), or after `ms`, or
+  // as soon as `signal` says whoever's waiting has gone (false).
+  wait(h, since, ms, { signal } = {}) {
     if (h.version > since) return Promise.resolve(true);
+    if (signal?.aborted) return Promise.resolve(false);
     return new Promise((resolve) => {
       const done = (changed) => {
         clearTimeout(timer);
         h.waiters.delete(wake);
+        signal?.removeEventListener('abort', gone);
         resolve(changed);
       };
       const wake = () => done(true);
+      const gone = () => done(false);
       const timer = setTimeout(() => done(false), Math.max(0, Math.min(ms, LIMITS.waitMs)));
       h.waiters.add(wake);
+      signal?.addEventListener('abort', gone, { once: true });
     });
   }
 

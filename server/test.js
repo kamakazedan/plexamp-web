@@ -181,6 +181,14 @@ test('long-poll waits for a change', async () => {
   tg.command(s, dan, { type: 'pause' });
   assert.equal(await p, true);
   assert.equal(await tg.wait(s, s.version, 10), false);
+  // ...and ends as soon as whoever waits has gone.
+  const ctrl = new AbortController();
+  const started = Date.now();
+  const gone = tg.wait(s, s.version, 5000, { signal: ctrl.signal });
+  ctrl.abort();
+  assert.equal(await gone, false);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(s.waiters.size, 0);
 });
 
 test('nginx errors relayed in debug mode lose their tokens', () => {
@@ -2986,6 +2994,61 @@ test('/pms/: nobody else\'s requests keep the owner out, a sign-in\'s many reque
     assert.equal(await check('made-up-token-100'), 503);
     assert.equal(await check('owner-token'), 204);
   } finally {
+    await svc.stop();
+    p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('long-polls: Play Together\'s and your devices\' are counted apart, and one ends as soon as whoever waited has gone (a page reloaded)', async () => {
+  const p = await fakePlex();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const svc = await startService({ PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_TOGETHER: 'true' }, dir);
+  const headers = { 'X-Plex-Token': 'owner-token' };
+  const held = []; // long-polls left open, each with its AbortController
+  const hold = (path) => {
+    const ctrl = new AbortController();
+    fetch(`${svc.url}${path}`, { headers, signal: ctrl.signal }).catch(() => {});
+    held.push(ctrl);
+    return ctrl;
+  };
+  // A long-poll's answer, and how long it took.
+  const poll = async (path) => {
+    const t = Date.now();
+    const r = await fetch(`${svc.url}${path}`, { headers });
+    return { status: r.status, body: await r.json(), ms: Date.now() - t };
+  };
+  try {
+    const made = await fetch(`${svc.url}/api/together/sessions`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ server: { id: 'srv-1', name: 'Test', section: '1' }, queue: [] }) });
+    assert.equal(made.status, 201);
+    const session = await made.json();
+    const together = (wait) => `/api/together/sessions/${session.id}?since=${session.version}&wait=${wait}`;
+    // As many of your devices' long-polls as an account may have open (two each of twelve devices)...
+    const device = (n) => `/api/devices?server=srv-1&device=device-${String(n).padStart(4, '0')}&name=D${n}`;
+    for (let n = 0; n < 12; n++) assert.equal((await poll(device(n))).status, 200);
+    const devicesWaiting = [];
+    for (let n = 0; n < 12; n++) for (let k = 0; k < 2; k++) devicesWaiting.push(hold(`${device(n)}&since=999999&wait=25`));
+    await sleep(300);
+    // ...and Play Together's still waits (it was answered straight away, as one of too many).
+    let r = await poll(together(1));
+    assert.ok(r.ms >= 800 && r.body.unchanged, `${r.ms} ms`);
+    // Gone, they're not counted (they were for 25 seconds): a device waits again.
+    for (const c of devicesWaiting) c.abort();
+    await sleep(300);
+    r = await poll(`${device(0)}&since=999999&wait=1`);
+    assert.ok(r.ms >= 800, `${r.ms} ms`);
+    // Four of Play Together's at once from one person (four tabs): the fifth is answered straight away...
+    const tabs = Array.from({ length: 4 }, () => hold(together(25)));
+    await sleep(300);
+    r = await poll(together(1));
+    assert.ok(r.ms < 500 && r.body.unchanged, `${r.ms} ms`);
+    // ...but not once those have gone.
+    for (const c of tabs) c.abort();
+    await sleep(300);
+    r = await poll(together(1));
+    assert.ok(r.ms >= 800 && r.body.unchanged, `${r.ms} ms`);
+  } finally {
+    for (const c of held) c.abort();
     await svc.stop();
     p.close();
     rmSync(dir, { recursive: true, force: true });

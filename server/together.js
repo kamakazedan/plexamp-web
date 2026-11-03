@@ -455,18 +455,23 @@ export class Together {
     this.onChange(s);
   }
 
-  // Resolves when the session changes after `since`, or after `ms`.
-  wait(s, since, ms) {
+  // Resolves when the session changes after `since` (true), or after `ms`,
+  // or as soon as `signal` says whoever's waiting has gone (false).
+  wait(s, since, ms, { signal } = {}) {
     if (s.version > since || s.ended) return Promise.resolve(true);
+    if (signal?.aborted) return Promise.resolve(false);
     return new Promise((resolve) => {
       const done = (changed) => {
         clearTimeout(timer);
         s.waiters.delete(wake);
+        signal?.removeEventListener('abort', gone);
         resolve(changed);
       };
       const wake = () => done(true);
+      const gone = () => done(false);
       const timer = setTimeout(() => done(false), Math.max(0, Math.min(ms, LIMITS.waitMs)));
       s.waiters.add(wake);
+      signal?.addEventListener('abort', gone, { once: true });
     });
   }
 
