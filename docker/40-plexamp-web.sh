@@ -142,6 +142,9 @@ data_dir_problem() {
             case "${e##*/}" in
                 # (and what file systems and file browsers leave around)
                 shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | musicbrainz.json | musicbrainz.json.tmp | owners.json | owners.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
+                # (One the service couldn't read, kept aside by it as it was,
+                # for whoever looks after it. Never changed here.)
+                shares.json.unreadable-* | settings.json.unreadable-* | missing.json.unreadable-* | musicbrainz.json.unreadable-* | owners.json.unreadable-*) ;;
                 *)
                     echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give it a folder of its own (a new or empty one, or a volume)"
                     return
@@ -349,7 +352,7 @@ case " $known_settings " in
         done <<UNKNOWN
 $unknown
 UNKNOWN
-        [ -z "$stops" ] || fail "rename or take out:$stops (the container stops, so that nothing you've set is left aside unseen)"
+        [ -z "$stops" ] || fail "rename or take out:$stops (plexamp-web doesn't start till then, so that nothing you've set is left aside unseen)"
         ;;
 esac
 

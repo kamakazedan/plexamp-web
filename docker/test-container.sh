@@ -680,6 +680,14 @@ off "refuses a shares.json that's a link" "shares.json must be a file of its own
 docker run --rm -v "$LINK_VOLUME:/data" --entrypoint sh "$IMAGE" -c 'rm -f /data/shares.json && touch /data/notes.txt'
 off "won't take over a folder with other files in it" "has other files in it (notes.txt)" -v "$LINK_VOLUME:/data"
 expect "...and leaves it as it was" "root" "$(docker run --rm -v "$LINK_VOLUME:/data" --entrypoint stat "$IMAGE" -c %U /data/notes.txt)"
+# ...but a file of its own it couldn't read, kept aside by the service, is
+# no one else's: nothing's turned off for it.
+docker run --rm -v "$LINK_VOLUME:/data" --entrypoint sh "$IMAGE" -c 'rm -f /data/notes.txt && echo "{" >/data/shares.json.unreadable-2026-11-03T22-10-00Z'
+docker rm -f pw-bad >/dev/null 2>&1 || true
+docker run -d --name pw-bad -v "$LINK_VOLUME:/data" "$IMAGE" >/dev/null
+sleep 3
+lacks "a data file the service kept aside, as it couldn't read it, isn't taken for another's" "shared playlists are off" "$(docker logs pw-bad 2>&1 || true)"
+docker rm -f pw-bad >/dev/null 2>&1 || true
 bad "rejects an unknown OLLAMA_AUTH" "OLLAMA_AUTH must be plex or off" -e OLLAMA_URL=http://x:11434 -e OLLAMA_AUTH=sometimes
 bad "rejects an address with odd characters" "invalid path" -e 'OLLAMA_URL=http://x:11434/;evil'
 bad "rejects an address with a line break in it" "can't have spaces or line breaks" -e "PLEX_SERVER_URL=$(printf 'http://plex.box:32400\n;evil')"
