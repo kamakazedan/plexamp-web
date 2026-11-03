@@ -2686,14 +2686,16 @@ class Player extends EventTarget {
     // kept, and sent from there (outbox.js), so the play counts as it would
     // have (but not twice: not if Plex has it as played already, as it may
     // from this one, its answer lost), once the connection's back, or in a
-    // while, if the server answers again already.
+    // while, if the server answers again already. (Not once another server's
+    // been chosen meanwhile; the same one at another address keeps it.)
     if (state !== 'stopped') return;
-    const s = app.server;
+    const serverId = app.source?.serverId;
+    const stillOnIt = () => !!serverId && app.source?.serverId === serverId;
     sent.then(async (status) => {
-      if ((status > 0 && status < 500) || app.server !== s) return;
+      if ((status > 0 && status < 500) || !stillOnIt()) return;
       keepPlayed(track, time * 1000, playback, sentAt);
       const answers = await serverAnswers();
-      if (app.server !== s) return;
+      if (!stillOnIt()) return;
       if (answers) flush();
       else connectionLost();
     });
