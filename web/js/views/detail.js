@@ -1061,6 +1061,14 @@ function editBar(text, { onDone, onSort }) {
   };
 }
 
+// This page again, as it is now (`path`: its own): at once where it's
+// still the one on screen, else when it's opened again. (The router's
+// refresh() alone is whichever page is on screen by then.)
+function pageAgain(el, path) {
+  if (el.isConnected) refresh();
+  else dropCached((p) => p === path);
+}
+
 // "Sort by": the ways a list of tracks, albums or artists can be sorted.
 function chooseSort(kind, title, onPick) {
   const icons = { artist: 'mic', title: kind === 'album' ? 'disc' : 'note', album: 'disc', year: 'calendar', reverse: 'arrowUp' };
@@ -1364,19 +1372,21 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       dropCached((p) => p === '/' || p === '/playlists' || p === '/library/playlists');
     },
   });
+  // (Shared, or not shared any more: this page again.)
+  const sharingChanged = () => pageAgain(el, `/playlist/${pl.ratingKey}`);
   // A smart playlist can't be unlocked (its rules decide what's in it), but
   // its picture can still change, from its menu.
   // (Not till what's shared is known: it decides which they are.)
   const shareActions = () => {
     if (!sharingOn() || !sharesKnown) return [];
     if (share && share.role !== 'owner') {
-      return [{ icon: 'together', label: 'Stop sharing it with me…', description: `Keep it as a playlist of your own, without ${share.owner.title}’s changes`, onSelect: () => leaveDialog(share, { onChange: refresh }) }];
+      return [{ icon: 'together', label: 'Stop sharing it with me…', description: `Keep it as a playlist of your own, without ${share.owner.title}’s changes`, onSelect: () => leaveDialog(share, { onChange: sharingChanged }) }];
     }
     if (pl.smart || (pl.playlistType || 'audio') !== 'audio') return [];
     return [
       share
-        ? { icon: 'together', label: 'Sharing…', description: shareLine(share), onSelect: () => openShareDialog(pl, { onChange: refresh }) }
-        : { icon: 'together', label: 'Share with friends…', description: 'Friends get a copy that stays in sync with yours', onSelect: () => openShareDialog(pl, { onChange: refresh }) },
+        ? { icon: 'together', label: 'Sharing…', description: shareLine(share), onSelect: () => openShareDialog(pl, { onChange: sharingChanged }) }
+        : { icon: 'together', label: 'Share with friends…', description: 'Friends get a copy that stays in sync with yours', onSelect: () => openShareDialog(pl, { onChange: sharingChanged }) },
     ];
   };
   const menu = iconButton('more', 'More options', () =>
@@ -1403,7 +1413,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
         pl.smart ? h('div.hero-meta', null, 'Smart playlist') : null,
         share
           ? share.role === 'owner'
-            ? h('button.hero-meta.share-line.link-btn', { type: 'button', onclick: () => openShareDialog(pl, { onChange: refresh }) }, icon('together', 18), h('span', null, shareLine(share)))
+            ? h('button.hero-meta.share-line.link-btn', { type: 'button', onclick: () => openShareDialog(pl, { onChange: sharingChanged }) }, icon('together', 18), h('span', null, shareLine(share)))
             : h('div.hero-meta.share-line', null, icon('together', 18), h('span', null, shareLine(share)))
           : null,
         actionButtons([
@@ -1441,8 +1451,17 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   // again if there were any).
   if (share) syncShare(share).catch(() => {});
 
+  // (Only an entry Plex gave its id for, in the playlist, can be moved or
+  // removed: the id says which. Moved after one, it's the nearest above
+  // that has one.)
+  const hasPid = (r) => /^\d+$/.test(r?.dataset.pid || '');
+  const pidBefore = (r) => {
+    for (let x = r.previousElementSibling; x; x = x.previousElementSibling) if (hasPid(x)) return x.dataset.pid;
+    return null;
+  };
+
   function controls(r) {
-    if (editing) addEditControls(r, `“${r.dataset.title}” from the playlist`, removeRow);
+    if (editing && hasPid(r)) addEditControls(r, `“${r.dataset.title}” from the playlist`, removeRow);
     else removeEditControls(r);
   }
 
@@ -1451,6 +1470,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       // Locked: the way in, for anyone looking here to remove a track.
       return canEdit() ? [{ icon: 'unlock', label: 'Edit playlist', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }] : [];
     }
+    if (!hasPid(r)) return [];
     return [
       r !== rows()[0] && { icon: 'moveTop', label: 'Move to top', onSelect: () => moveTo(r, 'top') },
       r !== rows().at(-1) && { icon: 'arrowDown', label: 'Move to bottom', onSelect: () => moveTo(r, 'bottom') },
@@ -1495,7 +1515,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
 
   async function removeRow(r) {
     const next = r.nextElementSibling;
-    const prevPid = r.previousElementSibling?.dataset.pid || null;
+    const prevPid = pidBefore(r);
     r.remove();
     setCount(total - 1);
     try {
@@ -1528,7 +1548,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       changed();
     } catch (err) {
       toast(failMessage(err, 'playlist'));
-      refresh();
+      reload();
     }
   }
 
@@ -1538,34 +1558,34 @@ export async function playlistView({ el, params, onDispose, onHide }) {
         list.prepend(r);
         await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, null);
       } else if (pager?.done) {
-        const last = rows().at(-1);
+        const last = rows().filter((x) => x !== r && hasPid(x)).at(-1);
         list.append(r);
-        await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, last.dataset.pid);
+        await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, last?.dataset.pid || null);
       } else {
         // Not all of it is loaded: move it after the last entry, then load
-        // the page again.
+        // the list again.
         const { items } = await s.playlistItems(pl.ratingKey, { start: Math.max(0, total - 1), size: 1 });
         await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, items.at(-1)?.playlistItemID || null);
-        refresh();
+        changed();
+        reload();
         return;
       }
       changed();
     } catch (err) {
       toast(failMessage(err, 'playlist'));
-      refresh();
+      reload();
     }
   }
 
   enableDrag(list, {
     item: '.track',
     onDrop: async ({ item }) => {
-      const prev = item.previousElementSibling;
       try {
-        await s.movePlaylistItem(pl.ratingKey, item.dataset.pid, prev?.dataset.pid || null);
+        await s.movePlaylistItem(pl.ratingKey, item.dataset.pid, pidBefore(item));
         changed();
       } catch (err) {
         toast(failMessage(err, 'playlist'));
-        refresh();
+        reload();
       }
     },
   });
