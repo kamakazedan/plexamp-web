@@ -2651,6 +2651,9 @@ class Player extends EventTarget {
     this.switching = playing;
     deck.el.src = src.url;
     deck.el.load();
+    // (From the network now, not memory: what was loaded ahead for it isn't
+    // this deck's any more.)
+    deck.prefetched = deck.recording = null;
     this.setPendingSeek(at);
     if (playing) deck.el.play()?.catch((err) => this.onPlayError(err));
     return true;
