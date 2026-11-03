@@ -143,6 +143,11 @@ the app with a large library: long grids, big playlists and memory use.
 also serves HTTPS on port 32443 with that certificate (for trying the
 container with an https:// PLEX_SERVER_URL; a real server's certificate is
 for its plex.direct name).
+
+It listens on 127.0.0.1 only (its /__mock/ switches need no token), and
+its player too. --host 0.0.0.0 has it listen on every address, for
+containers to reach it (the tests run it in one); its player then says it's
+at this machine's address on its network.
 """
 
 import base64
@@ -178,6 +183,8 @@ def flag_value(name, default):
 
 BIG = flag_value('--big', 0)
 PORT = int(next((a for i, a in enumerate(sys.argv[1:], 1) if a.isdigit() and sys.argv[i - 1] not in ('--big', '--tls')), 32400))
+# Where it listens (see the top): 127.0.0.1, unless --host says otherwise.
+HOST = sys.argv[sys.argv.index('--host') + 1] if '--host' in sys.argv[:-1] else '127.0.0.1'
 TLS = None
 if '--tls' in sys.argv:
     _i = sys.argv.index('--tls')
@@ -2688,19 +2695,22 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True  # long-lived WebSocket and event stream threads don't block exit
 
 
-PLAYER_ADDRESS = private_ip()
+# (The player is where it listens: on every address, at this machine's on
+# its network.)
+PLAYER_ADDRESS = private_ip() if HOST == '0.0.0.0' else HOST
 
 if __name__ == '__main__':
-    print(f'Mock Plex server on http://127.0.0.1:{PORT} '
+    where = f'port {PORT} on every address' if HOST == '0.0.0.0' else f'http://{HOST}:{PORT}'
+    print(f'Mock Plex server on {where} '
           f'({len(artists)} artists, {len(albums)} albums, {len(tracks)} tracks, {len(playlists)} playlists); '
           f'player "{PLAYER["name"]}" on http://{PLAYER_ADDRESS}:{PLAYER_PORT}', flush=True)
-    threading.Thread(target=Server(('0.0.0.0', PLAYER_PORT), PlayerHandler).serve_forever, daemon=True).start()
+    threading.Thread(target=Server((HOST, PLAYER_PORT), PlayerHandler).serve_forever, daemon=True).start()
     if TLS:
         import ssl
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(TLS[1], TLS[2])
-        secure = Server(('0.0.0.0', TLS[0]), Handler)
+        secure = Server((HOST, TLS[0]), Handler)
         secure.socket = context.wrap_socket(secure.socket, server_side=True)
         print(f'  and https on port {TLS[0]}', flush=True)
         threading.Thread(target=secure.serve_forever, daemon=True).start()
-    Server(('0.0.0.0', PORT), Handler).serve_forever()
+    Server((HOST, PORT), Handler).serve_forever()

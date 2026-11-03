@@ -32,12 +32,15 @@ cleanup() {
 trap cleanup EXIT
 cleanup
 
+# (On every address in its container, so the apps reach it by its name, and
+# this machine at the port given to it on 127.0.0.1.)
 mock() { # name port script args...
     name="$1"
     port="$2"
-    shift 2
+    script="$3"
+    shift 3
     docker run -d --name "$name" --network "$NET" -p "127.0.0.1:$port:$port" -v "$ROOT/dev:/dev-scripts:ro" "$PY" \
-        python "/dev-scripts/$@" >/dev/null
+        python "/dev-scripts/$script" --host 0.0.0.0 "$@" >/dev/null
 }
 
 # In GitHub Actions, a problem also becomes an annotation on the run's

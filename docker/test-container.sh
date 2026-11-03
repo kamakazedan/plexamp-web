@@ -82,8 +82,8 @@ wait_service() { # container
 }
 
 docker network create "$NET" >/dev/null
-docker run -d --name pw-plex --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --quiet >/dev/null
-docker run -d --name pw-ollama --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-ollama.py --port 11434 --quiet >/dev/null
+docker run -d --name pw-plex --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --host 0.0.0.0 --quiet >/dev/null
+docker run -d --name pw-ollama --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-ollama.py --port 11434 --host 0.0.0.0 --quiet >/dev/null
 wait_http pw-plex "http://pw-plex:32400/identity"
 wait_http pw-ollama "http://pw-ollama:11434/api/version"
 OLLAMA_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' pw-ollama)"
@@ -516,7 +516,7 @@ c "http://pw-plex:32400/__mock/config?open=0&honour=0&tv=up" >/dev/null
 # nginx takes turns between them, so the server can't be asked about each
 # request: only the owner gets through, and the log says why.
 for m in pw-plex-m1 pw-plex-m2; do
-    docker run -d --name "$m" --network "$NET" --network-alias pw-plex-multi -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --quiet >/dev/null
+    docker run -d --name "$m" --network "$NET" --network-alias pw-plex-multi -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --host 0.0.0.0 --quiet >/dev/null
 done
 wait_http pw-plex-m1 "http://pw-plex-m1:32400/identity"
 wait_http pw-plex-m2 "http://pw-plex-m2:32400/identity"
@@ -600,9 +600,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERTS/self.key" -out "$CERTS
 chmod 755 "$CERTS"
 chmod 644 "$CERTS"/*
 docker run -d --name pw-plex-tls --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" -v "$CERTS:/certs:ro" "$PY" \
-    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/server.pem /certs/server.key --quiet >/dev/null
+    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/server.pem /certs/server.key --host 0.0.0.0 --quiet >/dev/null
 docker run -d --name pw-plex-self --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" -v "$CERTS:/certs:ro" "$PY" \
-    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/self.pem /certs/self.key --quiet >/dev/null
+    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/self.pem /certs/self.key --host 0.0.0.0 --quiet >/dev/null
 wait_http pw-plex-tls "http://pw-plex-tls:32400/identity"
 wait_http pw-plex-self "http://pw-plex-self:32400/identity"
 ip_of() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"; }
