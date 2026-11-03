@@ -1369,6 +1369,55 @@ test('MusicBrainz features: albums not known yet are looked up in the background
   }
 });
 
+test('MusicBrainz features: albums waited for are looked at again alone, and an artist\'s titles are worked out once for their list, with the same answers', async () => {
+  // (Slower than the request waits: what isn't known stays pending.)
+  const fetchImpl = async () => (await sleep(1500), jsonAnswer({ artists: [] }));
+  const kept = new MBKept();
+  const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(kept);
+  const g = (n, title, primary = 'Album', date = '2001-01-01') => ({ id: MB_ID(1000 + n), title, primary, secondary: [], date });
+  const groups = [
+    g(1, 'Rumours', 'Album', '1977-02-04'),
+    g(2, 'Rumours', 'Album', '2004-03-22'),
+    g(3, 'Tusk'),
+    g(4, 'Tusk', 'EP'),
+    g(5, 'Out of Space', 'Single'),
+    g(6, 'Mirage (Deluxe Edition)'),
+    g(7, 'Then Play On'),
+    g(8, 'Penguin'),
+    ...Array.from({ length: 490 }, (_, i) => g(100 + i, `Some Album Title Number ${i} (Deluxe Edition)`)),
+  ];
+  kept.set('artist|prolific artist', { id: MB_ID(1), name: 'Prolific Artist', aliases: [], genres: [] });
+  kept.set(`groups|${MB_ID(1)}`, { capped: true, groups });
+  // The rules' own answers, from the whole list (releases.js), against what's found by the keys kept for it.
+  const titles = ['Rumours', 'Tusk', 'Tusk - EP', 'Mirage', 'Mirage (2016 Remaster)', 'Then Play Onn', 'Peguin', 'Out of Space', 'Some Album Title Number 7', 'Nothing Like It'];
+  for (const title of titles) {
+    for (const year of [null, 1977, 2004]) {
+      assert.deepEqual(mb.knownAlbum('Prolific Artist', title, { year }), matchGroup(groups, title, null, year), `${title} ${year}`);
+      for (const tracks of [3, 10]) assert.deepEqual(mb.knownAlbum('Prolific Artist', title, { year, strict: true, tracks }), exactAlbum(groups, title, { year, tracks }), `${title} ${year} ${tracks} (strict)`);
+    }
+  }
+  assert.equal(mb.knownAlbum('Prolific Artist', 'Penguin', { albumId: MB_ID(1003) }).title, 'Tusk', 'Plex\'s id for it first');
+  // 199 albums not among the artist's 500, one that is, and one by an artist not known yet: the first look at them...
+  const items = [
+    ...Array.from({ length: 199 }, (_, i) => ({ artist: 'Prolific Artist', title: `Not Here At All ${i}`, year: 2001, tracks: 10 })),
+    { artist: 'Prolific Artist', title: 'Some Album Title Number 7', year: 2001, tracks: 10 },
+    { artist: 'Someone New', title: 'Anything', year: 2001, tracks: 10 },
+  ];
+  let started = Date.now();
+  await mb.albums(items, { strict: true });
+  // (Each worked an album's title out for every one of the artist's release groups again: 0.6 s.)
+  assert.ok(Date.now() - started < 300, `${Date.now() - started} ms`);
+  // ...and while one's waited for, only it is looked at again (all were, every 200 ms).
+  let looked = 0;
+  const knownAlbum = mb.knownAlbum.bind(mb);
+  mb.knownAlbum = (...args) => ((looked += 1), knownAlbum(...args));
+  started = Date.now();
+  const out = await mb.albums(items, { waitMs: 1000, who: 'user|1' });
+  assert.ok(Date.now() - started >= 900);
+  assert.deepEqual([out.slice(0, 199).every((x) => x === null), out[199]?.id, out[200]], [true, MB_ID(1107), 'pending']);
+  assert.ok(looked <= items.length + 1000 / MB_ADVANCED_LIMITS.pendingMs + 1, `${looked}`);
+});
+
 test('MusicBrainz features: what\'s looked up is kept in a file only the service can read, for a month, and read back checked', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pw-mb-'));
   try {

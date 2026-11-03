@@ -710,13 +710,13 @@ export class MusicBrainz {
             this.done(key);
             continue;
           }
-          // MusicBrainz busy or out of reach: a rest, and again (three
+          // MusicBrainz busy or out of reach: a rest, and again (`tries`
           // times at most, each to the back of the queue).
-          this.todo.delete(key);
           it.tries += 1;
-          if (it.tries < 3) this.todo.set(key, it);
-          else {
+          if (it.tries < MB_ADVANCED_LIMITS.tries) {
+            this.todo.delete(key);
             this.todo.set(key, it);
+          } else {
             this.done(key);
             this.log?.debug(`musicbrainz: gave up on "${it.title}" by ${it.artist}: ${err.message}`);
           }
@@ -736,21 +736,21 @@ export class MusicBrainz {
   // artist's and the album's MusicBrainz ids, where Plex has them, so no
   // search is needed, how many tracks Plex has of it, and with `check`,
   // those tracks.) `strict` and `check`: as album has them.
+  // While it waits, only those still pending are looked at again.
   async albums(items, { genres = false, waitMs = 0, signal, who = '', strict = false, check = false } = {}) {
     const bySearch = (it) => !MBID.test(String(it.artistId)) || this.had(`artistid|${it.artistId}`) === null;
     const how = (it) => ({ genres, year: it.year, id: it.artistId, albumId: it.albumId, strict, tracks: it.tracks, check, trackList: it.trackList || null });
-    const answer = () =>
-      items.map((it) => {
-        const v = this.knownAlbum(it.artist, it.title, how(it));
-        if (v !== undefined) return v;
-        return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
-      });
-    let out = answer();
+    const answer = (it) => {
+      const v = this.knownAlbum(it.artist, it.title, how(it));
+      if (v !== undefined) return v;
+      return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
+    };
+    let out = items.map(answer);
     out.forEach((v, i) => v === 'pending' && this.later(items[i].artist, items[i].title, { ...how(items[i]), who }));
     const until = Date.now() + Math.max(0, Math.min(Number(waitMs) || 0, MB_ADVANCED_LIMITS.waitMs));
     while (out.includes('pending') && Date.now() < until && !signal?.aborted) {
-      await new Promise((r) => setTimeout(r, 200));
-      out = answer();
+      await new Promise((r) => setTimeout(r, MB_ADVANCED_LIMITS.pendingMs));
+      out = out.map((v, i) => (v === 'pending' ? answer(items[i]) : v));
     }
     return out;
   }
@@ -779,6 +779,8 @@ export const MB_ADVANCED_LIMITS = {
   namesakes: 3, // other artists of an artist's name, looked at for their page
   artistMs: 30000, // how long one artist's lookups may take for the app
   restMs: 30000, // after MusicBrainz doesn't answer, in the background
+  tries: 3, // ...and what's looked up there is tried this many times at most
+  pendingMs: 200, // how often what a request from the app waits for is looked at again
 };
 
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -857,9 +859,10 @@ function cleanNamesake(a) {
 // most (see checkedAlbum, which goes by their tracks).
 function sameTitled(groups, title) {
   const want = exactKey(title);
-  if (!want) return [];
-  return (Array.isArray(groups) ? groups : [])
-    .filter((g) => g && exactKey(g.title) === want)
+  if (!want || !Array.isArray(groups)) return [];
+  const keys = titleKeys(groups, 'exact');
+  return groups
+    .filter((g, i) => g && keys[i] === want)
     .sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'))
     .slice(0, 3);
 }
@@ -895,11 +898,37 @@ function remembered(map, key, v, most) {
   return v;
 }
 
-// An album's release group among its artist's (see MusicBrainz album).
+// A list of release groups' titles as they're matched (`kind`: 'album',
+// as releases.js albumKey has them, or 'exact', as exactKey does), in
+// order: worked out once for each list as it's kept, not again for each
+// album looked for among them, each time it's looked for.
+const keysOf = new WeakMap(); // a list of release groups -> { album, exact }
+function titleKeys(groups, kind) {
+  let keys = keysOf.get(groups);
+  if (!keys) keysOf.set(groups, (keys = {}));
+  keys[kind] ||= groups.map((g) => (kind === 'album' ? albumKey(g?.title) : exactKey(g?.title)));
+  return keys[kind];
+}
+
+// An album's release group among its artist's (see MusicBrainz album): by
+// the rules in releases.js, given those of the artist's that could be it (by
+// their keys, worked out once: see titleKeys), which come out the same.
 function pickAlbum(groups, title, { year = null, albumId = null, strict = false, tracks = 0 } = {}) {
   const id = MBID.test(String(albumId)) ? albumId : null;
-  if (strict) return exactAlbum(groups, title, { id, year, tracks });
-  return (id && groups.find((g) => g?.id === id)) || matchGroup(groups, title, null, year);
+  if (strict) {
+    // (Plex's id for it, or its exact title.)
+    const want = exactKey(title);
+    const keys = titleKeys(groups, 'exact');
+    return exactAlbum(groups.filter((g, i) => (id && g?.id === id) || (want && keys[i] === want)), title, { id, year, tracks });
+  }
+  const byId = id && groups.find((g) => g?.id === id);
+  if (byId) return byId;
+  // (Its title, or else a title near it.)
+  const want = albumKey(title);
+  if (!want) return null;
+  const keys = titleKeys(groups, 'album');
+  const same = groups.filter((g, i) => keys[i] === want);
+  return matchGroup(same.length ? same : groups.filter((g, i) => sameTitle(keys[i], want)), title, null, year);
 }
 
 // A release group as it's kept, or null.
@@ -939,17 +968,24 @@ function topGenres(list) {
     .map((g) => text(genreName(g.name), 60));
 }
 
-// A kept answer, checked as it's read back (undefined: it doesn't check out).
 // A list of release groups as it's kept: as it is, or (more than were
 // asked for) { capped: true, groups }. As releaseGroups gives it: the list,
-// `capped` where it is.
+// `capped` where it is (the same list each time, for what's kept: see
+// titleKeys).
+const listed = new WeakMap(); // { capped, groups } as kept -> the list
 function groupList(v) {
   if (Array.isArray(v)) return v;
-  const list = Array.isArray(v?.groups) ? v.groups.slice() : [];
-  if (v?.capped === true) list.capped = true;
+  if (!v || typeof v !== 'object') return [];
+  let list = listed.get(v);
+  if (!list) {
+    list = Array.isArray(v.groups) ? v.groups.slice() : [];
+    if (v.capped === true) list.capped = true;
+    listed.set(v, list);
+  }
   return list;
 }
 
+// A kept answer, checked as it's read back (undefined: it doesn't check out).
 function cleanKept(key, v) {
   if (key.startsWith('artist|') || key.startsWith('artistid|')) return v === null ? null : cleanArtist(v) || undefined;
   if (key.startsWith('groups|')) {
