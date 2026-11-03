@@ -68,6 +68,9 @@
 #                       service's alone.
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
+#
+# A setting it doesn't know, with a name like one of these, stops the
+# container, saying what it's called (see "settings it doesn't know").
 set -eu
 
 HTML_DIR="${HTML_DIR:-/usr/share/nginx/html}"
@@ -265,6 +268,90 @@ prepare_upstream() {
 
 # A URL with any user:password@ hidden, for the log.
 safe_url() { printf '%s' "$1" | sed -E 's#^(([A-Za-z]+://)?)[^/@]*@#\1***@#'; }
+
+# ---------- settings it doesn't know ----------
+
+# A setting whose name this doesn't know (a misspelt one, say) would do
+# nothing, unseen. One with a name like the app's own stops the container,
+# saying what it's called. The names it knows are those this script reads
+# (as ${NAME:-...} or ${NAME:+...}), so the list is the script itself, and
+# what it suggests are those described at the top. PLEX_ and OLLAMA_ names
+# are only warned of: Plex's and Ollama's own containers have settings of
+# theirs (PLEX_CLAIM, OLLAMA_HOST), and a stack can give all its
+# containers the same settings file.
+SCRIPT="$0"
+# shellcheck disable=SC2016 # (a $ to be found, not expanded)
+known_settings="$(grep -o '\${[A-Z][A-Z0-9_]*:[-+]' "$SCRIPT" 2>/dev/null | sed -e 's/^\${//' -e 's/:.$//' | sort -u | tr '\n' ' ' || true)"
+described_settings="$(sed -n '1,/^set -eu$/s/^#   \([A-Z][A-Z0-9_]*\) .*/\1/p' "$SCRIPT" 2>/dev/null | tr '\n' ' ' || true)"
+# (Only when this is the script itself, as it always is: never every name
+# taken for unknown.)
+case " $known_settings " in
+    *" PLEX_SERVER_URL "*)
+        unknown="$(awk -v known="$known_settings" -v described="$described_settings" '
+            # How many letters to change, add or take out to make one name the other.
+            function dist(a, b,    la, lb, i, j, c, x, prev, cur) {
+                la = length(a)
+                lb = length(b)
+                for (j = 0; j <= lb; j++) prev[j] = j
+                for (i = 1; i <= la; i++) {
+                    cur[0] = i
+                    for (j = 1; j <= lb; j++) {
+                        c = substr(a, i, 1) == substr(b, j, 1) ? 0 : 1
+                        x = prev[j - 1] + c
+                        if (prev[j] + 1 < x) x = prev[j] + 1
+                        if (cur[j - 1] + 1 < x) x = cur[j - 1] + 1
+                        cur[j] = x
+                    }
+                    for (j = 0; j <= lb; j++) prev[j] = cur[j]
+                }
+                return prev[lb]
+            }
+            BEGIN {
+                n = split(known, k, " ")
+                for (i = 1; i <= n; i++) is_known[k[i]] = 1
+                m = split(described, d, " ")
+                for (name in ENVIRON) {
+                    if (name in is_known) continue
+                    if (name ~ /^(PLEX|OLLAMA)_/) kind = "warn"
+                    else if (name ~ /^(MUSICBRAINZ|SPOTIFY|OFFLINE|SYNC|PLAYLIST|PLAY|WEBSOCKETS|CASTING|PW_SERVICE)_/) kind = "stop"
+                    else continue
+                    # A near miss (a letter or few), or the start of one, is
+                    # suggested; otherwise the settings that start alike.
+                    best = ""
+                    low = 4
+                    alike = ""
+                    first = substr(name, 1, index(name, "_"))
+                    for (i = 1; i <= m; i++) {
+                        x = dist(name, d[i])
+                        if (index(d[i], name) == 1 && x > 1) x = 1
+                        if (x < low) { low = x; best = d[i] }
+                        if (index(d[i], first) == 1) alike = alike (alike == "" ? "" : ", ") d[i]
+                    }
+                    print kind, name, (best == "" ? "-" : best), (alike == "" ? "-" : alike)
+                }
+            }')"
+        stops=""
+        while read -r kind name suggestion alike; do
+            [ -n "$name" ] || continue
+            if [ "$suggestion" != - ]; then
+                hint="did you mean $suggestion?"
+            elif [ "$alike" != - ]; then
+                hint="those like it are $alike."
+            else
+                hint="they're listed in docs/configuration.md."
+            fi
+            if [ "$kind" = warn ]; then
+                say "$name isn't a setting here, so it's left aside: fine if it's for another container (Plex's or Ollama's own, say), or else $hint" >&2
+            else
+                echo "plexamp-web: $name isn't a setting: $hint" >&2
+                stops="$stops $name"
+            fi
+        done <<UNKNOWN
+$unknown
+UNKNOWN
+        [ -z "$stops" ] || fail "rename or take out:$stops (the container stops, so that nothing you've set is left aside unseen)"
+        ;;
+esac
 
 PMS_CONF="$CONF_DIR/pms-proxy.inc"
 PMS_PROBE_CONF="$CONF_DIR/pms-probe.inc"
