@@ -21,7 +21,8 @@
 // 'real'). Ones listed without being checked (before there was a
 // MusicBrainz to ask) can be checked from the list (checkMissingOnMusicBrainz).
 import { app } from './state.js';
-import { songInLibrary, artistInLibrary, aiSettings } from './ai.js';
+import { chunks } from './plex.js';
+import { songInLibrary, artistInLibrary, aiSettings, mapLimit } from './ai.js';
 import { MISSING_LIMITS, MISSING_LISTS, keyOf, idOf, listId, sourceOf, applyNote, applyForget, applyClear, applyVerdicts, applyRestore } from './missinglist.js';
 import { loadMissing as load, saveMissing as save, queueMissing, missingOthers, editMissingOthers, ownsServer, syncs } from './missingsync.js';
 import { aliasesOf } from './mb.js';
@@ -38,7 +39,6 @@ const libraryName = (src = app.source) => (src ? `${src.sectionTitle} (${src.ser
 const KEYS = 1000;
 const ITEMS = 250;
 const ENTRIES = 200;
-const chunks = (list, n) => Array.from({ length: Math.ceil(list.length / n) }, (_, i) => list.slice(i * n, (i + 1) * n));
 
 // Whether what's listed for the server in use is everyone's: the player
 // keeps them for each account, and says this one owns the server. Then
@@ -92,7 +92,13 @@ export function missingList() {
   return [...rows.values()].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'artist' ? -1 : 1) || by.compare(a.artist, b.artist) || by.compare(a.title || '', b.title || ''));
 }
 
-export const missingCount = () => missingList().length;
+// (How many there are, as missingList has them: without putting them in
+// order.)
+export function missingCount() {
+  const ids = new Set(load().filter((m) => sameServer(m)).map(idOf));
+  for (const o of missingOthers(serverOf())) ids.add(idOf(o));
+  return ids.size;
+}
 // This account's own, on the server in use.
 export const myMissingCount = () => load().filter((m) => sameServer(m)).length;
 
@@ -221,23 +227,28 @@ export function clearMissing() {
 // Looks for each of the server in use's again, in the library it was
 // missing from (after adding music), and lets go of what's there now: by
 // its artist's name, and (with the player's MusicBrainz features: see
-// mb.js) the other names MusicBrainz has for them. Resolves to how many
-// were found.
+// mb.js) the other names MusicBrainz has for them. A few at a time
+// (CHECK_AT_ONCE). Resolves to how many were found.
+const CHECK_AT_ONCE = 4;
 export async function checkMissingAgain({ signal, onProgress } = {}) {
   const todo = missingList();
   const found = [];
   let n = 0;
   const here = (m, artist, section) => (m.kind === 'artist' ? artistInLibrary(artist, signal, section) : songInLibrary({ artist, title: m.title }, signal, { section }));
-  for (const m of todo) {
-    if (signal?.aborted) break;
-    const section = m.section || app.source.sectionKey;
-    let there = await here(m, m.artist, section);
-    for (const alias of there || !m.artist ? [] : (await aliasesOf(m.artist)).slice(0, 3)) {
-      if (signal?.aborted || (there = await here(m, alias, section))) break;
-    }
-    if (there) found.push(idOf(m));
-    onProgress?.(++n, todo.length);
-  }
+  await mapLimit(
+    todo,
+    CHECK_AT_ONCE,
+    async (m) => {
+      const section = m.section || app.source.sectionKey;
+      let there = await here(m, m.artist, section);
+      for (const alias of there || !m.artist ? [] : (await aliasesOf(m.artist)).slice(0, 3)) {
+        if (signal?.aborted || (there = await here(m, alias, section))) break;
+      }
+      if (there) found.push(idOf(m));
+      onProgress?.(++n, todo.length);
+    },
+    { signal },
+  );
   forget(found);
   return found.length;
 }

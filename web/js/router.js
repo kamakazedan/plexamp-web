@@ -19,7 +19,7 @@
 // device and gone when they sign out or switch user, as everything kept for
 // them is. Going back to someone else's page shows Home instead, so nobody
 // finds where the last person had been.
-import { store } from './plex.js';
+import { store, randomHex } from './plex.js';
 
 const routes = [];
 const cache = new Map(); // history key -> { el, hash, disposers }, least recently shown first
@@ -58,7 +58,7 @@ function ownMark() {
   }
   const kept = store.get(MARK);
   if (typeof kept === 'string' && /^[0-9a-f]{16}$/.test(kept)) return (mark = kept);
-  mark = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+  mark = randomHex(8);
   markKept = store.set(MARK, mark);
   return mark;
 }

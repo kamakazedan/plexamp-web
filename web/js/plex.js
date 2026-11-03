@@ -79,8 +79,9 @@ export const store = {
   },
 };
 
-// 16 random hex characters.
-const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+// Twice `bytes` random hex characters (16 to begin with).
+export const randomHex = (bytes = 8) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
+const randomId = () => randomHex(8);
 
 export function clientId() {
   let id = store.get('clientId');

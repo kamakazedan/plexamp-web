@@ -23,7 +23,7 @@
 // account's stays with the player. Everyone else's, for the server's owner,
 // is only ever in memory.
 import { app, on, emit, MISSING_OVER, plexAccount } from './state.js';
-import { store } from './plex.js';
+import { store, randomHex } from './plex.js';
 import { applyOp, idOf, listId, shortList, withShortLists, sourceOf } from './missinglist.js';
 import { serviceFetch } from './service.js';
 
@@ -108,7 +108,7 @@ const keepSynced = (s) => store.set(SYNCED, s);
 export const syncs = (server = serverNow()) => missingSyncOn() && server === serverNow();
 
 // 12 random hex characters: a change, by name.
-export const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(16).padStart(2, '0')).join('');
+export const randomId = () => randomHex(6);
 
 // ---------- changes still to go ----------
 

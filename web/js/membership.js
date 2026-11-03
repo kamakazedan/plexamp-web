@@ -183,14 +183,6 @@ function theirs(owners, me, want) {
   return n;
 }
 
-async function eachLimited(items, limit, fn) {
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) await fn(items[next++]);
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-}
-
 // ---------- smart playlists ----------
 
 // Query keys that shape a smart playlist without narrowing what's in it.
@@ -384,9 +376,7 @@ async function readLists(lists, section, { signal, onProgress, smartTtl, each })
   const aborted = abortedError;
   const said = lists.map(() => 'unknown');
   const smart = lists.map((x, i) => i).filter((i) => lists[i].kind === 'playlist' && isSmart(lists[i].list));
-  await eachLimited(smart, 3, async (i) => {
-    if (!signal?.aborted) said[i] = (await byRules(lists[i].list, section, signal)) || 'unknown';
-  });
+  await mapLimit(smart, 3, async (i) => (said[i] = (await byRules(lists[i].list, section, signal)) || 'unknown'), { signal });
   if (signal?.aborted) throw aborted();
   const skipped = [];
   const todo = lists.filter((x, i) => {
@@ -401,19 +391,23 @@ async function readLists(lists, section, { signal, onProgress, smartTtl, each })
   });
   let done = 0;
   onProgress?.(0, todo.length);
-  await eachLimited(todo, 3, async (x) => {
-    if (signal?.aborted) return;
-    let got = null;
-    try {
-      got = await contents(x.kind, x.list, signal, { smartTtl });
-    } catch {
-      if (signal?.aborted) return;
-      // A list that went away, or couldn't be read: left out.
-    }
-    if (got) each(x, got);
-    done++;
-    if (!signal?.aborted) onProgress?.(done, todo.length);
-  });
+  await mapLimit(
+    todo,
+    3,
+    async (x) => {
+      let got = null;
+      try {
+        got = await contents(x.kind, x.list, signal, { smartTtl });
+      } catch {
+        if (signal?.aborted) return;
+        // A list that went away, or couldn't be read: left out.
+      }
+      if (got) each(x, got);
+      done++;
+      if (!signal?.aborted) onProgress?.(done, todo.length);
+    },
+    { signal },
+  );
   if (signal?.aborted) throw aborted();
   return { skipped, checked: todo.length };
 }
