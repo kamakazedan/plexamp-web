@@ -101,7 +101,7 @@ function accountView({ el }) {
         'div.account-sub',
         null,
         auth.offline
-          ? 'Plex’s sign-in isn’t answering, so you’re signed in with the offline password, as the server’s owner. Play Together, your devices and shared playlists need a Plex sign-in. You’ll be signed out once Plex is back.'
+          ? 'Signed in with the offline password, as the server’s owner, until Plex is back.'
           : auth.manual
             ? 'Signed in with a server address and token'
             : 'Signed in with your Plex account',
@@ -617,11 +617,7 @@ const QUALITIES = [
 ];
 
 const FADES = [
-  [
-    'smart',
-    'Smart',
-    'Fades where the music ends, with albums gapless. Without Plex’s loudness analysis, at the very end.',
-  ],
+  ['smart', 'Smart', 'Fades where the music ends, and keeps albums gapless.'],
   ['always', 'Always', 'Fades between every track.'],
   ['off', 'Off', 'No fades.'],
 ];
@@ -748,7 +744,7 @@ function playbackView({ el }) {
       }),
       toggleRow({
         title: 'Skip tracks you’ve rated down',
-        subtitle: 'Leaves thumbs-down and one-star tracks out of radio, mixes, shuffles, Guest DJs and AI playlists.',
+        subtitle: 'Leaves them out of radio, mixes, shuffles, Guest DJs and AI playlists.',
         checked: app.settings.skipDisliked !== false,
         onChange: (v) => saveSettings({ skipDisliked: v }),
       }),
