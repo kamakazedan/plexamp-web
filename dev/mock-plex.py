@@ -69,15 +69,22 @@ testing, these endpoints need no token:
         smartcollection=1|0: a smart collection (Electronic picks) listed,
         whose items carry no tag for it, or not
     /__mock/add-artist?name=...[&eps=N][&noalbum=1][&albums=T:Y,...][&mb=0]
+                       [&format=Single][&tracks=T|T][&first=YYYY-MM-DD][&guids=1]
                                   adds an artist with an album and a track of
                                   their own (and N EPs, a track on each;
                                   noalbum: no album, only those; albums:
                                   albums of these titles and years instead,
                                   as a second artist of a name Plex made
-                                  from files tagged otherwise), without a
-                                  MusicBrainz id (mb=0: and the mock's
-                                  MusicBrainz doesn't have them, nor their
-                                  albums); ?remove=ID takes them away again
+                                  from files tagged otherwise; format: of
+                                  that kind; tracks: with tracks of these
+                                  titles; first: MusicBrainz has them first
+                                  out then), without a MusicBrainz id
+                                  (guids=1: with one for them and their
+                                  albums, as Plex has for those it's
+                                  matched, mbid=NAME: the artist's that of
+                                  another of that name; mb=0: and the mock's MusicBrainz
+                                  doesn't have them, nor their albums);
+                                  ?remove=ID takes them away again
                                   (and what was merged from them)
     /__mock/merges[?reset=1]      the merges made (PUT /library/metadata/ID/
                                   merge?ids=...: the server's admin's only)
@@ -296,6 +303,11 @@ for ai, (artist_idx, title, year, pal, sub, fmt) in enumerate(ALBUMS):
                              'bottomRight': lighten(pal[0], -0.1), 'bottomLeft': lighten(pal[0], -0.6)}],
         '_palette': pal,
     }
+    # (Plex's id for it on MusicBrainz, its release group's, as Plex has it
+    # with includeGuids=1. Not for Various Artists', nor for Interference:
+    # one Plex hasn't matched, found by its title.)
+    if artist['title'] != 'Various Artists' and title != 'Interference':
+        al['Guid'] = [{'id': 'mbid://' + mb_id('group|' + artist['title'] + '|' + title)}]
     items[k] = al
     albums.append(al)
     n = 5 + (ai % 4)
@@ -1236,6 +1248,8 @@ def add_album(title, untyped=False):
               thumb=f'/library/metadata/{k}/thumb/1', year=year, originallyAvailableAt=f'{year}-01-01',
               addedAt=int(time.time()), viewCount=0, lastViewedAt=None, leafCount=4, _palette=('402060', 'e0a0ff'))
     al.pop('lastViewedAt')
+    # (Plex's MusicBrainz id for it, its own release group's.)
+    al['Guid'] = [{'id': 'mbid://' + mb_id('group|' + artist['title'] + '|' + title)}]
     if untyped:
         al['Format'] = []
         al['Subformat'] = []
@@ -1592,6 +1606,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def send_json(self, mc, status=200, cors=True):
+        # (Items' ids elsewhere, MusicBrainz's, only with includeGuids=1, as
+        # Plex gives them.)
+        if isinstance(mc, dict) and isinstance(mc.get('Metadata'), list) and not self.path.startswith('/__mock/') and 'includeGuids=1' not in self.path:
+            mc = dict(mc, Metadata=[{k: v for k, v in m.items() if k != 'Guid'} if isinstance(m, dict) else m for m in mc['Metadata']])
         body = json.dumps({'MediaContainer': mc}).encode()
         self.send_response(status)
         if cors:
@@ -1707,18 +1725,18 @@ class Handler(BaseHTTPRequestHandler):
         MB_SEEN['asked'] = (MB_SEEN['asked'] + [self.path])[-500:]
         artists_ = {a['title'].lower() for a in artists} | {a.lower() for a in MB_EXTRA['artists']}
         # (A search, as a MusicBrainz without its search indexes answers
-        # one: no one at all. And Radiohead by id, as every MusicBrainz has
-        # them: what the player asks to see whether searching it works.)
+        # one: no one at all. And what the player asks to see whether
+        # searching it finds anything at all, of each kind: artists who are
+        # people, recordings and release groups of albums, any of them.)
         if query and MOCK['mbsearch'] == 'off':
             return self.send_json_plain({'count': 0, 'artists': [], 'recordings': [], 'release-groups': []})
-        if query.startswith('arid:'):
-            radiohead = 'a74b1b7f-71a5-4011-9441-d0b5e4122711'
-            if query != f'arid:{radiohead}':
-                return self.send_json_plain({'count': 0, 'artists': [], 'recordings': [], 'release-groups': []})
-            credit = [{'name': 'Radiohead', 'artist': {'id': radiohead, 'name': 'Radiohead'}}]
-            return self.send_json_plain({'count': 1, 'artists': [{'id': radiohead, 'name': 'Radiohead', 'score': 100}],
-                                         'recordings': [{'id': mb_id('recording|Creep'), 'title': 'Creep', 'score': 100, 'artist-credit': credit}],
-                                         'release-groups': [{'id': mb_id('group|Radiohead|OK Computer'), 'title': 'OK Computer', 'score': 100, 'artist-credit': credit}]})
+        if query in ('type:person', 'primarytype:album'):
+            first = mb_artists()[0]
+            credit = [{'name': first['name'], 'artist': {'id': first['id'], 'name': first['name']}}]
+            group = mb_groups(first['name'])[0]
+            return self.send_json_plain({'count': 1, 'artists': [dict(first, score=100)],
+                                         'recordings': [{'id': mb_id('recording|' + group['title']), 'title': group['title'], 'score': 100, 'artist-credit': credit}],
+                                         'release-groups': [dict(group, score=100, **{'artist-credit': credit})]})
         # (The MusicBrainz features: an artist by name or other name, looked
         # up by id, and their release groups, and a group's genres.)
         if p == '/ws/2/artist' and ' OR alias:' in query:
@@ -2144,6 +2162,12 @@ class Handler(BaseHTTPRequestHandler):
                      thumb=f'/library/metadata/{k}/thumb/1', art=f'/library/metadata/{k}/art/1', summary='')
             for f in ('Guid', 'Similar', 'Style'):
                 a.pop(f, None)
+            with_ids = q.get('guids', [''])[0] in ('1', 'true')
+            if with_ids:  # (mbid=...: another artist's MusicBrainz id, as Plex can have for one of a name)
+                a['Guid'] = [{'id': 'mbid://' + mb_id('artist|' + q.get('mbid', [name])[0])}]
+            fmt_asked = q.get('format', [''])[0] or None
+            titles_asked = [t for t in q.get('tracks', [''])[0].split('|') if t]
+            first_asked = q.get('first', [''])[0]
             no_mb = q.get('mb', ['1'])[0] == '0'
             if no_mb:
                 a['_noMB'] = True
@@ -2153,23 +2177,30 @@ class Handler(BaseHTTPRequestHandler):
             made = [] if q.get('noalbum', [''])[0] in ('1', 'true') else [(f'{name} Alone', 'Album', None)]
             made += [(f'{name} EP {n}', 'EP', None) for n in range(1, eps + 1)]
             if q.get('albums'):
-                made = [(t.rsplit(':', 1)[0], 'Album', int(t.rsplit(':', 1)[1])) for t in q['albums'][0].split(',') if ':' in t]
+                made = [(t.rsplit(':', 1)[0], fmt_asked or 'Album', int(t.rsplit(':', 1)[1])) for t in q['albums'][0].split(',') if ':' in t]
             for n, (title, fmt, year) in enumerate(made):
                 ak = key()
+                names = titles_asked or [f'{name} Song' if fmt == 'Album' else f'{title} Song']
                 al = dict(albums[0], ratingKey=ak, key=f'/library/metadata/{ak}/children', title=title, titleSort=title.lower(),
-                          parentRatingKey=k, parentTitle=name, parentThumb=a['thumb'], thumb=f'/library/metadata/{ak}/thumb/1', leafCount=1,
+                          parentRatingKey=k, parentTitle=name, parentThumb=a['thumb'], thumb=f'/library/metadata/{ak}/thumb/1', leafCount=len(names),
                           year=year or 2020 + n, originallyAvailableAt=f'{year or 2020 + n}-05-01', Format=[{'tag': fmt}], Subformat=[])
+                al.pop('Guid', None)
+                if with_ids:
+                    al['Guid'] = [{'id': 'mbid://' + mb_id('group|' + name + '|' + title)}]
+                if first_asked:
+                    MB_FIRST_DATES[title] = first_asked
                 if no_mb:
                     al['_noMB'] = True
                 items[ak] = al
                 albums.append(al)
-                tk = key()
-                tr = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', guid=track_guid(tk), title=f'{name} Song' if fmt == 'Album' else f'{title} Song',
-                          index=1, parentIndex=1, parentRatingKey=ak, parentTitle=al['title'], parentThumb=al['thumb'], grandparentRatingKey=k,
-                          grandparentTitle=name, grandparentThumb=a['thumb'])
-                tr.pop('originalTitle', None)
-                items[tk] = tr
-                tracks.append(tr)
+                for ti, track_title in enumerate(names):
+                    tk = key()
+                    tr = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', guid=track_guid(tk), title=track_title,
+                              index=ti + 1, parentIndex=1, parentRatingKey=ak, parentTitle=al['title'], parentThumb=al['thumb'], grandparentRatingKey=k,
+                              grandparentTitle=name, grandparentThumb=a['thumb'])
+                    tr.pop('originalTitle', None)
+                    items[tk] = tr
+                    tracks.append(tr)
             return self.send_json({'size': 1, 'Metadata': [public(a)]})
         if p == '/__mock/player':
             with PLAYER['lock']:

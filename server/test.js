@@ -11,7 +11,7 @@ import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
 import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS, MB_LIMITS, retryAfterMs } from './musicbrainz.js';
-import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, sameArtist, genericTitle, evidenceOf } from './releases.js';
+import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, asides, exactKey, exactGroup, exactAlbum, titlesAgree, sameAlbumTitle, sameVersion, versionedTracks, shortRelease, kindsAgree } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
@@ -969,6 +969,66 @@ test('MusicBrainz features: an album of a title the artist has more of, by the y
   assert.equal(asked.length, a, 'not asked about');
 });
 
+test('MusicBrainz features: for its year and genres to be fixed, an album is the very one or none (Plex\'s id for it among its artist\'s, or for an album proper its exact title, never a single\'s or an EP\'s)', async () => {
+  const B = MB_ID(8);
+  const asked = [];
+  const groups = [
+    { id: MB_ID(81), title: 'The Beat Goes On', 'primary-type': 'Single', 'secondary-types': [], 'first-release-date': '2002-03-01' },
+    { id: MB_ID(82), title: 'Gym Tonic', 'primary-type': 'Single', 'secondary-types': [], 'first-release-date': '1998-01-01' },
+    { id: MB_ID(83), title: 'Le Bal masqué', 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '2003-01-01' },
+    { id: MB_ID(84), title: 'Rock This Party (Everybody Dance Now)', 'primary-type': 'Single', 'secondary-types': [], 'first-release-date': '2006-06-01' },
+    { id: MB_ID(85), title: 'Paradise', 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '1998-05-01' },
+    { id: MB_ID(86), title: 'Night Owl', 'primary-type': 'EP', 'secondary-types': [], 'first-release-date': '2015-01-01' },
+  ];
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    asked.push(`${u.pathname}?${u.searchParams}`);
+    let body = {};
+    if (u.pathname === `/ws/2/artist/${B}`) body = { id: B, name: 'Bob Sinclar', aliases: [], genres: [] };
+    else if (u.pathname === '/ws/2/release-group' && u.searchParams.get('artist') === B) body = { 'release-group-count': groups.length, 'release-groups': groups };
+    else if (u.pathname.startsWith('/ws/2/release-group/')) body = { id: u.pathname.split('/').pop(), genres: [{ name: 'house', count: 3 }] };
+    else return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => body };
+  };
+  const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+  const strict = { id: B, strict: true };
+  // A remix single of the artist's single: not that single (as it was before 0.35.0, by its title without its asides)
+  assert.equal((await mb.album('Bob Sinclar', 'The Beat Goes On (Radio Edit) [The Cube Guys Remix]', { id: B })).date, '2002-03-01', 'as it was, for an album\'s kind');
+  assert.equal(await mb.album('Bob Sinclar', 'The Beat Goes On (Radio Edit) [The Cube Guys Remix]', { ...strict, year: 2019 }), null);
+  // A single, by its title alone: none (singles of a title come out again and again)
+  assert.equal(await mb.album('Bob Sinclar', 'Gym Tonic', { ...strict, year: 2021 }), null);
+  // ...but by Plex's id for it, that one, where the titles agree
+  assert.equal((await mb.album('Bob Sinclar', 'Gym Tonic', { ...strict, year: 2021, albumId: MB_ID(82) })).date, '1998-01-01');
+  assert.equal(await mb.album('Bob Sinclar', 'Gym Tonic (Club Mix)', { ...strict, year: 2021, albumId: MB_ID(82) }), null, 'not where the title says another recording');
+  // An album proper by its exact title (an edition's words aside)
+  assert.equal((await mb.album('Bob Sinclar', 'Le Bal Masque (Deluxe Edition)', { ...strict, year: 2011, tracks: 14 })).date, '2003-01-01');
+  assert.equal(await mb.album('Bob Sinclar', 'Le Bal Masque Remixed', { ...strict, year: 2011, tracks: 14 }), null);
+  // ...not a single or an EP of Plex's, by its title, as an album or an EP of that title (nor one Plex has no count of tracks for)
+  assert.equal(await mb.album('Bob Sinclar', 'Paradise', { ...strict, year: 2008, tracks: 3 }), null, 'a single, as the album of its title');
+  assert.equal(await mb.album('Bob Sinclar', 'Paradise', { ...strict, year: 2008 }), null);
+  assert.equal(await mb.album('Bob Sinclar', 'Night Owl', { ...strict, year: 2016, tracks: 9 }), null, 'nor as an EP');
+  assert.equal(await mb.album('Bob Sinclar', 'Paradise (2021 Version)', { ...strict, year: 2021, tracks: 12 }), null, 'nor another version of it');
+  // Plex's id for an album is matched here, not sent to find it; nor is its title
+  assert.ok(!asked.some((x) => x.includes(MB_ID(82)) || /Gym|Bal|Beat/i.test(decodeURIComponent(x))), asked.join(' '));
+  // The same for what's known without asking, and as the app asks
+  assert.equal(mb.knownAlbum('Bob Sinclar', 'Gym Tonic', { ...strict, year: 2021 }), null);
+  assert.equal(mb.knownAlbum('Bob Sinclar', 'Gym Tonic', { ...strict, year: 2021, albumId: MB_ID(82) }).date, '1998-01-01');
+  const got = await mb.albums(
+    [
+      { artist: 'Bob Sinclar', title: 'Gym Tonic', year: 2021, artistId: B },
+      { artist: 'Bob Sinclar', title: 'Gym Tonic', year: 2021, artistId: B, albumId: MB_ID(82) },
+      { artist: 'Bob Sinclar', title: 'Rock This Party (Everybody Dance Now)', year: 2021, artistId: B },
+      { artist: 'Bob Sinclar', title: 'Paradise', year: 2008, artistId: B, tracks: 2 },
+      { artist: 'Bob Sinclar', title: 'Paradise', year: 2008, artistId: B, tracks: 11 },
+    ],
+    { strict: true, genres: true, waitMs: 3000 },
+  );
+  assert.deepEqual(got.map((g) => g && g.date), [null, '1998-01-01', null, null, '1998-05-01']);
+  assert.deepEqual(got[1].genres, ['House']);
+  // Without `strict`, as it was (an album's kind, for Skip live tracks and demos)
+  assert.equal((await mb.albums([{ artist: 'Bob Sinclar', title: 'Gym Tonic', year: 2021, artistId: B }]))[0].date, '1998-01-01');
+});
+
 test('MusicBrainz features: when MusicBrainz doesn\'t answer, nothing new is asked of it for a minute (what\'s kept is still answered)', async () => {
   const { fetchImpl: answers } = fakeMusicBrainz();
   let down = false;
@@ -1162,7 +1222,8 @@ test('MusicBrainz features: what\'s looked up is kept in a file only the service
 });
 
 test('MusicBrainz features: a server of your own whose search finds no one isn\'t taken at its word: albums by Plex\'s MusicBrainz ids still, the rest unchecked, and nothing kept as not on MusicBrainz', async () => {
-  const CANARY = 'a74b1b7f-71a5-4011-9441-d0b5e4122711';
+  // (What's searched for to see whether searching finds anything at all: kinds MusicBrainz sorts everything into, nobody's music.)
+  const CHECKS = { '/ws/2/artist': 'type:person', '/ws/2/recording': 'primarytype:album', '/ws/2/release-group': 'primarytype:album' };
   let searchWorks = false;
   let groupsWork = true;
   const asked = [];
@@ -1173,9 +1234,9 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
     asked.push(query ? `search ${query}` : u.pathname);
     let body = {};
     if (u.pathname === '/ws/2/artist' && query) {
-      // (A search finds no one at all, unless it works: then Radiohead, and Sigur Rós by name.)
+      // (A search finds no one at all, unless it works: then anyone who's a person, and Sigur Rós by name.)
       body = { count: 0, artists: [] };
-      if (searchWorks && query === `arid:${CANARY}`) body = { count: 1, artists: [{ id: CANARY, name: 'Radiohead', score: 100 }] };
+      if (searchWorks && query === CHECKS[u.pathname]) body = { count: 1, artists: [{ id: MB_ID(2), name: 'Someone', score: 100 }] };
       else if (searchWorks && /Sigur/.test(query)) body = { count: 1, artists: [{ id: MB_ID(1), name: 'Sigur Rós', 'sort-name': 'Sigur Rós', score: 100 }] };
     } else if (u.pathname === `/ws/2/artist/${MB_ID(1)}`) {
       body = { id: MB_ID(1), name: 'Sigur Rós', 'sort-name': 'Sigur Rós', aliases: [], genres: [] };
@@ -1183,24 +1244,24 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
       const all = groupsOf[u.searchParams.get('artist')] || [];
       body = { 'release-group-count': all.length, 'release-groups': all };
     } else if (query && (u.pathname === '/ws/2/recording' || u.pathname === '/ws/2/release-group')) {
-      // (No one, unless it works: then Radiohead's, asked for by their id;
-      // release groups apart from recordings, `groupsWork`.)
+      // (Nothing, unless it works: then any album's; release groups apart
+      // from recordings, `groupsWork`.)
       const index = u.pathname === '/ws/2/recording' ? 'recordings' : 'release-groups';
       const works = index === 'recordings' ? searchWorks : searchWorks && groupsWork;
-      const theirs = works && query === `arid:${CANARY}`;
-      body = { [index]: theirs ? [{ id: MB_ID(index === 'recordings' ? 301 : 302), title: index === 'recordings' ? 'Creep' : 'OK Computer' }] : [] };
+      const any = works && query === CHECKS[u.pathname];
+      body = { [index]: any ? [{ id: MB_ID(index === 'recordings' ? 301 : 302), title: 'Anything' }] : [] };
     }
     return { ok: true, status: 200, json: async () => body };
   };
   const log = { warned: [], warn(m) { this.warned.push(m); }, info() {}, debug() {} };
   const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0, log, checkSearch: true }).advanced(new MBKept());
-  // By name: no one found, and searching finds no one at all (not even Radiohead): an error, nothing kept.
+  // By name: no one found, and searching finds no one at all (not even anyone who's a person): an error, nothing kept.
   await assert.rejects(mb.artistInfo('Sigur Rós'), (e) => e instanceof MusicBrainzError && e.searchBroken === true && /search indexes/.test(e.message));
   assert.equal(mb.had('artist|sigur ros'), undefined, 'not kept as not on MusicBrainz');
   assert.equal(log.warned.length, 1);
   assert.ok(mb.searchBroken());
   // ...checked once in a while, not each time.
-  const checks = () => asked.filter((x) => x.includes('arid:')).length;
+  const checks = () => asked.filter((x) => Object.values(CHECKS).some((c) => x === `search ${c}`)).length;
   await assert.rejects(mb.artistInfo('Someone'), (e) => e.searchBroken === true);
   assert.equal(checks(), 1);
   // By Plex's id: found as ever (no search). The app is told the rest can't be checked.
@@ -2822,105 +2883,106 @@ test('MusicBrainz features: an artist\'s albums told from those of another artis
   assert.deepEqual(ids(apartFromNamesakes(page, { name: 'Maduk', groups: producer, byId: true, namesakes: [rapper] })), ['4', '5', '6']);
 });
 
-test('MusicBrainz features: artists Plex has more than once, merged only on plain evidence that they\'re one', () => {
-  let n = 0;
-  const g = (title, date, primary = 'Album') => ({ id: `00000000-0000-4000-8000-${String((n += 1)).padStart(12, '0')}`, title, primary, secondary: [], date });
-  const id = '11111111-1111-4111-8111-111111111111';
-  const other = '22222222-2222-4222-8222-222222222222';
-  const band = { id, name: 'Alphabeat' };
-  const groups = [g('This Is Alphabeat', '2007-01-01'), g('The Beat Is...', '2009-11-02'), g('Express Non-Stop', '2012-09-24'), g('Alphabeat', '2007-03-01'),
-    g('Live', '2010-05-05'), g('Greatest Hits', '2015-01-01'), g('The Best of Alphabeat', '2016-01-01')];
-  const namesake = { id: other, name: 'Alphabeat', groups: [g('Night Shift', '2021-05-05'), g('Demos', '2020-01-01')] };
-  const old = { mbid: id, albums: [{ title: 'This Is Alphabeat', year: 2007 }, { title: 'The Beat Is...', year: 2009 }] };
-  const fresh = { mbid: null, albums: [{ title: 'Express Non-Stop (Deluxe)', year: 2012 }] };
-  const only = (...albums) => ({ mbid: null, albums });
-  const mb = { name: 'Alphabeat', artist: band, groups, namesakes: [] };
-
-  // Names of several artists in one, joined by ";" (and only by that)
+test('MusicBrainz features: names of several artists in one', () => {
+  // Joined by ";" (and only by that), as a tag can be
   assert.deepEqual(joinedParts('Alphabeat;Blondee;FORCE'), ['Alphabeat', 'Blondee', 'FORCE']);
   assert.deepEqual(joinedParts(' Alphabeat ; FORCE '), ['Alphabeat', 'FORCE']);
   for (const one of ['Alphabeat', 'Simon & Garfunkel', 'Earth, Wind & Fire', 'AC/DC', 'Alphabeat;', ';', '']) assert.equal(joinedParts(one), null, one);
+});
 
-  // Album titles plenty of artists have
-  const generic = (title, name = '') => genericTitle(albumKey(title), albumKey(name));
-  for (const [title, name] of [['Live'], ['Greatest Hits, Vol. 2'], ['The Very Best Of'], ['Demos'], ['B-Sides'], ['Remixes'], ['EP 1'], ['II'], ['1999'], ['Up'], ['Live 2009'],
-    ['Christmas'], ['Christmas Album'], ['Greatest Hits Live'], ['Live Hits'], ['Hits & Rarities'], ['BBC Sessions'], ['Peel Sessions'], ['MTV Unplugged'], ['Live in Tokyo'],
-    ['The Complete Recordings'], ['Best of the Best'], ['Second Album'], ['Bonus Tracks'], ['Remastered'], ['Deluxe'], ['Ballads'], ['Love Songs'], ['Love'], ['Home'], ['Blue'],
-    ['The Ultimate Collection'], ['The Definitive Collection'], ['Original Album Classics'], ['Original Album Series'], ['20th Century Masters: The Millennium Collection'],
-    ['Super Hits'], ['All the Hits'], ['Number Ones'], ['In Concert'], ['Christmas Classics'], ['Ultimate Hits'], ['Original Soundtrack'], ['John Peel Sessions'], ['The Lost Tapes'],
-    ['The Best of Alphabeat', 'Alphabeat'], ['Alphabeat Live', 'Alphabeat'], ['Led Zeppelin IV', 'Led Zeppelin']]) {
-    assert.equal(generic(title, name), true, title);
+test('MusicBrainz features: an album\'s release group for its year and genres is the very album or none', () => {
+  let n = 0;
+  const g = (title, date, primary = 'Album', id = null) => ({ id: id || `00000000-0000-4000-8000-${String((n += 1)).padStart(12, '0')}`, title, primary, secondary: [], date });
+  // What a title says besides its name: another recording (a remix, an edit, live...), or only which edition
+  assert.deepEqual(asides('The Beat Goes On (Radio Edit) [The Cube Guys Remix]'), [
+    { text: 'radio edit', versioned: true },
+    { text: 'cube guys remix', versioned: true },
+  ]);
+  for (const edition of ['Rumours (2004 Remaster)', 'Rumours (Super Deluxe Edition)', 'Rumours - 35th Anniversary Edition', 'Shadows - EP', 'Heat - Single', 'Rumours (Disc 1)', 'Rumours [Expanded]',
+    'Rumours (Deluxe Version)', 'Rumours (Remastered Version)', 'Rumours (Expanded & Remastered)', 'Rumours (Super Deluxe Box Set)', 'Rumours (Platinum Edition)', 'Rumours (Explicit)']) {
+    assert.deepEqual(asides(edition), [], edition);
   }
-  for (const title of ['This Is Alphabeat', 'The Beat Is...', 'Express Non-Stop', 'Civil War', 'Night Shift', 'Songs from the Big Chair']) assert.equal(generic(title, 'Alphabeat'), false, title);
-
-  // An album of each that's plainly theirs on MusicBrainz (by its title, within a year), none another's
-  assert.equal(sameArtist([old, fresh], mb), 'same');
-  assert.equal(sameArtist([fresh, { ...fresh }], mb), 'same');
-  // ...even where Plex has the very same MusicBrainz id for each (it can have taken an artist MusicBrainz doesn't know for the one it does)
-  assert.equal(sameArtist([old, { ...fresh, mbid: id }], mb), 'same');
-  assert.equal(sameArtist([old, { mbid: id, albums: [{ title: 'Unreleased', year: 2020 }] }], mb), 'unknown');
-  assert.equal(sameArtist([old, { ...fresh, mbid: id }], { name: 'Alphabeat' }), 'unknown');
-  // ...different ids: different artists
-  assert.equal(sameArtist([old, { ...fresh, mbid: other }], mb), 'different');
-  // ...not by a self-titled album (artists of one name have those by construction)
-  assert.equal(sameArtist([old, only({ title: 'Alphabeat', year: 2007 })], mb), 'unknown');
-  // ...nor another year, a title only near theirs, or no year
-  for (const it of [{ title: 'Express Non-Stop', year: 2015 }, { title: 'Express Non-Stops', year: 2012 }, { title: 'Express Non-Stop', year: null }]) {
-    assert.equal(sameArtist([old, only(it)], mb), 'unknown', JSON.stringify(it));
+  for (const version of ['Gym Tonic (2021 Version)', 'Gym Tonic (Single Version)', 'Gym Tonic (Sped Up)', 'Gym Tonic (Reprise)', 'Gym Tonic (Club Mix)']) {
+    assert.equal(asides(version)[0]?.versioned, true, version);
   }
-  // ...nor one of a title plenty have (two of those, though, are plain enough; one in two editions isn't two)
-  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 })], mb), 'unknown');
-  assert.equal(sameArtist([old, only({ title: 'The Best of Alphabeat', year: 2016 })], mb), 'unknown');
-  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 }, { title: 'Live (Deluxe)', year: 2010 })], mb), 'unknown');
-  assert.equal(sameArtist([old, only({ title: 'Live', year: 2010 }, { title: 'Greatest Hits', year: 2015 })], mb), 'same');
-  // ...nor with nothing of theirs on MusicBrainz for one of them
-  assert.equal(sameArtist([old, only({ title: 'Unreleased', year: 2020 })], mb), 'unknown');
-  // An album plainly another's of the name: different (but one of a title plenty have only says it can't be told)
-  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake] }), 'different');
-  assert.equal(sameArtist([old, only({ title: 'Demos', year: 2020 })], { ...mb, namesakes: [namesake] }), 'unknown');
-  assert.equal(sameArtist([old, { ...fresh, albums: [...fresh.albums, { title: 'Demos', year: 2020 }] }], { ...mb, namesakes: [namesake] }), 'unknown');
-  // ...but one theirs and another's both proves nothing either way
-  const both = { ...namesake, groups: [...namesake.groups, g('The Beat Is...', '2009-01-01')] };
-  assert.equal(sameArtist([old, only({ title: 'The Beat Is...', year: 2009 })], { ...mb, namesakes: [both] }), 'unknown');
-  // MusicBrainz's artist isn't the one Plex has the id of, or isn't known: can't tell
-  assert.equal(sameArtist([old, fresh], { ...mb, artist: { id: other } }), 'unknown');
-  assert.equal(sameArtist([old, fresh], { ...mb, artist: null }), 'unknown');
-  // ...nor where what's listed of either isn't all they have, nor where there are more of the name than are listed
-  assert.equal(sameArtist([old, fresh], { ...mb, capped: true }), 'unknown');
-  assert.equal(sameArtist([old, fresh], { ...mb, namesakes: [{ ...namesake, capped: true }] }), 'unknown');
-  assert.equal(sameArtist([old, fresh], { ...mb, namesakes: [namesake], moreNamesakes: true }), 'unknown');
-  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake], moreNamesakes: true }), 'different');
-  // One alone isn't more than once
-  assert.equal(sameArtist([old], mb), 'unknown');
-  // Titles as stores give them ("Shadows - EP", "Heat - Single"): as MusicBrainz has them
-  assert.equal(albumKey('Shadows - EP'), albumKey('Shadows'));
-  assert.equal(albumKey('Heat - Single'), albumKey('Heat'));
-  assert.equal(sameArtist([old, only({ title: 'Express Non-Stop - EP', year: 2012 })], mb), 'same');
-  // What there is of each, album by album (said for those left as they are)
-  const ev = evidenceOf([old, only({ title: 'Live', year: 2010 }), only({ title: 'Night Shift', year: 2021 }, { title: 'Unreleased', year: 2020 }, { title: 'Demos', year: 2020 })], { ...mb, namesakes: [namesake] });
-  assert.deepEqual(
-    ev.map((x) => [x.albums, x.plain, x.weak, x.apart, x.apartWeak]),
-    [
-      [2, ['This Is Alphabeat', 'The Beat Is...'], [], [], []],
-      [1, [], ['Live'], [], []],
-      [3, [], [], ['Night Shift'], ['Demos']],
-    ],
-  );
+  assert.deepEqual(asides('Fearless (Taylor’s Version)'), [{ text: 'taylor s version', versioned: true }]);
+  assert.deepEqual(asides('Yeah Yeah - Chocolate Puma Remix'), [{ text: 'chocolate puma remix', versioned: true }]);
+  assert.equal(exactKey('Rumours (2004 Remaster)'), 'rumours');
+  assert.equal(exactKey('The Beat Goes On (Radio Edit) [The Cube Guys Remix]'), 'beat goes on | cube guys remix | radio edit');
+  assert.equal(exactKey('The Beat Goes On [The Cube Guys Remix] (Radio Edit)'), exactKey('The Beat Goes On (Radio Edit) [The Cube Guys Remix]'));
 
-  // A name of several in one, as theirs: the artist of the plain name is MusicBrainz's, plainly, and it knows no other of the name
-  const joined = { mbid: null, albums: [{ title: 'Shadows (FORCE Remix)', year: 2023 }] };
-  assert.equal(sameArtist([old, joined], { ...mb, joined: true }), 'same');
-  assert.equal(sameArtist([only({ title: 'Unreleased', year: 2020 }), joined], { ...mb, joined: true }), 'unknown');
-  assert.equal(sameArtist([only({ title: 'Live', year: 2010 }), joined], { ...mb, joined: true }), 'unknown');
-  // ...where it knows another of the name, only on an album plainly theirs
-  assert.equal(sameArtist([old, joined], { ...mb, namesakes: [namesake], joined: true }), 'unknown');
-  assert.equal(sameArtist([old, only({ title: 'Express Non-Stop', year: 2012 })], { ...mb, namesakes: [namesake], joined: true }), 'same');
-  assert.equal(sameArtist([old, only({ title: 'Night Shift', year: 2021 })], { ...mb, namesakes: [namesake], joined: true }), 'different');
-  // ...an id Plex has for it that isn't the artist's: which of the names it's for can't be told
-  assert.equal(sameArtist([old, { ...joined, mbid: other }], { ...mb, joined: true }), 'unknown');
-  assert.equal(sameArtist([old, { ...joined, mbid: id }], { ...mb, joined: true }), 'same');
-  // ...and never where MusicBrainz doesn't know the artist at all
-  assert.equal(sameArtist([old, joined], { ...mb, artist: null, joined: true }), 'unknown');
+  // By its title alone: that very title (its asides too), never a single, and of several, the one first out the year Plex has
+  const groups = [
+    g('The Beat Goes On', '2002-03-01', 'Single'),
+    g('Rumours', '1977-02-04'),
+    g('Fearless', '2008-11-11'),
+    g('Fearless (Taylor’s Version)', '2021-04-09'),
+    g('Gym Tonic', '1998-01-01', 'Single'),
+    g('Le Bal masqué', '2003-01-01'),
+    g('Interference', '2009-06-01'),
+    g('Interference', '2016-05-01'),
+  ];
+  assert.equal(exactGroup(groups, 'Rumours (2004 Remaster)')?.date, '1977-02-04');
+  assert.equal(exactGroup(groups, 'The Beat Goes On (Radio Edit) [The Cube Guys Remix]'), null, 'a remix of a single isn\'t the single');
+  assert.equal(exactGroup(groups, 'The Beat Goes On'), null, 'nor is a single taken by its title, which comes out again and again');
+  assert.equal(exactGroup(groups, 'Gym Tonic'), null);
+  assert.equal(exactGroup(groups, 'Fearless (Taylor\'s Version)')?.date, '2021-04-09', 'a re-recording isn\'t the first');
+  assert.equal(exactGroup(groups, 'Fearless')?.date, '2008-11-11');
+  assert.equal(exactGroup(groups, 'Fearless (Platinum Edition)')?.date, '2008-11-11');
+  assert.equal(exactGroup([g('Night Owl', '2015-01-01', 'EP')], 'Night Owl'), null, 'nor an EP by its title');
+  // ...nor a compilation or a live album (their titles come again and again: those only by Plex's id for them)
+  for (const [title, secondary] of [['Greatest Hits', ['Compilation']], ['Live', ['Live']], ['Live at the Roundhouse', ['Live']]]) {
+    assert.equal(exactGroup([{ ...g(title, '1990-01-01'), secondary }], title), null, title);
+  }
+  // ...and a set of a live recording isn't another of it
+  assert.notEqual(exactKey('Live at the Roundhouse (Set 2)'), exactKey('Live at the Roundhouse (Set 1)'));
+  assert.equal(exactKey('Rumours (Super Deluxe Box Set)'), 'rumours');
+  assert.equal(exactGroup(groups, 'Le Bal Masque')?.date, '2003-01-01', 'case and accents don\'t count');
+  assert.equal(exactGroup(groups, 'Le Bal Masqué: The Remixes'), null, 'nor does a title with more after it match');
+  assert.equal(exactGroup(groups, 'Rumours Live'), null);
+  assert.equal(exactGroup(groups, 'Interference', 2016)?.date, '2016-05-01');
+  assert.equal(exactGroup(groups, 'Interference', 2012), null, 'of two of a title, one Plex\'s year doesn\'t tell apart: none');
+  assert.equal(exactGroup(groups, 'Interference'), null);
+
+  // By Plex's MusicBrainz id for it: that one, where the titles agree (Plex can have one wrong)
+  const single = g('Yeah Yeah', '2006-05-01', 'Single', '33333333-3333-4333-8333-333333333333');
+  const remixes = g('Yeah Yeah (Remixes)', '2017-02-01', 'EP', '44444444-4444-4444-8444-444444444444');
+  const theirs = [single, remixes, g('Rivers of Babylon', '1978-04-01', 'Single', '55555555-5555-4555-8555-555555555555')];
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah', { id: single.id }), single, 'a single, by Plex\'s id');
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah (2009 Remaster)', { id: single.id }), single);
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah (Remixes)', { id: single.id }), null, 'Plex\'s id for another recording than the title says: neither');
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah', { id: remixes.id }), null);
+  assert.equal(exactAlbum(theirs, 'Rivers of Babylon: Presenting Boney M.', { id: '55555555-5555-4555-8555-555555555555' }), null, 'nor one titled with more after it');
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah (Remixes)', { id: remixes.id }), remixes);
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah (Remixes)', { id: '66666666-6666-4666-8666-666666666666', tracks: 8 }), null, 'an id that isn\'t among theirs (a release\'s): by its exact title, never an EP\'s');
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah', { id: '66666666-6666-4666-8666-666666666666', tracks: 8 }), null, '...nor a single\'s');
+  assert.equal(exactAlbum(theirs, 'Yeah Yeah (Remixes)'), null);
+  const album = g('Thriller', '1982-11-30', 'Album');
+  assert.equal(exactAlbum([album], 'Thriller', { tracks: 9 }), album, 'an album proper by its title');
+  assert.equal(exactAlbum([album], 'Thriller', { tracks: 4 }), null, 'not a single or an EP of its title (too few tracks to be the album)');
+  assert.equal(exactAlbum([album], 'Thriller'), null, '...nor where Plex has no count of them');
+  assert.equal(exactAlbum([album], 'Thriller (2021 Version)', { tracks: 9 }), null);
+  // ...and of the kind Plex has it as
+  assert.ok(kindsAgree('albums', album) && kindsAgree(null, album) && !kindsAgree('singles', album) && !kindsAgree('live', album));
+  assert.ok(kindsAgree('live', { ...album, secondary: ['Live'] }) && !kindsAgree('albums', { ...album, secondary: ['Compilation'] }));
+  assert.ok(titlesAgree(g('Kid A', '2000-10-02'), 'Kid A (Collector’s Edition)'));
+  assert.ok(!titlesAgree(g('Kid A', '2000-10-02'), 'Kid A Mnesia'));
+  assert.ok(sameAlbumTitle('the colour and the shape', 'the color and the shape'));
+  assert.ok(!sameAlbumTitle('rivers of babylon', 'rivers of babylon presenting boney m'));
+  assert.ok(!sameAlbumTitle('greatest hits vol 1', 'greatest hits vol 2'));
+  assert.ok(sameVersion('Rumours (Deluxe)', 'Rumours'));
+  assert.ok(!sameVersion('Yeah Yeah (Remixes)', 'Yeah Yeah'));
+
+  // A short one's tracks: another recording than its title says (a remix single), or not
+  assert.equal(versionedTracks('Yeah Yeah', ['Yeah Yeah (Chocolate Puma Remix)']), true);
+  assert.equal(versionedTracks('Yeah Yeah', ['Yeah Yeah', 'Yeah Yeah - Extended Mix']), true);
+  assert.equal(versionedTracks('Yeah Yeah', ['Yeah Yeah', 'Yeah Yeah (2009 Remaster)']), false, 'a remaster is the same recording');
+  assert.equal(versionedTracks('Yeah Yeah (Remixes)', ['Yeah Yeah (Chocolate Puma Remix)']), false, 'an album whose title says so is as it says');
+  assert.equal(versionedTracks('Live at Leeds', ['Young Man Blues (Live)']), false, 'nor one whose title says it\'s live');
+  assert.equal(versionedTracks('Unplugged', ['About a Girl (Live)']), true);
+  assert.equal(versionedTracks('Night Swim', []), false);
+  assert.ok(shortRelease(1, g('X', '2000', 'Album')) && shortRelease(0, g('X', '2000', 'Album')) && shortRelease(12, g('X', '2000', 'EP')) && shortRelease(9, g('X', '2000', 'Single')));
+  assert.ok(!shortRelease(7, g('X', '2000', 'Album')));
 });
 
 test('MusicBrainz features: other artists of a name, and their release groups, looked up once and kept', async () => {

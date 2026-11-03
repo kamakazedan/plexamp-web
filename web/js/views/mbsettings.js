@@ -2,8 +2,8 @@
 // (mb.js): each on or off (for you, on all your devices where settings
 // follow your account), which kinds of an artist's missing albums are
 // shown, and for the server's owner, a look through the library for the
-// years and genres to fix in Plex (mbreview.js), and the artists Plex has
-// more than once, to merge there (mbmerge.js). (Skip live tracks and
+// years and genres to fix in Plex (mbreview.js), and the artists Plex may
+// have more than once, to know of (mbmerge.js). (Skip live tracks and
 // demos, which these add to, is in Settings › Playback, for everyone.)
 import { app, saveSettings } from '../state.js';
 import { dropCached } from '../router.js';
@@ -94,7 +94,6 @@ export async function musicbrainzSettingsView({ el }) {
           'div',
           null,
           h('div.section-head', null, h('h2', null, 'Your library')),
-          h('p.hint.pad', null, 'These change Plex for everyone, when you say so.'),
           h(
             'div.rows',
             null,
@@ -106,7 +105,7 @@ export async function musicbrainzSettingsView({ el }) {
             row({
               href: '/settings/mbmerge',
               title: 'Artists to merge',
-              subtitle: 'Find artists Plex has more than once, and merge them.',
+              subtitle: 'See artists Plex may have more than once.',
             }),
           ),
         )

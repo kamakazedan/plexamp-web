@@ -727,7 +727,7 @@ function planMessages(prompt, notes, vocab, length) {
         'Reply with:',
         '- "title": a short, catchy playlist title (2 to 6 words)',
         '- "summary": one sentence describing the playlist',
-        '- "focus_artists": the artists the request is about, if it names any (for "best of Daft Punk": ["Daft Punk"]); otherwise an empty list',
+        '- "focus_artists": the artists the request is about, if it names any (for "best of X": ["X"]); otherwise an empty list',
         '- "artist_scope": "only" if the playlist should have nothing but the focus artists (a best-of, greatest hits, "only", "just", deep cuts by them), "mostly" if it should be mainly them with a few similar artists, or "any" if it isn’t about particular artists',
         '- "genres", "styles", "moods": up to 4 each that fit the request, copied exactly from the lists above',
         '- "decades": up to 3 from the list above, or an empty list if any era fits',

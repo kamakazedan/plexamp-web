@@ -458,6 +458,16 @@ with sync_playwright() as pw:
         check('ai: "best of" an artist is only that artist', by == {'Glass Harbour'} and 0 < got <= has, f'{by}, {got} of {has}')
         check('ai: ...and says when that\'s all there is', got >= 25 or 'every track by Glass Harbour' in page.locator('.ai-note').inner_text())
         shot(page, 'ai-03-best-of')
+        # Only artists the request names are its focus: never the
+        # instructions' placeholder ("best of X"), copied by a small model.
+        focus = js(page, """() => import('./js/ai.js').then((m) => [
+            m.focusOf({ focus_artists: ['X'], artist_scope: 'only' }, 'best of 90s punk'),
+            m.focusOf({ focus_artists: ['X'], artist_scope: 'only' }, 'best of x-ray spex'),
+            m.focusOf({ focus_artists: ['Glass Harbour'], artist_scope: 'only' }, 'best of 90s punk'),
+            m.focusOf({ focus_artists: ['Glass Harbour'], artist_scope: 'any' }, 'Best of Glass Harbour'),
+        ].map((f) => [f.artists, f.scope]))""")
+        check('ai: the focus artists are only those the request names, never the instructions\' placeholder',
+              focus == [[[], 'any'], [[], 'any'], [[], 'any'], [['Glass Harbour'], 'only']], str(focus))
         # Never a track you've rated down (unless that's turned off in
         # Settings › Playback).
         gh_all = mock('/library/sections/1/all?type=10&artist.id=101&X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer']['Metadata']
@@ -1025,6 +1035,29 @@ with sync_playwright() as pw:
         check('cards: Play plays the playlist in order',
               wait_for(lambda: player(page, "p.state === 'playing' && !p.shuffle && p.context.href.startsWith('/playlist/')"), 10))
         page.mouse.move(5, 5)
+        # The bar's Shuffle says whether it's on, as Repeat does.
+        bar_shuffle = page.locator('.pb-controls button.mode-btn').first
+        titles = [bar_shuffle.get_attribute('title'), page.locator('.pb-controls button.mode-btn').last.get_attribute('title')]
+        bar_shuffle.click()
+        wait_for(lambda: player(page, 'p.shuffle'), 5)
+        titles.append(bar_shuffle.get_attribute('title'))
+        bar_shuffle.click()
+        wait_for(lambda: player(page, '!p.shuffle'), 5)
+        titles.append(bar_shuffle.get_attribute('title'))
+        # ...and the full player's.
+        js(page, "() => import('./js/nowplaying.js').then((m) => m.openNowPlaying())")
+        np_shuffle = page.locator('.np-tool[data-tool=shuffle]')
+        np_shuffle.wait_for(timeout=5000)
+        titles.append(np_shuffle.get_attribute('title'))
+        np_shuffle.click()
+        wait_for(lambda: player(page, 'p.shuffle'), 5)
+        titles.append(np_shuffle.get_attribute('title'))
+        np_shuffle.click()
+        wait_for(lambda: player(page, '!p.shuffle'), 5)
+        page.keyboard.press('Escape')
+        page.wait_for_selector('body:not(.np-open)', state='attached', timeout=5000)
+        check('player: Shuffle says on or off on hover, as Repeat does (in the bar and the full player)',
+              titles == ['Shuffle: off', 'Repeat: off', 'Shuffle: on', 'Shuffle: off', 'Shuffle: off', 'Shuffle: on'] and bar_shuffle.get_attribute('aria-label') == 'Shuffle', str(titles))
 
         # Shelves, with a mouse: ‹ › by the heading scroll them a screenful
         # (‹ once one has moved, › until its end, neither when it all fits),
@@ -7959,83 +7992,101 @@ with sync_playwright() as pw:
         finally:
             mock('/__mock/config?nogenre=')
 
-        # For the server's owner: the artists Plex has more than once, merged
-        # in Plex, as many as are chosen with one OK: those MusicBrainz
-        # plainly has as one chosen to begin with, the rest left as they
-        # are, saying why, for the owner to choose too. Here a second Glass
-        # Harbour (an album MusicBrainz has as theirs), a second Northbound
-        # Static (an album it has as another artist's of the name), a second
-        # Juniper & Ash (an album it hasn't at all), and "Glass
-        # Harbour;Kilo Meridian", a name of several artists' in one, as files
-        # can be tagged. (Not known to the mock's MusicBrainz, nor their
-        # albums, but for what it has of the names.)
+        # Only the very album (from 0.35.0): a single Plex has as its single
+        # on MusicBrainz, its one track a remix, isn't given the single's
+        # year (nor on its page, nor its artist's); a single matched by its
+        # title alone isn't matched at all; a first year after Plex's isn't
+        # shown; and a single Plex has by its id, its track as its title
+        # says, is given its year.
+        extra = [mock(f'/__mock/add-artist?{q}')['MediaContainer']['Metadata'][0] for q in (
+            'name=Signal%20Drift&albums=Night%20Swim:2019&format=Single&first=2005-06-01&guids=1&tracks=Night%20Swim%20(Club%20Remix)',
+            'name=Signal%20Bloom&albums=Glass%20Rain:2019&format=Single&first=2004-06-01&guids=1&tracks=Glass%20Rain',
+            'name=Signal%20Hollow&albums=Hollow%20Bell:2019&format=Single&first=2003-06-01&tracks=Hollow%20Bell',
+            'name=Late%20Light&albums=Early%20Hours:2010&first=2014-01-01&guids=1&tracks=Dawn|Noon|Dusk|Night|Late|Later|Latest',
+        )]
+        try:
+            page.goto(APP_MB + '#/')
+            page.goto(APP_MB + '#/settings/mbreview')
+            page.wait_for_selector('.mb-year-row:has-text("Glass Rain")', timeout=60000)
+            page.wait_for_function("() => { const s = document.querySelector('.mb-review-status'); return s && !s.querySelector('.spinner'); }", timeout=60000)
+            years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
+            bloom_line = page.locator('.mb-year-row', has_text='Glass Rain').inner_text()
+            said = page.locator('.mb-review-status').inner_text()
+            check('mb: years to fix: only the very album: a single Plex has by its id, its track as its title says, is given its year',
+                  '2019 in Plex, 2004 on MusicBrainz' in bloom_line and 'matched exactly' in said, f'{bloom_line!r} {said!r}')
+            check('mb: ...not a single whose one track is a remix (the single\'s first year is the original\'s), nor a single by its title alone, nor a first year after Plex\'s',
+                  not {'Night Swim', 'Hollow Bell', 'Early Hours'} & set(years_listed) and not page.locator('.mb-later').count(), str(years_listed))
+            albums_now = albums_of()
+            page.goto(APP_MB + f"#/album/{albums_now['Glass Rain']['ratingKey']}")
+            page.wait_for_selector('.hero-first:not([hidden])', timeout=15000)
+            bloom_first = page.locator('.hero-first').inner_text()
+            page.goto(APP_MB + f"#/album/{albums_now['Night Swim']['ratingKey']}")
+            page.wait_for_selector('.hero-album')
+            page.wait_for_timeout(2500)
+            check('mb: ...and an album\'s page says so too: when the single first came out, but not for the remix',
+                  bloom_first == 'First released in 2004' and page.locator('.hero-first:not([hidden])').count() == 0, bloom_first)
+            card_year = lambda name, title: (artist_page(name, until='.view .card'), page.wait_for_timeout(2500),
+                                             page.locator('.view .card', has_text=title).locator('.card-sub').inner_text())[-1]
+            named.update({a['title']: a for a in extra})
+            on_pages = [card_year('Signal Bloom', 'Glass Rain'), card_year('Signal Drift', 'Night Swim'), card_year('Signal Hollow', 'Hollow Bell')]
+            check('mb: ...as an artist\'s page does (Original release years)', on_pages == ['2004', '2019', '2019'], str(on_pages))
+        finally:
+            for a in extra:
+                mock(f"/__mock/add-artist?remove={a['ratingKey']}")
+
+        # For the server's owner: the artists Plex may have more than once,
+        # for their information only: nothing merged, nothing asked of
+        # MusicBrainz, only what Plex says. Here a second Glass Harbour
+        # (Plex links both to the one artist on MusicBrainz), a second
+        # Juniper & Ash (Plex hasn't linked it), a second Northbound Static
+        # (Plex links it to another artist of the name), and "Glass
+        # Harbour;Kilo Meridian", a name of several artists' in one, as
+        # files can be tagged.
         merges = lambda: mock('/__mock/merges')['MediaContainer']['merges']
         mock('/__mock/merges?reset=1')
-        added = [mock(f'/__mock/add-artist?name={urllib.parse.quote(n)}&albums={urllib.parse.quote(a)}&mb=0')['MediaContainer']['Metadata'][0]
-                 for n, a in [('Glass Harbour', 'Sea Glass:2016'), ('Northbound Static', 'Frost Engine:2019'), ('Juniper & Ash', 'Unknown Rooms:2022'),
-                              ('Glass Harbour;Kilo Meridian', 'Harbour Remixes:2021')]]
-        reads = []  # the library's artists, read from Plex
-        page.on('request', lambda r: reads.append(r.url) if '/all?' in r.url and 'type=8' in r.url else None)
-
-        def merge_page(status=r'^Checked'):
-            page.wait_for_function("(re) => new RegExp(re).test(document.querySelector('.mb-merge-status')?.textContent || '')", arg=status, timeout=60000)
-            rows = lambda cls: {page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(): {
-                'text': page.locator(f'.{cls}').nth(i).inner_text(),
-                'checked': page.locator(f'.{cls}').nth(i).locator('input.mb-merge-check').is_checked() if page.locator(f'.{cls}').nth(i).locator('input.mb-merge-check').count() else None}
-                for i in range(page.locator(f'.{cls}').count())}
-            return rows('mb-merge-twice'), rows('mb-merge-joined'), rows('mb-merge-left')
+        added = [mock(f'/__mock/add-artist?name={urllib.parse.quote(n)}&albums={urllib.parse.quote(a)}{more}')['MediaContainer']['Metadata'][0]
+                 for n, a, more in [('Glass Harbour', 'Sea Glass:2016', '&guids=1'), ('Juniper & Ash', 'Unknown Rooms:2022', ''),
+                                    ('Northbound Static', 'Frost Engine:2019', '&guids=1&mbid=Northbound%20Static%202'),
+                                    ('Glass Harbour;Kilo Meridian', 'Harbour Remixes:2021', '')]]
         try:
+            # (Once what the pages before asked of MusicBrainz is done.)
+            def mb_quiet():
+                n = mock('/__mock/musicbrainz')['MediaContainer']['requests']
+                time.sleep(1.5)
+                return mock('/__mock/musicbrainz')['MediaContainer']['requests'] == n
+            wait_for(mb_quiet, 30, 0.1)
+            mb_before = mock('/__mock/musicbrainz')['MediaContainer']['requests']
             page.goto(APP_MB + '#/settings/musicbrainz')
             page.locator('a.row[href="#/settings/mbmerge"]').click()
-            twice, joined, left = merge_page()
+            page.wait_for_function("() => /^Checked/.test(document.querySelector('.mb-merge-status')?.textContent || '')", timeout=60000)
             shot(page, 'mb-05-merge')
-            gh = twice.get('Glass Harbour', {})
-            check('mb: artists to merge: two of one name MusicBrainz plainly has as one (Glass Harbour) are offered, chosen to begin with, saying why',
-                  list(twice) == ['Glass Harbour'] and gh['checked'] is True and 'MusicBrainz says they’re the same artist' in gh['text'], f'{twice} {joined} {left}')
-            ns, ja = left.get('Northbound Static', {}), left.get('Juniper & Ash', {})
-            check('mb: ...not two it has as different artists of the name (Northbound Static), nor two it can\'t tell apart (Juniper & Ash): left as they are, saying why album by album, for you to choose',
-                  'are by a different Northbound Static' in ns.get('text', '') and '“Frost Engine”' in ns.get('text', '') and ns.get('checked') is False
-                  and 'Not sure' in ja.get('text', '') and 'can’t match any of their albums' in ja.get('text', '') and ja.get('checked') is False, str(left))
-            first = left.get('Glass Harbour;Kilo Meridian', {})
-            check('mb: ...nor a name of several artists\' in one, while Plex has the artist of its first name more than once (those first, not to choose yet)',
-                  not joined and 'called Glass Harbour first' in first.get('text', '') and first.get('checked') is None, f'{joined} {left}')
-            go = page.locator('.mb-merge-actions:not([hidden]) .mb-merge-go').first
-            check('mb: ...one button merges all that are chosen', go.inner_text() == 'Merge 1 in Plex', go.inner_text())
-            # An OK first, then Plex's own merge, into the one Plex has
-            # MusicBrainz's id for; and the page as it is then, without
-            # reading the library again.
-            before = len(reads)
-            go.click()
-            asked_ok = page.locator('.sheet.open').inner_text()
-            page.locator('.sheet.open .ask-form button.btn-danger').click()
-            wait_for(lambda: merges(), 10, 0.3)
-            check('mb: ...merged in Plex with the owner\'s OK (each merge on a line of its own; Plex\'s own merge, which can\'t be undone here), into the one Plex has MusicBrainz\'s id for',
-                  merges() == [{'into': named['Glass Harbour']['ratingKey'], 'ids': [added[0]['ratingKey']]}] and 'Glass Harbour ×2 → one Glass Harbour' in asked_ok
-                  and 'can’t be undone' in asked_ok, f'{merges()} {asked_ok!r}')
-            twice, joined, left = merge_page(r'^Merged 1\.')
-            row_text = joined.get('Glass Harbour;Kilo Meridian', {}).get('text', '')
-            check('mb: ...then the name of several artists\' in one is looked at, into the artist of its first name (MusicBrainz knows only one of it), without reading the library again',
-                  not twice and 'with Kilo Meridian' in row_text and 'Merges into Glass Harbour' in row_text and 'knows only one Glass Harbour' in row_text
-                  and joined['Glass Harbour;Kilo Meridian']['checked'] is True and len(reads) == before, f'{twice} {joined} {len(reads) - before}')
-            # Several at once: that one, and one left as it is, chosen too
-            # (MusicBrainz can't say: merged as chosen, the OK saying so).
-            page.locator('.mb-merge-left', has_text='Juniper & Ash').locator('input.mb-merge-check').check()
-            check('mb: ...and those left as they are can be chosen too', go.inner_text() == 'Merge 2 in Plex', go.inner_text())
-            go.click()
-            asked_ok = page.locator('.sheet.open').inner_text()
-            page.locator('.sheet.open .ask-form button.btn-danger').click()
-            wait_for(lambda: len(merges()) == 3, 15, 0.3)
-            twice, joined, left = merge_page(r'^Merged 2\.')
-            check('mb: ...merged with one OK, a line for each (separate merges), saying which MusicBrainz isn\'t sure of (those of one name first)',
-                  merges()[1] == {'into': named['Juniper & Ash']['ratingKey'], 'ids': [added[2]['ratingKey']]}
-                  and merges()[2] == {'into': named['Glass Harbour']['ratingKey'], 'ids': [added[3]['ratingKey']]}
-                  and '2 separate merges' in asked_ok and '“Glass Harbour;Kilo Meridian” → Glass Harbour' in asked_ok and 'Juniper & Ash ×2 → one Juniper & Ash (not sure)' in asked_ok
-                  and not joined and 'Juniper & Ash' not in left and len(reads) == before, f'{merges()} {asked_ok!r} {left}')
-            artist_page('Glass Harbour', until='.view .hero')
-            page.wait_for_selector('.view .card-title:has-text("Harbour Remixes")', timeout=20000)
-            on_page = page.locator('.view .card-title').all_inner_texts()
-            check('mb: ...so Glass Harbour\'s page has their albums (Sea Glass, Harbour Remixes), as Plex does',
-                  'Sea Glass' in on_page and 'Harbour Remixes' in on_page, f'{merges()} {on_page}')
+            rows = lambda cls: [(page.locator(f'.{cls}').nth(i).locator('.row-title').inner_text(), page.locator(f'.{cls}').nth(i).inner_text(),
+                                 page.locator(f'.{cls}').nth(i).locator('a.mb-merge-open').evaluate_all('as => as.map((a) => a.getAttribute("href"))'))
+                                for i in range(page.locator(f'.{cls}').count())]
+            twice, joined, apart = rows('mb-merge-twice'), rows('mb-merge-joined'), rows('mb-merge-apart')
+            status_text = page.locator('.mb-merge-status').inner_text()
+            heads = page.locator('.view .block h2').all_inner_texts()
+            check('mb: artists to merge: those of one name, Plex\'s links to MusicBrainz said (the same artist first, then not linked; those it links to different artists last, apart)',
+                  [t for t, *_ in twice] == ['Glass Harbour', 'Juniper & Ash'] and [t for t, *_ in apart] == ['Northbound Static']
+                  and 'Plex links both to the same artist on MusicBrainz' in twice[0][1] and 'Plex links only one of them to MusicBrainz' in twice[1][1]
+                  and 'Plex links them to different artists on MusicBrainz' in apart[0][1] and '1 album' in twice[0][1] and '4 to look at' in status_text
+                  and [x.upper() for x in heads][-1].startswith('SAME NAME, DIFFERENT ARTISTS'),
+                  f'{twice} {apart} {heads} {status_text!r}')
+            check('mb: ...each one Plex has to open (its page)',
+                  sorted(twice[0][2]) == sorted([f"#/artist/{named['Glass Harbour']['ratingKey']}", f"#/artist/{added[0]['ratingKey']}"]), str(twice[0][2]))
+            check('mb: ...and a name of several artists\' in one, with the artist of its name the library has',
+                  [t for t, *_ in joined] == ['Glass Harbour;Kilo Meridian'] and 'with Kilo Meridian' in joined[0][1] and 'merge into Glass Harbour in Plex' in joined[0][1]
+                  and f"#/artist/{added[3]['ratingKey']}" in joined[0][2], str(joined))
+            said_of = js(page, """() => import('./js/views/mbmerge.js').then((m) => [['a', 'a', 'b', 'b'], ['a', 'a', 'a', 'b', 'b'], ['a', 'a', 'b', 'b', 'c'], ['a', 'a', 'b'], ['a', 'a', null], ['a', 'b', null]]
+                .map((ids) => m.linkOf(ids.map((id) => ({ Guid: id ? [{ id: `mbid://${id.repeat(8)}-0000-4000-8000-${id.repeat(12)}` }] : [] }))).text))""")
+            check('mb: ...saying which of them Plex links to one artist, however many there are',
+                  said_of == ['Plex links 2 of them to one artist on MusicBrainz, 2 to another.', 'Plex links 3 of them to one artist on MusicBrainz, 2 to another.',
+                              'Plex links 2 of them to one artist on MusicBrainz, 2 to another, 1 to another.', 'Plex links 2 of them to the same artist on MusicBrainz, 1 to another.',
+                              'Plex links 2 of them to the same artist on MusicBrainz; 1 isn’t linked.', 'Plex links 2 of them to different artists on MusicBrainz; 1 isn’t linked.'],
+                  str(said_of))
+            check('mb: ...for information only: nothing to tick or merge, nothing merged, nothing asked of MusicBrainz',
+                  page.locator('.view input[type=checkbox], .view .mb-merge-go').count() == 0 and merges() == []
+                  and mock('/__mock/musicbrainz')['MediaContainer']['requests'] == mb_before, f'{merges()}')
         finally:
             mock('/__mock/merges?reset=1')
             for a in added:
@@ -8057,13 +8108,18 @@ with sync_playwright() as pw:
         fpage.goto(APP_MB + '#/settings/mbmerge')
         fpage.wait_for_selector('.view .empty-state', timeout=10000)
         told = fpage.locator('.view .empty-state').inner_text()
-        check('mb: ...nor the artists to merge (merging in Plex is the owner\'s too)', no_merge_row and 'owner' in told, told)
+        check('mb: ...nor the artists to merge (the owner\'s too)', no_merge_row and 'owner' in told, told)
         friend.close()
 
         # What went to MusicBrainz: artists' names, never an album's title.
         asked = [urllib.parse.unquote_plus(a) for a in mock('/__mock/musicbrainz')['MediaContainer']['asked']]
-        check('mb: only artists\' names went to MusicBrainz, never an album\'s title',
-              asked and any('Glass Harbour' in a for a in asked) and not any(t in a for a in asked for t in ('Sea Glass', 'Tidal Lines', 'Hearthstone', 'Harbour Lights Live')),
+        # (Plex's MusicBrainz ids for the library's albums: but Tidal Lines', whose genres were asked for, by the id MusicBrainz has for it.)
+        with_ids = mock('/library/sections/1/all?type=9&includeGuids=1&X-Plex-Container-Size=500&X-Plex-Token=t')['MediaContainer']['Metadata']
+        plex_album_ids = [g['id'][len('mbid://'):] for al in with_ids if al['title'] != 'Tidal Lines' for g in al.get('Guid', [])]
+        check('mb: only artists\' names went to MusicBrainz, never an album\'s title, nor Plex\'s MusicBrainz id for one',
+              asked and plex_album_ids and any('Glass Harbour' in a for a in asked)
+              and not any(t in a for a in asked for t in ('Sea Glass', 'Tidal Lines', 'Hearthstone', 'Harbour Lights Live', 'Glass Rain', 'Night Swim'))
+              and not any(i in a for a in asked for i in plex_album_ids),
               str(asked[:6]))
 
         # A MusicBrainz server of your own whose search finds no one (its
@@ -8082,7 +8138,7 @@ with sync_playwright() as pw:
             shot(page, 'mb-07-review-no-search')
             years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
             check('mb: with a MusicBrainz whose search finds no one, albums are still found by their artist\'s MusicBrainz id, and those Plex hasn\'t matched are unchecked, saying why',
-                  'Hearthstone' in years_listed and 'MusicBrainz knows' in said and 'couldn’t be checked' in said and 'search indexes' in said, f'{said!r} {years_listed}')
+                  'Hearthstone' in years_listed and 'matched exactly' in said and 'couldn’t be checked' in said and 'search indexes' in said, f'{said!r} {years_listed}')
         finally:
             mock('/__mock/config?mbsearch=on')
             mock(f"/__mock/add-artist?remove={unmatched['ratingKey']}")

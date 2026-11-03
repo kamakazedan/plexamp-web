@@ -1,17 +1,17 @@
 // Settings › MusicBrainz › Years and genres to fix, for the server's owner:
 // the library's albums looked up on MusicBrainz (by the player, in the
 // background: on musicbrainz.org, once a second, so a big library takes a
-// while, and the player carries on with it if this page is left), then
-// those whose year in Plex isn't the year they first came out (a remaster's
-// or reissue's, say), and those without a genre that MusicBrainz has
-// genres for. Each is fixed in Plex, one at a time or all at once, locked so
+// while, and the player carries on with it if this page is left), each the
+// very album or none at all, then those whose year in Plex is after the
+// year they first came out (a remaster's or reissue's, say), and those
+// without a genre that MusicBrainz has genres for. Each is fixed in Plex, one at a time or all at once, locked so
 // Plex's next refresh leaves it (with Undo); Plex never writes to the files,
 // so the list downloads too, with each album's MusicBrainz release group,
 // for MusicBrainz Picard or beets to fix them.
 import { app } from '../state.js';
 import { describeError } from '../router.js';
 import { h, icon, backHeader, row, sectionHeader, emptyState, toast, fmt, confirmAction, download, fileDate, spinner } from '../ui.js';
-import { albumsOnMB, firstYear, mbFeatures, mbidOf } from '../mb.js';
+import { albumsOnMB, firstYear, mbFeatures, mbidOf, notThatRecording, kindsAgree, plexKind } from '../mb.js';
 import { mbWhere, toCsv } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
@@ -57,11 +57,13 @@ export async function mbReviewView({ el, onDispose }) {
     h('p.hint.pad', null, 'Your files aren’t changed. To fix their tags too, download the list for MusicBrainz Picard or beets.'),
   );
 
-  // Every album in the library: what Plex has of it.
+  // Every album in the library: what Plex has of it (with Plex's
+  // MusicBrainz id for it, where it has one: the very album, found without
+  // a search).
   const albums = [];
   try {
     for (let start = 0; !gone; start += PAGE) {
-      const { items, total } = await s.list(sec, 9, { start, size: PAGE, sort: 'artist.titleSort' });
+      const { items, total } = await s.list(sec, 9, { start, size: PAGE, sort: 'artist.titleSort', filters: { includeGuids: 1 } });
       albums.push(...items.filter((m) => m.type === 'album' && m.title && m.parentTitle));
       status.lastChild.textContent = ` Reading your albums from ${app.source.sectionTitle}… ${fmt.number(albums.length)} of ${fmt.number(total)}`;
       if (!items.length || start + PAGE >= total) break;
@@ -102,10 +104,12 @@ export async function mbReviewView({ el, onDispose }) {
   );
   const asLibrary = (genre) => libraryGenres.get(norm(genre)) || genre;
 
-  // What MusicBrainz has of each (null: nothing, or which album it is can't
-  // be told; 'pending': being looked up), by its artist, its title and the
-  // year Plex has (which tells albums of one title apart), with its genres
-  // for those without any.
+  // What MusicBrainz has of each, the very album or nothing (null: nothing,
+  // or which album it is can't be told; 'pending': being looked up): by
+  // Plex's MusicBrainz id for it, where its title agrees, or else, for a
+  // studio album, by its artist and its exact title (see releases.js
+  // exactAlbum), and the year Plex has (which tells albums of one title
+  // apart), with its genres for those without any.
   // ('unchecked': only a search could find it, and searching the player's
   // MusicBrainz finds no one.)
   const found = albums.map(() => 'pending');
@@ -116,23 +120,44 @@ export async function mbReviewView({ el, onDispose }) {
       for (let i = 0; i < these.length && !gone; i += ASK) {
         const part = these.slice(i, i + ASK);
         const got = await albumsOnMB(
-          part.map((j) => ({ artist: albums[j].parentTitle, title: albums[j].title, year: plexYear(albums[j]), artistId: artistIds.get(String(albums[j].parentRatingKey)) })),
-          { genres: withGenres, background: true },
+          part.map((j) => ({
+            artist: albums[j].parentTitle,
+            title: albums[j].title,
+            year: plexYear(albums[j]),
+            artistId: artistIds.get(String(albums[j].parentRatingKey)),
+            albumId: mbidOf(albums[j]),
+            tracks: Number(albums[j].leafCount) || 0,
+          })),
+          { genres: withGenres, background: true, strict: true },
         );
-        part.forEach((j, k) => (found[j] = got[k] ?? null));
+        // Of those that would be fixed: not one found by its title whose
+        // kind Plex has as another (a live album as a studio one, a single
+        // as an album: Plex's release types, read for those), nor a short
+        // one whose tracks say it's another recording (a remix single's:
+        // see mb.js notThatRecording).
+        const would = part.map((j, k) => ({ j, g: got[k] ?? null })).filter(({ j, g }) => g && typeof g === 'object' && differs(albums[j], g));
+        const byTitle = would.filter(({ j, g }) => g.id !== mbidOf(albums[j]));
+        const types = byTitle.length ? await s.albumTypes(byTitle.map(({ j }) => albums[j].ratingKey)).catch(() => null) : [];
+        const otherKind = new Set(byTitle.filter(({ g }, n) => !types || !kindsAgree(types[n] ? plexKind(types[n]) : null, g)).map(({ j }) => j));
+        const otherRecording = new Set(
+          (await Promise.all(would.map(({ j, g }) => (otherKind.has(j) ? true : notThatRecording(albums[j], g, { server: s }))))).flatMap((no, n) => (no ? [would[n].j] : [])),
+        );
+        part.forEach((j, k) => (found[j] = otherKind.has(j) || otherRecording.has(j) ? null : (got[k] ?? null)));
       }
     }
   }
 
-  // What differs, as far as it's known. (A first year later than Plex's is
-  // shown, but not fixed with the rest: an album can't come out after it
-  // did, so it's more likely another album of that title than Plex's year
-  // that's wrong.)
+  // What would be fixed: a first year before the one Plex has (never after:
+  // an album can't come out after it did, so that's another album of that
+  // title), or genres for an album without any.
+  const earlier = (m, g) => !!(firstYear(g) && plexYear(m) && firstYear(g) < plexYear(m));
+  const differs = (m, g) => earlier(m, g) || !!(g.genres?.length && !genresOf(m).length);
+
+  // What differs, as far as it's known.
   const yearRows = () =>
     albums
       .map((m, i) => ({ m, g: found[i] }))
-      .filter(({ m, g }) => g && typeof g === 'object' && firstYear(g) && plexYear(m) && firstYear(g) !== plexYear(m) && fixed.get(String(m.ratingKey))?.kind !== 'year');
-  const later = ({ m, g }) => firstYear(g) > plexYear(m);
+      .filter(({ m, g }) => g && typeof g === 'object' && earlier(m, g) && fixed.get(String(m.ratingKey))?.kind !== 'year');
   const genreRows = () =>
     albums
       .map((m, i) => ({ m, g: found[i] }))
@@ -239,7 +264,7 @@ export async function mbReviewView({ el, onDispose }) {
     render();
   }
 
-  const yearLine = (x) => `${x.m.parentTitle} · ${plexYear(x.m)} in Plex, ${firstYear(x.g)} on MusicBrainz${later(x) ? ' (later: maybe not the same album)' : ''}`;
+  const yearLine = (x) => `${x.m.parentTitle} · ${plexYear(x.m)} in Plex, ${firstYear(x.g)} on MusicBrainz`;
   const genreLine = ({ m, g }) => `${m.parentTitle} · ${[...new Set(g.genres.map(asLibrary))].join(', ')}`;
   const fixButton = (label, onClick) =>
     h(
@@ -275,10 +300,10 @@ export async function mbReviewView({ el, onDispose }) {
         ? [spinner('Looking'), h('span', null, ` Checking your albums on ${mbWhere()}… ${fmt.number(albums.length - pending)} of ${fmt.number(albums.length)}`)]
         : [
             known
-              ? `Checked ${fmt.count(albums.length, 'album', 'albums')}: MusicBrainz knows ${known === albums.length ? 'them all' : fmt.number(known)}.${cantSearch}`
+              ? `Checked ${fmt.count(albums.length, 'album', 'albums')}: ${known === albums.length ? 'all' : fmt.number(known)} matched exactly on MusicBrainz.${cantSearch}`
               : unchecked
                 ? cantSearch.trim()
-                : `MusicBrainz doesn’t know any of your ${fmt.count(albums.length, 'album', 'albums')}, so there’s nothing to compare.`,
+                : `None of your ${fmt.count(albums.length, 'album', 'albums')} matched exactly on MusicBrainz, so there’s nothing to compare.`,
           ]),
     );
     if (!pending && (unchecked || !known)) status.classList.add('warn');
@@ -303,7 +328,7 @@ export async function mbReviewView({ el, onDispose }) {
                   const head = ['Artist', 'Album', 'Year in Plex', 'First year on MusicBrainz', 'Genres in Plex', 'Genres on MusicBrainz', 'MusicBrainz release group', 'Link'];
                   const all = albums.map((m, i) => ({ m, g: found[i] })).filter(({ g }) => g && typeof g === 'object');
                   const rows = all
-                    .filter(({ m, g }) => (firstYear(g) && plexYear(m) && firstYear(g) !== plexYear(m)) || (g.genres?.length && !genresOf(m).length))
+                    .filter(({ m, g }) => differs(m, g))
                     .map(({ m, g }) => [m.parentTitle, m.title, plexYear(m) || '', firstYear(g) || '', genresOf(m).join('; '), (g.genres || []).join('; '), g.id, mbLink(g)]);
                   download(toCsv(head, rows), `musicbrainz-fixes-${fileDate()}.csv`, 'text/csv;charset=utf-8');
                   toast('Downloaded, to open in a spreadsheet');
@@ -324,12 +349,12 @@ export async function mbReviewView({ el, onDispose }) {
               sectionHeader(
                 `Years (${fmt.number(ys.length)})`,
                 null,
-                ys.some((x) => !later(x)) ? h('button.link-btn.mb-fix-years', { type: 'button', onclick: () => fixAll(ys.filter((x) => !later(x)), fixYear, undoYear, 'year') }, 'Fix all') : null,
+                h('button.link-btn.mb-fix-years', { type: 'button', onclick: () => fixAll(ys, fixYear, undoYear, 'year') }, 'Fix all'),
               ),
               h(
                 'div.rows.mb-review-rows',
                 null,
-                ys.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: yearLine(x), right: fixButton(`Use ${firstYear(x.g)}`, () => fixYear(x)), cls: `mb-year-row${later(x) ? '.mb-later' : ''}` })),
+                ys.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: yearLine(x), right: fixButton(`Use ${firstYear(x.g)}`, () => fixYear(x)), cls: 'mb-year-row' })),
               ),
               ys.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(ys.length - 300)} more: Fix all and the download include them.`) : null,
             ),

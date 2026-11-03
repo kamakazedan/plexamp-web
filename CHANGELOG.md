@@ -3,6 +3,52 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.35.0 - 2026-11-02
+
+### Changed
+
+- **Years and genres to fix only suggests the very album**: the release
+  group Plex has it as (Plex's MusicBrainz id for the album, where that's
+  one of its artist's release groups and the titles agree: looked for
+  among those the player already has, so nothing more goes to
+  MusicBrainz). Or else, for a studio album (more than six tracks, and a
+  studio album to Plex too), by its exact title, with whatever the title
+  says besides its name ("(Radio Edit) [The Cube Guys Remix]" and "(2021
+  Version)" count; "(2004 Remaster)" and "(Deluxe Edition)" only say which
+  edition). A single, an EP, a
+  compilation or a live album is never matched by its title alone (their
+  titles come out again and again: singles remixed and re-recorded,
+  "Greatest Hits", "Live"), and a single or an EP whose tracks say they're
+  remixes, edits or live when its title doesn't is left out, as its
+  release group's first year is the original's. A first year after the one
+  Plex has is never shown. The page says how many albums matched exactly.
+  An album's page (First released in…) and an artist's page (Original
+  release years) go by the same rules.
+- **Artists to merge is for your information only**: it lists the artists
+  Plex may have more than once, with what Plex itself says of them (how
+  many albums each has, and whether Plex links them to the same artist on
+  MusicBrainz, to different ones, listed apart, or hasn't linked them),
+  and names of several artists in one ("Alphabeat;FORCE"), each opening
+  the artist's page. Nothing is merged or changed, and nothing is looked
+  up on MusicBrainz: merge them in Plex if they're one.
+- **Shuffle says whether it's on** when you hover over it, as Repeat
+  does.
+
+### Fixed
+
+- **Remix singles given the original's year**: Years and genres to fix
+  suggested, say, 2002 for a 2019 remix single ("The Beat Goes On (Radio
+  Edit) [The Cube Guys Remix]") or 2006 for a 2017 one whose only track is
+  a remix, as a title was matched without what's in its brackets, and to
+  singles of the same title; later years were shown too.
+- **Nothing in the code is tied to any particular music**: the check of
+  whether a MusicBrainz server's search works asked for one particular
+  artist (by id); it now searches for anything at all of a kind
+  MusicBrainz sorts everything into (artists who are people, albums). The
+  AI playlist's instructions named an artist as an example, now a
+  placeholder; and the words Artists to merge took as too common to go by
+  (some of them names) went with its MusicBrainz evidence.
+
 ## 0.34.0 - 2026-10-31
 
 ### Changed

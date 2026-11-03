@@ -567,8 +567,9 @@ async function musicbrainzRoute(req, res, parts) {
 //     just now, and only a search could find that one.
 // While MusicBrainz isn't answering (after a request to it that wasn't),
 // only what's known is answered, for a minute.
-// Only names go to MusicBrainz: an artist's (and an album's title is matched
-// here, against the artist's release groups).
+// Only names go to MusicBrainz: an artist's (and an album's title, and Plex's
+// MusicBrainz id for it, are matched here, against the artist's release
+// groups).
 async function musicbrainzFeatures(req, res, what) {
   if (!musicbrainz.adv) throw new HttpError(404, 'The MusicBrainz features are turned off on this player.');
   if (req.method !== 'POST') throw new HttpError(405, 'Not allowed.');
@@ -604,8 +605,16 @@ async function musicbrainzFeatures(req, res, what) {
   }
   const items = (Array.isArray(body.items) ? body.items : [])
     .slice(0, MB_ADVANCED_LIMITS.perRequest)
-    .map((it) => ({ artist: name(it?.artist), title: name(it?.title), year: year(it?.year), artistId: mbid(it?.artistId) }));
-  const results = await musicbrainz.albums(items, { genres: body.genres === true, waitMs: Number(body.wait) || 0, signal: ctrl.signal, who: key });
+    .map((it) => ({
+      artist: name(it?.artist),
+      title: name(it?.title),
+      year: year(it?.year),
+      artistId: mbid(it?.artistId),
+      albumId: mbid(it?.albumId),
+      tracks: Number.isSafeInteger(Number(it?.tracks)) && Number(it.tracks) > 0 ? Math.min(Number(it.tracks), 10000) : 0,
+    }));
+  // (`strict`: the very album or nothing, for its year and genres to be fixed: see musicbrainz.js album.)
+  const results = await musicbrainz.albums(items, { genres: body.genres === true, strict: body.strict === true, waitMs: Number(body.wait) || 0, signal: ctrl.signal, who: key });
   return send(res, 200, { results, ...(musicbrainz.searchBroken() ? { searchBroken: true } : {}) });
 }
 

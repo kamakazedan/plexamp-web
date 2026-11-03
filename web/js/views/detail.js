@@ -47,7 +47,7 @@ import { isAdmin } from '../editing.js';
 import { codecsOf, albumFormatOf, audioStream, wantsDetail } from '../formats.js';
 import { norm } from '../missinglist.js';
 import { browseHref } from './library.js';
-import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf } from '../mb.js';
+import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf, exactAlbum, shortRelease, kindsAgree, notThatRecording } from '../mb.js';
 import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
 import { artistAppearsIn } from '../membership.js';
 import { chooseMissingKinds, missingKinds } from './mbsettings.js';
@@ -113,7 +113,7 @@ const FIRST_WAIT = 3000; // ms the player may wait on MusicBrainz for when an al
 
 export async function albumView({ el, params }) {
   const s = app.server;
-  const [album, children] = await Promise.all([s.metadata(params.id), s.children(params.id)]);
+  const [album, children] = await Promise.all([s.metadata(params.id, mbOn('mbOriginalYears') ? { includeGuids: 1 } : undefined), s.children(params.id)]);
   if (!album) throw Object.assign(new Error('Not found'), { status: 404 });
   const tracks = children.filter((m) => m.type === 'track').map(normTrack);
 
@@ -180,12 +180,17 @@ export async function albumView({ el, params }) {
   );
   if (album.summary) el.append(h('section.block.about', null, sectionHeader('About this album'), h('div.pad', null, clampText(album.summary, 4))));
 
+  // (The very album or none, as Years and genres to fix has it: by Plex's
+  // MusicBrainz id for it, or its exact title, and not where its tracks say
+  // it's another recording than the title does, a remix single's, say.)
   if (mbOn('mbOriginalYears') && album.parentTitle && norm(album.parentTitle) !== 'various artists') {
-    albumsOnMB([{ artist: album.parentTitle, title: album.title, year: Number(year(album)) || null }], { wait: FIRST_WAIT })
-      .then(([g]) => {
+    albumsOnMB([{ artist: album.parentTitle, title: album.title, year: Number(year(album)) || null, albumId: mbidOf(album), tracks: tracks.length }], { wait: FIRST_WAIT, strict: true })
+      .then(async ([g]) => {
         const was = firstYear(g && typeof g === 'object' ? g : null);
         const own = Number(year(album)) || null;
         if (!was || (own && was >= own)) return;
+        if (g.id !== mbidOf(album) && !kindsAgree(plexKind(album), g)) return;
+        if (await notThatRecording(album, g, { tracks })) return;
         first.textContent = `First released in ${was}`;
         first.hidden = false;
       })
@@ -485,15 +490,34 @@ export async function artistView({ el, params, onDispose }) {
   const st = { proper: null, separated: false, rows: null, types: null, settled: false, listed: [], properList: [], various };
   let mb = null;
   const albumsNow = () => ownAlbums(me, st.listed, st.properList, [...(st.rows?.own?.values() || [])]);
+  // (The year it first came out: of the very album or none, as Years and
+  // genres to fix has it, by Plex's MusicBrainz id for it, or for an album
+  // proper of the kind the page has it as, its exact title; and a short
+  // one's only once its tracks don't say it's another recording, a remix
+  // single's, say: see mb.js notThatRecording. Those are read once each,
+  // and the page painted again.)
+  const tracksSay = new Map(); // album id -> whether its tracks say it's another recording (null: being read)
   const placed = (albums) => {
     const groups = mb?.groups || [];
     const origin = mbOn('mbOriginalYears');
     return albums.map((m) => {
       const kind = releaseKind(m, st);
       const own = Number(year(m)) || null;
-      const g = groups.length ? matchGroup(groups, m.title, kind, own) : null;
-      const was = origin ? firstYear(g) : null;
-      return { m, kind, year: was && (!own || was < own) ? was : own };
+      const g = origin && groups.length ? exactAlbum(groups, m.title, { id: mbidOf(m), year: own, tracks: m.leafCount }) : null;
+      let was = firstYear(g);
+      if (!was || (own && was >= own) || (g.id !== mbidOf(m) && !kindsAgree(kind, g))) return { m, kind, year: own };
+      if (shortRelease(m.leafCount, g)) {
+        const id = idOf(m);
+        if (!tracksSay.has(id)) {
+          tracksSay.set(id, null);
+          notThatRecording(m, g).then((no) => {
+            tracksSay.set(id, no);
+            if (!no) paintAlbums();
+          });
+        }
+        if (tracksSay.get(id) !== false) was = null;
+      }
+      return { m, kind, year: was || own };
     });
   };
   let painted = '';
@@ -702,7 +726,7 @@ export async function artistView({ el, params, onDispose }) {
   // (Asked of the library the artist's in; let go of if the page is.)
   const ctrl = new AbortController();
   onDispose?.(() => ctrl.abort());
-  const listedP = s.artistAlbums(artist.librarySectionID ?? sec, artist.ratingKey, { signal: ctrl.signal }).catch(() => null);
+  const listedP = s.artistAlbums(artist.librarySectionID ?? sec, artist.ratingKey, { signal: ctrl.signal, guids: mbOn('mbOriginalYears') }).catch(() => null);
   const properP = s.children(artist.ratingKey).catch(() => null);
   // (Once they're first shown: what comes after them waits for no more.)
   let shown;

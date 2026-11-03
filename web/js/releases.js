@@ -208,115 +208,134 @@ export function joinedParts(name) {
   return parts.length > 1 ? parts : null;
 }
 
-// An album that's this release group's, plainly: by its very title (as
-// albumKey has it), first out within a year of the year Plex has for it,
-// and not titled as the artist is (artists of one name have self-titled
-// albums by construction).
-function plainly(groups, it, self) {
-  const key = albumKey(it?.title);
-  const y = Number(it?.year) || null;
-  if (!key || !y || key === self) return false;
-  return (Array.isArray(groups) ? groups : []).some((g) => albumKey(g.title) === key && firstYear(g) && Math.abs(firstYear(g) - y) <= 1);
+// ---------- years and genres to fix ----------
+
+// Words in a title's asides (in brackets, or after a dash) that make it
+// another recording, not another edition of the same one: a remix, an
+// edit, a live or acoustic one, a re-recording ("(The Cube Guys Remix)",
+// "[Radio Edit]", " - Live", "(Taylor's Version)", "(2021 Version)"). And
+// those that only say which edition, or what kind, it is ("(Deluxe
+// Edition)", "(2011 Remaster)", " - EP", "(Disc 1)", "(Explicit)").
+const VERSIONED = /\b(re ?mix(es|ed)?|rmx|mix(es)?|edit(s|ed)?|re ?work(s|ed)?|bootleg|vip|dub|live|unplugged|acoustic|instrumentals?|a ?cappella|demos?|extended|radio|club|re ?record(ed|ing)?|covers?|karaoke|versions?|sped ?up|slowed|stripped|reprise)\b/;
+const EDITION_ONLY = /^(?:(?:\d{4}|\d+(?:st|nd|rd|th)?|digital(?:ly)?|the|and|super|special|deluxe|expanded|anniversary|bonus|tracks?|reissue|remaster(?:ed)?|mono|stereo|legacy|collector s|limited|edition|version|ep|single|lp|dis[ck]|cd|box(?: set)?|explicit|clean|japan(?:ese)?)\s*)+$/;
+// (A "version" only beside words that say which edition it is: "(Deluxe
+// Version)", "(Remastered Version)". "(2021 Version)" and "(Single Version)"
+// are other recordings.)
+const EDITION_WORDS = /\b(super|special|deluxe|expanded|anniversary|bonus|reissue|remaster(ed)?|mono|stereo|legacy|collector s|limited|digital(ly)?|explicit|clean|japan(ese)?)\b/;
+// ...and any "… Edition" that doesn't say another recording ("(Platinum
+// Edition)", "(Tour Edition)").
+const editionOnly = (text) => (EDITION_ONLY.test(text) && (!/\bversion\b/.test(text) || EDITION_WORDS.test(text))) || (/ edition$/.test(text) && !VERSIONED.test(text));
+
+// A title's asides, as norm has them: [{ text, versioned }] (`versioned`:
+// it says another recording; one that only says which edition isn't
+// listed).
+export function asides(title) {
+  const raw = String(title || '');
+  const [head, ...tail] = raw.split(/\s+[-–—:]\s+/);
+  const parts = [...head.matchAll(/\(([^()]*)\)|\[([^[\]]*)\]/g)].map((m) => m[1] ?? m[2]).concat(tail);
+  return parts
+    .map((p) => norm(p))
+    .filter((p) => p && !editionOnly(p))
+    .map((text) => ({ text, versioned: VERSIONED.test(text) }));
 }
 
-// Album titles plenty of artists have: of one word ("Live", "Christmas",
-// "Love", "Home"), of three letters or fewer ("Up"), live at somewhere
-// ("Live in Tokyo"), or of stock words and numbers alone ("Greatest Hits
-// Vol. 2", "BBC Sessions", "The Complete Recordings", "Second Album",
-// "II", "The Ultimate Collection", "20th Century Masters"), the artist's
-// own name aside ("The Best of Alphabeat", "Alphabeat
-// Live"). `key`: the title as albumKey has it; `self`: the artist's name,
-// as albumKey has it. An album of one such title that's an artist's, by its
-// title and year, isn't plain evidence on its own that it's that artist's
-// rather than another's of the name.
-const STOCK = new Set(
-  `a an and the of in at on from to for with by
-  best very greatest hits hit essential essentials singles single b side sides rarities rare
-  remix remixes remixed mix mixes collection collected complete recordings recorded anthology
-  demo demos live unplugged acoustic instrumental instrumentals untitled unreleased ep lp album albums
-  mixtape sampler compilation retrospective gold platinum covers cover sessions session debut
-  christmas xmas holiday holidays songs song love ballads bbc peel mtv radio tracks bonus
-  remastered remaster deluxe edition expanded version versions vol volume part pt no chapter book
-  first second third new early years favourites favorites selected works anniversary special
-  ultimate definitive original classics classic series masters millennium century playlist super all
-  number ones concert soundtrack tapes lost john
-  one two three four five six seven eight nine ten`.split(/\s+/),
-);
-const ROMAN = /^(?=[mdclxvi])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$/;
-export function genericTitle(key, self = '') {
-  let k = String(key || '');
-  if (self && k !== self) k = ` ${k} `.replace(` ${self} `, ' ').trim();
-  const words = k.split(' ').filter(Boolean);
-  if (k.length < 4 || words.length < 2 || /^live (?:in|at|from|on) /.test(k)) return true;
-  return words.every((w) => STOCK.has(w) || /^\d+(?:st|nd|rd|th)?$/.test(w) || ROMAN.test(w));
+// An album's title as it's matched exactly: its title as norm has it, with
+// every aside but those that only say which edition it is ("Rumours (2004
+// Remaster)" is "Rumours"; "The Beat Goes On (Radio Edit) [The Cube Guys
+// Remix]" is all of that).
+export function exactKey(title) {
+  const head = norm(String(title || '').split(/\s+[-–—:]\s+/)[0]);
+  return head ? [head, ...asides(title).map((a) => a.text).sort()].join(' | ') : '';
 }
 
-// Whether library artists are one artist, the artist of `name`, to merge
-// them in Plex (its owner's to do): those of that very name (Plex makes two
-// of one from files tagged otherwise), or with that name among several in
-// theirs (`joined`: see joinedParts), and the artist of that name. `entries`:
-// [{ mbid, albums: [{ title, year }] }] (`mbid`: the MusicBrainz id Plex
-// has, where it has one; `joined`, the first is the artist of the plain
-// name, the second the one of several names in one); and what MusicBrainz
-// has of the name (`artist`, `groups`, `capped`, `namesakes` and
-// `moreNamesakes`, as mb.js artistOnMB gives them: asked by the id Plex has
-// for one of them, if it has one). 'same' only on plain evidence, album by
-// album (even where Plex has the same MusicBrainz id for each: Plex can
-// have taken an artist MusicBrainz doesn't know for the one of the name it
-// does):
-//   - MusicBrainz has the artist (by that id, where Plex has one, and Plex
-//     has no other), and what's listed of them is all they have (not
-//     `capped`), and of the others of the name too (nor more of those than
-//     are listed: `moreNamesakes`);
-//   - none of them has an album that's plainly another artist's of the name
-//     (`namesakes`) and not this one's;
-//   - and each has albums that are plainly that artist's (see plainly) and
-//     not another's: two at least, or one of a title few others have (see
-//     genericTitle). `joined`: the artist of the plain name does, and the
-//     one of several names does too, unless MusicBrainz has no other artist
-//     of the name at all (the name the tag gives is theirs, then).
-// 'different': Plex has different ids for them (but `joined`: which of
-// the names Plex has an id for can't be told), or an album of one is
-// plainly another's of the name and not this one's (by a title few others
-// have). Anything else: 'unknown', and they're left as they are.
-// What there is of each of `entries` (as for sameArtist) to tell who they
-// are, album by album: [{ albums (how many Plex has), plain (titles of
-// those plainly the artist's, by `groups`, and not another's of the name,
-// of a title few others have: see genericTitle), weak (...of a title plenty
-// of others have), apart (titles of those plainly another's, by
-// `namesakes`, and not the artist's, of a title few others have), apartWeak
-// (...plenty have) }]: one title for each album, as albumKey has it.
-export function evidenceOf(entries, { name = '', groups = [], namesakes = [] } = {}) {
-  const self = albumKey(name);
-  const others = Array.isArray(namesakes) ? namesakes : [];
-  return (Array.isArray(entries) ? entries : []).map((e) => {
-    const albums = Array.isArray(e?.albums) ? e.albums : [];
-    const out = { albums: albums.length, plain: new Map(), weak: new Map(), apart: new Map(), apartWeak: new Map() };
-    for (const it of albums) {
-      const key = albumKey(it?.title);
-      const theirs = plainly(groups, it, self);
-      const another = others.some((n) => plainly(n?.groups, it, self));
-      const few = !genericTitle(key, self);
-      const into = theirs && !another ? (few ? out.plain : out.weak) : another && !theirs ? (few ? out.apart : out.apartWeak) : null;
-      if (into && !into.has(key)) into.set(key, String(it.title));
-    }
-    return { albums: out.albums, plain: [...out.plain.values()], weak: [...out.weak.values()], apart: [...out.apart.values()], apartWeak: [...out.apartWeak.values()] };
-  });
+// The release group of an artist's that's this album, by its title alone,
+// for its year and genres to be fixed: a studio album of that very title
+// (as exactKey has it: MusicBrainz's kind for it is an album's, as kindOf
+// has it), never a single or an EP (an artist's singles of one title come
+// out again and again, remixed and re-recorded, so which it is can't be
+// told from its title), nor a compilation, a live album or the like (their
+// titles come again too: "Greatest Hits", "Live"); and of several of that
+// title, the one that first came out the year Plex has (`year`), or none:
+// which it is can't be told.
+export function exactGroup(groups, title, year = null) {
+  const want = exactKey(title);
+  if (!want || !Array.isArray(groups)) return null;
+  const same = groups.filter((g) => g && g.primary === 'Album' && kindOf(g.primary, g.secondary) === 'albums' && exactKey(g.title) === want);
+  if (same.length < 2) return same[0] || null;
+  const y = Number(year) || null;
+  return (y && same.find((g) => firstYear(g) === y)) || null;
 }
 
-// Plain evidence that one of evidenceOf's is the artist's: two albums, or
-// one of a title few others have.
-const plainlyTheirs = (x) => x.plain.length > 0 || x.plain.length + x.weak.length >= 2;
+// The same album title (as albumKey has it), but for a letter or two (as
+// sameTitle has it, but never one with more after it: "Rivers of Babylon"
+// isn't "Rivers of Babylon: Presenting Boney M.").
+export function sameAlbumTitle(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b) || numbersOf(a) !== numbersOf(b)) return false;
+  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
+}
 
-export function sameArtist(entries, { name = '', artist = null, groups = [], capped = false, namesakes = [], moreNamesakes = false, joined = false } = {}) {
-  if (!Array.isArray(entries) || entries.length < 2) return 'unknown';
-  const ids = [...new Set(entries.map((e) => e?.mbid).filter(Boolean))];
-  if (ids.length > 1) return joined ? 'unknown' : 'different';
-  if (!artist?.id || (ids.length === 1 && artist.id !== ids[0]) || capped) return 'unknown';
-  const others = Array.isArray(namesakes) ? namesakes : [];
-  const ev = evidenceOf(entries, { name, groups, namesakes: others });
-  if (ev.some((x) => x.apart.length)) return 'different';
-  if (ev.some((x) => x.apartWeak.length) || moreNamesakes || others.some((n) => n?.capped)) return 'unknown';
-  if (joined) return plainlyTheirs(ev[0]) && (plainlyTheirs(ev[1]) || !others.length) ? 'same' : 'unknown';
-  return ev.every(plainlyTheirs) ? 'same' : 'unknown';
+// Whether two titles are of the same recording, as far as they say: the
+// same asides that say another recording (a remix, live...), whatever
+// else they say ("Yeah Yeah" and "Yeah Yeah (Remixes)" aren't).
+const versionsOf = (title) =>
+  asides(title)
+    .filter((a) => a.versioned)
+    .map((a) => a.text)
+    .sort()
+    .join(' | ');
+export function sameVersion(a, b) {
+  return versionsOf(a) === versionsOf(b);
+}
+
+// A release short enough (a single or an EP, or six tracks or fewer: an
+// album's count of them, `tracks`, 0 where it isn't known) that its tracks
+// must be looked at (see versionedTracks) before it's taken as the release
+// group Plex has it as, whose first year can be an original's it's a remix
+// of; and too short to be taken for one by its title alone (see
+// exactAlbum).
+export const SHORT_RELEASE = 6;
+export function shortRelease(tracks, g) {
+  return (Number(tracks) || 0) <= SHORT_RELEASE || g?.primary === 'Single' || g?.primary === 'EP';
+}
+
+// Whether the release group Plex has an album as (by Plex's MusicBrainz id
+// for it) is that album as its titles say too: the same title, but for a
+// letter or two, and the same recording (not "Yeah Yeah (Remixes)" as
+// "Yeah Yeah"). Plex can have one wrong.
+export function titlesAgree(g, title) {
+  return !!g && sameAlbumTitle(albumKey(g.title), albumKey(title)) && sameVersion(g.title, title);
+}
+
+// The release group of an artist's that's this very album, for when it
+// first came out: the one Plex has it as (`id`, Plex's MusicBrainz id for
+// it, where it's one of these), where the titles agree; or else, for an
+// album of more than SHORT_RELEASE tracks (`tracks`, Plex's count of them),
+// the studio album of its exact title (exactGroup); or none. A single, an
+// EP, a compilation or a live album is only ever the one Plex has it as.
+// (Plex's id for it, and its title saying it's another: which it is can't
+// be told.) By its title, the kind Plex has for it must be MusicBrainz's
+// too: see kindsAgree.
+export function exactAlbum(groups, title, { id = null, year = null, tracks = 0 } = {}) {
+  const list = Array.isArray(groups) ? groups : [];
+  const byId = id ? list.find((g) => g?.id === id) : null;
+  if (byId) return titlesAgree(byId, title) ? byId : null;
+  return (Number(tracks) || 0) > SHORT_RELEASE ? exactGroup(list, title, year) : null;
+}
+
+// Whether the kind Plex has for an album (`kind`, as plexKind has it: null
+// where Plex hasn't said) is the one MusicBrainz has for a release group of
+// its title: a live album isn't a studio album of its title, nor a single
+// an album.
+export const kindsAgree = (kind, g) => !kind || !g || kind === kindOf(g.primary, g.secondary);
+
+// Whether an album is another recording than its title says, by its tracks:
+// one of them says it's a remix, an edit, live... and the album's title
+// doesn't ("Yeah Yeah", of "Yeah Yeah (Chocolate Puma Remix)"). An album
+// whose title says so itself ("Yeah Yeah (Remixes)") is as it says.
+export function versionedTracks(albumTitle, trackTitles) {
+  if (versionsOf(albumTitle)) return false;
+  const own = ` ${exactKey(albumTitle).replace(/ \| /g, ' ')} `;
+  return (Array.isArray(trackTitles) ? trackTitles : []).some((t) => asides(t).some((a) => a.versioned && !own.includes(` ${a.text} `)));
 }

@@ -13,7 +13,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { norm } from './missinglist.js';
-import { albumKey, matchGroup } from './releases.js';
+import { albumKey, matchGroup, exactAlbum, exactKey } from './releases.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org
@@ -109,9 +109,12 @@ export const isPublic = (base) => {
   }
 };
 
-// An artist every MusicBrainz has (Radiohead), to see whether searching
-// one finds anyone (see searchCheck).
-const SEARCH_CANARY = 'a74b1b7f-71a5-4011-9441-d0b5e4122711';
+// A search that finds something in any MusicBrainz, for each kind it's
+// searched for, to see whether searching it finds anything at all (see
+// searchCheck): artists who are people, and recordings and release groups
+// of albums. These are kinds MusicBrainz sorts everything into, not anyone's
+// music.
+const SEARCH_CHECK = { artist: 'type:person', recording: 'primarytype:album', 'release-group': 'primarytype:album' };
 
 export class MusicBrainz {
   // `checkSearch`: a server of your own whose search finds no one at all is
@@ -133,7 +136,7 @@ export class MusicBrainz {
     // The advanced features (see advanced()): what's kept of them, and
     // what's waiting to be looked up in the background.
     this.adv = null;
-    this.todo = new Map(); // key -> { artist, title, genres, year, who, tries }
+    this.todo = new Map(); // key -> { artist, title, genres, year, id, albumId, strict, who, tries }
     this.queuedBy = new Map(); // who -> how many of theirs are waiting
     this.working = false;
     this.downUntil = 0; // MusicBrainz didn't answer: the features don't ask it again until then
@@ -333,17 +336,18 @@ export class MusicBrainz {
   // (or are being built again) finds no one, without saying anything's
   // wrong, so every artist and song would seem not to be on MusicBrainz.
   // Checked in each index searched (artists, recordings, release groups),
-  // for an artist every MusicBrainz has, by its id, at most every few
-  // minutes; while it finds no one, nothing a search couldn't find is taken
-  // as not on MusicBrainz (it's an error, `searchBroken`, said to the app),
-  // and what's found by a MusicBrainz id is found as ever.
+  // with a search that finds something in any MusicBrainz (SEARCH_CHECK), at
+  // most every few minutes; while it finds nothing, nothing a search
+  // couldn't find is taken as not on MusicBrainz (it's an error,
+  // `searchBroken`, said to the app), and what's found by a MusicBrainz id
+  // is found as ever.
   async searchCheck(signal, { index = 'artist', background = false } = {}) {
-    if (!this.checkSearch) return;
+    if (!this.checkSearch || !SEARCH_CHECK[index]) return;
     const s = this.search[index];
     if (!s || Date.now() - s.at > (s.works ? MB_LIMITS.searchOkMs : MB_LIMITS.searchBadMs)) {
-      const found = await this.ask(`/ws/2/${index}`, { query: `arid:${SEARCH_CANARY}`, limit: '1' }, signal, { background });
+      const found = await this.ask(`/ws/2/${index}`, { query: SEARCH_CHECK[index], limit: '1' }, signal, { background });
       const list = found?.[index === 'artist' ? 'artists' : index === 'recording' ? 'recordings' : 'release-groups'];
-      const works = index === 'artist' ? (Array.isArray(list) ? list : []).some((a) => a?.id === SEARCH_CANARY) : Array.isArray(list) && list.length > 0;
+      const works = Array.isArray(list) && list.length > 0;
       if (!works && s?.works !== false) this.log?.warn(`musicbrainz: searching the MusicBrainz server's ${index}s finds no one, so its search indexes may not be built: until it does, only what's found by a MusicBrainz id is found`);
       if (works && s?.works === false) this.log?.info(`musicbrainz: searching the MusicBrainz server's ${index}s finds them again`);
       this.search[index] = { works, at: Date.now() };
@@ -470,22 +474,28 @@ export class MusicBrainz {
     return this.adv.set(key, topGenres(data.genres));
   }
 
-  // One of an artist's albums, by its title (and the year Plex has for it,
-  // to tell albums of one title apart: see releases.js matchGroup): its
-  // release group (with `genres`, and its genres), or null where
-  // MusicBrainz has no such artist, or no such album of theirs (or which
-  // it is can't be told).
+  // One of an artist's albums, among their release groups: by its title
+  // (and the year Plex has for it, to tell albums of one title apart: see
+  // releases.js matchGroup), or with `strict`, for its year and genres to be
+  // fixed, the very album or nothing: the one Plex has it as (`albumId`,
+  // Plex's MusicBrainz id for it, where the titles agree), or else, for an
+  // album of more tracks than a single's (`tracks`, Plex's count of them),
+  // the studio album of its exact title (releases.js exactAlbum). Its
+  // release group (with `genres`, and its genres), or null where MusicBrainz
+  // has no such artist, or no such album of theirs (or which it is can't be
+  // told). Plex's id for the album is looked for among the artist's: only
+  // the artist's name, or their id, goes to MusicBrainz to find it.
   // (`id`: the artist's MusicBrainz id, where Plex has it: then no search.)
-  async album(artist, title, { genres = false, year = null, id = null, signal, background = false } = {}) {
+  async album(artist, title, { genres = false, year = null, id = null, albumId = null, strict = false, tracks = 0, signal, background = false } = {}) {
     const info = await this.artistInfo(artist, { id, signal, background });
     if (!info) return null;
-    const g = matchGroup(await this.releaseGroups(info.id, { signal, background }), title, null, year);
+    const g = pickAlbum(await this.releaseGroups(info.id, { signal, background }), title, { year, albumId, strict, tracks });
     if (!g) return null;
     return genres ? { ...g, genres: await this.groupGenres(g.id, { signal, background }) } : g;
   }
 
   // ...as far as it's known now, without asking: undefined where it isn't.
-  knownAlbum(artist, title, { genres = false, year = null, id = null } = {}) {
+  knownAlbum(artist, title, { genres = false, year = null, id = null, albumId = null, strict = false, tracks = 0 } = {}) {
     const who = norm(artist);
     const byId = MBID.test(String(id));
     if (!this.adv || (!who && !byId) || !albumKey(title)) return null;
@@ -496,7 +506,7 @@ export class MusicBrainz {
     if (!info) return info;
     const groups = this.had(`groups|${info.id}`);
     if (groups === undefined) return undefined;
-    const g = matchGroup(groups, title, null, year);
+    const g = pickAlbum(groupList(groups), title, { year, albumId, strict, tracks });
     if (!g || !genres) return g;
     const got = this.had(`genres|${g.id}`);
     return got === undefined ? undefined : { ...g, genres: got };
@@ -507,13 +517,15 @@ export class MusicBrainz {
   // anything else. At most MB_ADVANCED_LIMITS.queued waiting, and
   // queuedEach of any one account's (`who`): false if there's no room for
   // this one now (nor while MusicBrainz isn't answering).
-  later(artist, title, { genres = false, year = null, who = '', id = null } = {}) {
+  later(artist, title, { genres = false, year = null, who = '', id = null, albumId = null, strict = false, tracks = 0 } = {}) {
     if (!this.adv || !norm(artist) || !albumKey(title) || this.down()) return false;
     const byId = MBID.test(String(id)) ? id : null;
-    const key = `${norm(artist)}|${albumKey(title)}|${Number(year) || ''}|${genres ? 1 : 0}|${byId || ''}`;
+    const byAlbum = MBID.test(String(albumId)) ? albumId : null;
+    const count = Math.max(0, Math.min(10000, Math.floor(Number(tracks) || 0)));
+    const key = `${norm(artist)}|${strict ? exactKey(title) : albumKey(title)}|${Number(year) || ''}|${genres ? 1 : 0}|${byId || ''}|${byAlbum || ''}|${strict ? `1|${count}` : 0}`;
     if (this.todo.has(key)) return true;
     if (this.todo.size >= MB_ADVANCED_LIMITS.queued || (this.queuedBy.get(who) || 0) >= MB_ADVANCED_LIMITS.queuedEach) return false;
-    this.todo.set(key, { artist: String(artist), title: String(title), genres: !!genres, year: Number(year) || null, id: byId, who, tries: 0 });
+    this.todo.set(key, { artist: String(artist), title: String(title), genres: !!genres, year: Number(year) || null, id: byId, albumId: byAlbum, strict: !!strict, tracks: count, who, tries: 0 });
     this.queuedBy.set(who, (this.queuedBy.get(who) || 0) + 1);
     this.work();
     return true;
@@ -543,7 +555,7 @@ export class MusicBrainz {
           continue;
         }
         try {
-          await this.album(it.artist, it.title, { genres: it.genres, year: it.year, id: it.id, background: true });
+          await this.album(it.artist, it.title, { genres: it.genres, year: it.year, id: it.id, albumId: it.albumId, strict: it.strict, tracks: it.tracks, background: true });
           this.done(key);
         } catch (err) {
           // Only a search could find it, and searching finds no one: let go
@@ -575,18 +587,19 @@ export class MusicBrainz {
   // where it isn't yet: looked up in the background, for `who`), waiting
   // up to `waitMs` for those, and 'unchecked' where only a search could
   // find it while searching finds no one (see searchCheck). (Items: {
-  // artist, title, year, artistId }: the artist's MusicBrainz id, where
-  // Plex has it, so no search is needed.)
-  async albums(items, { genres = false, waitMs = 0, signal, who = '' } = {}) {
+  // artist, title, year, artistId, albumId, tracks }: the artist's and the
+  // album's MusicBrainz ids, where Plex has them, so no search is needed,
+  // and how many tracks Plex has of it.) `strict`: as album has it.
+  async albums(items, { genres = false, waitMs = 0, signal, who = '', strict = false } = {}) {
     const bySearch = (it) => !MBID.test(String(it.artistId)) || this.had(`artistid|${it.artistId}`) === null;
     const answer = () =>
       items.map((it) => {
-        const v = this.knownAlbum(it.artist, it.title, { genres, year: it.year, id: it.artistId });
+        const v = this.knownAlbum(it.artist, it.title, { genres, year: it.year, id: it.artistId, albumId: it.albumId, strict, tracks: it.tracks });
         if (v !== undefined) return v;
         return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
       });
     let out = answer();
-    out.forEach((v, i) => v === 'pending' && this.later(items[i].artist, items[i].title, { genres, year: items[i].year, who, id: items[i].artistId }));
+    out.forEach((v, i) => v === 'pending' && this.later(items[i].artist, items[i].title, { genres, year: items[i].year, who, id: items[i].artistId, albumId: items[i].albumId, strict, tracks: items[i].tracks }));
     const until = Date.now() + Math.max(0, Math.min(Number(waitMs) || 0, MB_ADVANCED_LIMITS.waitMs));
     while (out.includes('pending') && Date.now() < until && !signal?.aborted) {
       await new Promise((r) => setTimeout(r, 200));
@@ -684,6 +697,13 @@ function sameNamed(list, want) {
 function cleanNamesake(a) {
   if (!a || !MBID.test(String(a.id))) return null;
   return { id: a.id, name: text(a.name, 200), note: text(a.disambiguation ?? a.note, 120) };
+}
+
+// An album's release group among its artist's (see MusicBrainz album).
+function pickAlbum(groups, title, { year = null, albumId = null, strict = false, tracks = 0 } = {}) {
+  const id = MBID.test(String(albumId)) ? albumId : null;
+  if (strict) return exactAlbum(groups, title, { id, year, tracks });
+  return (id && groups.find((g) => g?.id === id)) || matchGroup(groups, title, null, year);
 }
 
 // A release group as it's kept, or null.

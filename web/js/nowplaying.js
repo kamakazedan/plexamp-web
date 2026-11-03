@@ -36,12 +36,14 @@ function setPlayButton(btn, size) {
   btn.classList.toggle('is-loading', player.state === 'loading');
 }
 
+// (Shuffle says whether it's on, as Repeat does: on hover, and to a screen
+// reader as pressed or not.)
+const shuffleTitle = () => (player.remote ? 'Shuffle up next for everyone' : `Shuffle: ${player.shuffle ? 'on' : 'off'}`);
 function setModeButtons(shuffleBtn, repeatBtn, size) {
   shuffleBtn.classList.toggle('on', player.shuffle);
   shuffleBtn.setAttribute('aria-pressed', String(player.shuffle));
-  const shuffleLabel = player.remote ? 'Shuffle up next for everyone' : 'Shuffle';
-  shuffleBtn.setAttribute('aria-label', shuffleLabel);
-  shuffleBtn.title = shuffleLabel;
+  shuffleBtn.setAttribute('aria-label', player.remote ? 'Shuffle up next for everyone' : 'Shuffle');
+  shuffleBtn.title = shuffleTitle();
   setIcon(repeatBtn, player.repeat === 'one' ? 'repeatOne' : 'repeat', size);
   repeatBtn.classList.toggle('on', player.repeat !== 'off');
   repeatBtn.classList.toggle('unavailable', !!player.remote);
@@ -861,6 +863,7 @@ function buildNowPlaying() {
   function renderModes() {
     const remote = !!player.remote;
     setToggle(shuffleBtn, player.shuffle, remote ? 'Shuffle up next for everyone' : 'Shuffle');
+    shuffleBtn.title = shuffleTitle();
     repeatBtn.replaceChildren(icon(player.repeat === 'one' ? 'repeatOne' : 'repeat', 26));
     setToggle(repeatBtn, player.repeat !== 'off', remote ? 'Repeat (not available while listening together)' : { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: this track' }[player.repeat]);
     repeatBtn.classList.toggle('unavailable', remote);

@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.34.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.35.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -557,14 +557,15 @@ export class PlexServer {
   // page where it gives none; one bigger than was asked for is a server
   // that gave them all at once, and the same page again one that doesn't
   // page). As the library lists them: without what kind each is.
-  async artistAlbums(section, artistId, { signal } = {}) {
+  // (`guids`: with the other services' ids for each: MusicBrainz's.)
+  async artistAlbums(section, artistId, { signal, guids = false } = {}) {
     if (!/^\d+$/.test(String(artistId)) || !/^\d+$/.test(String(section))) return [];
     const out = [];
     let last = null;
     for (let start = 0; start < ARTIST_PAGE * 50; ) {
       const mc = await this.get(
         `/library/sections/${section}/all`,
-        { type: 9, 'artist.id': artistId, 'X-Plex-Container-Start': start, 'X-Plex-Container-Size': ARTIST_PAGE },
+        { type: 9, 'artist.id': artistId, ...(guids ? { includeGuids: 1 } : {}), 'X-Plex-Container-Start': start, 'X-Plex-Container-Size': ARTIST_PAGE },
         { signal },
       );
       const items = asArray(mc.Metadata);
@@ -938,16 +939,6 @@ export class PlexServer {
   async deleteCollection(id) {
     await this.send('DELETE', `/library/collections/${id}`);
     this.forgetCollections();
-  }
-
-  // Plex's own merge (for artists: views/mbmerge.js): the others' albums,
-  // and their tracks, are the first's, and the others are gone, in Plex
-  // itself, for everyone and every app. Plex lets only its owner do it.
-  async mergeInto(id, others) {
-    const ids = [...new Set(others.map(String))].filter((x) => /^\d+$/.test(x) && x !== String(id));
-    if (!/^\d+$/.test(String(id)) || !ids.length) throw new Error('Nothing to merge.');
-    await this.send('PUT', `/library/metadata/${id}/merge`, { ids: ids.join(',') }, { discard: true });
-    this.cache.clear();
   }
 
   // An album's year (`year`, and the day it came out: `date`, YYYY-MM-DD)
