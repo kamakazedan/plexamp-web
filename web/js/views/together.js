@@ -7,6 +7,7 @@ import { navigate, popOverlay } from '../router.js';
 import { h, append, icon, iconButton, art, avatar, pageHeader, sectionHeader, spinner, emptyState, errorState, toast, sheet, fmt } from '../ui.js';
 import { trackRow } from '../components.js';
 import { openNowPlaying } from '../nowplaying.js';
+import { copyText } from '../missing.js';
 
 const HOW = [
   ['together', 'Invite Plex friends', 'Pick Plex friends who can use this library. They join from this player with their own account.'],
@@ -382,13 +383,10 @@ function sessionActions(s) {
       'button.btn.btn-secondary',
       {
         type: 'button',
+        // (Where it can't be copied, it's shown, to copy by hand.)
         onclick: async () => {
-          try {
-            await navigator.clipboard.writeText(link);
-            toast('Link copied. Only people you’ve invited can join.');
-          } catch {
-            sheet({ title: 'Invitation link', content: h('p.pad.selectable', null, link) });
-          }
+          if (await copyText(link)) toast('Link copied. Only people you’ve invited can join.');
+          else sheet({ title: 'Invitation link', content: h('p.pad.selectable', null, link) });
         },
       },
       icon('link', 20),
