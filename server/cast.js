@@ -18,6 +18,8 @@ import { SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 // 3005 or 32433.
 export const PLAYER_PORTS = new Set([3005, 32433, ...Array.from({ length: 11 }, (_, i) => 32500 + i)]);
 const TIMEOUT = 5000;
+const COMMAND_IDS_KEPT = 5000; // players' last command ids, kept (the latest used)
+const ANSWER_BYTES = 64 * 1024; // of a player's answer, read at most (it's small)
 const ID = /^[A-Za-z0-9_.-]{1,100}$/;
 const TOKEN = /^[A-Za-z0-9_.~-]{8,200}$/;
 
@@ -135,10 +137,14 @@ export class Cast {
   // Sends /player/<path> to a player: the commands below build `path` and
   // `params` themselves.
   async send(user, token, p, path, params = {}) {
+    // (Each player's go up, one by one, from the first sent it, as Plex
+    // players want: of those sent to least lately, past so many, one goes,
+    // never all of them at once.)
     const key = `${user.id}|${p.id}`;
     const commandID = (this.commandIds.get(key) || 0) + 1;
+    this.commandIds.delete(key);
     this.commandIds.set(key, commandID);
-    if (this.commandIds.size > 5000) this.commandIds.clear();
+    if (this.commandIds.size > COMMAND_IDS_KEPT) this.commandIds.delete(this.commandIds.keys().next().value);
     const q = new URLSearchParams({ ...params, commandID: String(commandID) });
     let res;
     try {
@@ -162,7 +168,7 @@ export class Cast {
       throw new CastError(502, `${p.name} didn’t take the command (it answered ${res.status}).`);
     }
     // (A player's answer is small: anything bigger isn't read.)
-    return readCapped(res, 64 * 1024).catch(() => '');
+    return readCapped(res, ANSWER_BYTES).catch(() => '');
   }
 
   // Start playing a play queue the browser made on the Plex server. The

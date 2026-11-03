@@ -118,6 +118,13 @@ test('"ended" only advances when the clock agrees', () => {
   assert.equal(s.index, 1);
 });
 
+test('a session started at a track past the end of its queue starts at its first, wherever it was in it', () => {
+  const tg = new Together({ now: () => 1_000_000 });
+  const s = tg.create(dan, { server, queue: [track(1, 10000), track(2, 3000)], index: 2, position: 8000 });
+  assert.equal(s.index, 0);
+  assert.equal(tg.position(s), 8000, 'within the first track, not the last');
+});
+
 test('track data from members is cleaned', () => {
   assert.equal(cleanTrack({ id: '1 OR 1=1' }), null);
   const t = cleanTrack({
@@ -427,6 +434,14 @@ test('commands are built by the service, with the target and a command id', asyn
   assert.equal(calls[1].url.searchParams.get('offset'), '61000');
   assert.equal(calls[2].url.searchParams.get('volume'), '55');
   assert.deepEqual(calls.map((c) => c.url.searchParams.get('commandID')), ['1', '2', '3']);
+  // ...each player's going on from its last while it's in use, however many others are sent to (past 5,000, they all
+  // began again at once).
+  for (let i = 0; i < 5000; i++) {
+    await cast.send(me, 'tok', { id: `other-${i}`, url: 'http://192.168.1.60:32500', name: 'Other' }, 'playback/pause');
+    if (i % 1000 === 999) await cast.command(me, 'tok', 'p1', { command: 'pause' });
+  }
+  assert.equal(calls.at(-1).url.searchParams.get('commandID'), '8');
+  calls.length = 3;
   for (const bad of [{ command: 'navigation/home' }, { command: 'seekTo', offset: -5 }, { command: 'setParameters', volume: 500 }, { command: 'skipTo', key: '/system/x' }]) {
     await assert.rejects(cast.command(me, 'tok', 'p1', bad), (e) => e.status === 400, JSON.stringify(bad));
   }

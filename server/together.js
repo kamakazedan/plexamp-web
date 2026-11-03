@@ -116,6 +116,8 @@ export class Together {
     if (this.sessions.size >= LIMITS.sessions) throw new TogetherError(429, 'This player has too many sessions running. Try again later.');
     const now = this.now();
     const items = this.items(queue, host).slice(0, LIMITS.queue);
+    // (The track it starts at: the first, where `index` isn't one of the queue's.)
+    const start = items.length ? int(index, items.length - 1) : 0;
     const s = {
       id: randomBytes(12).toString('base64url'),
       createdAt: now,
@@ -124,9 +126,9 @@ export class Together {
       members: new Map([[host.id, { ...person(host), host: true, seen: now }]]),
       invited: new Map(),
       queue: items,
-      index: items.length ? Math.min(int(index, items.length - 1), items.length - 1) : 0,
+      index: start,
       playing: !!playing && items.length > 0,
-      position: Math.min(int(position, 24 * 3600000), items[Math.min(int(index, items.length), items.length - 1)]?.duration || Infinity),
+      position: Math.min(int(position, 24 * 3600000), items[start]?.duration || Infinity),
       at: now,
       version: 1,
       events: [],
