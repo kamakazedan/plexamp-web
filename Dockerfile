@@ -1,14 +1,24 @@
 # plexamp-web: the web app served by nginx, plus a small Node.js service for
 # Play Together, Play on, shared playlists, the shared AI model and sign-in
 # checks. No build step for the app itself.
+#
+# The base images are named by their tags, not pinned to digests: each
+# release's build takes their newest security fixes (Alpine's, nginx's and
+# Node.js's). Pinning digests would need something to move them on, such as
+# Dependabot.
 
 # hls.js (plays music your server converts, in browsers without built-in
 # HLS) is bundled into the image at a pinned version, so the app never loads
-# code from a CDN. npm checks the download against the registry's checksum.
+# code from a CDN. The download has to match the checksum kept here (the npm
+# registry's for that version), so the registry alone can't change it. The
+# Proxmox VE install and dev/fetch-hls.sh check it too.
 FROM --platform=$BUILDPLATFORM node:22-alpine AS vendor
 ARG HLS_JS_VERSION=1.6.19
+ARG HLS_JS_INTEGRITY=sha512-A//aZeaAgM5rgUCbTURD4gkfyw5Uag2/4Jky7CfDOukL/DN+P5DjbgK2BYteyP3/KnCkPfkGVkbLxQG2T0AbUQ==
 WORKDIR /vendor
 RUN npm pack --silent "hls.js@${HLS_JS_VERSION}" \
+    && node -e 'const got = "sha512-" + require("crypto").createHash("sha512").update(require("fs").readFileSync(process.argv[1])).digest("base64"); if (got !== process.argv[2]) { console.error("hls.js " + process.argv[3] + " is " + got + ", not the " + process.argv[2] + " the Dockerfile has"); process.exit(1); }' \
+        "hls.js-${HLS_JS_VERSION}.tgz" "${HLS_JS_INTEGRITY}" "${HLS_JS_VERSION}" \
     && tar -xzf "hls.js-${HLS_JS_VERSION}.tgz" \
     && mkdir -p out \
     && cp package/dist/hls.min.js out/hls.min.js \
