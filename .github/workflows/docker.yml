@@ -7,16 +7,26 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Each job gets only what it needs (see image and stable below). Actions are
-# pinned to the commits of the versions named beside them, and the runners to
-# Ubuntu 24.04 (ubuntu-latest moves to 26.04 from October 2026, where
-# Playwright 1.56 can't install its browser's dependencies).
+# Each job gets only what it needs (see image, publish and stable below).
+# Actions are pinned to the commits of the versions named beside them, the
+# images they run to digests, and the runners to Ubuntu 24.04 (ubuntu-latest
+# moves to 26.04 from October 2026, where Playwright 1.56 can't install its
+# browser's dependencies).
 permissions:
   contents: read
+
+# One run at a time for each branch or tag: a newer push to main waits for
+# the one before (and the newest waiting replaces any older), so what's
+# published never goes back to an older commit. A pull request's older run
+# is cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -48,7 +58,7 @@ jobs:
           sh -n tests/run-browser-tests.sh
           sh -n dev/fetch-hls.sh
           python3 -m py_compile dev/mock-plex.py dev/mock-ollama.py tests/browser_test.py
-      - name: Check the Proxmox scripts
+      - name: Check the shell scripts, and the Proxmox scripts' own tests
         shell: bash # with pipefail, so shellcheck's findings fail the step
         env:
           SHELLCHECK_VERSION: v0.11.0
@@ -69,13 +79,79 @@ jobs:
           lint() { shellcheck -f gcc "$@" | sed -E 's/^([^:]+):([0-9]+):([0-9]+): ([a-z]+): (.*)$/::error file=\1,line=\2,col=\3::\4: \5/'; }
           status=0
           lint proxmox/plexamp-web.sh proxmox/install.sh tests/proxmox-install-test.sh docker/40-plexamp-web.sh || status=1
-          lint --severity=warning tests/proxmox-test.sh docker/test-container.sh || status=1
+          lint --severity=warning tests/proxmox-test.sh docker/test-container.sh tests/run-browser-tests.sh dev/fetch-hls.sh || status=1
           bash tests/proxmox-test.sh || status=1
           exit "$status"
       - name: Test the Proxmox install (in Debian 12 and 13)
         run: bash tests/proxmox-install-test.sh
-      - name: Build the image
-        run: docker build -t plexamp-web:test .
+
+  # The image is built once, for both platforms, and what's published is
+  # that very build, once it's passed: pushed to a staging tag, tested by its
+  # digest (amd64 in full, arm64 started under emulation), then given its
+  # tags (see publish). A pull request's is built for amd64 alone, and
+  # tested, not pushed.
+  image:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      packages: write # to push the build to its staging tag (never for pull requests)
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.name.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Name the image, and read the version
+        id: name
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "image=$image" >>"$GITHUB_OUTPUT"
+          echo "IMAGE=$image" >>"$GITHUB_ENV"
+          echo "version=$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" web/js/plex.js)" >>"$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        if: github.event_name != 'pull_request'
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: image=moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta # (the image's labels)
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.name.outputs.version }}
+            type=sha,format=short
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ github.event_name == 'pull_request' && 'plexamp-web:test' || format('{0}:staging', steps.name.outputs.image) }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Get the build just pushed, by its digest, to test it
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker pull --platform linux/amd64 "$IMAGE@$DIGEST"
+          docker tag "$IMAGE@$DIGEST" plexamp-web:test
+          [ "$(docker image inspect -f '{{.Architecture}}' plexamp-web:test)" = amd64 ]
       - name: Test the container (proxies, sign-in check, settings)
         run: sh docker/test-container.sh plexamp-web:test
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -95,24 +171,50 @@ jobs:
           path: screenshots
           if-no-files-found: ignore
           retention-days: 14
+      - name: Test the arm64 build starts, and its parts answer (under emulation)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker pull --platform linux/arm64 "$IMAGE@$DIGEST"
+          docker tag "$IMAGE@$DIGEST" plexamp-web:arm64
+          [ "$(docker image inspect -f '{{.Architecture}}' plexamp-web:arm64)" = arm64 ]
+          sh docker/test-container.sh plexamp-web:arm64 --smoke
 
-  image:
-    needs: check
+  # The tested build, given its tags as it is (not built again): latest and
+  # the version's number only while it's still the newest commit on main
+  # (an older run that finished later never moves them back).
+  publish:
+    needs: image
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
-      packages: write # to publish the image
+      packages: write # to tag the image
+    env:
+      IMAGE: ${{ needs.image.outputs.image }}
+      DIGEST: ${{ needs.image.outputs.digest }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - name: Read the version
-        id: version
+      - name: Is this still the newest commit on main?
+        id: newest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
         run: |
-          echo "app=$(sed -n "s/^export const APP_INFO = .*version: '\([0-9.]*\)'.*/\1/p" web/js/plex.js)" >>"$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+          newest=false
+          if [ "$GITHUB_REF" = "$DEFAULT_REF" ]; then
+            tip="$(gh api "repos/$GITHUB_REPOSITORY/commits/${GITHUB_REF#refs/heads/}" --jq .sha)"
+            if [ "$tip" = "$GITHUB_SHA" ]; then
+              newest=true
+            else
+              echo "::notice title=Not the newest::main is at $tip now, so latest and the version's tag are left to that run"
+            fi
+          fi
+          echo "newest=$newest" >>"$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: image=moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
@@ -121,33 +223,53 @@ jobs:
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ steps.version.outputs.app }},enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ steps.newest.outputs.newest }}
+            type=raw,value=${{ needs.image.outputs.version }},enable=${{ steps.newest.outputs.newest }}
             type=semver,pattern={{version}}
             type=sha,format=short
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Tag the tested build
+        shell: bash
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then args+=(-t "$tag"); fi
+          done <<<"$TAGS"
+          [ "${#args[@]}" -gt 0 ] || { echo "No tags to give it"; exit 1; }
+          docker buildx imagetools create "${args[@]}" "$IMAGE@$DIGEST"
+          # Each tag is that very build.
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            got="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)"
+            echo "$tag: $got"
+            [ "$got" = "$DIGEST" ] || { echo "::error title=Publish::$tag is $got, not the tested $DIGEST"; exit 1; }
+          done <<<"$TAGS"
 
   # The Proxmox install (proxmox/install.sh) and its updates take the app
   # from this branch: the newest commit that passed every test, as the image
   # just published was. A job of its own, as it's the only one that can
-  # change the repository.
+  # change the repository. Only forward: a push that isn't a fast-forward is
+  # refused, and it isn't moved at all once main has moved on.
   stable:
-    needs: image
+    needs: publish
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: write # to move the stable branch
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # (so git can tell the push is a fast-forward)
       - name: Move the stable branch here
-        run: git push --force origin "$GITHUB_SHA:refs/heads/stable"
+        run: |
+          git fetch --quiet origin main
+          tip="$(git rev-parse origin/main)"
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice title=Not the newest::main is at $tip now, so stable is left to that run"
+            exit 0
+          fi
+          git push origin "$GITHUB_SHA:refs/heads/stable"
