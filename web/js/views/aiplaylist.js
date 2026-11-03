@@ -1,6 +1,7 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
-import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError, norm } from '../ai.js';
+import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { norm } from '../missinglist.js';
 import { noteMissing, myMissingCount, mbOn, mbWhere, checkSuggestions, missingKeptNote } from '../missing.js';
 import { on, emit } from '../state.js';
 import { playList } from '../actions.js';
