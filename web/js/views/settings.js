@@ -367,17 +367,101 @@ async function showServers(body) {
   body.append(list);
 }
 
+// An address typed in, as the app uses it (without a slash at the end), or
+// null where it isn't one: http or https, a host, and nothing after the
+// path.
+function serverAddress(text) {
+  let u;
+  try {
+    u = new URL(text);
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/.test(u.protocol) || !u.hostname || u.username || u.password || u.search || u.hash) return null;
+  return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+}
+
+// Where a route goes, to tell one typed in from plex.tv's: its address and
+// port ("192.168.1.10:32400"), the address as a plex.direct name has it
+// too ("192-168-1-10.<the server's>.plex.direct").
+const PLEX_DIRECT = /^(\d{1,3}(?:-\d{1,3}){3})\.[0-9a-f]+\.plex\.direct$/i;
+function routeAddress(uri) {
+  try {
+    const u = new URL(uri);
+    const named = u.hostname.match(PLEX_DIRECT);
+    return `${named ? named[1].replaceAll('-', '.') : u.hostname}:${u.port || (u.protocol === 'https:' ? '443' : '80')}`;
+  } catch {
+    return null;
+  }
+}
+
+// Who's at an address, by its answer to /identity, asked with nothing of
+// yours (no sign-in, not even this player's name), and not by way of
+// anywhere else (a redirect isn't followed): { id } where it answered and
+// its answer could be read, { timedOut } where nothing answered in time.
+async function identityOf(uri, timeout) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const res = await fetch(`${uri}/identity`, { headers: { Accept: 'application/json' }, credentials: 'omit', cache: 'no-store', redirect: 'error', signal: ctrl.signal });
+    const id = res.ok ? (await res.json())?.MediaContainer?.machineIdentifier : null;
+    return { id: typeof id === 'string' && id ? id : null, timedOut: false };
+  } catch {
+    return { id: null, timedOut: ctrl.signal.aborted };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Which of your servers (`servers`: as plex.tv lists them) is at an address
+// typed in, found out before it's sent anything of yours. First it's asked
+// who it is, with nothing of yours at all (Plex answers that without a
+// sign-in): an answer that's none of your servers is the end of it. But
+// anything can answer that it's yours, and a Plex server only lets a page
+// on another address read its answer when the request has a sign-in, so
+// the address is only used where it's one plex.tv has for one of your
+// servers (its address and port: a plex.direct name's too), tried as each
+// of plex.tv's routes to a server is (plex.js probeConnections): with that
+// server's own sign-in, only where the rules for routes let that go, and
+// only if it's that very server that answers. Anywhere else nothing is
+// sent, and it says why.
+const ADDRESS_WAIT = 8000; // ms an address typed in is given to answer
+async function yourServerAt(uri, servers) {
+  const said = await identityOf(uri, ADDRESS_WAIT);
+  if (said.timedOut) throw Object.assign(new Error('unreachable'), { unreachable: true });
+  if (said.id && !servers.some((s) => s.id === said.id)) throw new Error('That isn’t one of your Plex servers.');
+  const here = routeAddress(uri);
+  const routesHere = (s) => (s.connections || []).filter((c) => !c.relay && routeAddress(c.uri) === here);
+  const listed = servers.filter((s) => (!said.id || s.id === said.id) && routesHere(s).length);
+  if (!listed.length) throw new Error('That isn’t an address Plex has for your servers. Add it to the server’s Custom server access URLs in Plex.');
+  if (listed.length > 1) throw new Error('Several of your servers have that address, so it wasn’t used.');
+  const [mine] = listed;
+  const typed = { uri, local: routesHere(mine).some((c) => c.local), relay: false, protocol: new URL(uri).protocol.slice(0, -1) };
+  const [route] = await probeConnections({ id: mine.id, token: mine.token, connections: [typed] }, { timeout: ADDRESS_WAIT });
+  if (route.ok) return mine;
+  if (route.why === 'http') throw new Error('This page is https, so it can’t use an http address.');
+  if (route.why === 'insecure') throw new Error('That’s plain http over the internet, so it wasn’t used.');
+  if (route.why === 'other') throw new Error('Another server answers at that address.');
+  if (route.why === 'status') throw Object.assign(new Error(`HTTP ${route.status}`), { status: route.status });
+  throw Object.assign(new Error('unreachable'), { unreachable: true });
+}
+
 function manualForm(body, servers) {
   const url = h('input', { type: 'url', placeholder: 'http://192.168.1.10:32400', required: true, autocomplete: 'url', 'aria-label': 'Server address' });
   const go = h('button.btn.btn-primary', { type: 'submit' }, 'Connect');
   const form = h(
     'form.form',
     {
-      onsubmit: (e) => {
+      onsubmit: async (e) => {
         e.preventDefault();
-        const uri = url.value.trim().replace(/\/+$/, '');
-        if (!/^https?:\/\//.test(uri)) return toast('Start the address with http:// or https://');
-        connect({ kind: 'manual', name: new URL(uri).hostname, uri, token: app.auth.token, connections: [] }, null, null, body, servers);
+        const typed = url.value.trim();
+        if (!/^https?:\/\//i.test(typed)) return toast('Start the address with http:// or https://');
+        const uri = serverAddress(typed);
+        if (!uri) return toast('That isn’t a server address. For example http://192.168.1.10:32400');
+        // (No sign-in goes with it: see connect.)
+        go.disabled = true;
+        await connect({ kind: 'manual', name: new URL(uri).hostname, uri, connections: [] }, null, null, body, servers);
+        go.disabled = false;
       },
     },
     h('label.field', null, h('span', null, 'Server address'), url),
@@ -400,12 +484,21 @@ async function connect(entry, rowEl, subEl, body, servers) {
     if (entry.kind === 'discovered') {
       conn = await pickConnection(entry, { proxy: proxyUri(), prefer: app.settings.route });
       if (!conn) throw Object.assign(new Error('unreachable'), { unreachable: true });
+    } else if (entry.kind === 'manual') {
+      // An address typed in gets a sign-in only once it's known to be one
+      // of your servers', and then that server's own.
+      const mine = await yourServerAt(entry.uri, servers);
+      conn = { uri: entry.uri, kind: 'manual' };
+      token = mine.token;
+      serverId = mine.id;
+      name = mine.name || name;
     } else {
       conn = { uri: entry.uri, kind: entry.kind };
     }
     let ps = new PlexServer({ uri: conn.uri, token });
     const root = await ps.get('/', null, { timeout: 8000 });
-    if (entry.kind !== 'discovered') {
+    if (entry.kind === 'manual' && root.machineIdentifier && root.machineIdentifier !== serverId) throw new Error('Another server answers at that address.');
+    if (entry.kind === 'proxy') {
       serverId = root.machineIdentifier || entry.uri;
       name = root.friendlyName || name;
       // A shared server needs its own access token rather than the account token.
@@ -423,7 +516,7 @@ async function connect(entry, rowEl, subEl, body, servers) {
     if (err.unreachable || err.network) {
       toast(`Can’t reach ${entry.name}. Check it’s online and the address is right.`, { timeout: 6000 });
     } else {
-      toast(describeError(err));
+      toast(describeError(err), { timeout: 6000 });
     }
   }
 }
