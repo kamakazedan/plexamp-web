@@ -1585,13 +1585,14 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     reorder((entries) => sortedOrder(entries, by).map((m) => String(m.playlistItemID)), sortWords(by, label));
   }
 
+  // (One list at a time, let go of with the page.)
+  onDispose(() => pager?.dispose());
   function showList() {
     pager = pagedList(list, {
       pageSize: 100,
       fetchPage: (start, size) => s.playlistItems(pl.ratingKey, { start, size }),
       render: (m) => rowFor(m),
       empty: 'This playlist is empty.',
-      onDispose,
     });
   }
 

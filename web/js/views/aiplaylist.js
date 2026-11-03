@@ -129,10 +129,11 @@ const leftOut = (verdict) => verdict === 'unknown' || verdict === 'album';
 const missingLine = (m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`);
 
 // Under a playlist, with Show missing tracks on: the songs and artists it
-// suggested that aren't in the library, or that they all are.
-function missingNote(found, onDispose) {
+// suggested that aren't in the library, or that they all are. (`watch`:
+// the page's, for following its MusicBrainz check: see missingBlock.)
+function missingNote(found, watch) {
   if (!aiSettings().missing) return null;
-  if (found?.missing?.length) return missingBlock(found, onDispose);
+  if (found?.missing?.length) return missingBlock(found, watch);
   const one = (list, key) => new Set((list || []).map(key).filter(Boolean)).size;
   const artists = one(found?.seen?.artists, (a) => norm(a));
   const songs = one(found?.seen?.songs, (t) => `${norm(t?.artist)}|${norm(t?.title)}`);
@@ -147,8 +148,9 @@ function missingNote(found, onDispose) {
 }
 
 // What's missing, and (checked on MusicBrainz) what was left out and why,
-// changing as the answers come.
-function missingBlock(found, onDispose) {
+// changing as the answers come: followed while they're coming (`watch`
+// lets go of the one before, the page following one at a time).
+function missingBlock(found, watch) {
   const missing = found.missing;
   const label = h('span');
   const list = h('ul.ai-missing-list');
@@ -203,7 +205,15 @@ function missingBlock(found, onDispose) {
     el.classList.toggle('checking', checking);
   };
   paint();
-  onDispose?.(on('ai-mb', (f) => f === found && paint()));
+  if (found.mb?.state === 'checking') {
+    watch(
+      on('ai-mb', (f) => {
+        if (f !== found) return;
+        paint();
+        if (found.mb?.state !== 'checking') watch(null);
+      }),
+    );
+  }
   return el;
 }
 
@@ -274,9 +284,21 @@ export async function aiPlaylistView({ el, onDispose }) {
   const body = h('div.ai-body');
   el.append(backHeader('AI playlist', { fallback: '/search' }), form, lengthRow, body);
 
-  // Pages put aside are kept, and still brought up to date.
+  // Pages put aside are kept, and still brought up to date: what this one
+  // follows is one playlist being made, and one MusicBrainz check, at a
+  // time (the one before let go of as another starts), till it's gone.
   let disposed = false;
-  onDispose?.(() => (disposed = true));
+  let unfollow = null;
+  let unwatch = null;
+  const watch = (off) => {
+    unwatch?.();
+    unwatch = off;
+  };
+  onDispose(() => {
+    disposed = true;
+    unfollow?.();
+    watch(null);
+  });
 
   // A shared model is only for people who can use this player's Plex
   // server: anyone else is told so here, rather than after a wait.
@@ -386,9 +408,11 @@ export async function aiPlaylistView({ el, onDispose }) {
     function stop() {
       clearInterval(tick);
       j.listeners.delete(update);
+      if (unfollow === stop) unfollow = null;
     }
+    unfollow?.();
+    unfollow = stop;
     j.listeners.add(update);
-    onDispose?.(stop);
     update();
   }
 
@@ -398,7 +422,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         'div.ai-error',
         { role: 'alert' },
         h('p', null, describeAIError(err)),
-        err?.missing?.length ? missingNote(err, onDispose) : null,
+        err?.missing?.length ? missingNote(err, watch) : null,
         h(
           'div.button-row',
           null,
@@ -477,7 +501,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         ),
       ),
       list,
-      missingNote(result, onDispose),
+      missingNote(result, watch),
       h('p.ai-based', { hidden: !based.length }, `Based on ${based.slice(0, 12).join(', ')}`),
       h(
         'div.pad',

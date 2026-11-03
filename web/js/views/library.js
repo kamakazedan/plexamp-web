@@ -266,9 +266,11 @@ export async function browseView({ el, params, query, saved, key, onDispose }) {
   };
   // The list as it is, and (while something's typed in the box) what in it
   // matches, shown in its place as you type; each with what loads more of
-  // it, which stops while it's out of sight.
+  // it, which stops while it's out of sight. (What matches is let go of as
+  // soon as something else is typed: only the list itself, and what
+  // matches now, wait for the page to go.)
   const box = (list) => h('div.list-box', null, list);
-  const listed = (wrap, extra, empty) =>
+  const listed = (wrap, extra, empty, stopWith) =>
     pagedList(wrap, {
       pageSize: r.pageSize,
       fetchPage: (start, size) => s.list(sec, type, { sort, start, size, filters: plexFilters({ ...filters, ...extra }) }),
@@ -279,16 +281,17 @@ export async function browseView({ el, params, query, saved, key, onDispose }) {
         wrap.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
       },
       empty,
-      onDispose,
+      onDispose: stopWith,
     });
   const container = r.wrap();
   const all = box(container);
   el.append(all);
-  listed(container, {}, 'Nothing matches.');
+  listed(container, {}, 'Nothing matches.', onDispose);
   const matches = box(null);
   matches.hidden = true;
   el.append(matches);
   let typed = null; // { list, words }
+  onDispose(() => typed?.list.destroy());
 
   function showWords(raw) {
     const words = raw.trim();
