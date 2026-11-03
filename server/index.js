@@ -246,7 +246,14 @@ function send(res, status, body, headers = {}) {
   res.end(data);
 }
 
+// A request's body, as JSON, and said to be (its Content-Type): another
+// site's page can have a browser send a form, or plain text, here without
+// asking first (a chat with the shared model with OLLAMA_AUTH=off, say, or
+// lines for the debug log), but not JSON. (A request with none needn't say.)
+const JSON_TYPE = /^application\/json\s*(;|$)/i;
 function readBody(req, limit = 256 * 1024) {
+  const sent = Number(req.headers['content-length']) > 0 || req.headers['transfer-encoding'] !== undefined;
+  if (sent && !JSON_TYPE.test(String(req.headers['content-type'] || ''))) return Promise.reject(new HttpError(415, 'Send that as JSON.'));
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -954,7 +961,7 @@ async function offlineRoute(req, res, parts) {
     if (parts[0] === 'session' && parts.length === 1 && req.method === 'POST') {
       // (As JSON only, so another site's page can't have a browser try
       // passwords: that would need the browser to ask this player first.)
-      if (!/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] || ''))) throw new HttpError(415, 'Send the password as JSON.');
+      if (!JSON_TYPE.test(String(req.headers['content-type'] || ''))) throw new HttpError(415, 'Send the password as JSON.');
       const body = await readBody(req, 4096);
       return send(res, 200, await offline.signIn(body.key, addr, ip));
     }

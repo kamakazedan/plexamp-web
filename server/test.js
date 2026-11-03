@@ -3289,6 +3289,50 @@ test('Play on and Play Together: a sign-in plex.tv refuses is said so, and plex.
   }
 });
 
+// An Ollama: one model, loaded at once, and a chat answered in a line; and
+// what it was asked.
+async function fakeOllama() {
+  const asked = [];
+  const srv = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      asked.push(req.url);
+      const answer = { '/api/tags': { models: [{ name: 'test-model' }] }, '/api/generate': {}, '/api/chat': { message: { role: 'assistant', content: 'Hello' }, done: true } }[req.url];
+      res.writeHead(answer ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(answer ? `${JSON.stringify(answer)}\n` : '');
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, asked, close: () => srv.close() };
+}
+
+test('request bodies are taken as JSON only: another site\'s page can\'t have a browser chat with the shared model (OLLAMA_AUTH=off), or write to the debug log', async () => {
+  const ollama = await fakeOllama();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const svc = await startService({ PW_SERVICE_OLLAMA_URL: ollama.url, PW_SERVICE_OLLAMA_MODEL: 'test-model', PW_SERVICE_AI_AUTH: 'off', PW_SERVICE_DEBUG: 'true' }, dir);
+  const chat = JSON.stringify({ messages: [{ role: 'user', content: 'Hi' }] });
+  const lines = JSON.stringify({ client: 'x', entries: [{ message: 'hi' }] });
+  const post = (path, body, type, more = {}) => fetch(`${svc.url}${path}`, { method: 'POST', headers: { ...(type ? { 'Content-Type': type } : {}), ...more }, body });
+  try {
+    // (What a page can send anywhere without asking first: and fetch's own type for text.)
+    for (const type of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x', null]) {
+      assert.equal((await post('/api/ai/chat', chat, type, { 'X-PW-Route': 'ai' })).status, 415, type);
+      assert.equal((await post('/api/debug/log', lines, type)).status, 415, type);
+    }
+    assert.ok(!ollama.asked.includes('/api/chat'), ollama.asked.join(' '));
+    // As JSON, as the app sends them, they're answered; and a request with nothing in it needn't say.
+    const r = await post('/api/ai/chat', chat, 'application/json', { 'X-PW-Route': 'ai' });
+    assert.equal(r.status, 200);
+    assert.match(await r.text(), /Hello/);
+    assert.equal((await post('/api/debug/log', lines, 'application/json; charset=utf-8')).status, 204);
+    assert.equal((await fetch(`${svc.url}/api/debug/log`, { method: 'POST' })).status, 204);
+  } finally {
+    await svc.stop();
+    ollama.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------- MusicBrainz features: artists of the same name ----------
 
 test('MusicBrainz features: an artist\'s albums told from those of another artist of their name, only on plain evidence', () => {
