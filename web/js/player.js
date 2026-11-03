@@ -31,6 +31,9 @@ const PRELOAD_AHEAD = 15;
 // Loading ahead (prefetch.js), the next track is waited for until this
 // long before it's due, then streamed as usual.
 const PRELOAD_LAST = 10;
+// A next track that failed to load ahead of its turn isn't loaded again for
+// this long (ms), or until it's the one playing.
+const PRELOAD_RETRY_MS = 10000;
 // A converted next track loads this many seconds while it waits its turn
 // (past where its music starts, for a smart crossfade).
 const PRELOAD_BUFFER = 10;
@@ -476,6 +479,7 @@ class Player extends EventTarget {
     this.held = null; // a track waiting for the connection (see holdFor)
     this.driftHold = 0;
     this.aheadOf = null;
+    this.preloadFailed = null; // { qid, until }: a next track that failed to load ahead of its turn (see maybePreload)
 
     this.history = []; // ids of tracks played this session, oldest first (DJ modes avoid repeats)
     // The change to the next track under way: { plan, out, inn } (see nextPlan).
@@ -619,9 +623,12 @@ class Player extends EventTarget {
     const forget = () => (el.pausedHere = false);
     el.addEventListener('play', forget);
     el.addEventListener('emptied', forget);
-    // A next track that fails while it's fading in: the change is called
-    // off, and it's loaded again when it's due.
+    // A next track that fails to load ahead of its turn (or as it fades in:
+    // the change is called off): it's loaded again when it's due, and not
+    // ahead of its turn again for a while (see maybePreload).
     const spareFailed = () => {
+      const qid = deck.qid ?? deck.loadingQid;
+      if (qid != null) this.preloadFailed = { qid, until: performance.now() + PRELOAD_RETRY_MS };
       if (this.transition?.inn === deck) this.cancelTransition();
       deck.reset();
     };
@@ -825,6 +832,7 @@ class Player extends EventTarget {
     this.loadingQid = track.qid;
     this.switching = autoplay;
     if (this.failedQid !== track.qid) this.failedQid = null;
+    if (this.preloadFailed?.qid === track.qid) this.preloadFailed = null;
     this.setState('loading');
     this.emit('track');
     this.updateMediaSession();
@@ -938,6 +946,8 @@ class Player extends EventTarget {
     if ((plan ? plan.at : this.duration) - this.time > PRELOAD_AT) return;
     const next = this.queue[ni];
     const spare = this.spare;
+    // (One that failed to just now: not again for a while, or until it's on.)
+    if (this.preloadFailed?.qid === next.qid && performance.now() < this.preloadFailed.until) return;
     // Loaded ahead already (prefetch.js), it needs nothing from the network;
     // loading ahead now, it's waited for if it'll be there shortly before
     // it's due.
@@ -964,7 +974,11 @@ class Player extends EventTarget {
         this.applyVolume();
         this.levelDeck(spare);
       })
-      .catch(() => spare.gen === gen && spare.reset());
+      .catch(() => {
+        if (spare.gen !== gen) return;
+        this.preloadFailed = { qid: next.qid, until: performance.now() + PRELOAD_RETRY_MS };
+        spare.reset();
+      });
   }
 
   // Streaming quality changed: the track playing carries on from where it
