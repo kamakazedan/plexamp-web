@@ -1,6 +1,6 @@
 import { app, playlistScope, on } from '../state.js';
 import { normTrack, store } from '../plex.js';
-import { navigate, parseHash, refresh, keepState } from '../router.js';
+import { navigate, parseHash, refresh, keepState, dropCached } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, iconTile, emptyState, debounce, fmt, sectionHeader } from '../ui.js';
 import { mapLimit, norm } from '../ai.js';
 import { albumCard, artistRow, playlistCard, collectionCard, trackRow, numberedList } from '../components.js';
@@ -497,15 +497,18 @@ export async function playlistsView({ el, onDispose }) {
   const [pls] = await Promise.all([app.server.playlists(playlistScope()), sharingOn() ? sharesSoon() : null]);
   const menu = iconButton('more', 'Import and back up', playlistsMenu, { cls: 'playlists-menu' });
   el.append(pageHeader('Playlists', { subtitle: pls.length ? fmt.count(pls.length, 'playlist', 'playlists') : null, actions: [menu] }));
-  // Shared with you by Plex friends, to add (or not).
+  // Shared with you by Plex friends, to add (or not). (One added or turned
+  // down: this page again, at once if it's still the one on screen, else
+  // when it's opened again.)
   const invites = h('section.block.invites');
+  const afterInvite = () => (el.isConnected ? refresh() : dropCached((p) => p === '/playlists'));
   const paintInvites = () => {
     const list = invitations();
     invites.hidden = !list.length;
-    invites.replaceChildren(...(list.length ? [sectionHeader('Shared with you'), h('div.rows', null, invitationRows(list, { onChange: () => refresh() }))] : []));
+    invites.replaceChildren(...(list.length ? [sectionHeader('Shared with you'), h('div.rows', null, invitationRows(list, { onChange: afterInvite }))] : []));
   };
   paintInvites();
-  onDispose?.(on('shares', paintInvites));
+  onDispose(on('shares', paintInvites));
   el.append(invites);
   if (!pls.length) {
     el.append(
