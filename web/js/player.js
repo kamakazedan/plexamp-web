@@ -829,7 +829,10 @@ class Player extends EventTarget {
     this.emit('track');
     this.updateMediaSession();
     if (memory) {
+      // (The track before goes as this one's read: nothing of it plays on,
+      // or moves, meanwhile, and the clock and the length are this one's.)
       this.deck.el.pause();
+      this.deck.reset();
       try {
         pre = await this.ahead.now(track, playback);
       } catch (err) {
@@ -1475,6 +1478,14 @@ class Player extends EventTarget {
       this.held.again();
       return;
     }
+    // (Still loading, read in full first, say, or waiting for its loudness:
+    // it plays once it's loaded, not loaded again.)
+    if (this.loadingQid === this.current.qid) {
+      this.loadAutoplay = true;
+      this.switching = true;
+      this.setState('loading');
+      return;
+    }
     if (!this.deck.hasSource()) {
       const held = this.heldWhilePaused(this.current) ? this.resumeAs : null;
       this.load(this.index, { startAt: this.restoredAt || 0, reportPrev: false, transcode: held?.forced || false, resume: !!held });
@@ -1575,8 +1586,9 @@ class Player extends EventTarget {
         /* not seekable */
       }
     }
-    // Still loading, to start part-way: it starts here instead.
-    if (this.pendingSeek != null) this.setPendingSeek(t);
+    // Still loading, to start part-way, or not yet where it can be moved
+    // (read in full first, say): it starts here instead.
+    if (this.pendingSeek != null || (this.loadingQid === this.current.qid && this.audio.readyState < HTMLMediaElement.HAVE_METADATA)) this.setPendingSeek(t);
     this.queueTime();
     this.updatePositionState();
     if (report) this.report(this.isPlaying ? 'playing' : 'paused', this.current, t, true);
