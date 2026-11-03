@@ -1172,17 +1172,40 @@ fi
 # proxmox/install.sh).
 if [ "$SERVICE" = true ] && [ "${SERVICE_START:-true}" != false ]; then
     rm -f "$SERVICE_SOCKET"
-    # Restarted if it ever stops. nginx runs as PID 1, so when the container
-    # stops this goes with it. UV_USE_IO_URING=0: without io_uring, giving up
-    # root really gives it all up (CVE-2024-22017), and Node.js lets it.
+    # Its settings are all in service.json: it's given nothing of the
+    # container's environment but what Node.js needs, so nothing left there
+    # (a PW_SERVICE_ name it reads for its tests, say) can change them. Only
+    # the tests' own few reach it, and the log says when one does.
+    # UV_USE_IO_URING=0: without io_uring, giving up root really gives it all
+    # up (CVE-2024-22017), and Node.js lets it.
+    for_tests=""
+    [ -z "${PW_SERVICE_OFFLINE_TIMING:-}" ] || for_tests="$for_tests PW_SERVICE_OFFLINE_TIMING"
+    [ -z "${PW_SERVICE_PMS_PROBE:-}" ] || for_tests="$for_tests PW_SERVICE_PMS_PROBE"
+    [ -z "${PW_SERVICE_CAST_LOOPBACK:-}" ] || for_tests="$for_tests PW_SERVICE_CAST_LOOPBACK"
+    [ -z "$for_tests" ] || say "set for tests, and passed on to the service:$for_tests (see server/index.js). Take them out otherwise." >&2
+    # Restarted if it ever stops. When the container stops, it has the stop
+    # signal too (tini gives it to nginx and everything it started: see the
+    # Dockerfile), so it keeps what it has to before it goes. So it has
+    # nginx's others too: SIGUSR1 (reopen your logs) mustn't open Node.js's
+    # inspector, which --disable-sigusr1 sees to, where Node.js has it.
+    NODE_SIGNAL_FLAG=""
+    if "$NODE_BIN" --disable-sigusr1 -e '' </dev/null >/dev/null 2>&1; then NODE_SIGNAL_FLAG=--disable-sigusr1; fi
+    # ($RUN_DIR/stop, and the loop's process id in service-loop.pid, are for
+    # a test setup that runs this outside Docker: there, they stop it.)
     (
         set +e
         while :; do
-            UV_USE_IO_URING=0 "$NODE_BIN" "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null
+            env -i PATH="$PATH" ${TZ:+"TZ=$TZ"} ${NODE_EXTRA_CA_CERTS:+"NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS"} UV_USE_IO_URING=0 \
+                ${PW_SERVICE_OFFLINE_TIMING:+"PW_SERVICE_OFFLINE_TIMING=$PW_SERVICE_OFFLINE_TIMING"} \
+                ${PW_SERVICE_PMS_PROBE:+"PW_SERVICE_PMS_PROBE=$PW_SERVICE_PMS_PROBE"} \
+                ${PW_SERVICE_CAST_LOOPBACK:+"PW_SERVICE_CAST_LOOPBACK=$PW_SERVICE_CAST_LOOPBACK"} \
+                "$NODE_BIN" ${NODE_SIGNAL_FLAG:+"$NODE_SIGNAL_FLAG"} "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null
             code=$?
             [ -f "$RUN_DIR/stop" ] && exit 0
-            echo "plexamp-web: the service stopped (exit $code); restarting it in 2 seconds" >&2
+            # (A container that's stopping is gone before this.)
             sleep 2
+            [ -f "$RUN_DIR/stop" ] && exit 0
+            echo "plexamp-web: the service stopped (exit $code), so it's started again" >&2
         done
     ) &
     echo "$!" >"$RUN_DIR/service-loop.pid"

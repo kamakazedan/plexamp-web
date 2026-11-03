@@ -24,19 +24,10 @@ LABEL org.opencontainers.image.title="plexamp-web" \
       org.opencontainers.image.source="https://github.com/kamakazedan/plexamp-web" \
       org.opencontainers.image.licenses="MIT"
 
-RUN apk upgrade --no-cache && apk add --no-cache nodejs
+RUN apk upgrade --no-cache && apk add --no-cache nodejs tini
 
-# All optional; see docs/configuration.md.
-ENV PLEX_SERVER_URL="" \
-    DISABLE_WEBSOCKETS="" \
-    OLLAMA_URL="" \
-    OLLAMA_MODEL="" \
-    OLLAMA_API_KEY="" \
-    OLLAMA_AUTH="plex" \
-    PLAY_TOGETHER="true" \
-    CASTING="true" \
-    PLAYLIST_SHARING="true" \
-    DEBUG=""
+# No settings here: all are optional (see docker-compose.yml, and
+# docs/configuration.md).
 
 RUN rm -rf /usr/share/nginx/html/* \
     && touch /etc/nginx/conf.d/pms-proxy.inc /etc/nginx/conf.d/pms-probe.inc /etc/nginx/conf.d/ai-proxy.inc /etc/nginx/conf.d/api.inc /etc/nginx/conf.d/log.inc
@@ -46,5 +37,16 @@ COPY server/ /opt/plexamp-web/server/
 COPY web/ /usr/share/nginx/html/
 COPY --from=vendor /vendor/out/ /usr/share/nginx/html/vendor/
 
+# nginx's own entrypoint (its start-up scripts, ours among them, then
+# nginx), run by tini, which gives the stop signal to everything they
+# started (-g): the service too, which keeps what it has to before it goes.
+# (As the first process, nginx alone had it, and the service was cut off
+# when nginx had gone.) The stop signal is still nginx's graceful one. -s:
+# the same where tini isn't the first process (docker run --init).
+ENTRYPOINT ["/sbin/tini", "-g", "-s", "--", "/docker-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]
+STOPSIGNAL SIGQUIT
+
 EXPOSE 80
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
+# The app, and its service, through nginx.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1/api/health || exit 1
