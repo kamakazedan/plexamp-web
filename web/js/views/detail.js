@@ -1157,9 +1157,11 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
     change(async () => app.server.uploadPoster(id, await shrinkPicture(file)), 'Picture changed');
   });
 
+  // (Not over another page, if you've gone to one while it's asked.)
   async function choose() {
     if (busy) return;
     const posters = await app.server.posters(id).catch(() => []);
+    if (!box.isConnected) return;
     const earlier = posters.filter((p) => !p.selected).slice(0, 12);
     const custom = posters.some((p) => p.selected && /^upload:\/\//.test(p.id));
     const grid = earlier.length

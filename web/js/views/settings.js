@@ -579,14 +579,17 @@ function showLibraries(body, srv, sections, servers) {
   );
 }
 
-// Quick library switcher behind "on <server>" on the home screen.
-export async function openSourceSheet() {
+// Quick library switcher behind "on <server>" on the home screen (`e`: the
+// tap on it). Not over another page, if you've gone to one meanwhile.
+export async function openSourceSheet(e) {
+  const from = e?.currentTarget;
   let sections = [];
   try {
     sections = await app.server.musicSections();
   } catch {
     /* still offer "change server" */
   }
+  if (from && !from.isConnected) return;
   sheet({
     title: app.source.serverName,
     subtitle: 'Music libraries',
@@ -918,7 +921,10 @@ function debugView({ el, onDispose }) {
       if (conn && conn.uri !== app.source?.uri && app.source === src) {
         setSource({ ...src, uri: conn.uri, kind: conn.kind, token: srv.token, connections: srv.connections });
         toast(`Now connected ${words(conn.kind)}`);
-        refresh();
+        // (This page again, as it is now: at once if it's still the one on
+        // screen, else when it's opened again.)
+        if (el.isConnected) refresh();
+        else dropCached((p) => p === '/settings/debug');
         return;
       }
       if (conn) toast(`Still connected ${words(conn.kind)}: that’s the route for this choice`);
