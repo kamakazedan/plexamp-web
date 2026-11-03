@@ -534,10 +534,20 @@ async function collectionsView({ el, query }) {
 // ---------- Genres, styles, moods, decades ----------
 
 // How many albums (or artists) have each tag: tags nothing in the library
-// uses any more are left out, and the rest show their count.
+// uses any more are left out, and the rest show their count. Each is
+// counted as it comes near the screen, a few at a time (a library can have
+// hundreds of styles, a request each), and its count kept a while, in a
+// list of their own: not the server's memo, which the rest of the app
+// shares.
+const TAG_COUNTS_AT_ONCE = 6;
+const TAG_COUNT_MS = 10 * 60000; // how long a tag's count is kept
+const TAG_COUNTS_KEPT = 2000; // tags' counts kept, of every list
+const TAG_NEAR = '600px 0px'; // how near the screen a tag is counted
+const tagCounts = new WeakMap(); // server -> Map(tag -> { at, n }), least recently counted first
+
 export async function tagsView({ el, params, query, onDispose }) {
   let disposed = false;
-  onDispose?.(() => (disposed = true));
+  onDispose(() => (disposed = true));
   const { field, type } = params;
   const kind = KINDS[type];
   el.append(backHeader(query.title || 'Browse', { fallback: '/search' }));
@@ -548,21 +558,73 @@ export async function tagsView({ el, params, query, onDispose }) {
     el.append(emptyState('Nothing here.'));
     return;
   }
+  if (!tagCounts.has(s)) tagCounts.set(s, new Map());
+  const kept = tagCounts.get(s);
+  const keyOf = (t) => `${sec}:${type}:${field}:${t.key}`;
+  const keptCount = (t) => {
+    const hit = kept.get(keyOf(t));
+    return hit && Date.now() - hit.at < TAG_COUNT_MS ? hit.n : null;
+  };
   const list = h('div.rows');
-  const rows = tags.map((t) => {
-    const count = h('span.row-count');
+  const show = ({ r, count }, n) => {
+    if (n === 0) {
+      r.remove();
+      if (!list.children.length) list.replaceWith(emptyState('Nothing here.'));
+    } else if (n) count.textContent = fmt.count(n, ...UNITS[kind]);
+  };
+  const countTag = async (x) => {
+    let n = keptCount(x.t);
+    if (n === null) {
+      n = await s.count(sec, type, { [field]: String(x.t.key) }).catch(() => null);
+      if (n === null) return;
+      kept.delete(keyOf(x.t));
+      kept.set(keyOf(x.t), { at: Date.now(), n });
+      while (kept.size > TAG_COUNTS_KEPT) kept.delete(kept.keys().next().value);
+    }
+    if (!disposed) show(x, n);
+  };
+  // Those that come near the screen, counted in turn.
+  const queue = [];
+  let counting = 0;
+  const countNext = () => {
+    while (!disposed && counting < TAG_COUNTS_AT_ONCE && queue.length) {
+      counting += 1;
+      countTag(queue.shift()).finally(() => {
+        counting -= 1;
+        countNext();
+      });
+    }
+  };
+  const byRow = new Map();
+  const near =
+    'IntersectionObserver' in window
+      ? new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) {
+              if (!e.isIntersecting) continue;
+              near.unobserve(e.target);
+              queue.push(byRow.get(e.target));
+            }
+            countNext();
+          },
+          { rootMargin: TAG_NEAR },
+        )
+      : null;
+  onDispose(() => near?.disconnect());
+  for (const t of tags) {
+    // (One counted lately, as it was: no tag nothing has, no wait.)
+    const n = keptCount(t);
+    if (n === 0) continue;
+    const count = h('span.row-count', null, n ? fmt.count(n, ...UNITS[kind]) : null);
     const r = row({ href: browseHref(kind, { [field]: String(t.key), title: t.title }), title: t.title, subtitle: count });
     list.append(r);
-    return { t, r, count };
-  });
-  el.append(list);
-  await mapLimit(rows, 6, async ({ t, r, count }) => {
-    if (disposed) return;
-    const n = await s.memo(`tagCount:${sec}:${type}:${field}:${t.key}`, () => s.count(sec, type, { [field]: String(t.key) }), 10 * 60000).catch(() => null);
-    if (n === 0) r.remove();
-    else if (n) count.textContent = fmt.count(n, ...UNITS[kind]);
-  });
-  if (!list.children.length && !disposed) list.replaceWith(emptyState('Nothing here.'));
+    if (n) continue;
+    byRow.set(r, { t, r, count });
+    if (near) near.observe(r);
+    else queue.push(byRow.get(r));
+  }
+  el.append(list.children.length ? list : emptyState('Nothing here.'));
+  countNext();
 }
 
 // Generic paged listing for any server path (e.g. a genre's albums).
