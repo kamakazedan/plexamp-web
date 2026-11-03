@@ -3826,6 +3826,9 @@ with sync_playwright() as pw:
             r(0, 2, 3), r(0, 3, 3), r(503, 2, 3), r(undefined, 2, 3), r(429, 2, 3)])""")
         check('stream: a request that fails is tried again (more for no answer or a server error than a client error), never when refused',
               policy == [False, False, True, False, True, False, True, True, True], str(policy))
+        comes = js(page, "() => import('./js/player.js').then(({ fileComes: f }) => f && [200, 206, 0, 401, 403, 404, 410, 400, 429, 500].map(f))")
+        check('stream: a file\'s answer says it comes, didn\'t (none), is refused (401, 403, another client error) or gone (404, 410), or the server\'s failing (500)',
+              comes == [True, True, False, 'refused', 'refused', 'gone', 'gone', 'refused', True, 'failed'], str(comes))
 
         # The server stops the stream part-way (as Plex can): it's started
         # again where it got to, as the same playback, and plays on.
@@ -4189,6 +4192,22 @@ with sync_playwright() as pw:
         skipped = wait_for(lambda: now()['id'] != failing and now()['state'] == 'playing', 20, 0.25)
         check('stream: ...and one the server keeps failing (500, asked three times or more over half a minute) won\'t play here: skipped, saying so (not held for ever)',
               said_so and skipped and len(play_errors()) == 1, f'{now()} {play_errors()}')
+        js(page, '() => { window.__playErrors = []; }')
+        # ...and one the server says isn't there (404): skipped at once,
+        # saying so, never taken for a connection that keeps dropping.
+        play_track(4, 3)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        gone = now()['id']
+        page.route('**/library/parts/**', lambda route: route.fulfill(status=404, body=''))
+        player(page, f"({not_supported}, {first_load}, p.onError(), true)")
+        said_gone = wait_for(lambda: len(play_errors()) >= 1, 15, 0.2)
+        told = page.locator('.toast').all_text_contents()
+        page.unroute('**/library/parts/**')
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        skipped = wait_for(lambda: now()['id'] != gone and now()['state'] == 'playing', 20, 0.25)
+        check('stream: ...and one the server says isn\'t there (404) is skipped at once, saying so (not held as a connection that keeps dropping)',
+              said_gone and skipped and len(play_errors()) == 1 and any('not on the server any more' in x for x in told)
+              and not any('keeps dropping' in x for x in told), f'{now()} {play_errors()} {told}')
         js(page, '() => { window.__playErrors = []; }')
 
         # ...whereas one that doesn't play as it is here stays converted, at

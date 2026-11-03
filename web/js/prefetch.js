@@ -91,6 +91,9 @@ const due = (e) => !e || (e.state === 'failed' && Date.now() >= e.retryAt);
 // More than can be kept: it plays as it comes in, and isn't tried again
 // while it's wanted.
 const tooBig = () => Object.assign(new Error('More than can be kept.'), { tooBig: true });
+// The server's answer wasn't the file (or part): with its status, which says
+// whether asking again could help (see player.js fileComes).
+const answered = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
 
 export class Prefetcher {
   constructor(player) {
@@ -511,7 +514,7 @@ export class Prefetcher {
     await this.room(e);
     const t = performance.now();
     const res = await this.request(e, url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw answered(res.status);
     const got = kind === 'text' ? { body: await res.text(), url: res.url || url } : { body: await res.arrayBuffer(), url: res.url || url };
     await this.pace(e, kind === 'text' ? got.body.length : got.body.byteLength, performance.now() - t);
     return got;
@@ -556,7 +559,7 @@ export class Prefetcher {
       }
       // Asked for from just past its end (it's a whole number of parts).
       if (res.status === 416 && at > 0) break;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw answered(res.status);
       e.type ||= res.headers.get('Content-Type') || '';
       if (body) {
         // Where the part is, and the file's size, where the browser can see

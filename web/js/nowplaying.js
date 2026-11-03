@@ -298,13 +298,24 @@ export function initPlayerBar(root) {
   player.addEventListener('converted', (e) => {
     toast(`“${e.detail.track.title}” doesn’t play as it streams here, and it’s too big to read in full first, so it’s converted, at ${e.detail.kbps} kbps.`, { timeout: 10000 });
   });
+  // (Saying why, where the server said no: a file that isn't there any more,
+  // or refused, a sign-in it doesn't take any more with where to sign in
+  // again: see player.js couldntPlayHere.)
   player.addEventListener('playerror', (e) => {
-    const { track, remote } = e.detail;
+    const { track, remote, why } = e.detail;
     if (remote) {
       toast(`Can’t play “${track.title}” on this device. You’ll hear the next track with everyone.`, { action: 'Try again', onAction: () => together.listen(), timeout: 7000 });
-    } else {
-      toast(`Can't play “${track.title}”.${player.nextIndex() !== -1 ? ' Skipping.' : ''}`);
+      return;
     }
+    const skipping = player.nextIndex() !== -1 ? ' Skipping.' : '';
+    if (why === 'gone') toast(`Can’t play “${track.title}”: it’s not on the server any more.${skipping}`);
+    else if (why === 'refused') toast(`Can’t play “${track.title}”: the server refused it.${skipping}`);
+    else if (why === 'signed-out') {
+      toast(`Can’t play “${track.title}”: Plex didn’t accept your sign-in.${skipping}`, {
+        action: 'Sign in again',
+        onAction: () => closeOverlays().then(() => navigate('/settings/account')),
+      });
+    } else toast(`Can't play “${track.title}”.${skipping}`);
   });
   // "Show full player": open Now Playing when something new starts.
   player.addEventListener('started', () => app.settings.showFullPlayer && setTimeout(() => openNowPlaying(), 50));

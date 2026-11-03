@@ -130,7 +130,7 @@ const DROPS_FORGOTTEN_S = 60;
 // this long at least (riding out a moment's trouble: Plex starting up, say),
 // is a track that won't play here (see couldntPlay).
 const FILE_FAILS = { times: 3, overMs: 30000 };
-// How long the server has to answer for a track's file (ms: see fileComes).
+// How long the server has to answer for a track's file (ms: see fileAnswer).
 const FILE_ANSWER_WAIT_MS = 8000;
 // A file whose connection keeps dropping (see dropped): loaded again this
 // long after the second time (ms), and twice as long each time after, up
@@ -162,12 +162,31 @@ function retries(maxNumRetry, retryDelayMs, maxRetryDelayMs) {
     shouldRetry: (_config, count, _timeout, res) => retryable(res?.code, count, maxNumRetry),
   };
 }
+// Client errors that say to try again later (no answer in time, too early,
+// too many requests): not refusals.
+const TRY_LATER = new Set([408, 425, 429]);
 // The decision, by the status of the answer (0 or none: no answer at all).
 export function retryable(code, count, most) {
   if (code === 401 || code === 403) return false;
   // Other client errors (a playlist that isn't there): one more try.
-  if (code >= 400 && code < 500 && code !== 408 && code !== 425 && code !== 429) return count < Math.min(1, most);
+  if (code >= 400 && code < 500 && !TRY_LATER.has(code)) return count < Math.min(1, most);
   return count < most;
+}
+
+// What the server's answer to a track's file says of it (see
+// Player.fileAnswer), by its status (0: none, the connection dropping):
+// true, it hands it over; false, no answer; 'failed', the server failing it
+// (500 or more: Plex starting up, say, see FILE_FAILS); or the server saying
+// no, which no asking again will change: 'gone' (404, 410: not on the
+// server any more) or 'refused' (401, 403: signed out everywhere, say, or no
+// longer shared with you; and any other client error but those to try again
+// later). A media element's error can't tell these apart: Chromium's says
+// the format's wrong whichever it is.
+export function fileComes(status) {
+  if (!status) return false;
+  if (status === 404 || status === 410) return 'gone';
+  if (status >= 400 && status < 500 && !TRY_LATER.has(status)) return 'refused';
+  return status < 500 ? true : 'failed';
 }
 const loadPolicy = (maxTimeToFirstByteMs, maxLoadTimeMs, timeoutRetry, errorRetry) => ({
   default: { maxTimeToFirstByteMs, maxLoadTimeMs, timeoutRetry, errorRetry },
@@ -820,12 +839,15 @@ class Player extends EventTarget {
         // More than can be kept: read in full as files are on this
         // connection, as it comes instead; one that's come but didn't play
         // as it came, converted (it can't play here otherwise), saying so.
-        // Not there: a drop.
+        // The server saying no (see fileComes): a track that won't play
+        // here. Not there: a drop.
+        const refusal = fileComes(err?.status);
         if (err?.tooBig && !viaMemory) this.load(this.index, { autoplay, startAt, reportPrev: false, resume: true, asStream: true });
         else if (err?.tooBig) {
           this.emit('converted', { track, kbps: this.sourceFor(track, true).kbps });
           this.load(this.index, { autoplay, startAt, transcode: true, reportPrev: false, resume: true });
-        } else this.dropped(track, { at: valueNow(startAt) || 0, autoplay, startAt });
+        } else if (refusal === 'refused' || refusal === 'gone') this.couldntPlayHere(track, err, { refusal, status: err.status });
+        else this.dropped(track, { at: valueNow(startAt) || 0, autoplay, startAt });
         return;
       }
       if (token !== this.loadToken) return;
@@ -1709,10 +1731,12 @@ class Player extends EventTarget {
       return;
     }
     // The browser couldn't play the file as it is, it says ("not supported"):
-    // as it says too of a file that didn't come (no answer to it, or the
-    // server failing it: a weak signal, say). A file that's played as it is
-    // here: a drop, loaded again at once the first time. Otherwise the
-    // server's asked for it first (fileComes): a file that's played as it
+    // as it says too of a file that didn't come (no answer to it, the server
+    // failing it, or refusing it: a weak signal, say, or a file that isn't
+    // there). A file that's played as it is here: a drop, loaded again at
+    // once the first time. Otherwise the server's asked for it first
+    // (fileComes): one it says no to (not there any more, or refused) won't
+    // play here, however often it's asked for; a file that's played as it
     // is here, or whose connection's dropped, is never converted for this,
     // only loaded again (a drop); one that hasn't played here yet, that the
     // server hands over, is read in full and played from memory, and only
@@ -1729,8 +1753,13 @@ class Player extends EventTarget {
         return;
       }
       const token = this.loadToken;
-      this.fileComes(track).then((comes) => {
+      this.fileAnswer(track).then((status) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
+        const comes = fileComes(status);
+        if (comes === 'refused' || comes === 'gone') {
+          this.couldntPlayHere(track, err, { refusal: comes, status });
+          return;
+        }
         if (comes === 'failed') {
           const was = this.fileFails?.qid === track.qid ? this.fileFails : { n: 0, since: Date.now() };
           this.fileFails = { qid: track.qid, n: was.n + 1, since: was.since };
@@ -1788,20 +1817,18 @@ class Player extends EventTarget {
     this.holdFor(track, at, autoplay, { delay: Math.min(DROP_WAIT.mostMs, DROP_WAIT.firstMs * 2 ** (n - 2)), gone: false, transcode: again.transcode });
   }
 
-  // Whether the server hands over a track's file as it is: true; false for
-  // no answer (the connection dropping), 'failed' for an answer of 500 or
-  // more (the server failing it), which a media element's error can't be
-  // told from (Chromium's says the format's wrong either way). Only the
-  // answer's start is read: the rest is let go.
-  async fileComes(track) {
-    if (!app.server || navigator.onLine === false) return false;
+  // The server's answer to a track's file, asked for as it is (see
+  // fileComes): its status, or 0 for none (offline, or no answer in time).
+  // Only the answer's start is read: the rest is let go.
+  async fileAnswer(track) {
+    if (!app.server || navigator.onLine === false) return 0;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FILE_ANSWER_WAIT_MS);
     try {
-      const res = await fetch(this.sourceFor(track, false).url, { cache: 'no-store', signal: ctrl.signal });
-      return res.status < 500 ? true : 'failed';
+      const res = await fetch(this.sourceFor(track, false).url, { cache: 'no-store', credentials: 'omit', signal: ctrl.signal });
+      return res.status;
     } catch {
-      return false;
+      return 0;
     } finally {
       clearTimeout(timer);
       ctrl.abort();
@@ -1809,18 +1836,24 @@ class Player extends EventTarget {
   }
 
   // A track that won't play on this device: the next one, as it can.
-  couldntPlayHere(track, err) {
+  // `refusal`: the server said no to its file (see fileComes), its answer's
+  // `status` being this.
+  couldntPlayHere(track, err, { refusal = null, status = 0 } = {}) {
     this.errorsInRow += 1;
+    // Why, for what's said (nowplaying.js): a 401 to the account's own
+    // token (not the temporary one AirPlay and Cast have) is a sign-in Plex
+    // doesn't take any more.
+    const why = refusal === 'refused' && status === 401 && !this.useMediaToken ? 'signed-out' : refusal;
     if (this.remote) {
       // Only this device can't play it; the session carries on, and this
       // device picks up again at the next track.
       this.failedQid = track.qid;
       this.noteWhy('this device couldn’t play the track', { warn: true });
       this.setState('paused');
-      this.emit('playerror', { track, err, remote: true });
+      this.emit('playerror', { track, err, why, remote: true });
       return;
     }
-    this.emit('playerror', { track, err });
+    this.emit('playerror', { track, err, why });
     if (this.errorsInRow >= 3 || this.nextIndex() === -1) {
       this.noteWhy(this.errorsInRow >= 3 ? 'three tracks in a row couldn’t be played' : 'the last track couldn’t be played', { warn: true });
       this.setState('paused');
