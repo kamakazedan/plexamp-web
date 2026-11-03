@@ -2353,8 +2353,12 @@ with sync_playwright() as pw:
         check('lists: ...playlists first, then collections, each by name',
               order == sorted(order, key=lambda x: (x[0] != 'playlist', x[1].casefold())), str(order))
         light_in = [urllib.parse.unquote(u) for u in in_reads if '/playlists/' in u or '/library/collections/' in u]
+        # (Ids and whose they are, and what each is, no more: Plex's fields
+        # for the list's size and paging aside.)
+        light_fields = {'ratingKey', 'playlistItemID', 'type', 'parentRatingKey', 'grandparentRatingKey', 'originalTitle', 'size', 'totalSize', 'offset', 'leafCount'}
+        fields_of = lambda u: set((re.search(r'includeFields=([^&]*)', u) or re.search(r'()$', u)).group(1).split(','))
         check('lists: ...lists read as their entries\' ids and whose they are, a page Plex takes at a time',
-              all('includeFields=ratingKey,parentRatingKey,grandparentRatingKey,originalTitle' in u for u in light_in)
+              light_in and all({'ratingKey', 'parentRatingKey', 'grandparentRatingKey', 'originalTitle'} <= fields_of(u) <= light_fields for u in light_in)
               and all(int(re.search(r'X-Plex-Container-Size=(\d+)', u).group(1)) <= 120 for u in light_in if '/library/collections/' in u), str(light_in[:3]))
         in_reads.clear()
         again = appears_in(gh)
