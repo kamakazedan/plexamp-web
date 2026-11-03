@@ -347,6 +347,7 @@ export function homeEditorView({ el }) {
       h('div.home-editor-sub', null, 'Drag to reorder. Tap a section to show, hide or change it.'),
     ),
     list,
+    // (All of it: the order, what's hidden, and each section's period.)
     h(
       'div.pad.home-editor-reset',
       null,
@@ -362,7 +363,7 @@ export function homeEditorView({ el }) {
             toast('Home is back to how it started.');
           },
         },
-        'Reset order',
+        'Reset Home screen',
       ),
     ),
   );

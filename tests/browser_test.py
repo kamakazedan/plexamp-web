@@ -6085,7 +6085,7 @@ with sync_playwright() as pw:
         shot(page, 'home-04-custom')
         page.goto(APP + '#/settings/home')
         page.wait_for_selector('.home-row')
-        page.click('button:has-text("Reset order")')
+        page.click('button:has-text("Reset Home screen")')
         order = sections_on_home(page)
         check('home: reset brings the defaults back', order[:3] == ['mixes', 'recentPlays', 'recentPlaylists'] and 'decade2020' not in order, str(order))
         ctx.close()
