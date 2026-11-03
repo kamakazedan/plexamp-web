@@ -12,7 +12,7 @@
 // While another device plays, the player is in the same remote mode as when
 // casting to a Plex player (player.cast is this module's `remote`).
 import { app, on, plexAccount } from './state.js';
-import { clientId, deviceLabel } from './plex.js';
+import { clientId, deviceLabel, store } from './plex.js';
 import { player } from './player.js';
 import { together } from './together.js';
 import { toast, shuffleArray } from './ui.js';
@@ -695,7 +695,13 @@ class Devices extends EventTarget {
     clearInterval(this.ticker);
     const st = this.state;
     const position = at ?? this.time();
-    if (player.cast === this.remote) player.setCast(null);
+    if (player.cast === this.remote) {
+      player.setCast(null);
+      // This device's own volume again (the slider had the other's).
+      player.volume = store.get('volume', 1);
+      player.applyVolume();
+      player.emit('volume');
+    }
     if (this.role === 'remote') this.role = 'idle';
     if (!adopt || !this.queue.length) return;
     const index = Math.max(0, this.queue.findIndex((t) => t.qid === st?.qid));
