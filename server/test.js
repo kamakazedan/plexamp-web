@@ -2397,9 +2397,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // people's are theirs). state.nobody: it shows nobody what only its owner
 // may see (its settings, who's playing); state.tokenless: what it answers
 // a request for its library without a sign-in (0: as above). state.down:
-// plex.tv answers 503.
+// plex.tv answers 503 (state.tvStatus: what it answers at each of these
+// paths instead).
 async function fakePlex() {
-  const state = { open: false, honour: false, down: false, noSessions: false, broken: false, nobody: false, tokenless: 0 };
+  const state = { open: false, honour: false, down: false, noSessions: false, broken: false, nobody: false, tokenless: 0, tvStatus: {} };
   const accounts = {
     'owner-token': { id: 1, uuid: 'u1', username: 'dan', friendlyName: 'Dan' },
     'sam-token': { id: 2, uuid: 'u2', username: 'sam', friendlyName: 'Sam' },
@@ -2433,6 +2434,7 @@ async function fakePlex() {
     if (t) tvTokens.push(t);
     tvAsked.push({ path: u.pathname, token: t });
     if (state.down) return json(res, 503, {});
+    if (state.tvStatus[u.pathname]) return json(res, state.tvStatus[u.pathname], {});
     if (u.pathname === '/api/v2/ping') return json(res, 200, { pong: true });
     const a = accounts[t];
     if (!a) return json(res, 401, {});
@@ -3049,6 +3051,33 @@ test('long-polls: Play Together\'s and your devices\' are counted apart, and one
     assert.ok(r.ms >= 800 && r.body.unchanged, `${r.ms} ms`);
   } finally {
     for (const c of held) c.abort();
+    await svc.stop();
+    p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Play on and Play Together: a sign-in plex.tv refuses is said so, and plex.tv not answering never leaves those invited out unsaid', async () => {
+  const p = await fakePlex();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const svc = await startService({ PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_TOGETHER: 'true' }, dir);
+  const headers = { 'X-Plex-Token': 'owner-token', 'Content-Type': 'application/json' };
+  const start = (body) => fetch(`${svc.url}/api/together/sessions`, { method: 'POST', headers, body: JSON.stringify({ server: { id: 'srv-1', name: 'Test', section: '1' }, queue: [], ...body }) });
+  try {
+    // Play on: plex.tv refusing the sign-in, asked about its servers, is a sign-in refused (it was "couldn't be asked").
+    p.state.tvStatus['/api/v2/resources'] = 401;
+    assert.equal((await fetch(`${svc.url}/api/cast/players`, { headers })).status, 401);
+    delete p.state.tvStatus['/api/v2/resources'];
+    // Play Together: a session, then plex.tv not answering who the host's friends are.
+    const made = await start({});
+    assert.equal(made.status, 201);
+    const { id } = await made.json();
+    p.state.tvStatus['/api/users'] = 503;
+    assert.equal((await start({ invite: [2] })).status, 503); // (it was started, with no one invited)
+    assert.equal((await fetch(`${svc.url}/api/together/sessions/${id}/invite`, { method: 'POST', headers, body: JSON.stringify({ invite: [2] }) })).status, 503);
+    const me = await (await fetch(`${svc.url}/api/together/me`, { headers })).json();
+    assert.deepEqual(me.sessions.map((x) => x.id), [id]);
+  } finally {
     await svc.stop();
     p.close();
     rmSync(dir, { recursive: true, force: true });

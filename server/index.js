@@ -994,11 +994,24 @@ async function friendsOf(user, token, serverId) {
     [list, { owned }] = await Promise.all([auth.friends(token), auth.serverAccess(token, serverId)]);
   } catch (err) {
     if (err instanceof AuthError) throw new HttpError(401, err.message);
-    throw new HttpError(503, 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).');
+    throw new HttpError(503, FRIENDS_UNANSWERED);
   }
   return list
     .filter((f) => f.id !== user.id)
     .map((f) => ({ id: f.id, title: f.title, thumb: f.thumb, home: f.home, canPlay: owned ? f.servers.includes(serverId) : null }));
+}
+
+// The account's own Plex friends (and Plex Home users), as plex.tv has them:
+// a sign-in it refuses is said (401), and plex.tv not answering (503), never
+// taken as no friends (someone invited would be left out, unsaid).
+const FRIENDS_UNANSWERED = 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).';
+async function plexFriends(token) {
+  try {
+    return await auth.friends(token);
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    throw new HttpError(503, FRIENDS_UNANSWERED);
+  }
 }
 
 // Play Together, your devices and shared playlists, on a Plex server the
@@ -1070,7 +1083,7 @@ async function togetherRoute(req, res, parts, url) {
     // Only the host's own Plex friends can be invited.
     let friendIds = new Map();
     if (Array.isArray(body.invite) && body.invite.length) {
-      const friends = await auth.friends(token).catch(() => []);
+      const friends = await plexFriends(token);
       friendIds = new Map(friends.map((f) => [f.id, f]));
     }
     const invite = (Array.isArray(body.invite) ? body.invite : []).map((id) => friendIds.get(Number(id))).filter(Boolean);
@@ -1135,7 +1148,7 @@ async function togetherRoute(req, res, parts, url) {
   if (action === 'invite') {
     const body = await readBody(req, 16 * 1024);
     if (s.host.id !== user.id) throw new HttpError(403, 'Only the host can invite people.');
-    const friends = await auth.friends(token).catch(() => []);
+    const friends = await plexFriends(token);
     const byId = new Map(friends.map((f) => [f.id, f]));
     together.invite(s, user, (Array.isArray(body.invite) ? body.invite : []).map((id) => byId.get(Number(id))).filter(Boolean));
     return send(res, 200, together.view(s, user.id));
@@ -1170,9 +1183,15 @@ async function castRoute(req, res, parts) {
   if (!allow(`cast|${user.id}`, 300)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
   const serverId = await auth.loadServerId();
   if (!serverId) throw new HttpError(503, 'The Plex server isn’t answering. Try again in a minute.');
+  // (A sign-in plex.tv refuses is said, 401; plex.tv not answering, 503.)
   const unanswered = 'Plex couldn’t be asked about your players right now. Try again in a minute.';
-  const access = await auth.serverAccess(token, serverId).catch(() => null);
-  if (!access) throw new HttpError(503, unanswered);
+  let access;
+  try {
+    access = await auth.serverAccess(token, serverId);
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    throw new HttpError(503, unanswered);
+  }
   if (!access.owned) throw new HttpError(403, 'Only the server’s owner can play on Plex players from here.');
   const [what, id, action] = parts;
   if (what !== 'players') throw new HttpError(404, 'Not found.');
@@ -1288,7 +1307,7 @@ async function sharesRoute(req, res, parts, url) {
       [friends, { owned }] = await Promise.all([auth.friends(token), auth.serverAccess(token, serverId)]);
     } catch (err) {
       if (err instanceof AuthError) throw new HttpError(401, err.message);
-      throw new HttpError(503, 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).');
+      throw new HttpError(503, FRIENDS_UNANSWERED);
     }
     const byId = new Map(friends.map((f) => [f.id, f]));
     return asked
@@ -1320,8 +1339,9 @@ async function sharesRoute(req, res, parts, url) {
   const role = shares.roleOf(s, user.id);
   // Not shared with them: as if it weren't there.
   if (!role) throw new HttpError(404, 'That shared playlist isn’t shared any more.');
-  const access = (await canUse(s.server)) ? await auth.serverAccess(token, s.server).catch(() => null) : null;
-  if (!access?.ok) throw new HttpError(403, 'You can’t play from that playlist’s Plex server.');
+  // (Whether they own it too, from the same answer of plex.tv's.)
+  const access = await serverAccessOf(token, s.server);
+  if (!access.ok) throw new HttpError(403, 'You can’t play from that playlist’s Plex server.');
   const ownerOnly = () => {
     if (role !== 'owner') throw new HttpError(403, 'Only whoever shared the playlist can do that.');
   };
