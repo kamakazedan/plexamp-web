@@ -1724,6 +1724,10 @@ class Player extends EventTarget {
       `couldn’t play “${track.title}” (${track.codec || 'unknown format'}, ${this.transcoding ? 'converted by the server' : 'original file'}): ${err?.message || (media ? `media error ${media.code}${media.message ? `, ${media.message}` : ''}` : 'stream error')}`,
       'warn',
     );
+    // Playing through AirPlay or Cast: the server's temporary token may be
+    // one it doesn't take any more (it's restarted since, say), so another
+    // is asked for (cast.js), for what plays from here.
+    if (this.useMediaToken) this.emit('renewtoken');
     // The connection gone (the browser offline, or the server not
     // answering): the track waits for it, where it got to, rather than
     // being converted or skipped as one that won't play is (holdFor). Not

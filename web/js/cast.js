@@ -546,6 +546,16 @@ function fetchMediaToken(then) {
   );
 }
 
+// A track that failed while AirPlay or Cast plays: the temporary token may
+// be one the server doesn't take any more (it's restarted since, say), so a
+// new one's asked for (not the one kept, which may be that one), for what
+// plays from here.
+player.addEventListener('renewtoken', () => {
+  if (!player.useMediaToken) return;
+  cast.token = null;
+  fetchMediaToken();
+});
+
 // Opens the browser's own device picker for the element that's playing.
 function promptRemote() {
   const el = player.audio;
