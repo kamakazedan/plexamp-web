@@ -645,12 +645,14 @@ export const fileDate = () => new Date().toISOString().slice(0, 10);
 
 // ---------- toasts ----------
 
+// (Said by screen readers as #toasts' own live region has it: once, not
+// as a status of its own too, which some say twice.)
 let toastTimer;
 export function toast(message, { action, onAction, timeout = 3500 } = {}) {
   const root = document.getElementById('toasts');
   const el = h(
     'div.toast',
-    { role: 'status' },
+    null,
     h('span', null, message),
     action ? h('button.toast-action', { type: 'button', onclick: () => { onAction?.(); el.remove(); } }, action) : null,
   );
