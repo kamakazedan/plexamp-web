@@ -111,7 +111,8 @@ if [ "$SMOKE" = true ]; then
     expect "smoke: ...and a sign-in no one knows refused" 401 "$(c "$W/pms/library/sections?X-Plex-Token=bad")"
     expect "smoke: the shared AI model, for someone signed in" 200 "$(c -H 'X-Plex-Token: t' $W/ollama/api/tags)"
     contains "smoke: tini runs it all, so the stop signal reaches everything" "tini" "$(docker exec pw-web cat /proc/1/cmdline 2>/dev/null | tr '\0' ' ')"
-    svc_uid="$(docker exec pw-web sh -c 'for p in /proc/[0-9]*; do if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -Eq "^[^ ]*node( -[^ ]*)* [^ ]*[s]erver/index.js"; then awk "/^Uid:/ { print \$2 }" "$p/status"; break; fi; done' 2>/dev/null || true)"
+    # (Under emulation, a process's command line can start with QEMU's.)
+    svc_uid="$(docker exec pw-web sh -c 'for p in /proc/[0-9]*; do if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -Eq "(^|/| )node( -[^ ]*)* [^ ]*[s]erver/index.js"; then awk "/^Uid:/ { print \$2 }" "$p/status"; break; fi; done' 2>/dev/null || true)"
     expect "smoke: the service isn't root" yes "$(if [ -n "$svc_uid" ] && [ "$svc_uid" != 0 ]; then echo yes; else echo "no (uid ${svc_uid:-unknown})"; fi)"
     if [ "$FAILED" -ne 0 ]; then
         docker logs pw-web 2>&1 | tail -40
