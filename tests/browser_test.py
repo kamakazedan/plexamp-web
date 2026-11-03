@@ -7825,13 +7825,16 @@ with sync_playwright() as pw:
         check('missingsync: signing out leaves the account\'s list, and the next account on that browser gets none of it', titles('t') == before and titles('t2') == sam_before
               and not any(t in here(desk) for t in before), f'{titles("t")} {titles("t2")} {here(desk)}')
         # Signed in over someone (without signing out): theirs isn't the new
-        # account's.
+        # account's, nor is their server and library (signed in to as them):
+        # the new account chooses one.
         js(old, "() => import('./js/state.js').then(({ setAuth, app }) => setAuth({ ...app.auth, token: 't2', username: 'sam' }))")
         old.evaluate("() => { location.hash = '#/'; }")
         old.reload()
-        old.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+        old.wait_for_selector('.source-body', timeout=20000)
         old.wait_for_timeout(2000)
-        check('missingsync: signed in over someone, what that browser had isn\'t the new account\'s', titles('t2') == sam_before and 'Legacy Band' not in here(old), f'{titles("t2")} {here(old)}')
+        over_source = js(old, "() => import('./js/state.js').then(({ app }) => app.source)")
+        check('missingsync: signed in over someone, what that browser had isn\'t the new account\'s', titles('t2') == sam_before and 'Legacy Band' not in here(old) and over_source is None,
+              f'{titles("t2")} {here(old)} {over_source}')
 
         # Clear the list, for the owner: everyone's.
         lists('t2', 'POST', {'ops': [{'type': 'note', 'id': op_id(), 'items': [{'kind': 'artist', 'artist': 'Sams Band'}], 'section': sec, 'library': lib}]})

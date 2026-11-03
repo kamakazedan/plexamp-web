@@ -226,18 +226,38 @@ export const MISSING_OVER = 'aiMissingOver';
 // needs one is used then.
 export const plexAccount = () => !!app.auth?.token && !app.auth.offline;
 
+// The settings that are the person's own rather than the device's (anything
+// for the AI, the name this player goes by, Home layouts), as they are to
+// begin with: for the next person, once someone's left (AI that was off
+// here stays off).
+function personalReset() {
+  const { ai, playerName } = DEFAULT_SETTINGS;
+  return { ai: { ...ai, mode: app.settings.ai?.mode === 'off' ? 'off' : ai.mode }, playerName, home: {} };
+}
+
+// Signed in over someone (without their signing out first): nothing of
+// theirs stays for the new account, as on signing out (see leave): their
+// own settings go back to how they are to begin with, and all else that was
+// kept for them goes (their server and library, which they chose and signed
+// in to; their queue, lists, Missing tracks and the rest). None of it is
+// sent to the new account either. (Then they choose a server.)
 export function setAuth(auth) {
   const over = app.auth?.token && app.auth.token !== auth?.token;
-  if (over || (!app.auth?.token && store.get('settings'))) store.set(SYNCED_BEFORE, true);
+  if (!over && !app.auth?.token && store.get('settings')) store.set(SYNCED_BEFORE, true);
   if (over) {
-    store.set(SYNC_PENDING, null);
-    store.set(SYNC_REV, null);
-    store.set(MISSING_OVER, true);
-    for (const k of store.keys(PROFILE)) store.set(k, null);
+    Object.assign(app.settings, personalReset());
+    setDeviceName(app.settings.playerName);
+    store.clear(['clientId', 'settings', SYNCED_BEFORE]);
   }
   app.auth = auth;
   store.set('auth', auth);
   store.own(auth?.token);
+  if (over) {
+    store.set(SYNCED_BEFORE, true);
+    store.set('settings', app.settings);
+    store.set(MISSING_OVER, true);
+    emit('settings', app.settings);
+  }
 }
 
 // The Plex server a source is on, to ask it things.
@@ -284,10 +304,7 @@ export function switchAccount(next) {
 function leave(next) {
   // (Settings that follow your account stay as they are for it: see sync.js.)
   emit('signing-out');
-  if (!next) {
-    const { ai, playerName } = DEFAULT_SETTINGS;
-    saveSettings({ ai: { ...ai, mode: app.settings.ai?.mode === 'off' ? 'off' : ai.mode }, playerName, home: {} });
-  }
+  if (!next) saveSettings(personalReset());
   store.set(SYNCED_BEFORE, true);
   // (Switching: yours kept for you, and theirs, kept from before, taken
   // out to be theirs again. Signing out: everyone's go.)
