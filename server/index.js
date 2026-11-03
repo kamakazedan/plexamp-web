@@ -15,18 +15,20 @@ import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, unlinkSync, chmodSync, chownSync, mkdirSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname } from 'node:path';
 import { log, setDebug, isDebug } from './log.js';
+import { ServiceError } from './errors.js';
+import { SERVER_ID } from './clean.js';
 import { PlexAuth, AuthError, validToken, fingerprintOf, PLEX_TV_TIMING } from './plex.js';
 import { OwnerSignIns } from './owners.js';
 import { Offline, OfflineError, isOfflineToken, OFFLINE_LIMITS } from './offline.js';
-import { Together, TogetherError } from './together.js';
-import { Cast, CastError } from './cast.js';
-import { Devices, DevicesError, LIMITS as LIMITS_DEVICES } from './devices.js';
-import { SharedModel, AIRequestError, cleanChat, errorText, AI_LIMITS } from './ai.js';
-import { MusicBrainz, MusicBrainzError, MB_LIMITS, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
-import { Shares, ShareError } from './shares.js';
-import { SettingsStore, SettingsError } from './settings.js';
-import { MissingStore, MissingError, SERVER_ID } from './missing.js';
-import { Spotify, SpotifyError, playlistId, NOT_A_LINK } from './spotify.js';
+import { Together } from './together.js';
+import { Cast } from './cast.js';
+import { Devices, LIMITS as LIMITS_DEVICES } from './devices.js';
+import { SharedModel, AIRequestError, cleanChat, errorText, readAnswer, AI_LIMITS } from './ai.js';
+import { MusicBrainz, MB_LIMITS, MBKept, MB_ADVANCED_LIMITS } from './musicbrainz.js';
+import { Shares } from './shares.js';
+import { SettingsStore } from './settings.js';
+import { MissingStore } from './missing.js';
+import { Spotify, playlistId, NOT_A_LINK } from './spotify.js';
 import { listenForNginx } from './syslog.js';
 import { plainPath, clientIp } from './paths.js';
 
@@ -145,8 +147,6 @@ let owners = null; // the owner's sign-ins, as fingerprints (see owners.js)
 const buckets = new Map(); // key -> { at, n }, oldest first
 const MAX_BUCKETS = 20000;
 const everyone = new Map(); // limits for everyone together: never dropped
-const waiting = new Map(); // user id -> long-polls open
-const deviceWaits = new Map(); // `${user id}|${device id}` -> long-polls open
 // `n`: how many this counts for. Too many keys at once (many addresses or
 // accounts) drops the oldest minutes first, never everyone's.
 function allow(key, perMinute, n = 1, map = buckets) {
@@ -174,6 +174,37 @@ function againIn(key, map = buckets) {
   return b ? Math.max(1, Math.ceil((b.at + 60000 - Date.now()) / 1000)) : 60;
 }
 
+// Long-polls (Play Together's, and your devices'): each waits for news up to
+// waitMs (?wait=, in seconds), and ends as soon as whoever's waiting has gone
+// (a page reloaded, say). A few at once from each person (several tabs),
+// each kind counted apart, so one can't use up the other's: past that, one
+// is answered straight away.
+const LONG_POLLS = {
+  waitMs: 25000,
+  together: 4, // Play Together's, for each person
+  device: 2, // your devices', for each device
+  devices: 24, // ...and for each person, all their devices' together
+};
+const togetherWaits = new Map(); // user id -> Play Together's long-polls open
+const deviceWaits = new Map(); // `${user id}|${device id}` -> that device's long-polls open
+const accountDeviceWaits = new Map(); // user id -> long-polls open of all their devices
+const waitOf = (url) => Math.max(0, Math.min(Number(url.searchParams.get('wait') || 0) * 1000 || 0, LONG_POLLS.waitMs));
+// One more (or one fewer) open for `key` (none left: it goes).
+const opened = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+function closed(map, key) {
+  const n = (map.get(key) || 1) - 1;
+  if (n > 0) map.set(key, n);
+  else map.delete(key);
+}
+
+// Aborted once whoever sent the request `res` answers has gone, before it's
+// answered.
+function whenGone(res) {
+  const ctrl = new AbortController();
+  res.on('close', () => !res.writableFinished && ctrl.abort());
+  return ctrl.signal;
+}
+
 // A sign-in this service hasn't seen lately is checked with plex.tv. Made-up
 // tokens would each be another question for plex.tv, so each address gets
 // a few a minute: counted as each is checked (ones seen lately aren't).
@@ -195,11 +226,10 @@ function identifyFor(req, token, { counted = true } = {}) {
 
 // ---------- HTTP helpers ----------
 
-class HttpError extends Error {
+class HttpError extends ServiceError {
   // `retryAfter`: seconds to wait before asking again (as Retry-After says).
   constructor(status, message, { retryAfter = null } = {}) {
-    super(message);
-    this.status = status;
+    super(status, message);
     this.retryAfter = retryAfter;
   }
 }
@@ -216,7 +246,14 @@ function send(res, status, body, headers = {}) {
   res.end(data);
 }
 
+// A request's body, as JSON, and said to be (its Content-Type): another
+// site's page can have a browser send a form, or plain text, here without
+// asking first (a chat with the shared model with OLLAMA_AUTH=off, say, or
+// lines for the debug log), but not JSON. (A request with none needn't say.)
+const JSON_TYPE = /^application\/json\s*(;|$)/i;
 function readBody(req, limit = 256 * 1024) {
+  const sent = Number(req.headers['content-length']) > 0 || req.headers['transfer-encoding'] !== undefined;
+  if (sent && !JSON_TYPE.test(String(req.headers['content-type'] || ''))) return Promise.reject(new HttpError(415, 'Send that as JSON.'));
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -239,20 +276,6 @@ function readBody(req, limit = 256 * 1024) {
       }
     });
     req.on('error', reject);
-  });
-}
-
-// An answer from another server (Ollama's), up to `limit` bytes.
-function readAnswer(res, limit) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    res.on('data', (c) => {
-      size += c.length;
-      if (size <= limit) chunks.push(c);
-    });
-    res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    res.on('error', reject);
   });
 }
 
@@ -343,6 +366,7 @@ function aiRefused(reason, user = null) {
 
 const aiBusy = new Map(); // limit key -> chats under way
 let aiChats = 0;
+const OLLAMA_ERROR_BYTES = 64 * 1024; // of Ollama's answer when it turns a chat down, read at most
 
 async function aiRoute(req, res, parts) {
   if (!sharedModel) throw new HttpError(404, 'This player has no shared AI model.');
@@ -448,7 +472,7 @@ async function aiChat(req, res, who) {
     const status = upstream.statusCode || 502;
     let message = '';
     try {
-      message = errorText(await readAnswer(upstream, 65536));
+      message = errorText(await readAnswer(upstream, OLLAMA_ERROR_BYTES));
     } catch {
       message = '';
     }
@@ -674,9 +698,6 @@ async function spotifyRoute(req, res, parts) {
     const playlist = await spotify.playlist(id, { signal: ctrl.signal });
     log.debug(`spotify: read a playlist (${id.slice(0, 6)}…): ${playlist.tracks.length} tracks${playlist.capped ? ', as many as its page lists' : ''}`);
     return send(res, 200, { playlist });
-  } catch (err) {
-    if (err instanceof SpotifyError) throw new HttpError(err.status, err.message);
-    throw err;
   } finally {
     spotifyReads -= 1;
   }
@@ -859,6 +880,8 @@ function offlinePass(res, token, { stream, single, tokenPath }) {
 // minute, so made-up ones can't have it asked without end. (Those it has are
 // still asked each time: only not counted. Nor is the owner's: see pmsAuth.)
 const PMS_NEW_CHECKS_PER_MINUTE = 60;
+const ASKED_LATELY_MS = 10 * 60000; // asked about this lately, a sign-in isn't counted
+const ASKED_LATELY_KEPT = 5000; // ...of so many sign-ins at most, the latest
 const askedLately = new Map(); // token hash -> until, oldest first
 function pmsCheckable(req, token) {
   // (Nor while the server's being asked about it already: those wait for
@@ -869,8 +892,8 @@ function pmsCheckable(req, token) {
 function askedAbout(token) {
   const key = fingerprintOf(token);
   askedLately.delete(key);
-  askedLately.set(key, Date.now() + 10 * 60000);
-  if (askedLately.size > 5000) askedLately.delete(askedLately.keys().next().value);
+  askedLately.set(key, Date.now() + ASKED_LATELY_MS);
+  if (askedLately.size > ASKED_LATELY_KEPT) askedLately.delete(askedLately.keys().next().value);
 }
 
 // Is this the sign-in of the Plex server's owner? 'owner', 'friend' (someone
@@ -941,7 +964,7 @@ async function offlineRoute(req, res, parts) {
     if (parts[0] === 'session' && parts.length === 1 && req.method === 'POST') {
       // (As JSON only, so another site's page can't have a browser try
       // passwords: that would need the browser to ask this player first.)
-      if (!/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] || ''))) throw new HttpError(415, 'Send the password as JSON.');
+      if (!JSON_TYPE.test(String(req.headers['content-type'] || ''))) throw new HttpError(415, 'Send the password as JSON.');
       const body = await readBody(req, 4096);
       return send(res, 200, await offline.signIn(body.key, addr, ip));
     }
@@ -981,11 +1004,24 @@ async function friendsOf(user, token, serverId) {
     [list, { owned }] = await Promise.all([auth.friends(token), auth.serverAccess(token, serverId)]);
   } catch (err) {
     if (err instanceof AuthError) throw new HttpError(401, err.message);
-    throw new HttpError(503, 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).');
+    throw new HttpError(503, FRIENDS_UNANSWERED);
   }
   return list
     .filter((f) => f.id !== user.id)
     .map((f) => ({ id: f.id, title: f.title, thumb: f.thumb, home: f.home, canPlay: owned ? f.servers.includes(serverId) : null }));
+}
+
+// The account's own Plex friends (and Plex Home users), as plex.tv has them:
+// a sign-in it refuses is said (401), and plex.tv not answering (503), never
+// taken as no friends (someone invited would be left out, unsaid).
+const FRIENDS_UNANSWERED = 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).';
+async function plexFriends(token) {
+  try {
+    return await auth.friends(token);
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    throw new HttpError(503, FRIENDS_UNANSWERED);
+  }
 }
 
 // Play Together, your devices and shared playlists, on a Plex server the
@@ -1057,7 +1093,7 @@ async function togetherRoute(req, res, parts, url) {
     // Only the host's own Plex friends can be invited.
     let friendIds = new Map();
     if (Array.isArray(body.invite) && body.invite.length) {
-      const friends = await auth.friends(token).catch(() => []);
+      const friends = await plexFriends(token);
       friendIds = new Map(friends.map((f) => [f.id, f]));
     }
     const invite = (Array.isArray(body.invite) ? body.invite : []).map((id) => friendIds.get(Number(id))).filter(Boolean);
@@ -1074,27 +1110,24 @@ async function togetherRoute(req, res, parts, url) {
     if (!together.roleOf(s, user.id)) throw new HttpError(403, 'You haven’t been invited to this session.');
     together.seen(s, user.id);
     const since = Number(url.searchParams.get('since') || 0);
-    const wait = Math.max(0, Math.min(Number(url.searchParams.get('wait') || 0), 25)) * 1000;
+    const wait = waitOf(url);
     const unchanged = () => send(res, 200, { version: s.version, now: Date.now(), unchanged: true });
     if (together.settle(s)) together.bump(s);
-    if (wait && (waiting.get(user.id) || 0) >= 4) {
+    if (wait && (togetherWaits.get(user.id) || 0) >= LONG_POLLS.together) {
       // Enough waiting requests from this person already (several tabs):
       // answer this one straight away.
       return since >= s.version ? unchanged() : send(res, 200, together.view(s, user.id));
     }
     if (wait) {
-      let gone = false;
-      res.on('close', () => !res.writableFinished && (gone = true));
-      waiting.set(user.id, (waiting.get(user.id) || 0) + 1);
+      const gone = whenGone(res);
+      opened(togetherWaits, user.id);
       let changed;
       try {
-        changed = await together.wait(s, since, wait);
+        changed = await together.wait(s, since, wait, { signal: gone });
       } finally {
-        const n = (waiting.get(user.id) || 1) - 1;
-        if (n > 0) waiting.set(user.id, n);
-        else waiting.delete(user.id);
+        closed(togetherWaits, user.id);
       }
-      if (gone) return undefined;
+      if (gone.aborted) return undefined;
       together.seen(s, user.id);
       if (!changed) return unchanged();
     } else if (since >= s.version && together.roleOf(s, user.id) !== 'invited') {
@@ -1125,7 +1158,7 @@ async function togetherRoute(req, res, parts, url) {
   if (action === 'invite') {
     const body = await readBody(req, 16 * 1024);
     if (s.host.id !== user.id) throw new HttpError(403, 'Only the host can invite people.');
-    const friends = await auth.friends(token).catch(() => []);
+    const friends = await plexFriends(token);
     const byId = new Map(friends.map((f) => [f.id, f]));
     together.invite(s, user, (Array.isArray(body.invite) ? body.invite : []).map((id) => byId.get(Number(id))).filter(Boolean));
     return send(res, 200, together.view(s, user.id));
@@ -1160,8 +1193,15 @@ async function castRoute(req, res, parts) {
   if (!allow(`cast|${user.id}`, 300)) throw new HttpError(429, 'Too many requests. Wait a moment and try again.');
   const serverId = await auth.loadServerId();
   if (!serverId) throw new HttpError(503, 'The Plex server isn’t answering. Try again in a minute.');
-  const access = await auth.serverAccess(token, serverId).catch(() => null);
-  if (!access) throw new HttpError(503, 'Plex couldn’t be asked about your players right now. Try again in a minute.');
+  // (A sign-in plex.tv refuses is said, 401; plex.tv not answering, 503.)
+  const unanswered = 'Plex couldn’t be asked about your players right now. Try again in a minute.';
+  let access;
+  try {
+    access = await auth.serverAccess(token, serverId);
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    throw new HttpError(503, unanswered);
+  }
   if (!access.owned) throw new HttpError(403, 'Only the server’s owner can play on Plex players from here.');
   const [what, id, action] = parts;
   if (what !== 'players') throw new HttpError(404, 'Not found.');
@@ -1174,9 +1214,7 @@ async function castRoute(req, res, parts) {
     if (action === 'play' && req.method === 'POST') return send(res, 200, await cast.play(user, token, id, await readBody(req, 8 * 1024)));
     if (action === 'command' && req.method === 'POST') return send(res, 200, await cast.command(user, token, id, await readBody(req, 8 * 1024)));
   } catch (err) {
-    if (err instanceof CastError) throw new HttpError(err.status, err.message);
-    if (err instanceof AuthError) throw new HttpError(401, err.message);
-    if (err.network || err.upstream) throw new HttpError(503, 'Plex couldn’t be asked about your players right now. Try again in a minute.');
+    if (err.network || err.upstream) throw new HttpError(503, unanswered);
     throw err;
   }
   throw new HttpError(404, 'Not found.');
@@ -1200,61 +1238,50 @@ async function devicesRoute(req, res, parts, url) {
   if (!(await serverAllowed(token, serverId))) throw new HttpError(403, 'You can’t play from that Plex server.');
   const device = body ? body.device : { id: q.get('device'), name: q.get('name') };
   const deviceId = String(device?.id || '');
-  try {
-    const h = devices.home(user.id, serverId);
-    const view = () => devices.view(h, deviceId, { queueVersion: Number(q.get('queue') ?? -1), after: Number(q.get('after') || 0) });
-    if (!parts[0] && method === 'GET') {
-      devices.seen(h, device);
-      const since = Number(q.get('since') || 0);
-      const wait = Math.max(0, Math.min(Number(q.get('wait') || 0), 25)) * 1000;
-      const key = `${user.id}|${deviceId}`;
-      const mine = deviceWaits.get(key) || 0;
-      if (wait && since >= h.version && mine < 2 && (waiting.get(user.id) || 0) < 24) {
-        let gone = false;
-        res.on('close', () => !res.writableFinished && (gone = true));
-        deviceWaits.set(key, mine + 1);
-        waiting.set(user.id, (waiting.get(user.id) || 0) + 1);
-        try {
-          await devices.wait(h, since, wait);
-        } finally {
-          const n = (deviceWaits.get(key) || 1) - 1;
-          if (n > 0) deviceWaits.set(key, n);
-          else deviceWaits.delete(key);
-          const u = (waiting.get(user.id) || 1) - 1;
-          if (u > 0) waiting.set(user.id, u);
-          else waiting.delete(user.id);
-        }
-        if (gone) return undefined;
-        devices.seen(h, device);
+  const h = devices.home(user.id, serverId);
+  const view = () => devices.view(h, deviceId, { queueVersion: Number(q.get('queue') ?? -1), after: Number(q.get('after') || 0) });
+  if (!parts[0] && method === 'GET') {
+    devices.seen(h, device);
+    const since = Number(q.get('since') || 0);
+    const wait = waitOf(url);
+    const key = `${user.id}|${deviceId}`;
+    if (wait && since >= h.version && (deviceWaits.get(key) || 0) < LONG_POLLS.device && (accountDeviceWaits.get(user.id) || 0) < LONG_POLLS.devices) {
+      const gone = whenGone(res);
+      opened(deviceWaits, key);
+      opened(accountDeviceWaits, user.id);
+      try {
+        await devices.wait(h, since, wait, { signal: gone });
+      } finally {
+        closed(deviceWaits, key);
+        closed(accountDeviceWaits, user.id);
       }
-      return send(res, 200, view());
-    }
-    if (method !== 'POST') throw new HttpError(405, 'Not allowed.');
-    if (parts[0] === 'activate') {
-      devices.activate(h, device);
-      log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" plays now`);
-      return send(res, 200, view());
-    }
-    if (parts[0] === 'release') {
+      if (gone.aborted) return undefined;
       devices.seen(h, device);
-      if (devices.release(h, deviceId)) log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" stopped being the one that plays`);
-      return send(res, 200, { ok: true });
     }
-    if (parts[0] === 'report') {
-      devices.report(h, device, body);
-      return send(res, 200, { version: h.version, queueVersion: h.queueVersion });
-    }
-    if (parts[0] === 'command') {
-      const id = devices.command(h, device, body.command);
-      // (What kind of command only: not the tracks in it. Not each change of
-      // volume as a slider moves.)
-      const type = h.commands.at(-1)?.type;
-      if (type !== 'volume') log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" sent ${type} to "${h.devices.get(h.active)?.name}"`);
-      return send(res, 200, { id });
-    }
-  } catch (err) {
-    if (err instanceof DevicesError) throw new HttpError(err.status, err.message);
-    throw err;
+    return send(res, 200, view());
+  }
+  if (method !== 'POST') throw new HttpError(405, 'Not allowed.');
+  if (parts[0] === 'activate') {
+    devices.activate(h, device);
+    log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" plays now`);
+    return send(res, 200, view());
+  }
+  if (parts[0] === 'release') {
+    devices.seen(h, device);
+    if (devices.release(h, deviceId)) log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" stopped being the one that plays`);
+    return send(res, 200, { ok: true });
+  }
+  if (parts[0] === 'report') {
+    devices.report(h, device, body);
+    return send(res, 200, { version: h.version, queueVersion: h.queueVersion });
+  }
+  if (parts[0] === 'command') {
+    const id = devices.command(h, device, body.command);
+    // (What kind of command only: not the tracks in it. Not each change of
+    // volume as a slider moves.)
+    const type = h.commands.at(-1)?.type;
+    if (type !== 'volume') log.debug(`devices: ${user.title}'s "${h.devices.get(deviceId)?.name}" sent ${type} to "${h.devices.get(h.active)?.name}"`);
+    return send(res, 200, { id });
   }
   throw new HttpError(404, 'Not found.');
 }
@@ -1290,7 +1317,7 @@ async function sharesRoute(req, res, parts, url) {
       [friends, { owned }] = await Promise.all([auth.friends(token), auth.serverAccess(token, serverId)]);
     } catch (err) {
       if (err instanceof AuthError) throw new HttpError(401, err.message);
-      throw new HttpError(503, 'Your Plex friends couldn’t be loaded (plex.tv didn’t answer).');
+      throw new HttpError(503, FRIENDS_UNANSWERED);
     }
     const byId = new Map(friends.map((f) => [f.id, f]));
     return asked
@@ -1299,67 +1326,63 @@ async function sharesRoute(req, res, parts, url) {
       .map(({ f, role }) => ({ id: f.id, title: f.title, role }));
   };
   const canUse = (serverId) => serverAllowed(token, serverId);
-  try {
-    if (!parts[0] && method === 'GET') {
-      const server = String(url.searchParams.get('server') || '');
-      // Only for a server they can use (nothing about one they can't).
-      if (!(await canUse(server))) return send(res, 200, { shares: [] });
-      return send(res, 200, { shares: shares.forUser(user.id, server).map((s) => shares.view(s, user.id)) });
-    }
-    if (parts[0] === 'friends' && parts.length === 1 && method === 'GET') {
-      return send(res, 200, { friends: await friendsOf(user, token, url.searchParams.get('server') || '') });
-    }
-    if (!parts[0] && method === 'POST') {
-      if (!allow(`s-new|${user.id}`, 20)) throw new HttpError(429, 'Too many in a short time. Wait a minute.');
-      const server = String(body.server || '');
-      if (!(await canUse(server))) throw new HttpError(403, 'You can’t play from that Plex server.');
-      const s = shares.create(user, { server, playlist: body.playlist, title: body.title, tracks: body.tracks, members: await friendsAsked(body.members ?? [], server) });
-      log.debug(`shares: ${user.title} shared a playlist with ${s.members.length}`);
-      return send(res, 201, shares.view(s, user.id));
-    }
-    if (parts.length > 2) throw new HttpError(404, 'Not found.');
-    const s = shares.get(parts[0]);
-    const action = parts[1] || '';
-    const role = shares.roleOf(s, user.id);
-    // Not shared with them: as if it weren't there.
-    if (!role) throw new HttpError(404, 'That shared playlist isn’t shared any more.');
-    const access = (await canUse(s.server)) ? await auth.serverAccess(token, s.server).catch(() => null) : null;
-    if (!access?.ok) throw new HttpError(403, 'You can’t play from that playlist’s Plex server.');
-    const ownerOnly = () => {
-      if (role !== 'owner') throw new HttpError(403, 'Only whoever shared the playlist can do that.');
-    };
-    if (!action && method === 'GET') return send(res, 200, { ...shares.view(s, user.id), tracks: s.tracks });
-    if (!action && method === 'DELETE') {
-      ownerOnly();
-      shares.remove(s);
-      return send(res, 200, { ok: true });
-    }
-    if (action === 'members' && method === 'PUT') {
-      ownerOnly();
-      shares.setMembers(s, await friendsAsked(body.members, s.server));
-      return send(res, 200, shares.view(s, user.id));
-    }
-    if (method !== 'POST') throw new HttpError(405, 'Not allowed.');
-    if (action === 'join') {
-      if (role === 'owner') throw new HttpError(400, 'It’s your playlist.');
-      shares.join(s, user, body);
-      return send(res, 200, shares.view(s, user.id));
-    }
-    if (action === 'decline' || action === 'leave') {
-      if (role === 'owner') throw new HttpError(400, 'It’s your playlist: stop sharing it instead.');
-      shares.leave(s, user.id);
-      return send(res, 200, { ok: true });
-    }
-    // On a Plex server of their own, nothing in a playlist of theirs is hidden
-    // from them: what's gone from it they took out (or was deleted from the
-    // library), so there's nothing to ask (see shares.sync's unseen).
-    if (action === 'sync') return send(res, 200, shares.sync(s, user, role === 'owner' && access.owned ? { ...body, unseen: [] } : body));
-    if (action === 'synced') return send(res, 200, { ok: true, ...shares.synced(s, user, body) });
-    if (action === 'lease') return send(res, 200, shares.renew(s, user, body));
-  } catch (err) {
-    if (err instanceof ShareError) throw new HttpError(err.status, err.message);
-    throw err;
+  if (!parts[0] && method === 'GET') {
+    const server = String(url.searchParams.get('server') || '');
+    // Only for a server they can use (nothing about one they can't).
+    if (!(await canUse(server))) return send(res, 200, { shares: [] });
+    return send(res, 200, { shares: shares.forUser(user.id, server).map((s) => shares.view(s, user.id)) });
   }
+  if (parts[0] === 'friends' && parts.length === 1 && method === 'GET') {
+    return send(res, 200, { friends: await friendsOf(user, token, url.searchParams.get('server') || '') });
+  }
+  if (!parts[0] && method === 'POST') {
+    if (!allow(`s-new|${user.id}`, 20)) throw new HttpError(429, 'Too many in a short time. Wait a minute.');
+    const server = String(body.server || '');
+    if (!(await canUse(server))) throw new HttpError(403, 'You can’t play from that Plex server.');
+    const s = shares.create(user, { server, playlist: body.playlist, title: body.title, tracks: body.tracks, members: await friendsAsked(body.members ?? [], server) });
+    log.debug(`shares: ${user.title} shared a playlist with ${s.members.length}`);
+    return send(res, 201, shares.view(s, user.id));
+  }
+  if (parts.length > 2) throw new HttpError(404, 'Not found.');
+  const s = shares.get(parts[0]);
+  const action = parts[1] || '';
+  const role = shares.roleOf(s, user.id);
+  // Not shared with them: as if it weren't there.
+  if (!role) throw new HttpError(404, 'That shared playlist isn’t shared any more.');
+  // (Whether they own it too, from the same answer of plex.tv's.)
+  const access = await serverAccessOf(token, s.server);
+  if (!access.ok) throw new HttpError(403, 'You can’t play from that playlist’s Plex server.');
+  const ownerOnly = () => {
+    if (role !== 'owner') throw new HttpError(403, 'Only whoever shared the playlist can do that.');
+  };
+  if (!action && method === 'GET') return send(res, 200, { ...shares.view(s, user.id), tracks: s.tracks });
+  if (!action && method === 'DELETE') {
+    ownerOnly();
+    shares.remove(s);
+    return send(res, 200, { ok: true });
+  }
+  if (action === 'members' && method === 'PUT') {
+    ownerOnly();
+    shares.setMembers(s, await friendsAsked(body.members, s.server));
+    return send(res, 200, shares.view(s, user.id));
+  }
+  if (method !== 'POST') throw new HttpError(405, 'Not allowed.');
+  if (action === 'join') {
+    if (role === 'owner') throw new HttpError(400, 'It’s your playlist.');
+    shares.join(s, user, body);
+    return send(res, 200, shares.view(s, user.id));
+  }
+  if (action === 'decline' || action === 'leave') {
+    if (role === 'owner') throw new HttpError(400, 'It’s your playlist: stop sharing it instead.');
+    shares.leave(s, user.id);
+    return send(res, 200, { ok: true });
+  }
+  // On a Plex server of their own, nothing in a playlist of theirs is hidden
+  // from them: what's gone from it they took out (or was deleted from the
+  // library), so there's nothing to ask (see shares.sync's unseen).
+  if (action === 'sync') return send(res, 200, shares.sync(s, user, role === 'owner' && access.owned ? { ...body, unseen: [] } : body));
+  if (action === 'synced') return send(res, 200, { ok: true, ...shares.synced(s, user, body) });
+  if (action === 'lease') return send(res, 200, shares.renew(s, user, body));
   throw new HttpError(404, 'Not found.');
 }
 
@@ -1378,16 +1401,11 @@ async function settingsRoute(req, res, parts, url) {
   // (A brief plex.tv outage isn't a no: the app tries again later.)
   if (!(await serverAllowed(token, String(url.searchParams.get('server') || ''))))
     throw new HttpError(403, 'Settings are kept for Plex accounts that can use this player’s Plex server, and yours can’t.');
-  try {
-    if (req.method === 'GET') return send(res, 200, accountSettings.get(user.id));
-    if (req.method === 'PUT') return send(res, 200, accountSettings.update(user.id, await readBody(req, 64 * 1024)));
-    if (req.method === 'DELETE') {
-      accountSettings.forget(user.id);
-      return send(res, 200, { ok: true });
-    }
-  } catch (err) {
-    if (err instanceof SettingsError) throw new HttpError(err.status, err.message);
-    throw err;
+  if (req.method === 'GET') return send(res, 200, accountSettings.get(user.id));
+  if (req.method === 'PUT') return send(res, 200, accountSettings.update(user.id, await readBody(req, 64 * 1024)));
+  if (req.method === 'DELETE') {
+    accountSettings.forget(user.id);
+    return send(res, 200, { ok: true });
   }
   throw new HttpError(405, 'Not allowed.');
 }
@@ -1416,29 +1434,24 @@ async function missingRoute(req, res, parts, url) {
   const access = await serverAccessOf(token, server);
   if (!access.ok) throw new HttpError(403, 'Missing tracks are kept for Plex accounts that can use this player’s Plex server, and yours can’t.');
   const owner = access.owned === true;
-  try {
-    if (req.method === 'GET') {
-      const rev = (k) => {
-        const v = url.searchParams.get(k);
-        return v && /^[a-f0-9]{8}\.\d{1,12}$/.test(v) ? v : null;
-      };
-      const got = missingLists.view(user.id, server, { owner, have: { mine: rev('mine'), all: rev('all') } });
-      const out = { account: user.id, owner, rev: owner ? got.rev : { mine: got.rev.mine } };
-      if (got.entries) Object.assign(out, { entries: got.entries, done: got.done });
-      if (got.others) out.others = await named(token, got.others);
-      return send(res, 200, out);
-    }
-    if (req.method === 'POST') {
-      const body = await readBody(req, 512 * 1024);
-      const ops = Array.isArray(body.ops) ? body.ops : null;
-      if (!ops) throw new HttpError(400, 'Those changes couldn’t be read.');
-      const r = missingLists.apply(user.id, server, ops, { owner });
-      const mineOnly = ({ mine }) => ({ mine });
-      return send(res, 200, { rev: owner ? r.rev : mineOnly(r.rev), before: owner ? r.before : mineOnly(r.before), skipped: r.skipped, refused: r.refused, full: r.full });
-    }
-  } catch (err) {
-    if (err instanceof MissingError) throw new HttpError(err.status, err.message);
-    throw err;
+  if (req.method === 'GET') {
+    const rev = (k) => {
+      const v = url.searchParams.get(k);
+      return v && /^[a-f0-9]{8}\.\d{1,12}$/.test(v) ? v : null;
+    };
+    const got = missingLists.view(user.id, server, { owner, have: { mine: rev('mine'), all: rev('all') } });
+    const out = { account: user.id, owner, rev: owner ? got.rev : { mine: got.rev.mine } };
+    if (got.entries) Object.assign(out, { entries: got.entries, done: got.done });
+    if (got.others) out.others = await named(token, got.others);
+    return send(res, 200, out);
+  }
+  if (req.method === 'POST') {
+    const body = await readBody(req, 512 * 1024);
+    const ops = Array.isArray(body.ops) ? body.ops : null;
+    if (!ops) throw new HttpError(400, 'Those changes couldn’t be read.');
+    const r = missingLists.apply(user.id, server, ops, { owner });
+    const mineOnly = ({ mine }) => ({ mine });
+    return send(res, 200, { rev: owner ? r.rev : mineOnly(r.rev), before: owner ? r.before : mineOnly(r.before), skipped: r.skipped, refused: r.refused, full: r.full });
   }
   throw new HttpError(405, 'Not allowed.');
 }
@@ -1506,7 +1519,8 @@ async function handle(req, res) {
     if (area === 'spotify') return await spotifyRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
-    const known = err instanceof HttpError || err instanceof TogetherError || err instanceof AIRequestError || err instanceof MusicBrainzError;
+    // (Each part's own errors are answered as they are: see errors.js.)
+    const known = err instanceof ServiceError;
     if (!known) log.error(`${req.method} ${url.pathname}: ${err.stack || err.message}`);
     if (!res.headersSent) {
       send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong in the service.', ...(known && err.searchBroken ? { searchBroken: true } : {}) }, err?.retryAfter ? { 'Retry-After': String(err.retryAfter) } : {});
@@ -1571,9 +1585,9 @@ function started() {
     log.error(`couldn't hand the socket to the ${config.user} user: ${err.message}`);
     process.exit(1);
   }
-  startSharing();
-  startSettings();
-  startMissing();
+  shares = startKept(config.sharing, 'shared playlists', Shares);
+  accountSettings = startKept(config.settingsSync, 'settings that follow each account', SettingsStore);
+  missingLists = startKept(config.missingSync, 'missing tracks that follow each account', MissingStore);
   startMusicBrainzKept();
   startOwners();
   const off = [
@@ -1590,34 +1604,27 @@ function started() {
   auth.loadServerId();
 }
 
-// Shared playlists, kept in the data folder (it has to be this service's to
-// write, or they're off).
-function startSharing() {
-  if (!config.sharing) return;
-  if (config.dataDir) {
-    try {
-      accessSync(config.dataDir, fsConstants.W_OK);
-    } catch {
-      log.error(`shared playlists are off: ${config.dataDir} can't be written to by this service`);
-      return;
-    }
+// Whether this service can write to a folder.
+function canWrite(dir) {
+  try {
+    accessSync(dir, fsConstants.W_OK);
+    return true;
+  } catch {
+    return false;
   }
-  shares = new Shares({ dir: config.dataDir || null, log });
 }
 
-// Settings that follow each Plex account, kept in the data folder too (it
-// has to be this service's to write, or they're off).
-function startSettings() {
-  if (!config.settingsSync) return;
-  if (config.dataDir) {
-    try {
-      accessSync(config.dataDir, fsConstants.W_OK);
-    } catch {
-      log.error(`settings that follow each account are off: ${config.dataDir} can't be written to by this service`);
-      return;
-    }
+// Shared playlists, settings that follow each Plex account, and Missing
+// tracks that follow each one too (`what`, for the log), each kept in the
+// data folder by a `Store`: it has to be this service's to write, or
+// they're off. (No folder: in memory, for development.)
+function startKept(on, what, Store) {
+  if (!on) return null;
+  if (config.dataDir && !canWrite(config.dataDir)) {
+    log.error(`${what} are off: ${config.dataDir} can't be written to by this service`);
+    return null;
   }
-  accountSettings = new SettingsStore({ dir: config.dataDir || null, log });
+  return new Store({ dir: config.dataDir || null, log });
 }
 
 // What the app's MusicBrainz features look up (MUSICBRAINZ_ADVANCED), kept
@@ -1626,13 +1633,9 @@ function startSettings() {
 function startMusicBrainzKept() {
   if (!musicbrainz || !config.musicbrainzAdvanced) return;
   let dir = (config.musicbrainzKeep && config.dataDir) || null;
-  if (dir) {
-    try {
-      accessSync(dir, fsConstants.W_OK);
-    } catch {
-      log.warn(`musicbrainz: ${dir} can't be written to by this service, so what's looked up is kept in memory only (until it restarts)`);
-      dir = null;
-    }
+  if (dir && !canWrite(dir)) {
+    log.warn(`musicbrainz: ${dir} can't be written to by this service, so what's looked up is kept in memory only (until it restarts)`);
+    dir = null;
   }
   musicbrainz.advanced(new MBKept({ dir, log }));
 }
@@ -1643,30 +1646,11 @@ function startMusicBrainzKept() {
 function startOwners() {
   if (!config.plexServerUrl) return;
   let dir = (config.ownersKeep && config.dataDir) || null;
-  if (dir) {
-    try {
-      accessSync(dir, fsConstants.W_OK);
-    } catch {
-      log.warn(`${dir} can't be written to by this service, so the owner's sign-ins are kept in memory only: if it restarts while plex.tv isn't answering, they're not known till it is`);
-      dir = null;
-    }
+  if (dir && !canWrite(dir)) {
+    log.warn(`${dir} can't be written to by this service, so the owner's sign-ins are kept in memory only: if it restarts while plex.tv isn't answering, they're not known till it is`);
+    dir = null;
   }
   owners = new OwnerSignIns({ dir, log });
-}
-
-// Missing tracks that follow each Plex account, kept in the data folder too
-// (it has to be this service's to write, or they're off).
-function startMissing() {
-  if (!config.missingSync) return;
-  if (config.dataDir) {
-    try {
-      accessSync(config.dataDir, fsConstants.W_OK);
-    } catch {
-      log.error(`missing tracks that follow each account are off: ${config.dataDir} can't be written to by this service`);
-      return;
-    }
-  }
-  missingLists = new MissingStore({ dir: config.dataDir || null, log });
 }
 
 server.on('error', (err) => {

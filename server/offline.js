@@ -12,6 +12,7 @@
 // needed, and never sent to plex.tv.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
+import { ServiceError } from './errors.js';
 
 export const OFFLINE_LIMITS = {
   downForMs: 20000, // plex.tv hasn't answered for this long: the password can be used
@@ -29,10 +30,10 @@ export const isOfflineToken = (t) => typeof t === 'string' && TOKEN.test(t);
 const digest = (s) => createHash('sha256').update(String(s), 'utf8').digest();
 const hash = (t) => digest(t).toString('hex');
 
-export class OfflineError extends Error {
+// (`reason`: why the password can't be used now, for the app: see state.)
+export class OfflineError extends ServiceError {
   constructor(status, message, reason = '') {
-    super(message);
-    this.status = status;
+    super(status, message);
     this.reason = reason;
   }
 }

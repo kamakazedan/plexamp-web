@@ -11,20 +11,19 @@
 import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { attrs, readCapped } from './plex.js';
+import { ServiceError } from './errors.js';
+import { SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 // Plex players listen on 32500 (Plexamp, the mobile apps) and older ones on
 // 3005 or 32433.
 export const PLAYER_PORTS = new Set([3005, 32433, ...Array.from({ length: 11 }, (_, i) => 32500 + i)]);
 const TIMEOUT = 5000;
+const COMMAND_IDS_KEPT = 5000; // players' last command ids, kept (the latest used)
+const ANSWER_BYTES = 64 * 1024; // of a player's answer, read at most (it's small)
 const ID = /^[A-Za-z0-9_.-]{1,100}$/;
 const TOKEN = /^[A-Za-z0-9_.~-]{8,200}$/;
 
-export class CastError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class CastError extends ServiceError {}
 
 // Home-network addresses: 10/8, 172.16/12, 192.168/16, 100.64/10 (Tailscale
 // and other carrier-grade NAT) and IPv6 unique-local (fc00::/7). Not
@@ -43,7 +42,7 @@ export function privateAddress(host, { loopback = false } = {}) {
   return false;
 }
 
-const cleanName = (s, max = 80) => String(s || '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max);
+const cleanName = (s, max = 80) => String(s || '').replace(CONTROL_CHARACTERS, '').slice(0, max);
 const int = (v, min, max) => {
   const n = Math.round(Number(v));
   if (!Number.isFinite(n) || n < min || n > max) throw new CastError(400, 'That command isn’t right.');
@@ -138,10 +137,14 @@ export class Cast {
   // Sends /player/<path> to a player: the commands below build `path` and
   // `params` themselves.
   async send(user, token, p, path, params = {}) {
+    // (Each player's go up, one by one, from the first sent it, as Plex
+    // players want: of those sent to least lately, past so many, one goes,
+    // never all of them at once.)
     const key = `${user.id}|${p.id}`;
     const commandID = (this.commandIds.get(key) || 0) + 1;
+    this.commandIds.delete(key);
     this.commandIds.set(key, commandID);
-    if (this.commandIds.size > 5000) this.commandIds.clear();
+    if (this.commandIds.size > COMMAND_IDS_KEPT) this.commandIds.delete(this.commandIds.keys().next().value);
     const q = new URLSearchParams({ ...params, commandID: String(commandID) });
     let res;
     try {
@@ -165,7 +168,7 @@ export class Cast {
       throw new CastError(502, `${p.name} didn’t take the command (it answered ${res.status}).`);
     }
     // (A player's answer is small: anything bigger isn't read.)
-    return readCapped(res, 64 * 1024).catch(() => '');
+    return readCapped(res, ANSWER_BYTES).catch(() => '');
   }
 
   // Start playing a play queue the browser made on the Plex server. The
@@ -178,7 +181,7 @@ export class Cast {
     const playQueueID = int(body.playQueueID, 1, 1e12);
     const offset = int(body.offset || 0, 0, 24 * 3600 * 1000);
     const serverId = String(body.serverId || '');
-    if (!/^[A-Za-z0-9-]{8,64}$/.test(serverId)) throw new CastError(400, 'That command isn’t right.');
+    if (!SERVER_ID.test(serverId)) throw new CastError(400, 'That command isn’t right.');
     const temp = String(body.token || '');
     if (!TOKEN.test(temp)) throw new CastError(400, 'That command isn’t right.');
     const server = await this.serverConnection(token, serverId);
