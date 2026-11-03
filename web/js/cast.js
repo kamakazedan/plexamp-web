@@ -217,6 +217,8 @@ class Cast extends EventTarget {
       this.emit('change');
       this.startPolling();
     } catch {
+      // (Not left as its remote, if it got that far: back to this device.)
+      this.stop({ here: false, quiet: true });
       store.set(key, null);
     }
   }
