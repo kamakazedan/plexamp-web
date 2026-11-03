@@ -167,10 +167,12 @@ function confirmSignOut() {
   });
 }
 
-// Whether settings follow the account (sync.js), with a switch for it.
+// Whether settings follow the account (sync.js), with a switch for it:
+// shown on till the player says (it's on unless it's been turned off), then
+// as the player says, whether the page is on screen or put aside by then
+// (but not once the switch has been used: then it's as that made it).
 function accountSyncRows() {
   const rows = h('div.rows');
-  const mine = 'Some, like Streaming quality, stay on each device.';
   if (!app.config.settingsSync || app.auth?.offline) {
     rows.append(
       row({
@@ -180,13 +182,15 @@ function accountSyncRows() {
     );
     return rows;
   }
+  let switchUsed = false;
   const paint = (on) =>
     rows.replaceChildren(
       toggleRow({
         title: 'On all your devices',
-        subtitle: `${on === null ? 'Couldn’t check just now. ' : ''}Your settings follow your Plex account. ${mine}`,
+        subtitle: on === null ? 'Couldn’t check just now.' : 'Your settings follow your Plex account, except a few like Streaming quality.',
         checked: on !== false,
         onChange: async (v) => {
+          switchUsed = true;
           try {
             await setAccountSync(v);
             toast(v ? 'Your settings follow your Plex account again.' : 'Each device keeps its own settings now.');
@@ -198,7 +202,7 @@ function accountSyncRows() {
       }),
     );
   paint(true);
-  accountSyncState().then((on) => rows.isConnected !== false && paint(on));
+  accountSyncState().then((on) => switchUsed || paint(on));
   return rows;
 }
 
