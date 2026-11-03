@@ -986,7 +986,7 @@ function debugView({ el, onDispose }) {
             live.start();
             const t0 = performance.now();
             try {
-              await app.server.identity({ timeout: 15000 });
+              await app.server.checkIdentity({ timeout: 15000 });
               const ms = Math.round(performance.now() - t0);
               status.textContent = `${fmt.number(ms)} ms${ms > 3000 ? ' (slow)' : ''}`;
             } catch (err) {

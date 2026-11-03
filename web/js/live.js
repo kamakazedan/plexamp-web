@@ -8,7 +8,7 @@
 // (the default); WEBSOCKETS=on uses WebSockets only, and off never does
 // (as DISABLE_WEBSOCKETS=true did before 0.25.0).
 import { app, on } from './state.js';
-import { store } from './plex.js';
+import { store, asArray } from './plex.js';
 import { debugLog } from './debug.js';
 
 const WS_OPEN_TIMEOUT = 8000;
@@ -21,7 +21,6 @@ const WS_BLOCKED_FOR = 6 * 3600 * 1000;
 const MAX_FAILURES = 3;
 const WS_ONLY_RETRY_MAX = 60000; // WebSockets only: the longest wait between tries
 
-const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 const EVENT_TYPES = ['timeline', 'activity', 'playing', 'status', 'progress', 'reachability', 'update.statechange'];
 
 export const LIVE_MODES = {
@@ -184,7 +183,7 @@ class LiveUpdates extends EventTarget {
 
   async serverReachable() {
     try {
-      await app.server.identity({ timeout: 8000 });
+      await app.server.checkIdentity({ timeout: 8000 });
       return true;
     } catch {
       return false;

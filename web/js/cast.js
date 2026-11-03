@@ -9,7 +9,7 @@
 // to the queue go to the play queue, and the player is told to look again.
 import { app, on, plexAccount } from './state.js';
 import { player } from './player.js';
-import { normTrack, store } from './plex.js';
+import { normTrack, store, asArray } from './plex.js';
 import { popOverlay, describeError } from './router.js';
 import { h, icon, sheet, toast, shuffleArray } from './ui.js';
 import { together } from './together.js';
@@ -55,12 +55,10 @@ async function api(path, { method = 'GET', body } = {}) {
   return data || {};
 }
 
-const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
-
 // The play queue's entries as queue tracks: each keeps its entry's id, so it
 // keeps its place (and its qid) while it's in the queue.
 function entriesOf(mc) {
-  return asList(mc.Metadata)
+  return asArray(mc.Metadata)
     .filter((m) => m.type === 'track' && m.playQueueItemID != null)
     .map((m) => ({ ...normTrack(m), qid: `c:${m.playQueueItemID}`, pqid: String(m.playQueueItemID) }));
 }
@@ -109,7 +107,7 @@ class Cast extends EventTarget {
 
   async players() {
     if (!this.available) return [];
-    return asList((await api('players')).players);
+    return asArray((await api('players')).players);
   }
 
   // A temporary token from the server, for whatever device plays: it never
