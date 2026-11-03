@@ -488,12 +488,42 @@ if truthy MUSICBRAINZ_ADVANCED "${MUSICBRAINZ_ADVANCED:-}"; then
     MB_ADV=true
 fi
 
+# near_host URL: the address's host is this machine (127.x, ::1,
+# localhost), or a name without a dot, as a container is reached by on the
+# same Docker network (the tests' mocks are): nothing a name server on the
+# internet could answer for.
+near_host() {
+    h="${1#*://}"
+    h="${h%%/*}"
+    case "$h" in
+        \[*) h="${h%%]*}]" ;;
+        *:*) h="${h%:*}" ;;
+    esac
+    h="$(lower "$h")"
+    [ "$h" = localhost ] || [ "$h" = "[::1]" ] || whole "$h" '^127(\.[0-9]{1,3}){3}$' || whole "$h" '^[a-z][a-z0-9-]*$'
+}
+
+# test_address NAME URL DEFAULT WHAT: an address for the tests (the mock's),
+# in place of DEFAULT. Said in the log whenever it's set, so one left over
+# is seen, and plain http:// only where it goes nowhere near the internet.
+test_address() {
+    [ "${2%/}" != "$3" ] || return 0
+    case "$2" in
+        https://*) ;;
+        *) near_host "$2" || fail "$1 must be an https:// address (got: $(safe_url "$2")): plain http:// is only for this machine, or a container beside this one, as in the tests" ;;
+    esac
+    say "$1 is set ($(safe_url "$2")): $4. It's for tests: take it out otherwise." >&2
+}
+
+# plex.tv, where every sign-in check goes, with the sign-in's token.
+# PLEX_TV_URL is for tests (the mock's address).
 PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
 case "$PLEX_TV" in
     http://* | https://*) ;;
     *) fail "PLEX_TV_URL must start with http:// or https:// (got: $(safe_url "$PLEX_TV"))" ;;
 esac
 whole "$PLEX_TV" '^https?://[]A-Za-z0-9._:[-]+(/[A-Za-z0-9._~/-]*)?$' || fail "PLEX_TV_URL isn't a plain address (got: $(safe_url "$PLEX_TV"))"
+test_address PLEX_TV_URL "$PLEX_TV" https://plex.tv "every sign-in check goes there, with its Plex token, instead of to plex.tv"
 
 # ---------- Spotify imports ----------
 
@@ -513,6 +543,7 @@ if [ -n "${SPOTIFY_LINK_IMPORT:-}" ]; then
 fi
 SPOTIFY_URL="${SPOTIFY_URL:-https://open.spotify.com}"
 whole "$SPOTIFY_URL" '^https?://[]A-Za-z0-9._:[-]+$' || fail "SPOTIFY_URL isn't a plain address (got: $(safe_url "$SPOTIFY_URL"))"
+test_address SPOTIFY_URL "$SPOTIFY_URL" https://open.spotify.com "Spotify playlists' links are read from there instead of from open.spotify.com"
 
 # ---------- the service (/api/) ----------
 
