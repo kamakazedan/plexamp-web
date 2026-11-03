@@ -190,13 +190,17 @@ async function syncOne(share, { force }) {
   const key = keyNow();
   const token = app.auth.token;
   const call = (path, opts) => api(path, { ...opts, token });
+  // Deleted only where Plex says so (404): an answer that doesn't say what
+  // it is, or says nothing of it, isn't taken for that (it would stop the
+  // share), and it's tried again next time.
   let pl = null;
   try {
     pl = await s.playlist(share.copy);
   } catch (err) {
     if (err?.status !== 404) throw err;
+    return keyNow() === key ? copyGone(share, token, key) : { changed: false };
   }
-  if (!pl) return keyNow() === key ? copyGone(share, token, key) : { changed: false };
+  if (!pl) throw new Error('Plex didn’t say what’s in your copy.');
   const seen = remembered(share.id);
   if (!force && seen && seen.v === share.version && seen.u === (pl.updatedAt || 0) && seen.n === (pl.leafCount || 0) && seen.t === pl.title) {
     return { changed: false };

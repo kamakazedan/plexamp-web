@@ -3,6 +3,7 @@
 // derive the player-bar tint from them.
 import { app, on } from './state.js';
 import { ultraBlurOf, cleanColors } from './plex.js';
+import { unreachable } from './connection.js';
 
 const DEFAULT = { topLeft: '1c2233', topRight: '2b3752', bottomRight: '1e2638', bottomLeft: '131722' };
 const albumColors = new Map();
@@ -103,13 +104,13 @@ async function colorsFor(track) {
   try {
     if (track.albumId) colors = ultraBlurOf(await s.metadata(track.albumId));
   } catch (err) {
-    offline = !!err.network;
+    offline = unreachable(err);
   }
   if (!colors && track.thumb && !offline) {
     try {
       colors = await s.ultraBlur(track.thumb);
     } catch (err) {
-      offline = !!err.network;
+      offline = unreachable(err);
     }
   }
   colors = cleanColors(colors);

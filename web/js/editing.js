@@ -16,7 +16,8 @@ on('signout', () => (admin = { key: null, value: null }));
 
 // Signed in with Plex: plex.tv says whether this account owns the server.
 // Otherwise (a server address and token), whether the server lets this
-// token see its settings, which only its admin can.
+// token see its settings, which only its admin can (its settings, as
+// Plex lists them: not just any answer).
 export async function isAdmin() {
   const s = app.server;
   if (!s || !app.source) return false;
@@ -37,8 +38,7 @@ export async function isAdmin() {
     }
     if (value === null) {
       try {
-        await s.get('/:/prefs');
-        value = true;
+        value = Array.isArray((await s.get('/:/prefs')).Setting);
       } catch {
         value = false;
       }

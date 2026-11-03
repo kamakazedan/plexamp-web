@@ -490,9 +490,16 @@ export class PlexServer {
     return withParams(this.uri + path, { ...params, ...plexParams(token) });
   }
 
+  // Every answer Plex reads out has its MediaContainer: one without (empty,
+  // or not JSON at all, as a Wi-Fi sign-in page is) is an error, never taken
+  // for one that says there's nothing there (a playlist deleted, or empty).
   async get(path, params, opts) {
     const data = await request(this.url(path, params), opts);
-    return data.MediaContainer || {};
+    if (!data.MediaContainer || typeof data.MediaContainer !== 'object') {
+      debugLog('plex', `GET ${safeUrl(this.uri + path)} answered with something that isn’t Plex’s`, 'warn');
+      throw Object.assign(new Error('Your Plex server’s answer couldn’t be read.'), { unreadable: true });
+    }
+    return data.MediaContainer;
   }
 
   // Small memo for data that rarely changes during a session. It holds at
