@@ -36,4 +36,11 @@ export function radioArrowKeys(group) {
 // For an input that holds a secret (a token, a key): never offered to the
 // browser's keeping, or a password manager's (the browser's own is told
 // it's a code), as the PIN dialog's isn't (ui.js askText).
-export const SECRET_INPUT = { autocomplete: 'one-time-code', spellcheck: 'false', 'data-1p-ignore': true, 'data-lpignore': 'true', 'data-bwignore': true, 'data-form-type': 'other' };
+export const SECRET_INPUT = {
+  autocomplete: 'one-time-code',
+  spellcheck: 'false',
+  'data-1p-ignore': true,
+  'data-lpignore': 'true',
+  'data-bwignore': true,
+  'data-form-type': 'other',
+};

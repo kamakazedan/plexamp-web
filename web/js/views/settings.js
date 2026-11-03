@@ -221,7 +221,11 @@ function chooseHomeUser(users, mine, myId, servers = []) {
     const you = mine(u);
     const offLimits = !you && !u.protected && (u.admin || owns(u));
     if (offLimits) notOffered.push(u.title);
-    const what = [you ? 'You' : null, u.admin ? 'Admin' : u.guest ? 'Guest' : u.restricted ? 'Managed user' : null, offLimits ? 'Needs a PIN' : u.protected && !you ? 'Has a PIN' : null]
+    const what = [
+      you ? 'You' : null,
+      u.admin ? 'Admin' : u.guest ? 'Guest' : u.restricted ? 'Managed user' : null,
+      offLimits ? 'Needs a PIN' : u.protected && !you ? 'Has a PIN' : null,
+    ]
       .filter(Boolean)
       .join(' · ');
     list.append(
