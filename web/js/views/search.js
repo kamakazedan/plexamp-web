@@ -71,7 +71,7 @@ export async function searchView({ el, query, saved, key, onDispose }) {
   let aiRow = null;
   const paintAI = () => aiRow && (aiRow.hidden = !aiReady());
   aiEvents.addEventListener('change', paintAI);
-  onDispose?.(() => aiEvents.removeEventListener('change', paintAI));
+  onDispose(() => aiEvents.removeEventListener('change', paintAI));
 
   const paintBox = () => {
     keep.hidden = !input.value.trim() || words.length >= 6;
@@ -425,7 +425,6 @@ export async function topView({ el, params }) {
       row({
         href: cfg.type === 8 ? `/artist/${m.ratingKey}` : `/album/${m.ratingKey}`,
         lead: h('span.rank', null, String(i + 1)),
-        image: undefined,
         title: m.title,
         subtitle: [cfg.type === 9 ? m.parentTitle : null, fmt.count(m.viewCount, 'play', 'plays')].filter(Boolean).join(', '),
         right: art(m.thumb, { size: 56, round: cfg.type === 8, fallback: cfg.type === 8 ? 'mic' : 'disc' }),

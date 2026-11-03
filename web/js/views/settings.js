@@ -1043,7 +1043,7 @@ function missingSection(onDispose) {
   paint();
   // An AI playlist made meanwhile can add to it (and the player says whose
   // the server is).
-  onDispose?.(on('missing', paint));
+  onDispose(on('missing', paint));
   return h(
     'div.ai-missing-settings',
     null,
@@ -1112,7 +1112,7 @@ function aiView({ el, onDispose }) {
   const missing = missingSection(onDispose);
   // (Friends' too, for the server's owner, once the player has said: then
   // the list is shown with AI off on this device as well.)
-  onDispose?.(on('missing', () => (missing.hidden = chosen() === 'off' && !missingCount())));
+  onDispose(on('missing', () => (missing.hidden = chosen() === 'off' && !missingCount())));
 
   // (Which loadModels is the latest: what one before it gets back, from an
   // Ollama asked about before, isn't shown.)

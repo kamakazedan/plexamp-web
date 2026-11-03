@@ -268,9 +268,9 @@ export function missingTracksView({ el, onDispose }) {
   // An AI playlist made meanwhile may add to it, and another device (or for
   // the server's owner, a friend) may have: what's kept for the account,
   // read again.
-  onDispose?.(on('missing', render));
+  onDispose(on('missing', render));
   pullMissing();
-  onDispose?.(() => {
+  onDispose(() => {
     checking?.abort();
     asking?.abort();
   });

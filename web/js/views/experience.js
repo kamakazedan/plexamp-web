@@ -9,6 +9,7 @@ import { ratingMode } from '../ratings.js';
 import { joinWithAnd } from './common.js';
 
 const set = (key) => (v) => saveSettings({ [key]: v });
+const SHEET_OPEN_MS = 250; // a sheet sliding in (app.css .sheet-panel), before its field takes the keyboard
 // Home and lists read these settings when they're built, so cached pages
 // are dropped to show the change straight away.
 const setAndRefresh = (key) => (v) => {
@@ -149,7 +150,7 @@ function playerNameRow() {
           h('div.form-actions', null, h('button.btn.btn-primary', { type: 'submit' }, 'Save')),
         ),
       });
-      setTimeout(() => input.focus(), 250);
+      setTimeout(() => input.focus(), SHEET_OPEN_MS);
     },
   });
 }

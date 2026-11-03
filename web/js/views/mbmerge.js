@@ -68,7 +68,7 @@ export async function mbMergeView({ el, onDispose }) {
   const s = app.server;
   const sec = app.source.sectionKey;
   let gone = false;
-  onDispose?.(() => {
+  onDispose(() => {
     gone = true;
   });
 
