@@ -1443,7 +1443,9 @@ test('MusicBrainz features: albums waited for are looked at again alone, and an 
   for (const title of titles) {
     for (const year of [null, 1977, 2004]) {
       assert.deepEqual(mb.knownAlbum('Prolific Artist', title, { year }), matchGroup(groups, title, null, year), `${title} ${year}`);
-      for (const tracks of [3, 10]) assert.deepEqual(mb.knownAlbum('Prolific Artist', title, { year, strict: true, tracks }), exactAlbum(groups, title, { year, tracks }), `${title} ${year} ${tracks} (strict)`);
+      for (const tracks of [3, 10]) {
+        assert.deepEqual(mb.knownAlbum('Prolific Artist', title, { year, strict: true, tracks }), exactAlbum(groups, title, { year, tracks }), `${title} ${year} ${tracks} (strict)`);
+      }
     }
   }
   assert.equal(mb.knownAlbum('Prolific Artist', 'Penguin', { albumId: MB_ID(1003) }).title, 'Tusk', 'Plex\'s id for it first');
@@ -2256,7 +2258,8 @@ test('missing tracks: nothing\'s kept for an account with no list, and a list cl
   const kept = (who) => st.servers.get(SRV)?.accounts.has(who.id) ?? false;
   asOwner(st, [noteOp([song('A', 'One')])]);
   // Changes that do nothing, to a list the account hasn't got: nothing's kept for it (once, 2,000 of their ids were).
-  asFriend(st, sam, [{ type: 'clear', id: opId() }, { type: 'forget', id: opId(), ids: [idOf({ ...song('A', 'One'), section: '1' })] }, { type: 'mb', id: opId(), real: [], dropped: [] }]);
+  const oneId = idOf({ ...song('A', 'One'), section: '1' });
+  asFriend(st, sam, [{ type: 'clear', id: opId() }, { type: 'forget', id: opId(), ids: [oneId] }, { type: 'mb', id: opId(), real: [], dropped: [] }]);
   assert.equal(kept(sam), false);
   // One cleared remembers its changes (each made once), and is counted as a list while it does...
   asFriend(st, eve, [noteOp([song('B', 'Two')]), { type: 'clear', id: opId() }]);
@@ -3267,7 +3270,11 @@ test('long-polls: Play Together\'s and your devices\' are counted apart, and one
     return { status: r.status, body: await r.json(), ms: Date.now() - t };
   };
   try {
-    const made = await fetch(`${svc.url}/api/together/sessions`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ server: { id: 'srv-1', name: 'Test', section: '1' }, queue: [] }) });
+    const made = await fetch(`${svc.url}/api/together/sessions`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server: { id: 'srv-1', name: 'Test', section: '1' }, queue: [] }),
+    });
     assert.equal(made.status, 201);
     const session = await made.json();
     const together = (wait) => `/api/together/sessions/${session.id}?since=${session.version}&wait=${wait}`;
@@ -3338,7 +3345,8 @@ async function fakeOllama() {
     req.resume();
     req.on('end', () => {
       asked.push(req.url);
-      const answer = { '/api/tags': { models: [{ name: 'test-model' }] }, '/api/generate': {}, '/api/chat': { message: { role: 'assistant', content: 'Hello' }, done: true } }[req.url];
+      const answers = { '/api/tags': { models: [{ name: 'test-model' }] }, '/api/generate': {}, '/api/chat': { message: { role: 'assistant', content: 'Hello' }, done: true } };
+      const answer = answers[req.url];
       res.writeHead(answer ? 200 : 404, { 'Content-Type': 'application/json' });
       res.end(answer ? `${JSON.stringify(answer)}\n` : '');
     });
