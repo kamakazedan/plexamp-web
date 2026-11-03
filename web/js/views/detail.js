@@ -1085,6 +1085,55 @@ const movedWords = (doing, n, of, { total, checking }) =>
 const doneWords = (done, { moved, total }, one, many) => `${done}: ${fmt.number(moved)} of ${fmt.count(total, one, many)} moved`;
 
 const SORT_LIMIT = 5000; // entries; longer lists aren't sorted here
+const tooLongToSort = (what, unit) => Object.assign(new Error(`${what} of more than ${fmt.number(SORT_LIMIT)} ${unit} can’t be sorted here.`), { tooLong: true });
+
+// Sorting a playlist or a collection, as "Sort by" chooses: the new order
+// is worked out from every entry (`read`, each with its id: `idOf`), then
+// saved with the fewest moves (`move`; see sorting.js), after `prepare`
+// where there's something to do first. Undo puts it back the same way.
+// While it's saved, the list (`listEl()`) waits, the lock stays as it is,
+// and live updates don't reload the page under it; the bar says how far
+// it's got. Then `settle({ moved, failed })` shows the list as Plex has it
+// now (`onMoved`: once something has). Gives sortBy(by, label).
+function listSorter({ el, bar, lock, listEl, what, units, idOf, read, move, prepare, onMoved, settle }) {
+  let sorting = null;
+  const busy = (on) => {
+    listEl()?.classList.toggle('sorting', on);
+    el.classList.toggle('is-sorting', on);
+    if (lock) lock.el.disabled = on;
+  };
+  async function reorder(makeTarget, [doing, done]) {
+    if (sorting) return;
+    const ctrl = new AbortController();
+    sorting = ctrl;
+    busy(true);
+    bar.working(`${doing}…`, () => ctrl.abort());
+    let moved = false;
+    let failed = null;
+    try {
+      await prepare?.();
+      const result = await saveOrder({ read, idOf, target: makeTarget, move, signal: ctrl.signal, onProgress: (n, of, p) => bar.say(movedWords(doing, n, of, p)) });
+      if (!result.moved) {
+        toast('It’s in that order already.');
+        return;
+      }
+      moved = true;
+      onMoved();
+      const before = result.before;
+      const undo = { action: 'Undo', onAction: () => reorder((now) => restoreOrder(now.map(idOf), before), ['Putting it back', 'Put back']), timeout: 8000 };
+      toast(result.stopped ? 'Stopped, part way through.' : doneWords(done, result, ...units), undo);
+    } catch (err) {
+      failed = err;
+      toast(err?.tooLong ? err.message : failMessage(err, what));
+    } finally {
+      sorting = null;
+      busy(false);
+      bar.idle();
+      settle({ moved, failed });
+    }
+  }
+  return (by, label) => reorder((entries) => sortedOrder(entries, by).map(idOf), sortWords(by, label));
+}
 
 // The remove button and drag handle on a row in an unlocked list.
 function addEditControls(r, label, onRemove) {
@@ -1557,11 +1606,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     }
   }
 
-  // ---------- sorting ----------
-  // The new order is worked out from every entry, then saved with the
-  // fewest moves (see sorting.js). Undo puts it back the same way.
-
-  let sorting = null;
+  // ---------- sorting (see listSorter) ----------
 
   // Every entry, page by page (as many as the server gives at a time).
   async function allEntries() {
@@ -1569,60 +1614,26 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     for (;;) {
       const { items, total: t } = await s.playlistItems(pl.ratingKey, { start: out.length, size: 500 });
       out.push(...items);
-      if (out.length > SORT_LIMIT) throw Object.assign(new Error(`Playlists of more than ${fmt.number(SORT_LIMIT)} tracks can’t be sorted here.`), { tooLong: true });
+      if (out.length > SORT_LIMIT) throw tooLongToSort('Playlists', 'tracks');
       if (!items.length || out.length >= t) break;
     }
     return out;
   }
 
-  // makeTarget(entries) gives the entries' ids (playlistItemID) in the
-  // order wanted.
-  async function reorder(makeTarget, [doing, done]) {
-    if (sorting) return;
-    const ctrl = new AbortController();
-    sorting = ctrl;
-    busy(true);
-    bar.working(`${doing}…`, () => ctrl.abort());
-    let result = null;
-    try {
-      result = await saveOrder({
-        read: allEntries,
-        idOf: (m) => String(m.playlistItemID),
-        target: makeTarget,
-        move: (id, after) => s.movePlaylistItem(pl.ratingKey, id, after),
-        signal: ctrl.signal,
-        onProgress: (n, of, p) => bar.say(movedWords(doing, n, of, p)),
-      });
-      if (!result.moved) {
-        toast('It’s in that order already.');
-        return;
-      }
-      changed();
-      reload();
-      const before = result.before;
-      const undo = { action: 'Undo', onAction: () => reorder((now) => restoreOrder(now.map((m) => String(m.playlistItemID)), before), ['Putting it back', 'Put back']), timeout: 8000 };
-      toast(result.stopped ? 'Stopped, part way through.' : doneWords(done, result, 'track', 'tracks'), undo);
-    } catch (err) {
-      toast(err?.tooLong ? err.message : failMessage(err, 'playlist'));
-      if (!err?.tooLong) reload(); // (some may have moved)
-    } finally {
-      sorting = null;
-      busy(false);
-      bar.idle();
-    }
-  }
-
-  // While a new order is saved: the list waits, the lock stays as it is, and
-  // live updates don't reload the page under it.
-  function busy(on) {
-    list.classList.toggle('sorting', on);
-    el.classList.toggle('is-sorting', on);
-    if (lock) lock.el.disabled = on;
-  }
-
-  function sortBy(by, label) {
-    reorder((entries) => sortedOrder(entries, by).map((m) => String(m.playlistItemID)), sortWords(by, label));
-  }
+  const sortBy = listSorter({
+    el,
+    bar,
+    lock,
+    listEl: () => list,
+    what: 'playlist',
+    units: ['track', 'tracks'],
+    idOf: (m) => String(m.playlistItemID),
+    read: allEntries,
+    move: (id, after) => s.movePlaylistItem(pl.ratingKey, id, after),
+    onMoved: changed,
+    // (Failed, unless it was too long to sort: some may have moved.)
+    settle: ({ moved, failed }) => (moved || (failed && !failed.tooLong)) && reload(),
+  });
 
   // (One list at a time, let go of with the page.)
   onDispose(() => pager?.dispose());
