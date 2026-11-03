@@ -18,6 +18,7 @@ import { rateTrack, ratingEvents, ratingMode, isDownRating, LOVED, LOVED_TITLE }
 import { formatOf, audioStream } from './formats.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const QUEUE_SHOWN = 200; // Up next shows this many tracks at most (the one playing first)
 
 // Things that work differently in a Play Together session.
 function sessionOnly(what) {
@@ -298,13 +299,24 @@ export function initPlayerBar(root) {
   player.addEventListener('converted', (e) => {
     toast(`“${e.detail.track.title}” doesn’t play as it streams here, and it’s too big to read in full first, so it’s converted, at ${e.detail.kbps} kbps.`, { timeout: 10000 });
   });
+  // (Saying why, where the server said no: a file that isn't there any more,
+  // or refused, a sign-in it doesn't take any more with where to sign in
+  // again: see player.js couldntPlayHere.)
   player.addEventListener('playerror', (e) => {
-    const { track, remote } = e.detail;
+    const { track, remote, why } = e.detail;
     if (remote) {
       toast(`Can’t play “${track.title}” on this device. You’ll hear the next track with everyone.`, { action: 'Try again', onAction: () => together.listen(), timeout: 7000 });
-    } else {
-      toast(`Can't play “${track.title}”.${player.nextIndex() !== -1 ? ' Skipping.' : ''}`);
+      return;
     }
+    const skipping = player.nextIndex() !== -1 ? ' Skipping.' : '';
+    if (why === 'gone') toast(`Can’t play “${track.title}”: it’s not on the server any more.${skipping}`);
+    else if (why === 'refused') toast(`Can’t play “${track.title}”: the server refused it.${skipping}`);
+    else if (why === 'signed-out') {
+      toast(`Can’t play “${track.title}”: Plex didn’t accept your sign-in.${skipping}`, {
+        action: 'Sign in again',
+        onAction: () => closeOverlays().then(() => navigate('/settings/account')),
+      });
+    } else toast(`Can't play “${track.title}”.${skipping}`);
   });
   // "Show full player": open Now Playing when something new starts.
   player.addEventListener('started', () => app.settings.showFullPlayer && setTimeout(() => openNowPlaying(), 50));
@@ -421,6 +433,9 @@ function waveform() {
   let progress = 0;
   let dragging = false;
   let frame = 0;
+  // What's played is drawn in the tint (backdrop.js), looked up once for
+  // each tint rather than for every frame.
+  let playedColor = null;
 
   function draw() {
     frame = 0;
@@ -437,7 +452,8 @@ function waveform() {
     const ctx = canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, ht);
-    const played = getComputedStyle(document.documentElement).getPropertyValue('--tint-hi').trim() || '#a3b65a';
+    playedColor ||= getComputedStyle(document.documentElement).getPropertyValue('--tint-hi').trim() || '#a3b65a';
+    const played = playedColor;
     const mid = ht / 2;
     const x = Math.max(0, Math.min(w, progress * w));
     const style = app.settings.seekbarStyle || 'smooth';
@@ -517,7 +533,10 @@ function waveform() {
     player.seek(player.time + (e.key === 'ArrowRight' ? 5 : -5));
   });
   if ('ResizeObserver' in window) new ResizeObserver(redraw).observe(track);
-  document.addEventListener('tintchange', redraw);
+  document.addEventListener('tintchange', () => {
+    playedColor = null;
+    redraw();
+  });
 
   return {
     el: h('div.np-wave', null, cur, track, total),
@@ -926,19 +945,28 @@ function buildNowPlaying() {
     listeners.setAttribute('aria-label', `${text}. Open Play Together.`);
   }
 
+  // What Up next shows, as it was last built (see renderQueue).
+  let queueShown = '';
   function renderQueue() {
     if (!root.classList.contains('show-queue') && !window.matchMedia('(min-width: 960px)').matches) return;
     const from = player.index;
-    const items = player.queue.slice(from, from + 200);
-    queueCount.textContent = player.upcoming.length ? fmt.count(player.upcoming.length, 'track', 'tracks') : '';
+    const items = player.queue.slice(from, from + QUEUE_SHOWN);
+    const left = player.upcomingCount;
     const you = together.session?.you;
     const added = (t) => (t.addedBy ? `added by ${t.addedBy.id === you ? 'you' : t.addedBy.title}` : '');
+    const subtitle = (t) => [t.artist, t.dj ? djName(t.dj) : t.djMoved ? `moved up by ${djName(t.djMoved)}` : added(t)].filter(Boolean).join(' · ');
+    // (Not built again when none of it has changed: a Play Together
+    // session's news, say, that didn't change the queue.)
+    const shown = JSON.stringify([from, left, !!player.remote, items.map((t) => [t.qid, t.id, t.title, t.thumb, t.duration, subtitle(t)])]);
+    if (shown === queueShown) return;
+    queueShown = shown;
+    queueCount.textContent = left ? fmt.count(left, 'track', 'tracks') : '';
     queueList.replaceChildren(
       ...items.map((t, i) =>
         trackRow(t, {
           showArt: true,
           queueIndex: from + i,
-          subtitle: [t.artist, t.dj ? djName(t.dj) : t.djMoved ? `moved up by ${djName(t.djMoved)}` : added(t)].filter(Boolean).join(' · '),
+          subtitle: subtitle(t),
           onPlay: () => player.jump(from + i),
         }),
       ),
@@ -965,8 +993,18 @@ function buildNowPlaying() {
     },
   };
 
+  // (Once for changes made one after another: a Guest DJ turned off takes
+  // its picks out one at a time, say.)
+  let queueSoon = false;
   player.addEventListener('track', () => state.isOpen && (renderTrack(), renderQueue()));
-  player.addEventListener('queue', () => state.isOpen && renderQueue());
+  player.addEventListener('queue', () => {
+    if (!state.isOpen || queueSoon) return;
+    queueSoon = true;
+    queueMicrotask(() => {
+      queueSoon = false;
+      if (state.isOpen) renderQueue();
+    });
+  });
   player.addEventListener('state', () => setPlayButton(play, 38));
   player.addEventListener('mode', renderModes);
   player.addEventListener('sleep', renderModes);

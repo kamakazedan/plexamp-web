@@ -1,6 +1,7 @@
 // Track previews (Settings › Experience › Show preview buttons): a short
 // listen from part-way into a track, without touching the queue. Whatever
-// was playing pauses for it and carries on afterwards; in a Play Together
+// was playing pauses for it and carries on afterwards (on a Plex player
+// it's cast to, or another of your devices, too); in a Play Together
 // session it's turned down on this device instead, so nobody else notices.
 import { player, Deck } from './player.js';
 import { toast } from './ui.js';
@@ -10,7 +11,6 @@ let deck = null;
 let current = null; // { track, button }
 let stopTimer = null;
 let resumeAfter = false;
-let ducked = false;
 
 function setButton(button, on) {
   if (!button) return;
@@ -31,13 +31,15 @@ export function stopPreview() {
     deck.el.pause();
     deck.reset();
   }
-  if (ducked) {
-    ducked = false;
+  if (player.mutedForPreview) {
+    player.mutedForPreview = false;
     player.applyVolume();
   }
+  // (Not once a Play Together session's started meanwhile: that plays as
+  // the session does.)
   if (resumeAfter) {
     resumeAfter = false;
-    player._play();
+    if (!player.remote) player.play('the end of a track preview');
   }
 }
 
@@ -47,13 +49,14 @@ export async function togglePreview(track, button) {
   deck ||= new Deck();
   current = { track, button };
   setButton(button, true);
+  // (The player keeps its sound off meanwhile, whatever else changes its
+  // volume: a crossfade, or the next track's level.)
   if (player.remote) {
-    ducked = true;
-    for (const d of player.decks) d.el.volume = 0;
+    player.mutedForPreview = true;
+    player.applyVolume();
   } else if (player.isPlaying) {
     resumeAfter = true;
-    player.noteWhy('a track preview');
-    player._pause();
+    player.pause('a track preview');
   }
   try {
     const src = player.sourceFor(track, false);

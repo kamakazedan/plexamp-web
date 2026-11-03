@@ -12,7 +12,7 @@
 // While another device plays, the player is in the same remote mode as when
 // casting to a Plex player (player.cast is this module's `remote`).
 import { app, on, plexAccount } from './state.js';
-import { clientId, deviceLabel } from './plex.js';
+import { clientId, deviceLabel, store } from './plex.js';
 import { player } from './player.js';
 import { together } from './together.js';
 import { toast, shuffleArray } from './ui.js';
@@ -20,6 +20,10 @@ import { debugLog } from './debug.js';
 
 const API = 'api/devices';
 const WAIT_SECONDS = 25;
+// An answer this quick (ms) with nothing new: this device has other requests
+// waiting already, so it waits this long before asking again.
+const QUICK_ANSWER_MS = 500;
+const UNCHANGED_PAUSE_MS = 3000;
 const HEARTBEAT_MS = 20000;
 const REPORT_DELAY = 250;
 // Paused this long, a device stops being the one that plays, so another can
@@ -151,6 +155,10 @@ class Devices extends EventTarget {
       stop: () => this.stop(),
     };
 
+    // Signing out (or switching to someone else in your Plex Home), while
+    // the sign-in still works: the others can carry on at once, rather
+    // than waiting for this one to go quiet.
+    on('signing-out', () => this.role === 'active' && this.post('release', {}, { keepalive: true }).catch(() => {}));
     on('signout', () => this.stop({ release: false }));
     on('source', () => this.update());
     on('settings', () => this.update());
@@ -197,7 +205,7 @@ class Devices extends EventTarget {
       res = await fetch(`${API}${path}`, {
         method,
         cache: 'no-store',
-        credentials: 'same-origin',
+        credentials: 'omit',
         keepalive,
         headers: { Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
         body: body ? JSON.stringify(body) : undefined,
@@ -321,7 +329,7 @@ class Devices extends EventTarget {
         this.apply(view, { first: wait === 0 });
         // An answer at once with nothing new (this device has other
         // requests waiting already): a moment before asking again.
-        if (wait && view.version === before && clientNow() - asked < 500) await sleep(3000);
+        if (wait && view.version === before && clientNow() - asked < QUICK_ANSWER_MS) await sleep(UNCHANGED_PAUSE_MS);
         wait = WAIT_SECONDS;
       } catch (err) {
         if (gen !== this.gen || err.aborted) return;
@@ -695,7 +703,13 @@ class Devices extends EventTarget {
     clearInterval(this.ticker);
     const st = this.state;
     const position = at ?? this.time();
-    if (player.cast === this.remote) player.setCast(null);
+    if (player.cast === this.remote) {
+      player.setCast(null);
+      // This device's own volume again (the slider had the other's).
+      player.volume = store.get('volume', 1);
+      player.applyVolume();
+      player.emit('volume');
+    }
     if (this.role === 'remote') this.role = 'idle';
     if (!adopt || !this.queue.length) return;
     const index = Math.max(0, this.queue.findIndex((t) => t.qid === st?.qid));

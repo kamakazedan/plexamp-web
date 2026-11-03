@@ -37,7 +37,7 @@ async function api(path, { method = 'GET', body } = {}) {
     res = await fetch(`api/cast/${path}`, {
       method,
       cache: 'no-store',
-      credentials: 'same-origin',
+      credentials: 'omit',
       headers: { Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(12000),
@@ -217,6 +217,8 @@ class Cast extends EventTarget {
       this.emit('change');
       this.startPolling();
     } catch {
+      // (Not left as its remote, if it got that far: back to this device.)
+      this.stop({ here: false, quiet: true });
       store.set(key, null);
     }
   }
@@ -478,7 +480,7 @@ class Cast extends EventTarget {
   setShuffle(on) {
     player.shuffle = on;
     player.emit('mode');
-    if (!on || player.upcoming.length < 2) return;
+    if (!on || player.upcomingCount < 2) return;
     const q = player.queue;
     const i = player.index;
     this.resend([...q.slice(0, i + 1), ...shuffleArray(q.slice(i + 1))], i);
@@ -545,6 +547,16 @@ function fetchMediaToken(then) {
     },
   );
 }
+
+// A track that failed while AirPlay or Cast plays: the temporary token may
+// be one the server doesn't take any more (it's restarted since, say), so a
+// new one's asked for (not the one kept, which may be that one), for what
+// plays from here.
+player.addEventListener('renewtoken', () => {
+  if (!player.useMediaToken) return;
+  cast.token = null;
+  fetchMediaToken();
+});
 
 // Opens the browser's own device picker for the element that's playing.
 function promptRemote() {
