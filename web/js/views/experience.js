@@ -6,8 +6,10 @@ import { popOverlay, dropCached } from '../router.js';
 import { h, icon, backHeader, row, sheet, toast, toggleRow, choiceRow, enableDrag } from '../ui.js';
 import { homeLayout, saveHomeLayout, resetHomeLayout, sectionById } from '../home-sections.js';
 import { ratingMode } from '../ratings.js';
+import { joinWithAnd } from './common.js';
 
 const set = (key) => (v) => saveSettings({ [key]: v });
+const SHEET_OPEN_MS = 250; // a sheet sliding in (app.css .sheet-panel), before its field takes the keyboard
 // Home and lists read these settings when they're built, so cached pages
 // are dropped to show the change straight away.
 const setAndRefresh = (key) => (v) => {
@@ -61,9 +63,8 @@ export function experienceView({ el }) {
     .musicSections()
     .then((secs) => {
       if (secs.length < 2) return;
-      const here = app.source.sectionTitle;
       const others = secs.filter((x) => String(x.key) !== String(app.source.sectionKey)).map((x) => x.title);
-      const list = others.length === 1 ? others[0] : `${others.slice(0, -1).join(', ')} and ${others.at(-1)}`;
+      const list = joinWithAnd(others);
       libraries.replaceChildren(
         toggleRow({
           title: 'Search all music libraries',
@@ -148,7 +149,7 @@ function playerNameRow() {
           h('div.form-actions', null, h('button.btn.btn-primary', { type: 'submit' }, 'Save')),
         ),
       });
-      setTimeout(() => input.focus(), 250);
+      setTimeout(() => input.focus(), SHEET_OPEN_MS);
     },
   });
 }
@@ -345,6 +346,7 @@ export function homeEditorView({ el }) {
       h('div.home-editor-sub', null, 'Drag to reorder. Tap a section to show, hide or change it.'),
     ),
     list,
+    // (All of it: the order, what's hidden, and each section's period.)
     h(
       'div.pad.home-editor-reset',
       null,
@@ -360,7 +362,7 @@ export function homeEditorView({ el }) {
             toast('Home is back to how it started.');
           },
         },
-        'Reset order',
+        'Reset Home screen',
       ),
     ),
   );

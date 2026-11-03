@@ -6088,7 +6088,7 @@ with sync_playwright() as pw:
         shot(page, 'home-04-custom')
         page.goto(APP + '#/settings/home')
         page.wait_for_selector('.home-row')
-        page.click('button:has-text("Reset order")')
+        page.click('button:has-text("Reset Home screen")')
         order = sections_on_home(page)
         check('home: reset brings the defaults back', order[:3] == ['mixes', 'recentPlays', 'recentPlaylists'] and 'decade2020' not in order, str(order))
         ctx.close()
@@ -7334,7 +7334,7 @@ with sync_playwright() as pw:
     # logs.
     if run('plexhome') and APP_DEBUG:
         A = APP_DEBUG
-        KID_PIN, WRONG_PIN = '0427', '0913'
+        KID_PIN, WRONG_PIN, DAN_PIN = '0427', '0913', '5150'
 
         def kept_for(token, method='GET'):
             req = urllib.request.Request(A + 'api/settings?server=mock-server-1', method=method, headers={'X-Plex-Token': token, 'Accept': 'application/json'})
@@ -7518,22 +7518,43 @@ with sync_playwright() as pw:
         shown = switch_button(page)
         page.click('.account-card button:has-text("Switch user")')
         kids_rows = home_rows(page)
+        pin_note = page.locator('.sheet.open .home-users-pin').all_inner_texts()
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
         check('plexhome: ...and Kid can switch too, with Kid as "You"', shown and page.locator('.account-name').inner_text() == 'Kid'
-              and [r[:2] for r in kids_rows] == [['Dan', 'Admin'], ['Kid', 'You · Managed user'], ['Gran', '']], str(kids_rows))
+              and kids_rows[1:] == [['Kid', 'You · Managed user', False], ['Gran', '', True]], str(kids_rows))
+        check('plexhome: ...but not to Dan, the Home\'s admin and the server\'s owner, who has no PIN: it says to set one in Plex, or sign in as him',
+              kids_rows[0] == ['Dan', 'Admin · Needs a PIN', False] and pin_note == ['To switch to Dan, set a PIN for them in Plex, or sign in as them.'], f'{kids_rows} {pin_note}')
 
-        # Back to Dan (no PIN): his own again, as kept for his account.
+        # Back to Dan, once he has a PIN (as plex.tv says from here on; the
+        # mock takes any PIN of his): his own again, as kept for his account.
+        def dan_has_pin(route):
+            u = urllib.parse.urlsplit(route.request.url)
+            home = route.fetch(url=f'{MOCK}{u.path}?{u.query}').json()
+            for user in home.get('users', []):
+                user['protected'] = user['protected'] or user['admin']
+            route.fulfill(status=200, content_type='application/json', body=json.dumps(home), headers={'Access-Control-Allow-Origin': '*'})
+        ctx.route(re.compile(r'https://(clients\.)?plex\.tv/api/v2/home/users(\?.*)?$'), dan_has_pin)
+
+        def switch_by_pin(pg, name, pin, where='.account-card'):
+            switch_to(pg, name, where)
+            pg.wait_for_selector('.sheet.open .ask-form input')
+            pg.wait_for_timeout(250)
+            pg.fill('.sheet.open .ask-form input', pin)
+            pg.click('.sheet.open .ask-form button[type=submit]')
+
+        page.reload()
+        switch_button(page)
         js(page, COVER_WATCH)
         with page.expect_event('load', timeout=15000):
-            switch_to(page, 'Dan')
+            switch_by_pin(page, 'Dan', DAN_PIN)
         page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
         back = who(page)
         dan_again = wait_for(lambda: js(page, "() => import('./js/state.js').then(({ app }) => [app.settings.gridSize, app.settings.skipDisliked])") == ['large', False], 10, 0.3)
         his_missing = wait_for(lambda: 'Dans Secret Song' in js(page, "() => import('./js/missing.js').then((m) => m.missingList().map((x) => x.title))"), 10, 0.5)
         page.goto(A + '#/playlists')
         page.wait_for_selector('.view .grid-playlists .card', timeout=15000)
-        check('plexhome: switching back to Dan (no PIN to ask for): his token, server and library, and his settings, missing tracks and playlists again',
+        check('plexhome: switching back to Dan (by his PIN): his token, server and library, and his settings, missing tracks and playlists again',
               back['token'] == 't' and back['server'] == 'mock-server-1' and back['section'] == section_before and dan_again and his_missing
               and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts(), str(back))
         own_again = js(page, "() => import('./js/state.js').then(({ app }) => ({ quality: app.settings.quality, name: app.settings.playerName, ai: app.settings.ai }))")
@@ -7557,7 +7578,7 @@ with sync_playwright() as pw:
               gran['token'] == 't5' and gran['server'] is None and page.url.endswith('#/setup') and 'Signed in as Gran' in setup_said and at_setup
               and page.locator('.setup-account button:has-text("Sign out")').count() == 1, f'{gran} {page.url} {setup_said!r}')
         with page.expect_event('load', timeout=15000):
-            switch_to(page, 'Dan', where='.setup-account')
+            switch_by_pin(page, 'Dan', DAN_PIN, where='.setup-account')
         page.wait_for_selector('.source-body .row', timeout=20000)
         check('plexhome: ...back to Dan from there, who chooses his (nothing of Gran\'s to go on)', who(page)['token'] == 't' and page.url.endswith('#/setup'), str(who(page)))
         # Signing out: everyone's kept settings go too.
@@ -7574,7 +7595,7 @@ with sync_playwright() as pw:
         pin_here = re.compile(rf'\b({KID_PIN}|{WRONG_PIN})\b')
         stored = js(page, '() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage)')
         check('plexhome: Kid\'s PIN went to plex.tv only: none sent to this app (nor in what the browser logs to it), none kept',
-              [(s['to'], s['pin']) for s in switches] == [('t4', WRONG_PIN), ('t4', KID_PIN), ('t', ''), ('t5', ''), ('t', '')]
+              [(s['to'], s['pin']) for s in switches] == [('t4', WRONG_PIN), ('t4', KID_PIN), ('t', DAN_PIN), ('t5', ''), ('t', DAN_PIN)]
               and not any(pin_here.search(x) for x in to_app) and not pin_here.search(stored) and any('api/debug/log' in x for x in to_app),
               f'{switches} {[x[:120] for x in to_app if pin_here.search(x)]}')
         ctx.close()

@@ -15,12 +15,11 @@ const LOOKING = 'Looking through your playlists and collections…';
 
 export async function appearsInView({ el, params, onDispose }) {
   const s = app.server;
-  if (!/^\d+$/.test(String(params.id))) throw Object.assign(new Error('Not found'), { status: 404 });
   const meta = await s.trackDetail(params.id);
   if (!meta || meta.type !== 'track') throw Object.assign(new Error('Not found'), { status: 404 });
   const t = normTrack(meta);
   const ctrl = new AbortController();
-  onDispose?.(() => ctrl.abort());
+  onDispose(() => ctrl.abort());
 
   const progress = h('span', null, LOOKING);
   const status = h('div.appears-status', { role: 'status' }, spinner('Looking'), progress);

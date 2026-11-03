@@ -8,9 +8,10 @@ import { copyText, noteMissing, keptCounter, missingFull, MISSING_LIMITS } from 
 import { refreshLists } from '../editing.js';
 import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine, entryWhere, entryText, entriesCsv } from '../playlistio.js';
 
-const where = () => app.source?.sectionTitle || 'this library';
+// The library tracks are looked for in, as it's named in what's said.
+export const libraryName = () => app.source?.sectionTitle || 'this library';
 // Playlists by name ("Late night" and "late night " are one name).
-const nameKey = (t) => String(t || '').trim().toLowerCase();
+export const nameKey = (t) => String(t || '').trim().toLowerCase();
 const JSON_TYPE = 'application/json';
 
 // One playlist, from its menu.
@@ -70,21 +71,31 @@ export async function backUpPlaylists() {
 
 // ---------- import ----------
 
+// The file picker for playlist files (it only opens from a tap: call it
+// straight from one), one at a time: then(files) with those chosen, if
+// any (`multiple`: several at once).
 let picker = null;
-
-// The file picker (it only opens from a tap: call it straight from one).
-export function importPicker() {
+export function pickFiles(then, { multiple = false } = {}) {
   picker?.remove();
-  picker = h('input.file-picker', { type: 'file', accept: '.json,application/json', hidden: true });
-  const input = picker;
-  input.addEventListener('change', () => {
-    const file = input.files?.[0];
+  const input = h('input.file-picker', { type: 'file', multiple, accept: '.json,application/json', hidden: true });
+  picker = input;
+  const done = () => {
     input.remove();
-    if (file) importFile(file);
+    if (picker === input) picker = null;
+  };
+  input.addEventListener('change', () => {
+    const files = [...(input.files || [])];
+    done();
+    if (files.length) then(files);
   });
-  input.addEventListener('cancel', () => input.remove());
+  input.addEventListener('cancel', done);
   document.body.append(input);
   input.click();
+}
+
+// A playlist file to import, from the file picker.
+export function importPicker() {
+  pickFiles(([file]) => importFile(file));
 }
 
 export async function importFile(file) {
@@ -109,7 +120,7 @@ export async function importFile(file) {
       value: have.has(nameKey(p.title)) ? `${p.title} (imported)` : p.title,
       confirm: 'Import',
       maxLength: 200,
-      message: `${fmt.count(p.tracks.length, 'track', 'tracks')}, looked for in ${where()}.${have.has(nameKey(p.title)) ? ` You have a playlist called “${p.title}” already.` : ''}`,
+      message: `${fmt.count(p.tracks.length, 'track', 'tracks')}, looked for in ${libraryName()}.${have.has(nameKey(p.title)) ? ` You have a playlist called “${p.title}” already.` : ''}`,
     });
     if (title) runImport([{ p, title }]);
     return;
@@ -150,7 +161,7 @@ function choosePlaylists(list, have) {
       content: h(
         'div.ask-form.import-form',
         null,
-        h('p.ask-message', null, `Their tracks are looked for in ${where()}. Ones with the name of a playlist you have already aren’t chosen to begin with.`),
+        h('p.ask-message', null, `Their tracks are looked for in ${libraryName()}. Ones with the name of a playlist you have already aren’t chosen to begin with.`),
         h('div.import-choices', null, boxes.map((b) => b.row)),
         go,
       ),
@@ -257,7 +268,7 @@ export function runImport(jobs, { remember = null } = {}) {
     const found = done.reduce((n, r) => n + (r.found || 0), 0);
     const missing = done.reduce((n, r) => n + (r.missing?.length || 0), 0);
     status.textContent = made
-      ? `Imported ${fmt.count(made, 'playlist', 'playlists')}: ${fmt.count(found, 'track', 'tracks')} found in ${where()}${missing ? `, ${fmt.number(missing)} not` : ''}.`
+      ? `Imported ${fmt.count(made, 'playlist', 'playlists')}: ${fmt.count(found, 'track', 'tracks')} found in ${libraryName()}${missing ? `, ${fmt.number(missing)} not` : ''}.`
       : 'Nothing was imported.';
     closeBtn.textContent = 'Done';
   })();
@@ -325,7 +336,7 @@ function resultRow(r) {
       'div.import-result.warn',
       null,
       h('div.import-result-title', null, title),
-      h('div.import-result-sub', null, r.missing.length ? `None of its ${fmt.count(r.missing.length, 'track is', 'tracks are')} in ${where()}, so it wasn’t made.` : 'It has no tracks, so it wasn’t made.'),
+      h('div.import-result-sub', null, r.missing.length ? `None of its ${fmt.count(r.missing.length, 'track is', 'tracks are')} in ${libraryName()}, so it wasn’t made.` : 'It has no tracks, so it wasn’t made.'),
       notFound(r, title),
       rememberedNote(r),
     );
@@ -336,7 +347,7 @@ function resultRow(r) {
     'div.import-result',
     null,
     h('button.link-btn.import-result-title', { type: 'button', onclick: () => navigate(`/playlist/${id}`) }, title),
-    h('div.import-result-sub', null, r.missing.length ? `${fmt.number(r.found)} of ${fmt.count(of, 'track', 'tracks')} found; ${fmt.number(r.missing.length)} not in ${where()}` : `All ${fmt.count(of, 'track', 'tracks')} found`),
+    h('div.import-result-sub', null, r.missing.length ? `${fmt.number(r.found)} of ${fmt.count(of, 'track', 'tracks')} found; ${fmt.number(r.missing.length)} not in ${libraryName()}` : `All ${fmt.count(of, 'track', 'tracks')} found`),
     notFound(r, title),
     rememberedNote(r),
   );

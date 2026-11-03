@@ -15,6 +15,7 @@ import {
   clampText,
   pagedList,
   emptyState,
+  errorState,
   enableDrag,
   askText,
   confirmAction,
@@ -520,11 +521,20 @@ export async function artistView({ el, params, onDispose }) {
   const byTracks = new Map(); // album id -> its release group, checked by its tracks (null: being asked about, 0: none)
   let toCheck = [];
   let checkTimer = 0;
+  let paintFrame = 0;
   let gone = false;
-  onDispose?.(() => {
+  onDispose(() => {
     gone = true;
     clearTimeout(checkTimer);
+    cancelAnimationFrame(paintFrame);
   });
+  // (Painted again once a frame at most, however many years come in it.)
+  const paintSoon = () => {
+    paintFrame ||= requestAnimationFrame(() => {
+      paintFrame = 0;
+      if (!gone) paintAlbums();
+    });
+  };
   const checkLater = (x, ms = 0) => {
     toCheck.push(x);
     checkTimer ||= setTimeout(checkYears, ms);
@@ -566,11 +576,11 @@ export async function artistView({ el, params, onDispose }) {
         again(x);
         continue;
       }
-      const ok = g && typeof g === 'object' && g.checked && earlier(x.m, g) && !(await notThatRecording(x.m, g).catch(() => true));
+      const ok = g && typeof g === 'object' && g.checked && earlier(x.m, g) && !(await notThatRecording(x.m, g));
       byTracks.set(idOf(x.m), ok ? g : 0);
       if (ok) shownNow = true;
     }
-    if (shownNow && !gone) paintAlbums();
+    if (shownNow) paintSoon();
   }
   const placed = (albums) => {
     const groups = mb?.groups || [];
@@ -596,7 +606,7 @@ export async function artistView({ el, params, onDispose }) {
           tracksSay.set(id, null);
           notThatRecording(m, g).then((no) => {
             tracksSay.set(id, no);
-            if (!no) paintAlbums();
+            if (!no) paintSoon();
           });
         }
         if (tracksSay.get(id) !== false) was = null;
@@ -809,7 +819,7 @@ export async function artistView({ el, params, onDispose }) {
 
   // (Asked of the library the artist's in; let go of if the page is.)
   const ctrl = new AbortController();
-  onDispose?.(() => ctrl.abort());
+  onDispose(() => ctrl.abort());
   const listedP = s.artistAlbums(artist.librarySectionID ?? sec, artist.ratingKey, { signal: ctrl.signal, guids: mbOn('mbOriginalYears') }).catch(() => null);
   const properP = s.children(artist.ratingKey).catch(() => null);
   // (Once they're first shown: what comes after them waits for no more.)
@@ -843,7 +853,13 @@ export async function artistView({ el, params, onDispose }) {
     shown();
     await Promise.all([typesP.then(paintAlbums), rowsP.then(paintAlbums), mbIn.then(paintAlbums), all.then(paintAlbums)]);
   });
-  albumsP.finally(() => shown()).catch(() => {});
+  // (Where Plex couldn't say what albums they have, that says so, with
+  // the page again from Try again.)
+  albumsP
+    .finally(() => shown())
+    .catch(() => {
+      if (!gone) albumsBox.replaceChildren(errorState('Couldn’t load their albums.', () => refresh()));
+    });
 
   // Appears on: others' albums they're on, newest first, as Plex's rows
   // for the page have them (and the library's albums by them, where those
@@ -963,15 +979,15 @@ async function appearsInShelf(box, artist, signal) {
 
 // All of an artist's similar artists in the library (`kind`: 'similar',
 // Plex's; 'sonic', those that sound like it, further than the shelf goes).
+const SONIC_FURTHER = 0.4; // how unlike it they may sound on this page (the shelf has plex.js nearest's 0.25)
 export async function similarArtistsView({ el, params, kind }) {
   const s = app.server;
   const sec = app.source.sectionKey;
-  if (!/^\d+$/.test(String(params.id))) throw Object.assign(new Error('Not found'), { status: 404 });
   const artist = await s.metadata(params.id);
   if (!artist || artist.type !== 'artist') throw Object.assign(new Error('Not found'), { status: 404 });
   const sonic = kind === 'sonic';
   el.append(backHeader(sonic ? `Sounds like ${artist.title}` : `Similar to ${artist.title}`, { fallback: `/artist/${artist.ratingKey}` }));
-  const artists = sonic ? await sonicallySimilar(s, artist, { limit: ALL_ARTISTS, maxDistance: 0.4 }) : await similarInLibrary(s, sec, artist, ALL_ARTISTS);
+  const artists = sonic ? await sonicallySimilar(s, artist, { limit: ALL_ARTISTS, maxDistance: SONIC_FURTHER }) : await similarInLibrary(s, sec, artist, ALL_ARTISTS);
   el.append(
     h('p.lede', null, sonic ? `Artists in your library who sound like ${artist.title}.` : `Artists in your library that Plex says are like ${artist.title}.`),
     artists.length
@@ -1002,29 +1018,55 @@ function lockButton(label, onToggle) {
 }
 
 // The bar over an unlocked list: what you can do, Sort, and Done. While a
-// sort is being saved it says how far it's got, with a Stop button.
+// sort is being saved it says how far it's got, with a Stop button: every
+// so often, not at every move, as a screen reader reads out each.
+const SORT_PROGRESS_MS = 1500; // between what a sort says of how far it's got
 function editBar(text, { onDone, onSort }) {
-  const textEl = h('span.edit-bar-text', null, text);
+  const textEl = h('span.edit-bar-text', { role: 'status' }, text);
   const sortBtn = onSort ? h('button.btn.btn-secondary.edit-sort', { type: 'button', onclick: onSort }, icon('sort', 18), h('span', null, 'Sort')) : null;
   const doneBtn = h('button.btn.btn-primary.edit-done', { type: 'button', onclick: onDone }, 'Done');
   const actions = h('div.edit-bar-actions', null, sortBtn, doneBtn);
-  const el = h('div.edit-bar', { hidden: true, role: 'status' }, icon('unlock', 20), textEl, actions);
+  const el = h('div.edit-bar', { hidden: true }, icon('unlock', 20), textEl, actions);
+  let saidAt = 0;
+  let sayTimer = 0;
+  let latest = '';
+  const sayNow = () => {
+    sayTimer = 0;
+    saidAt = Date.now();
+    textEl.textContent = latest;
+  };
+  const stopSaying = () => {
+    clearTimeout(sayTimer);
+    sayTimer = 0;
+  };
   return {
     el,
     working(message, onStop) {
+      stopSaying();
+      saidAt = Date.now();
       el.classList.add('busy');
       textEl.textContent = message;
       actions.replaceChildren(h('button.btn.btn-secondary.edit-stop', { type: 'button', onclick: onStop }, 'Stop'));
     },
     say(message) {
-      textEl.textContent = message;
+      latest = message;
+      if (!sayTimer) sayTimer = setTimeout(sayNow, Math.max(0, saidAt + SORT_PROGRESS_MS - Date.now()));
     },
     idle() {
+      stopSaying();
       el.classList.remove('busy');
       textEl.textContent = text;
       actions.replaceChildren(...[sortBtn, doneBtn].filter(Boolean));
     },
   };
+}
+
+// This page again, as it is now (`path`: its own): at once where it's
+// still the one on screen, else when it's opened again. (The router's
+// refresh() alone is whichever page is on screen by then.)
+function pageAgain(el, path) {
+  if (el.isConnected) refresh();
+  else dropCached((p) => p === path);
 }
 
 // "Sort by": the ways a list of tracks, albums or artists can be sorted.
@@ -1051,6 +1093,55 @@ const movedWords = (doing, n, of, { total, checking }) =>
 const doneWords = (done, { moved, total }, one, many) => `${done}: ${fmt.number(moved)} of ${fmt.count(total, one, many)} moved`;
 
 const SORT_LIMIT = 5000; // entries; longer lists aren't sorted here
+const tooLongToSort = (what, unit) => Object.assign(new Error(`${what} of more than ${fmt.number(SORT_LIMIT)} ${unit} can’t be sorted here.`), { tooLong: true });
+
+// Sorting a playlist or a collection, as "Sort by" chooses: the new order
+// is worked out from every entry (`read`, each with its id: `idOf`), then
+// saved with the fewest moves (`move`; see sorting.js), after `prepare`
+// where there's something to do first. Undo puts it back the same way.
+// While it's saved, the list (`listEl()`) waits, the lock stays as it is,
+// and live updates don't reload the page under it; the bar says how far
+// it's got. Then `settle({ moved, failed })` shows the list as Plex has it
+// now (`onMoved`: once something has). Gives sortBy(by, label).
+function listSorter({ el, bar, lock, listEl, what, units, idOf, read, move, prepare, onMoved, settle }) {
+  let sorting = null;
+  const busy = (on) => {
+    listEl()?.classList.toggle('sorting', on);
+    el.classList.toggle('is-sorting', on);
+    if (lock) lock.el.disabled = on;
+  };
+  async function reorder(makeTarget, [doing, done]) {
+    if (sorting) return;
+    const ctrl = new AbortController();
+    sorting = ctrl;
+    busy(true);
+    bar.working(`${doing}…`, () => ctrl.abort());
+    let moved = false;
+    let failed = null;
+    try {
+      await prepare?.();
+      const result = await saveOrder({ read, idOf, target: makeTarget, move, signal: ctrl.signal, onProgress: (n, of, p) => bar.say(movedWords(doing, n, of, p)) });
+      if (!result.moved) {
+        toast('It’s in that order already.');
+        return;
+      }
+      moved = true;
+      onMoved();
+      const before = result.before;
+      const undo = { action: 'Undo', onAction: () => reorder((now) => restoreOrder(now.map(idOf), before), ['Putting it back', 'Put back']), timeout: 8000 };
+      toast(result.stopped ? 'Stopped, part way through.' : doneWords(done, result, ...units), undo);
+    } catch (err) {
+      failed = err;
+      toast(err?.tooLong ? err.message : failMessage(err, what));
+    } finally {
+      sorting = null;
+      busy(false);
+      bar.idle();
+      settle({ moved, failed });
+    }
+  }
+  return (by, label) => reorder((entries) => sortedOrder(entries, by).map(idOf), sortWords(by, label));
+}
 
 // The remove button and drag handle on a row in an unlocked list.
 function addEditControls(r, label, onRemove) {
@@ -1071,37 +1162,42 @@ const failMessage = (err, what) => (err?.status === 401 || err?.status === 403 ?
 // ---------- a playlist's or collection's picture ----------
 
 // Pictures are made smaller in the browser before they go to Plex: this many
-// pixels across at most, as a JPEG.
+// pixels across at most, as a JPEG of this quality.
 const PICTURE_SIZE = 1200;
+const PICTURE_QUALITY = 0.88;
 
 async function shrinkPicture(file) {
   let source;
-  try {
-    source = await createImageBitmap(file);
-  } catch {
-    // (Safari before 17 can't make one from some files: an <img> can.)
-    source = await new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(Object.assign(new Error('Not a picture'), { badImage: true }));
-      img.src = url;
-    });
-  }
-  const w = source.width || source.naturalWidth;
-  const ht = source.height || source.naturalHeight;
-  if (!w || !ht) throw Object.assign(new Error('Not a picture'), { badImage: true });
-  const scale = Math.min(1, PICTURE_SIZE / Math.max(w, ht));
+  let fileUrl = null; // (for an <img>: let go of once it's drawn, or couldn't be)
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(w * scale));
-  canvas.height = Math.max(1, Math.round(ht * scale));
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#16171b'; // under any see-through parts
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
-  source.close?.();
-  if (source.src?.startsWith('blob:')) URL.revokeObjectURL(source.src);
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+  try {
+    try {
+      source = await createImageBitmap(file);
+    } catch {
+      // (Safari before 17 can't make one from some files: an <img> can.)
+      fileUrl = URL.createObjectURL(file);
+      source = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(Object.assign(new Error('Not a picture'), { badImage: true }));
+        img.src = fileUrl;
+      });
+    }
+    const w = source.width || source.naturalWidth;
+    const ht = source.height || source.naturalHeight;
+    if (!w || !ht) throw Object.assign(new Error('Not a picture'), { badImage: true });
+    const scale = Math.min(1, PICTURE_SIZE / Math.max(w, ht));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(ht * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#16171b'; // under any see-through parts
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  } finally {
+    source?.close?.();
+    if (fileUrl) URL.revokeObjectURL(fileUrl);
+  }
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', PICTURE_QUALITY));
   if (!blob) throw Object.assign(new Error('Not a picture'), { badImage: true });
   return blob.arrayBuffer();
 }
@@ -1126,7 +1222,7 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
     pencil.setAttribute('aria-label', on ? 'Changing the picture…' : `Change the ${what}’s picture`);
   };
 
-  async function refresh() {
+  async function showNewPicture() {
     const fresh = await load().catch(() => null);
     const next = fresh ? fresh.thumb || fresh.composite : null;
     if (fresh) onChanged?.(fresh);
@@ -1140,7 +1236,7 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
     setBusy(true);
     try {
       await job();
-      await refresh();
+      await showNewPicture();
       toast(done);
     } catch (err) {
       toast(err?.badImage ? 'That picture couldn’t be read. Try a JPEG or PNG.' : failMessage(err, what));
@@ -1157,9 +1253,11 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
     change(async () => app.server.uploadPoster(id, await shrinkPicture(file)), 'Picture changed');
   });
 
+  // (Not over another page, if you've gone to one while it's asked.)
   async function choose() {
     if (busy) return;
     const posters = await app.server.posters(id).catch(() => []);
+    if (!box.isConnected) return;
     const earlier = posters.filter((p) => !p.selected).slice(0, 12);
     const custom = posters.some((p) => p.selected && /^upload:\/\//.test(p.id));
     const grid = earlier.length
@@ -1274,19 +1372,21 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       dropCached((p) => p === '/' || p === '/playlists' || p === '/library/playlists');
     },
   });
+  // (Shared, or not shared any more: this page again.)
+  const sharingChanged = () => pageAgain(el, `/playlist/${pl.ratingKey}`);
   // A smart playlist can't be unlocked (its rules decide what's in it), but
   // its picture can still change, from its menu.
   // (Not till what's shared is known: it decides which they are.)
   const shareActions = () => {
     if (!sharingOn() || !sharesKnown) return [];
     if (share && share.role !== 'owner') {
-      return [{ icon: 'together', label: 'Stop sharing it with me…', description: `Keep it as a playlist of your own, without ${share.owner.title}’s changes`, onSelect: () => leaveDialog(share, { onChange: refresh }) }];
+      return [{ icon: 'together', label: 'Stop sharing it with me…', description: `Keep it as a playlist of your own, without ${share.owner.title}’s changes`, onSelect: () => leaveDialog(share, { onChange: sharingChanged }) }];
     }
     if (pl.smart || (pl.playlistType || 'audio') !== 'audio') return [];
     return [
       share
-        ? { icon: 'together', label: 'Sharing…', description: shareLine(share), onSelect: () => openShareDialog(pl, { onChange: refresh }) }
-        : { icon: 'together', label: 'Share with friends…', description: 'Friends get a copy that stays in sync with yours', onSelect: () => openShareDialog(pl, { onChange: refresh }) },
+        ? { icon: 'together', label: 'Sharing…', description: shareLine(share), onSelect: () => openShareDialog(pl, { onChange: sharingChanged }) }
+        : { icon: 'together', label: 'Share with friends…', description: 'Friends get a copy that stays in sync with yours', onSelect: () => openShareDialog(pl, { onChange: sharingChanged }) },
     ];
   };
   const menu = iconButton('more', 'More options', () =>
@@ -1313,7 +1413,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
         pl.smart ? h('div.hero-meta', null, 'Smart playlist') : null,
         share
           ? share.role === 'owner'
-            ? h('button.hero-meta.share-line.link-btn', { type: 'button', onclick: () => openShareDialog(pl, { onChange: refresh }) }, icon('together', 18), h('span', null, shareLine(share)))
+            ? h('button.hero-meta.share-line.link-btn', { type: 'button', onclick: () => openShareDialog(pl, { onChange: sharingChanged }) }, icon('together', 18), h('span', null, shareLine(share)))
             : h('div.hero-meta.share-line', null, icon('together', 18), h('span', null, shareLine(share)))
           : null,
         actionButtons([
@@ -1329,7 +1429,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   if (pl.summary) el.append(h('div.pad.hero-summary', null, clampText(pl.summary, 3)));
 
   const list = numberedList({ total, album: true });
-  const bar = editBar('Drag to reorder or remove tracks (they stay in your library), or tap the picture to change it. Changes save to Plex as you go.', {
+  const bar = editBar('Drag to reorder, or remove tracks: changes save to Plex as you go.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort('track', pl.title, (by, label) => sortBy(by, label)),
   });
@@ -1351,8 +1451,17 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   // again if there were any).
   if (share) syncShare(share).catch(() => {});
 
+  // (Only an entry Plex gave its id for, in the playlist, can be moved or
+  // removed: the id says which. Moved after one, it's the nearest above
+  // that has one.)
+  const hasPid = (r) => /^\d+$/.test(r?.dataset.pid || '');
+  const pidBefore = (r) => {
+    for (let x = r.previousElementSibling; x; x = x.previousElementSibling) if (hasPid(x)) return x.dataset.pid;
+    return null;
+  };
+
   function controls(r) {
-    if (editing) addEditControls(r, `“${r.dataset.title}” from the playlist`, removeRow);
+    if (editing && hasPid(r)) addEditControls(r, `“${r.dataset.title}” from the playlist`, removeRow);
     else removeEditControls(r);
   }
 
@@ -1361,6 +1470,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       // Locked: the way in, for anyone looking here to remove a track.
       return canEdit() ? [{ icon: 'unlock', label: 'Edit playlist', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }] : [];
     }
+    if (!hasPid(r)) return [];
     return [
       r !== rows()[0] && { icon: 'moveTop', label: 'Move to top', onSelect: () => moveTo(r, 'top') },
       r !== rows().at(-1) && { icon: 'arrowDown', label: 'Move to bottom', onSelect: () => moveTo(r, 'bottom') },
@@ -1405,7 +1515,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
 
   async function removeRow(r) {
     const next = r.nextElementSibling;
-    const prevPid = r.previousElementSibling?.dataset.pid || null;
+    const prevPid = pidBefore(r);
     r.remove();
     setCount(total - 1);
     try {
@@ -1438,7 +1548,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       changed();
     } catch (err) {
       toast(failMessage(err, 'playlist'));
-      refresh();
+      reload();
     }
   }
 
@@ -1448,34 +1558,34 @@ export async function playlistView({ el, params, onDispose, onHide }) {
         list.prepend(r);
         await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, null);
       } else if (pager?.done) {
-        const last = rows().at(-1);
+        const last = rows().filter((x) => x !== r && hasPid(x)).at(-1);
         list.append(r);
-        await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, last.dataset.pid);
+        await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, last?.dataset.pid || null);
       } else {
         // Not all of it is loaded: move it after the last entry, then load
-        // the page again.
+        // the list again.
         const { items } = await s.playlistItems(pl.ratingKey, { start: Math.max(0, total - 1), size: 1 });
         await s.movePlaylistItem(pl.ratingKey, r.dataset.pid, items.at(-1)?.playlistItemID || null);
-        refresh();
+        changed();
+        reload();
         return;
       }
       changed();
     } catch (err) {
       toast(failMessage(err, 'playlist'));
-      refresh();
+      reload();
     }
   }
 
   enableDrag(list, {
     item: '.track',
     onDrop: async ({ item }) => {
-      const prev = item.previousElementSibling;
       try {
-        await s.movePlaylistItem(pl.ratingKey, item.dataset.pid, prev?.dataset.pid || null);
+        await s.movePlaylistItem(pl.ratingKey, item.dataset.pid, pidBefore(item));
         changed();
       } catch (err) {
         toast(failMessage(err, 'playlist'));
-        refresh();
+        reload();
       }
     },
   });
@@ -1516,11 +1626,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     }
   }
 
-  // ---------- sorting ----------
-  // The new order is worked out from every entry, then saved with the
-  // fewest moves (see sorting.js). Undo puts it back the same way.
-
-  let sorting = null;
+  // ---------- sorting (see listSorter) ----------
 
   // Every entry, page by page (as many as the server gives at a time).
   async function allEntries() {
@@ -1528,68 +1634,35 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     for (;;) {
       const { items, total: t } = await s.playlistItems(pl.ratingKey, { start: out.length, size: 500 });
       out.push(...items);
-      if (out.length > SORT_LIMIT) throw Object.assign(new Error(`Playlists of more than ${fmt.number(SORT_LIMIT)} tracks can’t be sorted here.`), { tooLong: true });
+      if (out.length > SORT_LIMIT) throw tooLongToSort('Playlists', 'tracks');
       if (!items.length || out.length >= t) break;
     }
     return out;
   }
 
-  // makeTarget(entries) gives the entries' ids (playlistItemID) in the
-  // order wanted.
-  async function reorder(makeTarget, [doing, done]) {
-    if (sorting) return;
-    const ctrl = new AbortController();
-    sorting = ctrl;
-    busy(true);
-    bar.working(`${doing}…`, () => ctrl.abort());
-    let result = null;
-    try {
-      result = await saveOrder({
-        read: allEntries,
-        idOf: (m) => String(m.playlistItemID),
-        target: makeTarget,
-        move: (id, after) => s.movePlaylistItem(pl.ratingKey, id, after),
-        signal: ctrl.signal,
-        onProgress: (n, of, p) => bar.say(movedWords(doing, n, of, p)),
-      });
-      if (!result.moved) {
-        toast('It’s in that order already.');
-        return;
-      }
-      changed();
-      reload();
-      const before = result.before;
-      const undo = { action: 'Undo', onAction: () => reorder((now) => restoreOrder(now.map((m) => String(m.playlistItemID)), before), ['Putting it back', 'Put back']), timeout: 8000 };
-      toast(result.stopped ? 'Stopped, part way through.' : doneWords(done, result, 'track', 'tracks'), undo);
-    } catch (err) {
-      toast(err?.tooLong ? err.message : failMessage(err, 'playlist'));
-      if (!err?.tooLong) reload(); // (some may have moved)
-    } finally {
-      sorting = null;
-      busy(false);
-      bar.idle();
-    }
-  }
+  const sortBy = listSorter({
+    el,
+    bar,
+    lock,
+    listEl: () => list,
+    what: 'playlist',
+    units: ['track', 'tracks'],
+    idOf: (m) => String(m.playlistItemID),
+    read: allEntries,
+    move: (id, after) => s.movePlaylistItem(pl.ratingKey, id, after),
+    onMoved: changed,
+    // (Failed, unless it was too long to sort: some may have moved.)
+    settle: ({ moved, failed }) => (moved || (failed && !failed.tooLong)) && reload(),
+  });
 
-  // While a new order is saved: the list waits, the lock stays as it is, and
-  // live updates don't reload the page under it.
-  function busy(on) {
-    list.classList.toggle('sorting', on);
-    el.classList.toggle('is-sorting', on);
-    if (lock) lock.el.disabled = on;
-  }
-
-  function sortBy(by, label) {
-    reorder((entries) => sortedOrder(entries, by).map((m) => String(m.playlistItemID)), sortWords(by, label));
-  }
-
+  // (One list at a time, let go of with the page.)
+  onDispose(() => pager?.dispose());
   function showList() {
     pager = pagedList(list, {
       pageSize: 100,
       fetchPage: (start, size) => s.playlistItems(pl.ratingKey, { start, size }),
       render: (m) => rowFor(m),
       empty: 'This playlist is empty.',
-      onDispose,
     });
   }
 
@@ -1606,16 +1679,24 @@ export async function playlistView({ el, params, onDispose, onHide }) {
 // ---------- Collection ----------
 
 const KIND_UNITS = { artist: ['artist', 'artists'], album: ['album', 'albums'], track: ['track', 'tracks'] };
+// What's in a collection is asked for this many at a time, as the list is
+// scrolled (a smart one can have thousands; some servers refuse more than
+// 120 of a collection's at once: see membership.js).
+const COLLECTION_PAGE = 100;
 
-export async function collectionView({ el, params, onHide }) {
+export async function collectionView({ el, params, onDispose, onHide }) {
   const s = app.server;
-  const { meta, items: loaded } = await s.collection(params.id);
-  if (!meta) throw Object.assign(new Error('Not found'), { status: 404 });
-  let items = loaded;
+  // (Its details: what's in it comes a page at a time, below.)
+  const meta = await s.metadata(params.id);
+  if (!meta || meta.type !== 'collection') throw Object.assign(new Error('Not found'), { status: 404 });
   // Only the server's admin can change a collection; smart ones follow
   // their rules.
   const editable = !meta.smart && (await isAdmin());
   let editing = false;
+  let total = 0;
+  let pager = null;
+  let shown = null; // the list on screen, locked or unlocked
+  onDispose(() => pager?.dispose());
 
   const lock = editable ? lockButton('collection', () => setEditing(!editing)) : null;
   lock?.set(false);
@@ -1624,7 +1705,7 @@ export async function collectionView({ el, params, onHide }) {
     what: 'collection',
     id: meta.ratingKey,
     title: () => meta.title,
-    load: async () => (await s.collection(meta.ratingKey)).meta,
+    load: () => s.metadata(meta.ratingKey),
     onChanged: (fresh) => {
       meta.thumb = fresh.thumb;
       meta.composite = fresh.composite;
@@ -1636,7 +1717,7 @@ export async function collectionView({ el, params, onHide }) {
   );
   const head = backHeader(meta.title, { collapse: true, actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, meta.title);
-  const countEl = h('div.hero-meta', null, fmt.count(items.length, 'item', 'items'));
+  const countEl = h('div.hero-meta');
   const buttons = actionButtons([
     { icon: 'play', label: 'Play', primary: true, onClick: () => playCollection(meta) },
     { icon: 'shuffle', label: 'Shuffle', onClick: () => playCollection(meta, { shuffle: true }) },
@@ -1646,49 +1727,52 @@ export async function collectionView({ el, params, onHide }) {
     h('section.hero.hero-album', null, picture.el, h('div.hero-info', null, title, countEl, buttons)),
   );
   collapseWhenHidden(head, title);
-  const bar = editBar('Drag to reorder or remove items (they stay in your library), or tap the picture to change it. Changes save to Plex as you go.', {
+  const bar = editBar('Drag to reorder, or remove items: changes save to Plex as you go.', {
     onDone: () => setEditing(false),
     onSort: () => chooseSort(meta.subtype || 'album', meta.title, (by, label) => sortBy(by, label)),
   });
   const body = h('div.collection-body');
   el.append(bar.el, body);
   const changed = () => dropCached((p) => p === '/' || p === '/search' || p.startsWith('/browse/collections'));
-  const setCount = () => {
-    countEl.textContent = fmt.count(items.length, 'item', 'items');
-    buttons.hidden = !items.length;
-    meta.childCount = items.length;
+  // How many are in it: as its details say, till its pages do.
+  const setCount = (n) => {
+    total = Math.max(0, n);
+    countEl.textContent = fmt.count(total, 'item', 'items');
+    buttons.hidden = !total;
+    meta.childCount = total;
+    shown?.style.setProperty('--pos-digits', String(Math.max(2, String(total).length)));
   };
+  if (meta.childCount != null) setCount(Number(meta.childCount) || 0);
 
-  // Locked: tracks as a track list, albums and artists as cards.
-  function renderLocked() {
-    const tracks = items.filter((m) => m.type === 'track').map(normTrack);
-    const kids = [];
-    if (tracks.length) {
-      const list = numberedList({ total: tracks.length, album: true });
-      const unlock = [{ icon: 'unlock', label: 'Edit collection', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }];
-      tracks.forEach((t, i) =>
-        list.append(
-          trackRow(t, {
-            showArt: true,
-            position: true,
-            album: true,
-            onPlay: () => playList(tracks, i, { title: meta.title, href: `/collection/${params.id}` }),
-            onMenu: editable ? ({ select }) => trackMenu(t, { extra: unlock, select }) : undefined,
-          }),
-        ),
-      );
-      kids.push(list);
-    }
-    const others = items.filter((m) => m.type !== 'track');
-    if (others.length) {
-      kids.push(grid(others.map((m) => (m.type === 'artist' ? artistCard(m) : m.type === 'collection' ? collectionCard(m) : albumCard(m))), { centered: true }));
-    }
-    if (!items.length) kids.push(emptyState('This collection is empty.'));
-    body.replaceChildren(...kids);
+  // A page of what's in it, in its order. (Where Plex doesn't say how
+  // many there are: on, while pages come full.)
+  async function fetchPage(start, size) {
+    const page = await s.collectionItems(meta.ratingKey, { start, size });
+    const n = page.counted ?? (page.items.length < size ? start + page.items.length : null);
+    if (n !== null) setCount(n);
+    return { items: page.items, total: n ?? start + page.items.length + 1 };
+  }
+
+  // Locked: tracks as a track list (each plays from there on, with those
+  // shown so far), albums and artists as cards.
+  const unlock = [{ icon: 'unlock', label: 'Edit collection', description: 'Unlock it to reorder or remove tracks', onSelect: () => setEditing(true) }];
+  const context = { title: meta.title, href: `/collection/${params.id}` };
+  function lockedItem(m, i, all) {
+    if (m.type !== 'track') return m.type === 'artist' ? artistCard(m) : m.type === 'collection' ? collectionCard(m) : albumCard(m);
+    const t = normTrack(m);
+    return trackRow(t, {
+      showArt: true,
+      position: true,
+      album: true,
+      onPlay: () => {
+        const tracks = all.filter((x) => x.type === 'track');
+        playList(tracks.map(normTrack), tracks.indexOf(m), context);
+      },
+      onMenu: editable ? ({ select }) => trackMenu(t, { extra: unlock, select }) : undefined,
+    });
   }
 
   // Unlocked: everything as rows, to drag or remove.
-  const list = h('div.rows.edit-rows');
   function itemRow(m) {
     const t = m.type === 'track' ? normTrack(m) : null;
     const sub = t ? [t.artist, t.album].filter(Boolean).join(' — ') : m.type === 'album' ? m.parentTitle : '';
@@ -1699,9 +1783,14 @@ export async function collectionView({ el, params, onHide }) {
     addEditControls(r, `“${m.title}” from the collection`, removeItem);
     return r;
   }
-  function renderEditing() {
-    list.replaceChildren(...items.map(itemRow));
-    body.replaceChildren(items.length ? list : emptyState('This collection is empty.'));
+
+  // The list, locked or unlocked, from the top, as Plex now has it.
+  function showItems() {
+    pager?.destroy();
+    shown = editing ? h('div.rows.edit-rows') : meta.subtype === 'track' ? numberedList({ total, album: true }) : grid([], { centered: true });
+    if (editing) enableDrag(shown, { item: '.edit-row', onDrop: dropped });
+    body.replaceChildren(shown);
+    pager = pagedList(shown, { pageSize: COLLECTION_PAGE, fetchPage, render: editing ? itemRow : lockedItem, empty: 'This collection is empty.' });
   }
 
   function setEditing(on) {
@@ -1714,8 +1803,8 @@ export async function collectionView({ el, params, onHide }) {
     if (on) {
       learned('lock');
       hint();
-      renderEditing();
-    } else renderLocked();
+    }
+    showItems();
   }
   onHide(() => {
     hint();
@@ -1723,64 +1812,58 @@ export async function collectionView({ el, params, onHide }) {
   });
 
   async function removeItem(r) {
+    const list = r.parentElement;
     const key = r.dataset.key;
-    const at = items.findIndex((m) => String(m.ratingKey) === key);
-    const item = items[at];
     const next = r.nextElementSibling;
+    const prevKey = r.previousElementSibling?.dataset.key || null;
     r.remove();
-    items = items.filter((m) => m !== item);
-    setCount();
+    setCount(total - 1);
     try {
       await s.removeFromCollection(meta.ratingKey, key);
     } catch (err) {
-      items.splice(at, 0, item);
       list.insertBefore(r, next && next.parentElement === list ? next : null);
-      setCount();
+      setCount(total + 1);
       toast(failMessage(err, 'collection'));
       return;
     }
     changed();
-    toast(`Removed “${item.title}”`, {
-      action: 'Undo',
-      timeout: 6000,
-      onAction: async () => {
-        try {
-          await s.addToCollection(meta.ratingKey, [key]);
-          const prev = items[at - 1];
-          if (meta.collectionSort === 2) await s.moveCollectionItem(meta.ratingKey, key, prev ? prev.ratingKey : null);
-          items.splice(at, 0, item);
-          setCount();
-          if (editing) list.insertBefore(r, list.children[at] || null);
-          else renderLocked();
-          changed();
-        } catch (err) {
-          toast(failMessage(err, 'collection'));
-          refresh();
-        }
-      },
-    });
+    toast(`Removed “${r.dataset.title}”`, { action: 'Undo', timeout: 6000, onAction: () => undoRemove(r, list, prevKey, next) });
   }
 
-  enableDrag(list, {
-    item: '.edit-row',
-    onDrop: async ({ item, order }) => {
-      const prev = item.previousElementSibling;
-      try {
-        // A collection keeps a custom order only when sorted that way.
-        if (meta.collectionSort !== 2) {
-          await s.customOrder(meta.ratingKey);
-          meta.collectionSort = 2;
-        }
-        await s.moveCollectionItem(meta.ratingKey, item.dataset.key, prev?.dataset.key || null);
-        const byKey = new Map(items.map((m) => [String(m.ratingKey), m]));
-        items = order.map((r) => byKey.get(r.dataset.key)).filter(Boolean);
-        changed();
-      } catch (err) {
-        toast(failMessage(err, 'collection'));
-        refresh();
+  // Put it back where it was: add it again, then, in a custom order, move
+  // it after the one that was before it. (Shown there, in the list it was
+  // in, if that's the one on screen still; else the list again.)
+  async function undoRemove(r, list, prevKey, next) {
+    try {
+      await s.addToCollection(meta.ratingKey, [r.dataset.key]);
+      if (meta.collectionSort === 2) await s.moveCollectionItem(meta.ratingKey, r.dataset.key, prevKey);
+      setCount(total + 1);
+      changed();
+      if (list === shown) {
+        const after = prevKey ? [...list.children].find((x) => x.dataset.key === prevKey) : null;
+        list.insertBefore(r, next?.parentElement === list ? next : after ? after.nextElementSibling : prevKey ? null : list.firstElementChild);
+      } else showItems();
+    } catch (err) {
+      toast(failMessage(err, 'collection'));
+      showItems();
+    }
+  }
+
+  async function dropped({ item }) {
+    const prev = item.previousElementSibling;
+    try {
+      // A collection keeps a custom order only when sorted that way.
+      if (meta.collectionSort !== 2) {
+        await s.customOrder(meta.ratingKey);
+        meta.collectionSort = 2;
       }
-    },
-  });
+      await s.moveCollectionItem(meta.ratingKey, item.dataset.key, prev?.dataset.key || null);
+      changed();
+    } catch (err) {
+      toast(failMessage(err, 'collection'));
+      showItems();
+    }
+  }
 
   async function rename() {
     const name = await askText({ title: 'Rename collection', label: 'Name', value: meta.title });
@@ -1815,71 +1898,37 @@ export async function collectionView({ el, params, onHide }) {
     }
   }
 
-  // ---------- sorting (see the playlist's) ----------
+  // ---------- sorting (see listSorter) ----------
 
-  let sorting = null;
-
-  // makeTarget(items) gives the items' ids in the order wanted.
-  async function reorder(makeTarget, [doing, done]) {
-    if (sorting) return;
-    const ctrl = new AbortController();
-    sorting = ctrl;
-    busy(true);
-    bar.working(`${doing}…`, () => ctrl.abort());
-    try {
-      // A collection keeps an order of its own only when sorted "custom".
-      // Its custom order can differ from the one it was showing, so the
-      // moves are worked out from the order Plex has once it's custom.
+  const sortBy = listSorter({
+    el,
+    bar,
+    lock,
+    listEl: () => shown,
+    what: 'collection',
+    units: ['item', 'items'],
+    idOf: (m) => String(m.ratingKey),
+    // A collection keeps an order of its own only when sorted "custom".
+    // Its custom order can differ from the one it was showing, so the
+    // moves are worked out from the order Plex has once it's custom.
+    prepare: async () => {
+      if (total > SORT_LIMIT) throw tooLongToSort('Collections', 'items');
       if (meta.collectionSort !== 2) {
         await s.customOrder(meta.ratingKey);
         meta.collectionSort = 2;
       }
-      const result = await saveOrder({
-        read: async () => {
-          const { items: now } = await s.collection(meta.ratingKey);
-          if (now.length > SORT_LIMIT) throw Object.assign(new Error(`Collections of more than ${fmt.number(SORT_LIMIT)} items can’t be sorted here.`), { tooLong: true });
-          return now;
-        },
-        idOf: (m) => String(m.ratingKey),
-        target: makeTarget,
-        move: (id, after) => s.moveCollectionItem(meta.ratingKey, id, after),
-        signal: ctrl.signal,
-        onProgress: (n, of, p) => bar.say(movedWords(doing, n, of, p)),
-      });
-      if (result.moved) {
-        changed();
-        const before = result.before;
-        const undo = { action: 'Undo', onAction: () => reorder((list2) => restoreOrder(list2.map((m) => String(m.ratingKey)), before), ['Putting it back', 'Put back']), timeout: 8000 };
-        toast(result.stopped ? 'Stopped, part way through.' : doneWords(done, result, 'item', 'items'), undo);
-      } else {
-        toast('It’s in that order already.');
-      }
-      items = (await s.collection(meta.ratingKey)).items;
-    } catch (err) {
-      toast(err?.tooLong ? err.message : failMessage(err, 'collection'));
-      // (Some may have moved.)
-      if (!err?.tooLong) items = (await s.collection(meta.ratingKey).catch(() => null))?.items || items;
-    } finally {
-      sorting = null;
-      busy(false);
-      bar.idle();
-      setCount();
-      if (editing) renderEditing();
-      else renderLocked();
-    }
-  }
+    },
+    read: async () => {
+      const { items: now } = await s.collection(meta.ratingKey);
+      if (now.length > SORT_LIMIT) throw tooLongToSort('Collections', 'items');
+      return now;
+    },
+    move: (id, after) => s.moveCollectionItem(meta.ratingKey, id, after),
+    onMoved: changed,
+    // (Whatever came of it: in its custom order now, it can show another
+    // order with nothing moved.)
+    settle: () => showItems(),
+  });
 
-  function busy(on) {
-    list.classList.toggle('sorting', on);
-    el.classList.toggle('is-sorting', on);
-    if (lock) lock.el.disabled = on;
-  }
-
-  function sortBy(by, label) {
-    reorder((now) => sortedOrder(now, by).map((m) => String(m.ratingKey)), sortWords(by, label));
-  }
-
-  setCount();
-  renderLocked();
+  showItems();
 }
-

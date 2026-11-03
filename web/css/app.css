@@ -78,6 +78,19 @@ img {
   display: none !important;
 }
 
+/* For a screen reader only: a status the page says without showing it. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 :focus-visible {
   outline: 2px solid #fff;
   outline-offset: 2px;
@@ -306,14 +319,6 @@ button.page-sub:hover {
 
 .section-head .chev {
   flex: none;
-}
-
-.section-head .head-more {
-  width: 32px;
-  height: 32px;
-  flex: none;
-  margin-right: auto;
-  background: var(--surface-2);
 }
 
 a.section-head:hover .chev {
@@ -890,10 +895,6 @@ label.row:hover {
   opacity: 0.7;
 }
 
-.library-rows .row {
-  min-height: 68px;
-}
-
 .row-icon {
   display: grid;
   place-items: center;
@@ -905,10 +906,6 @@ label.row:hover {
 /* Rows shown only sometimes, among the others. */
 .rows-group {
   display: contents;
-}
-
-.rows-group[hidden] {
-  display: none;
 }
 
 .settings-rows .row {
@@ -1583,11 +1580,6 @@ a.hero-link:hover {
   color: #fff;
 }
 
-.search-box .search-clear[hidden],
-.search-box .search-keep[hidden] {
-  display: none;
-}
-
 /* Words kept from a search, above it: everything shown matches them all. */
 .search-tags {
   padding-top: 4px;
@@ -1774,7 +1766,7 @@ a.hero-link:hover {
 /* ---------- settings pages ---------- */
 
 .account-card,
-.about {
+.about-page {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1848,7 +1840,7 @@ a.hero-link:hover {
   color: var(--muted);
 }
 
-.about p {
+.about-page p {
   max-width: 46ch;
   color: var(--muted);
 }
@@ -2725,10 +2717,6 @@ body.np-open #toasts {
   background: var(--hover);
 }
 
-.sheet-action > span {
-  flex: 1;
-}
-
 .sheet-action.danger {
   color: var(--danger);
 }
@@ -2746,7 +2734,7 @@ body.np-open #toasts {
 }
 
 .sheet-spacer {
-  flex: none !important;
+  flex: none;
   width: 22px;
 }
 
@@ -2770,6 +2758,7 @@ body.np-open #toasts {
 
 .sheet-action-text {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
@@ -2854,10 +2843,6 @@ body.np-open #toasts {
   max-width: 100%;
 }
 
-.np-where[hidden] {
-  display: none;
-}
-
 .np-where-label,
 .np-where-here {
   display: inline-flex;
@@ -2883,10 +2868,6 @@ body.np-open #toasts {
   color: #15161a;
 }
 
-.np-where-here[hidden] {
-  display: none;
-}
-
 .np-where span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2909,10 +2890,6 @@ body.np-open #toasts {
   font-weight: 600;
 }
 
-.pb-where[hidden] {
-  display: none;
-}
-
 .pb-where span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2921,10 +2898,6 @@ body.np-open #toasts {
 
 .pb-where .ic {
   flex: none;
-}
-
-.pb-actions .pb-here[hidden] {
-  display: none;
 }
 
 .volume .listen-here {
@@ -2997,11 +2970,6 @@ body.np-open #toasts {
 .ask-details li {
   padding: 4px 0;
   overflow-wrap: anywhere;
-}
-
-.ask-details .ask-note {
-  color: #ffb4a8;
-  font-size: 0.9em;
 }
 
 .ask-after {
@@ -3317,10 +3285,6 @@ a.chip:hover {
   flex-wrap: wrap;
 }
 
-.filter-chips[hidden] {
-  display: none;
-}
-
 .filter-chip {
   display: inline-flex;
   align-items: center;
@@ -3337,15 +3301,6 @@ a.chip:hover {
 /* Searching within a library list: choices that narrow it. */
 .within-results {
   margin-top: 6px;
-}
-
-.within-results[hidden] {
-  display: none;
-}
-
-.within-none {
-  margin: 10px var(--gutter);
-  color: var(--muted);
 }
 
 .ai-body {
@@ -4194,9 +4149,6 @@ body.bare #toasts {
   background: color-mix(in srgb, var(--tint) 40%, rgba(255, 255, 255, 0.06));
   font-size: calc(14px * var(--fs, 1));
   line-height: 1.4;
-}
-
-.edit-bar {
   flex-wrap: wrap;
 }
 
@@ -4501,10 +4453,6 @@ body.bare #toasts {
   background: var(--surface-2);
 }
 
-.browse-tile[hidden] {
-  display: none;
-}
-
 .browse-icon {
   flex: none;
   display: grid;
@@ -4570,7 +4518,6 @@ body.bare #toasts {
   --rr-off: rgba(255, 255, 255, 0.2);
 }
 
-.row-rating[hidden],
 body.no-list-ratings .row-rating {
   display: none;
 }
@@ -4595,7 +4542,9 @@ body.no-list-ratings .row-rating {
   background: linear-gradient(90deg, var(--muted) calc(var(--hv, 0) * 100%), var(--rr-off) 0);
 }
 
-.rr-thumb {
+/* Thumbs, and the favourite tick: buttons a star's size. */
+.rr-thumb,
+.rr-tick {
   display: grid;
   place-items: center;
   width: 34px;
@@ -4638,18 +4587,6 @@ body.no-list-ratings .row-rating {
 }
 
 /* The favourite tick: a ring, filled with a tick once it's a favourite. */
-.rr-tick {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 40px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--faint);
-  cursor: pointer;
-}
-
 .rr-tick::before {
   content: '';
   box-sizing: border-box;
@@ -5103,10 +5040,6 @@ body.no-list-ratings .row-rating {
   pointer-events: none;
 }
 
-.shared-mark[hidden] {
-  display: none;
-}
-
 .hero-art-box > .shared-mark {
   top: 10px;
   left: 10px;
@@ -5392,6 +5325,7 @@ body.in-together .pb-art::after {
     gap: 32px;
     text-align: left;
     margin-top: 12px;
+    margin-bottom: 28px;
   }
 
   .hero-art {
@@ -5410,10 +5344,6 @@ body.in-together .pb-art::after {
   .hero-actions {
     justify-content: flex-start;
     margin-bottom: 0;
-  }
-
-  .hero-album {
-    margin-bottom: 28px;
   }
 
   .hero-artist {
