@@ -1105,37 +1105,42 @@ const failMessage = (err, what) => (err?.status === 401 || err?.status === 403 ?
 // ---------- a playlist's or collection's picture ----------
 
 // Pictures are made smaller in the browser before they go to Plex: this many
-// pixels across at most, as a JPEG.
+// pixels across at most, as a JPEG of this quality.
 const PICTURE_SIZE = 1200;
+const PICTURE_QUALITY = 0.88;
 
 async function shrinkPicture(file) {
   let source;
-  try {
-    source = await createImageBitmap(file);
-  } catch {
-    // (Safari before 17 can't make one from some files: an <img> can.)
-    source = await new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(Object.assign(new Error('Not a picture'), { badImage: true }));
-      img.src = url;
-    });
-  }
-  const w = source.width || source.naturalWidth;
-  const ht = source.height || source.naturalHeight;
-  if (!w || !ht) throw Object.assign(new Error('Not a picture'), { badImage: true });
-  const scale = Math.min(1, PICTURE_SIZE / Math.max(w, ht));
+  let fileUrl = null; // (for an <img>: let go of once it's drawn, or couldn't be)
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(w * scale));
-  canvas.height = Math.max(1, Math.round(ht * scale));
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#16171b'; // under any see-through parts
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
-  source.close?.();
-  if (source.src?.startsWith('blob:')) URL.revokeObjectURL(source.src);
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+  try {
+    try {
+      source = await createImageBitmap(file);
+    } catch {
+      // (Safari before 17 can't make one from some files: an <img> can.)
+      fileUrl = URL.createObjectURL(file);
+      source = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(Object.assign(new Error('Not a picture'), { badImage: true }));
+        img.src = fileUrl;
+      });
+    }
+    const w = source.width || source.naturalWidth;
+    const ht = source.height || source.naturalHeight;
+    if (!w || !ht) throw Object.assign(new Error('Not a picture'), { badImage: true });
+    const scale = Math.min(1, PICTURE_SIZE / Math.max(w, ht));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(ht * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#16171b'; // under any see-through parts
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  } finally {
+    source?.close?.();
+    if (fileUrl) URL.revokeObjectURL(fileUrl);
+  }
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', PICTURE_QUALITY));
   if (!blob) throw Object.assign(new Error('Not a picture'), { badImage: true });
   return blob.arrayBuffer();
 }
@@ -1160,7 +1165,7 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
     pencil.setAttribute('aria-label', on ? 'Changing the picture…' : `Change the ${what}’s picture`);
   };
 
-  async function refresh() {
+  async function showNewPicture() {
     const fresh = await load().catch(() => null);
     const next = fresh ? fresh.thumb || fresh.composite : null;
     if (fresh) onChanged?.(fresh);
@@ -1174,7 +1179,7 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
     setBusy(true);
     try {
       await job();
-      await refresh();
+      await showNewPicture();
       toast(done);
     } catch (err) {
       toast(err?.badImage ? 'That picture couldn’t be read. Try a JPEG or PNG.' : failMessage(err, what));
