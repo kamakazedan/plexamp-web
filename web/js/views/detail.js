@@ -1002,24 +1002,42 @@ function lockButton(label, onToggle) {
 }
 
 // The bar over an unlocked list: what you can do, Sort, and Done. While a
-// sort is being saved it says how far it's got, with a Stop button.
+// sort is being saved it says how far it's got, with a Stop button: every
+// so often, not at every move, as a screen reader reads out each.
+const SORT_PROGRESS_MS = 1500; // between what a sort says of how far it's got
 function editBar(text, { onDone, onSort }) {
-  const textEl = h('span.edit-bar-text', null, text);
+  const textEl = h('span.edit-bar-text', { role: 'status' }, text);
   const sortBtn = onSort ? h('button.btn.btn-secondary.edit-sort', { type: 'button', onclick: onSort }, icon('sort', 18), h('span', null, 'Sort')) : null;
   const doneBtn = h('button.btn.btn-primary.edit-done', { type: 'button', onclick: onDone }, 'Done');
   const actions = h('div.edit-bar-actions', null, sortBtn, doneBtn);
-  const el = h('div.edit-bar', { hidden: true, role: 'status' }, icon('unlock', 20), textEl, actions);
+  const el = h('div.edit-bar', { hidden: true }, icon('unlock', 20), textEl, actions);
+  let saidAt = 0;
+  let sayTimer = 0;
+  let latest = '';
+  const sayNow = () => {
+    sayTimer = 0;
+    saidAt = Date.now();
+    textEl.textContent = latest;
+  };
+  const stopSaying = () => {
+    clearTimeout(sayTimer);
+    sayTimer = 0;
+  };
   return {
     el,
     working(message, onStop) {
+      stopSaying();
+      saidAt = Date.now();
       el.classList.add('busy');
       textEl.textContent = message;
       actions.replaceChildren(h('button.btn.btn-secondary.edit-stop', { type: 'button', onclick: onStop }, 'Stop'));
     },
     say(message) {
-      textEl.textContent = message;
+      latest = message;
+      if (!sayTimer) sayTimer = setTimeout(sayNow, Math.max(0, saidAt + SORT_PROGRESS_MS - Date.now()));
     },
     idle() {
+      stopSaying();
       el.classList.remove('busy');
       textEl.textContent = text;
       actions.replaceChildren(...[sortBtn, doneBtn].filter(Boolean));

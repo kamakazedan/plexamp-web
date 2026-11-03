@@ -29,6 +29,7 @@ const STEPS = [
   ['search', 'Finding tracks in your library'],
   ['order', 'Choosing and ordering tracks'],
 ];
+const LOADING_NOTE = 'Loading the AI model. The first time can take a few minutes.';
 
 // Kept for the session so leaving and coming back shows the last playlist.
 let last = null;
@@ -367,18 +368,21 @@ export async function aiPlaylistView({ el, onDispose }) {
   }
 
   // Shows a playlist being made, step by step, and then the playlist (or
-  // what went wrong).
+  // what went wrong). (A screen reader hears each step as it starts, and
+  // that the model is loading: not the seconds counting.)
   function follow(j) {
-    const steps = STEPS.map(([id, label]) => ({ id, el: h('li.ai-step', null, h('span.ai-step-mark'), h('span', null, label)) }));
+    const steps = STEPS.map(([id, label]) => ({ id, label, el: h('li.ai-step', null, h('span.ai-step-mark'), h('span', null, label)) }));
     const elapsed = h('span');
     const time = () => (elapsed.textContent = `${Math.round((Date.now() - j.started) / 1000)} s`);
     time();
     const tick = setInterval(time, 1000);
-    const loadingNote = h('p.ai-loading', { hidden: true }, 'Loading the AI model. The first time can take a few minutes.');
+    const loadingNote = h('p.ai-loading', { hidden: true }, LOADING_NOTE);
+    const said = h('span.visually-hidden', { role: 'status' });
     body.replaceChildren(
       h(
         'div.ai-progress',
-        { role: 'status' },
+        null,
+        said,
         h('ol.ai-steps', null, steps.map((s) => s.el)),
         loadingNote,
         h(
@@ -398,6 +402,8 @@ export async function aiPlaylistView({ el, onDispose }) {
           s.el.classList.toggle('done', i < at);
           s.el.classList.toggle('active', i === at);
         });
+        const now = [steps[at]?.label, j.loading ? LOADING_NOTE : null].filter(Boolean).join('. ');
+        if (said.textContent !== now) said.textContent = now;
         return undefined;
       }
       stop();
