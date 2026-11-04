@@ -1536,11 +1536,16 @@ async function handle(req, res) {
   } finally {
     // Paths only (no query strings), so nothing secret can be logged. The
     // checks nginx makes for each proxied request would only be noise, and
-    // so would what every open player asks every few seconds (your devices
-    // waiting for news, the playing one's report, Play Together's look for
-    // invitations), unless it went wrong.
+    // so would the health check (Docker's, every 30 seconds) and what every
+    // open player asks every few seconds (your devices waiting for news, the
+    // playing one's report, Play Together's look for invitations), unless it
+    // went wrong.
     const code = status || res.statusCode;
-    const routine = parts[1] === 'internal' || (parts[1] === 'devices' && (req.method === 'GET' ? !parts[2] : parts[2] === 'report')) || (parts[1] === 'together' && parts[2] === 'me' && req.method === 'GET');
+    const routine =
+      parts[1] === 'internal' ||
+      parts[1] === 'health' ||
+      (parts[1] === 'devices' && (req.method === 'GET' ? !parts[2] : parts[2] === 'report')) ||
+      (parts[1] === 'together' && parts[2] === 'me' && req.method === 'GET');
     if (isDebug() && parts[1] !== 'debug' && (!routine || code >= 400)) {
       const path = url.pathname.replace(/(\/sessions\/[A-Za-z0-9_-]{6})[A-Za-z0-9_-]*/, '$1…').replace(/(\/shares\/[a-f0-9]{6})[a-f0-9]+/, '$1…');
       log.debug(`${req.method} ${path} ${code} ${Date.now() - started} ms`);

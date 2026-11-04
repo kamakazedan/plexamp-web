@@ -632,7 +632,9 @@ contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked
 # (OFFLINE_NETWORKS=private and OLLAMA_AUTH=plex alone, as Proxmox VE's
 # settings have them: the defaults, so the container starts, as it has.)
 lacks "OFFLINE_NETWORKS=private alone (the default): nothing said of it" "OFFLINE_NETWORKS" "$(docker logs pw-web7 2>&1)"
-lacks "...nor of OLLAMA_AUTH=plex alone" "OLLAMA_AUTH" "$(docker logs pw-web7 2>&1)"
+# (What it would say of it; OLLAMA_HOST's warning, below, names the OLLAMA_
+# settings there are, OLLAMA_AUTH among them.)
+lacks "...nor of OLLAMA_AUTH=plex alone" "OLLAMA_AUTH needs" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
 # (A stack can give every container the same settings file: Plex's and
 # Ollama's own settings are only warned of.)
