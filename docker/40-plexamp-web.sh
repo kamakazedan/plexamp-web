@@ -406,7 +406,7 @@ udp_taken() {
 # are.
 NGINX_ERROR_LOG="error_log stderr emerg;"
 if [ "$DEBUG_ON" = true ]; then
-    echo "access_log $ACCESS_LOG pw_debug;" >"$LOG_CONF"
+    echo "access_log $ACCESS_LOG pw_debug if=\$pw_logged;" >"$LOG_CONF"
     if udp_taken "$NGINX_LOG_PORT"; then
         say "debug mode: something else here already listens on UDP port $NGINX_LOG_PORT, where nginx's errors would go to be cleaned of tokens, so they're left out of the log (NGINX_LOG_PORT can be another port)" >&2
     else
