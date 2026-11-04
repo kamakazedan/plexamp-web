@@ -1526,6 +1526,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       toast(failMessage(err, 'playlist'));
       return;
     }
+    pager?.shift(-1);
     changed();
     toast(`Removed “${r.dataset.title}”`, { action: 'Undo', onAction: () => undoRemove(r, prevPid, next), timeout: 6000 });
   }
@@ -1543,6 +1544,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       r.dataset.pid = entry.playlistItemID;
       const before = next && next.parentElement === list ? next : prevPid ? rows().find((x) => x.dataset.pid === prevPid)?.nextElementSibling : rows()[0];
       list.insertBefore(r, before || null);
+      pager?.shift(1);
       setCount(n);
       controls(r);
       changed();
@@ -1746,9 +1748,15 @@ export async function collectionView({ el, params, onDispose, onHide }) {
 
   // A page of what's in it, in its order. (Where Plex doesn't say how
   // many there are: on, while pages come full.)
+  // (A server that doesn't page sends all of it at once, or the same page
+  // again: that's the end, as plex.js readPages has it.)
+  let firstOfPage = null;
   async function fetchPage(start, size) {
     const page = await s.collectionItems(meta.ratingKey, { start, size });
-    const n = page.counted ?? (page.items.length < size ? start + page.items.length : null);
+    const first = page.items[0]?.ratingKey ?? null;
+    if (start > 0 && first !== null && first === firstOfPage) return { items: [], total: start };
+    firstOfPage = first;
+    const n = page.counted ?? (page.items.length !== size ? start + page.items.length : null);
     if (n !== null) setCount(n);
     return { items: page.items, total: n ?? start + page.items.length + 1 };
   }
@@ -1826,6 +1834,7 @@ export async function collectionView({ el, params, onDispose, onHide }) {
       toast(failMessage(err, 'collection'));
       return;
     }
+    if (list === shown) pager?.shift(-1);
     changed();
     toast(`Removed “${r.dataset.title}”`, { action: 'Undo', timeout: 6000, onAction: () => undoRemove(r, list, prevKey, next) });
   }
@@ -1842,6 +1851,7 @@ export async function collectionView({ el, params, onDispose, onHide }) {
       if (list === shown) {
         const after = prevKey ? [...list.children].find((x) => x.dataset.key === prevKey) : null;
         list.insertBefore(r, next?.parentElement === list ? next : after ? after.nextElementSibling : prevKey ? null : list.firstElementChild);
+        pager?.shift(1);
       } else showItems();
     } catch (err) {
       toast(failMessage(err, 'collection'));

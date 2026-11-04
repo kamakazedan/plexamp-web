@@ -984,6 +984,14 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
     items: all,
     load,
     dispose,
+    // What's on the server changed in the part of the list loaded already
+    // (`by`: entries taken out of it, -1, or put back in it, +1), so what's
+    // asked for next starts that much sooner or later: nothing is left out,
+    // or shown twice, once the list's scrolled on.
+    shift(by) {
+      start = Math.max(0, start + by);
+      if (Number.isFinite(total)) total = Math.max(0, total + by);
+    },
     // Stops, and takes away what it put after the list (to start it again).
     destroy() {
       destroyed = true;

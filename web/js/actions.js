@@ -156,8 +156,13 @@ export const similarRadio = (track) =>
 // ---------- radio from your music ----------
 
 const pick = (list, n) => shuffleArray(list.slice()).slice(0, n);
-// `n` of an artist's tracks, any of them (Plex picks them at random).
-const anyOf = async (artistId, n) => (await app.server.list(app.source.sectionKey, 10, { sort: 'random', size: n, filters: { 'artist.id': artistId } })).items;
+// `n` of an artist's tracks, any of them (Plex picks them at random), from
+// the library in use; or, for an artist of another library (with Search all
+// music libraries on, say), their first `n`, from theirs.
+const anyOf = async (artistId, n) => {
+  const { items } = await app.server.list(app.source.sectionKey, 10, { sort: 'random', size: n, filters: { 'artist.id': artistId } });
+  return items.length ? items : app.server.allLeaves(artistId, { size: n }).catch(() => []);
+};
 const once = (list) => {
   const seen = new Set();
   return list.filter((m) => m?.type === 'track' && !seen.has(String(m.ratingKey)) && seen.add(String(m.ratingKey)));
