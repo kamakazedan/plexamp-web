@@ -272,12 +272,35 @@ export async function homeUsers(token) {
       id: String(u.id ?? ''),
       uuid: String(u.uuid),
       title: String(u.friendlyName || u.title || u.username || 'Plex user').slice(0, 100),
+      username: String(u.username || '').slice(0, 100),
       thumb: typeof u.thumb === 'string' && /^https:\/\//.test(u.thumb) ? u.thumb : null,
       admin: yes(u.admin),
       restricted: yes(u.restricted),
       guest: yes(u.guest),
       protected: yes(u.protected),
     }));
+}
+
+// Who in the Plex Home can't be switched to without a PIN (`users`, as
+// homeUsers has them; `servers`: yours, as listServers has them, or null
+// where plex.tv didn't say; `serverId`: the server this is on, if any): the
+// Home's admin, and the owner of the server this is on, so nobody gets into
+// the server owner's account with a tap. Where it can't be told who owns it
+// (no server chosen yet, plex.tv didn't list it, or its owner is named as
+// nobody in the Home is), everyone but managed users, who can't own a
+// server. A PIN they have, plex.tv asks for. Returns (user) -> true for
+// those not offered.
+export function homeUsersOffLimits(users, servers, serverId) {
+  const same = (a, b) => !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+  const server = serverId && Array.isArray(servers) ? servers.find((s) => s.id === serverId) : null;
+  let owners = null; // ids of the Home's people who may own it; null: can't be told
+  if (server?.owned) owners = new Set(); // yours (and you're never offered)
+  else if (server?.ownerId) owners = new Set(users.filter((u) => u.id === server.ownerId).map((u) => u.id)); // (none: not in the Home)
+  else if (server?.sharedBy) {
+    const named = users.filter((u) => same(u.username, server.sharedBy) || same(u.title, server.sharedBy));
+    if (named.length) owners = new Set(named.map((u) => u.id));
+  }
+  return (u) => !u.protected && (u.admin || (owners ? owners.has(u.id) : !u.restricted));
 }
 
 // Switches to one of them (`pin`: theirs, where they have one): plex.tv's
@@ -314,6 +337,7 @@ export async function listServers(token) {
       name: r.name,
       owned: !!r.owned,
       sharedBy: r.sourceTitle || null,
+      ownerId: r.ownerId != null && String(r.ownerId) !== '' ? String(r.ownerId) : null,
       token: r.accessToken || (r.owned ? token : null),
       sameNetwork: r.publicAddressMatches == null ? undefined : yes(r.publicAddressMatches),
       connections: asArray(r.connections).map((c) => ({

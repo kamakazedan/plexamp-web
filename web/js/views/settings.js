@@ -1,5 +1,5 @@
 import { app, on, saveSettings, setSource, signOut, switchAccount, proxyUri } from '../state.js';
-import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, switchHomeUser, getUser, store } from '../plex.js';
+import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, homeUsersOffLimits, switchHomeUser, getUser, store } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, askText, avatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
@@ -115,7 +115,7 @@ function accountButtons() {
   const switchBtn = h('button.btn.btn-secondary.account-switch', { type: 'button', hidden: true }, icon('switchUser', 20), h('span', null, 'Switch user'));
   if (!auth.manual && auth.token) {
     // (Your servers too, for who owns the one this is on: see chooseHomeUser.)
-    Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null), listServers(auth.token).catch(() => [])])
+    Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null), listServers(auth.token).catch(() => null)])
       .then(([users, me, servers]) => {
         if (app.auth?.token !== auth.token || !me?.uuid) return;
         // (Which of them is you, by plex.tv's id for you: never offered
@@ -205,21 +205,19 @@ function accountSyncRows() {
 
 // The people in your Plex Home (`mine`: which is you, `myId`: your Plex
 // account's id), to switch to. Never, without a PIN, the Home's admin, or
-// the owner of the server this is on, where that's known (`servers`: yours,
-// as plex.tv lists them, which say who shares one with you: by their id,
-// where plex.tv's list has it, else by their name): nobody gets into the
-// server owner's account with a tap. For them: a PIN in Plex, or signing in
-// as them.
-function chooseHomeUser(users, mine, myId, servers = []) {
-  const server = servers.find((s) => s.id === app.source?.serverId);
-  const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
-  const owns = (u) => !!server && !server.owned && (server.ownerId != null ? String(server.ownerId) === u.id : !!server.sharedBy && sameName(server.sharedBy, u.title));
+// the owner of the server this is on, or anyone who may be, where that
+// can't be told (see plex.js homeUsersOffLimits: `servers`, yours, as
+// plex.tv lists them, null where it didn't): nobody gets into the server
+// owner's account with a tap. For them: a PIN in Plex, or signing in as
+// them.
+function chooseHomeUser(users, mine, myId, servers = null) {
+  const offLimitsHere = homeUsersOffLimits(users, servers, app.source?.serverId);
   const list = h('div.rows.home-users');
   const notOffered = [];
   let panel = null;
   for (const u of users) {
     const you = mine(u);
-    const offLimits = !you && !u.protected && (u.admin || owns(u));
+    const offLimits = !you && offLimitsHere(u);
     if (offLimits) notOffered.push(u.title);
     const what = [
       you ? 'You' : null,
@@ -265,11 +263,26 @@ function chooseHomeUser(users, mine, myId, servers = []) {
 
 // To them: their PIN first, where they have one. Then plex.tv's token for
 // them, the server and library this is on (where they can use those), and
-// the page afresh as them (state.js switchAccount). (Never the Home's admin
-// without a PIN: see chooseHomeUser.)
+// the page afresh as them (state.js switchAccount). Never anyone
+// chooseHomeUser doesn't offer, by plex.tv's word just before, not the
+// list's from when it opened (who's in the Home, their PIN, who owns the
+// server this is on).
 let switching = false;
-async function switchToHomeUser(u, myId) {
-  if (switching || (u.admin && !u.protected)) return;
+async function switchToHomeUser(chosen, myId) {
+  if (switching || chosen.uuid === myId) return;
+  const asked = app.auth?.token;
+  let u;
+  try {
+    const [users, servers] = await Promise.all([homeUsers(asked), listServers(asked).catch(() => null)]);
+    u = users.find((x) => x.uuid === chosen.uuid);
+    if (u && homeUsersOffLimits(users, servers, app.source?.serverId)(u)) {
+      return toast(`To switch to ${u.title}, set a PIN for them in Plex, or sign in as them.`, { timeout: 6000 });
+    }
+  } catch (err) {
+    return toast(`Couldn’t switch to ${chosen.title}. ${describeError(err)}`, { timeout: 6000 });
+  }
+  if (!u) return toast(`${chosen.title} isn’t in your Plex Home now.`);
+  if (switching || app.auth?.token !== asked) return;
   let pin = null;
   if (u.protected) {
     pin = await askText({ title: `Switch to ${u.title}`, label: 'Their PIN', confirm: 'Switch', maxLength: 4, type: 'password', inputMode: 'numeric', secret: true, message: `${u.title} has a PIN on Plex.` });

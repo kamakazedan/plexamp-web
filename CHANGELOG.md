@@ -26,7 +26,9 @@ security and privacy is in [SECURITY.md](SECURITY.md#0370).
 - **Switch user offers the Plex Home's admin only with a PIN**, and the
   owner of the server the app is on too: without one, anyone in the Home
   could get into their account with a tap. They're listed, with what to
-  do (give them a PIN in Plex, or sign in as them).
+  do (give them a PIN in Plex, or sign in as them). Where it can't be told
+  who owns the server (before one's chosen, or while plex.tv doesn't say),
+  only managed users and those with a PIN are offered.
 - **Enter a server address sends nothing of yours to an address until
   it's yours**: it's asked who it is with nothing of yours, then used only
   where plex.tv has it for one of your servers, and only if that very

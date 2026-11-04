@@ -7552,6 +7552,31 @@ with sync_playwright() as pw:
               and kids_rows[1:] == [['Kid', 'You · Managed user', False], ['Gran', '', True]], str(kids_rows))
         check('plexhome: ...but not to Dan, the Home\'s admin and the server\'s owner, who has no PIN: it says to set one in Plex, or sign in as him',
               kids_rows[0] == ['Dan', 'Admin · Needs a PIN', False] and pin_note == ['To switch to Dan, set a PIN for them in Plex, or sign in as them.'], f'{kids_rows} {pin_note}')
+        # Who isn't offered without a PIN: the Home's admin; the server's owner,
+        # by plex.tv's id for them, or by their name (one who isn't the admin,
+        # with a name of their own to show); and where who owns it can't be
+        # told, everyone but managed users, who can't own a server.
+        rule = js(page, """() => import('./js/plex.js').then(({ homeUsersOffLimits: off }) => {
+            const users = [
+                { id: '1', uuid: 'u1', title: 'Dad', username: 'dad', admin: true },
+                { id: '2', uuid: 'u2', title: 'Mom', username: 'mom_1980' },
+                { id: '3', uuid: 'u3', title: 'Kid', restricted: true },
+                { id: '4', uuid: 'u4', title: 'Gran', username: 'gran', protected: true },
+            ];
+            const names = (servers, id) => users.filter(off(users, servers, id)).map((u) => u.title).join(',');
+            return [
+                names([{ id: 's', owned: true }], 's'),
+                names([{ id: 's', owned: false, ownerId: '2', sharedBy: 'someone' }], 's'),
+                names([{ id: 's', owned: false, sharedBy: 'mom_1980' }], 's'),
+                names([{ id: 's', owned: false, ownerId: '99', sharedBy: 'someone' }], 's'),
+                names([{ id: 's', owned: false, sharedBy: 'someone' }], 's'),
+                names(null, 's'),
+                names([{ id: 'other', owned: true }], 's'),
+                names([{ id: 's', owned: true }], undefined),
+            ];
+        })""")
+        check('plexhome: ...nor to the server\'s owner without a PIN (by plex.tv\'s id for them, or their name), nor, where who owns it can\'t be told, anyone but managed users',
+              rule == ['Dad', 'Dad,Mom', 'Dad,Mom', 'Dad', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom'], str(rule))
 
         # Back to Dan, once he has a PIN (as plex.tv says from here on; the
         # mock takes any PIN of his): his own again, as kept for his account.

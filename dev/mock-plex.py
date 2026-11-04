@@ -1580,6 +1580,7 @@ def server_resource(token, base):
         'name': "Dan's Test Server", 'product': 'Plex Media Server', 'provides': 'server',
         'clientIdentifier': 'mock-server-1', 'owned': SERVER_TOKENS[token] == 'owned', 'accessToken': token,
         'sourceTitle': None if SERVER_TOKENS[token] == 'owned' else 'Dan',
+        'ownerId': None if SERVER_TOKENS[token] == 'owned' else ACCOUNTS['t']['id'],
         'connections': [{'protocol': 'http', 'address': '127.0.0.1', 'port': PORT, 'uri': base, 'local': True, 'relay': False}],
     }
 
