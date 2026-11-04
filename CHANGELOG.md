@@ -21,7 +21,10 @@ security and privacy is in [SECURITY.md](SECURITY.md#0370).
   track is matched to the same recording, as the titles say. "Song -
   Glasswork Remix" isn't "Song", nor "Song (Harbour Remix)", and a live
   take isn't the studio one, while what only says which cut it is (Radio
-  Edit, Single Version, Original Mix, Extended Mix) doesn't count.
+  Edit, Single Version, Original Mix, Extended Mix) doesn't count. A live
+  take whose copy on a live album doesn't say it's live (as MusicBrainz's
+  tags leave it out) is that copy, but only on an album Plex has as a live
+  one. And a title is never a longer one's: "One" isn't "One Tree Hill".
   Playlist files are matched the same way.
 - **Switch user offers the Plex Home's admin only with a PIN**, and the
   owner of the server the app is on too: without one, anyone in the Home
@@ -31,9 +34,10 @@ security and privacy is in [SECURITY.md](SECURITY.md#0370).
   only managed users and those with a PIN are offered.
 - **Enter a server address sends nothing of yours to an address until
   it's yours**: it's asked who it is with nothing of yours, then used only
-  where plex.tv has it for one of your servers, and only if that very
-  server answers. Before, your Plex sign-in went to whatever was typed (a
-  typo, or an address pasted from someone), often over plain http.
+  where plex.tv has it for one of your servers (a `plex.direct` name only
+  as that very name), and only if that very server answers. Before, your
+  Plex sign-in went to whatever was typed (a typo, or an address pasted
+  from someone), often over plain http.
 - **A collection's page loads a page at a time**, as a playlist's does: a
   smart collection of 10,000 tracks was one answer of megabytes, and
   10,000 rows on a phone.
@@ -86,7 +90,14 @@ security and privacy is in [SECURITY.md](SECURITY.md#0370).
 - **A file the server refuses or no longer has** (401, 403, 404, 410) was
   taken for a dropped connection: loaded again and again, and never
   skipped. It's skipped now, saying why (with Sign in again, where Plex no
-  longer takes your sign-in).
+  longer takes your sign-in), where Plex itself answers so: a refusal from
+  something in between (a proxy's sign-in page, a firewall) waits as a
+  dropped connection does, and plays on once it's let through.
+- **A paused track whose connection dropped** started playing as it was
+  loaded again, and the track after one that wouldn't play started
+  playing even where that one was loaded paused (at the end of the sleep
+  timer's track, say). A pause or a seek made while a track was read in
+  full was lost if the read had to be tried again.
 - **While a track was read in full**, the one before stayed loaded: its
   clock showed, a seek moved it, pause and play played it, and its end
   skipped the track being read.
@@ -121,6 +132,17 @@ security and privacy is in [SECURITY.md](SECURITY.md#0370).
 - **A sheet** (the library switcher, a playlist's Picture) could open over
   the page you'd gone to meanwhile, and an Undo or a failed change rebuilt
   whichever page was on screen.
+- **Removing a track from a long playlist**, or undoing that, left the next
+  page of it one entry out, or one shown twice, and a track played from
+  there started one off.
+- **Artist radio** played nothing of an artist in another music library
+  (with Search all music libraries on, say), and playlist and Favourites
+  radio left their tracks out.
+- **The access token for whichever server you were on** went to the
+  container's service with the shared AI model's, MusicBrainz's and
+  Spotify's requests, and on to the server it's set up for: only that
+  server's own goes now, where it's the one in use. And Settings › Source
+  no longer asks that server who it is with your Plex sign-in.
 - **docker stop lost what the service hadn't written yet** (the last few
   seconds' changes, and up to five minutes of what the MusicBrainz features
   looked up): the image starts under tini, which tells the service to stop,
