@@ -20,6 +20,7 @@ const PAGE = 500; // albums read from Plex at a time
 const ASK = 200; // ...and asked about at a time
 const AGAIN_MS = 5000; // how often what's still being looked up is asked about again
 const AGAIN_AT_MOST = 400; // ...those first in line, at most, each time
+const SHOWN = 300; // of each list, on the page (Fix all, Add all and the download take in the rest)
 
 const genresOf = (m) => (Array.isArray(m.Genre) ? m.Genre.map((t) => t?.tag).filter(Boolean) : []);
 const plexYear = (m) => Number(m.year) || Number(String(m.originallyAvailableAt || '').slice(0, 4)) || null;
@@ -39,7 +40,7 @@ export async function mbReviewView({ el, onDispose }) {
   const sec = app.source.sectionKey;
   let gone = false;
   let timer = null;
-  onDispose?.(() => {
+  onDispose(() => {
     gone = true;
     clearTimeout(timer);
   });
@@ -283,17 +284,32 @@ export async function mbReviewView({ el, onDispose }) {
       {
         type: 'button',
         onclick: async (e) => {
-          e.currentTarget.disabled = true;
+          const button = e.currentTarget;
+          button.disabled = true;
           try {
             await onClick();
           } catch (err) {
             toast(`Couldn’t change it in Plex. ${describeError(err)}`);
+            button.disabled = false;
           }
           render();
         },
       },
       label,
     );
+
+  // What's shown, as it was last painted: each part is painted again only
+  // when what it shows has changed (it's asked again every few seconds
+  // while albums are looked up, for hours on musicbrainz.org), so what has
+  // focus keeps it, and the page stays where it's scrolled to. (Fix all and
+  // Add all take the lists as they are when they're used.)
+  const painted = { actions: '', years: '', genres: '' };
+  const changedPart = (part, shape) => {
+    const now = JSON.stringify(shape);
+    if (painted[part] === now) return false;
+    painted[part] = now;
+    return true;
+  };
 
   function render() {
     if (gone) return;
@@ -321,79 +337,88 @@ export async function mbReviewView({ el, onDispose }) {
           ]),
     );
     if (!pending && (unchecked || !known)) status.classList.add('warn');
-    actions.replaceChildren(
-      ...(lastAll?.list.length
-        ? [
-            h(
-              'button.btn.btn-secondary.mb-undo-all',
-              { type: 'button', onclick: () => undoAll() },
-              icon('refresh', 20),
-              h('span', null, `Undo the last ${fmt.count(lastAll.list.length, 'fix', 'fixes')}`),
-            ),
-          ]
-        : []),
-      ...(ys.length || gs.length
-        ? [
-            h(
-              'button.btn.btn-secondary',
-              {
-                type: 'button',
-                onclick: () => {
-                  const head = ['Artist', 'Album', 'Year in Plex', 'First year on MusicBrainz', 'Genres in Plex', 'Genres on MusicBrainz', 'MusicBrainz release group', 'Link'];
-                  const all = albums.map((m, i) => ({ m, g: found[i] })).filter(({ g }) => g && typeof g === 'object');
-                  const rows = all
-                    .filter(({ m, g }) => differs(m, g))
-                    .map(({ m, g }) => [m.parentTitle, m.title, plexYear(m) || '', firstYear(g) || '', genresOf(m).join('; '), (g.genres || []).join('; '), g.id, mbLink(g)]);
-                  download(toCsv(head, rows), `musicbrainz-fixes-${fileDate()}.csv`, 'text/csv;charset=utf-8');
-                  toast('Downloaded, to open in a spreadsheet');
-                },
-              },
-              icon('arrowDown', 20),
-              h('span', null, 'Download (CSV)'),
-            ),
-          ]
-        : []),
-    );
-    years.replaceChildren(
-      ...(ys.length
-        ? [
-            h(
-              'section.block',
-              null,
-              sectionHeader(
-                `Years (${fmt.number(ys.length)})`,
-                null,
-                h('button.link-btn.mb-fix-years', { type: 'button', onclick: () => fixAll(ys, fixYear, undoYear, 'year') }, 'Fix all'),
-              ),
+    const yearsShown = ys.slice(0, SHOWN).map((x) => [x.m.ratingKey, yearLine(x)]);
+    const genresShown = gs.slice(0, SHOWN).map((x) => [x.m.ratingKey, genreLine(x)]);
+    const nothing = !pending && !ys.length && found.some((g) => g && typeof g === 'object');
+    if (changedPart('actions', [lastAll?.list.length || 0, !!(ys.length || gs.length)])) {
+      actions.replaceChildren(
+        ...(lastAll?.list.length
+          ? [
               h(
-                'div.rows.mb-review-rows',
-                null,
-                ys.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: yearLine(x), right: fixButton(`Use ${firstYear(x.g)}`, () => fixYear(x)), cls: 'mb-year-row' })),
+                'button.btn.btn-secondary.mb-undo-all',
+                { type: 'button', onclick: () => undoAll() },
+                icon('refresh', 20),
+                h('span', null, `Undo the last ${fmt.count(lastAll.list.length, 'fix', 'fixes')}`),
               ),
-              ys.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(ys.length - 300)} more: Fix all and the download include them.`) : null,
-            ),
-          ]
-        : []),
-    );
-    genres.replaceChildren(
-      ...(gs.length
-        ? [
-            h(
-              'section.block',
-              null,
-              sectionHeader(`Genres (${fmt.number(gs.length)})`, null, h('button.link-btn.mb-fix-genres', { type: 'button', onclick: () => fixAll(gs, fixGenres, undoGenres, 'genres') }, 'Add all')),
-              h(
-                'div.rows.mb-review-rows',
-                null,
-                gs.slice(0, 300).map((x) => row({ title: x.m.title, subtitle: genreLine(x), right: fixButton('Add', () => fixGenres(x)), cls: 'mb-genre-row' })),
-              ),
-              gs.length > 300 ? h('p.hint.pad', null, `And ${fmt.number(gs.length - 300)} more: Add all and the download include them.`) : null,
-            ),
-          ]
-        : !pending && !ys.length && found.some((g) => g && typeof g === 'object')
-          ? [emptyState('Nothing to fix.')]
+            ]
           : []),
-    );
+        ...(ys.length || gs.length
+          ? [
+              h(
+                'button.btn.btn-secondary',
+                {
+                  type: 'button',
+                  onclick: () => {
+                    const head = ['Artist', 'Album', 'Year in Plex', 'First year on MusicBrainz', 'Genres in Plex', 'Genres on MusicBrainz', 'MusicBrainz release group', 'Link'];
+                    const all = albums.map((m, i) => ({ m, g: found[i] })).filter(({ g }) => g && typeof g === 'object');
+                    const rows = all
+                      .filter(({ m, g }) => differs(m, g))
+                      .map(({ m, g }) => [m.parentTitle, m.title, plexYear(m) || '', firstYear(g) || '', genresOf(m).join('; '), (g.genres || []).join('; '), g.id, mbLink(g)]);
+                    download(toCsv(head, rows), `musicbrainz-fixes-${fileDate()}.csv`, 'text/csv;charset=utf-8');
+                    toast('Downloaded, to open in a spreadsheet');
+                  },
+                },
+                icon('arrowDown', 20),
+                h('span', null, 'Download (CSV)'),
+              ),
+            ]
+          : []),
+      );
+    }
+    if (changedPart('years', [ys.length, yearsShown])) {
+      years.replaceChildren(
+        ...(ys.length
+          ? [
+              h(
+                'section.block',
+                null,
+                sectionHeader(
+                  `Years (${fmt.number(ys.length)})`,
+                  null,
+                  h('button.link-btn.mb-fix-years', { type: 'button', onclick: () => fixAll(yearRows(), fixYear, undoYear, 'year') }, 'Fix all'),
+                ),
+                h(
+                  'div.rows.mb-review-rows',
+                  null,
+                  ys.slice(0, SHOWN).map((x) => row({ title: x.m.title, subtitle: yearLine(x), right: fixButton(`Use ${firstYear(x.g)}`, () => fixYear(x)), cls: 'mb-year-row' })),
+                ),
+                ys.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(ys.length - SHOWN)} more: Fix all and the download include them.`) : null,
+              ),
+            ]
+          : []),
+      );
+    }
+    if (changedPart('genres', [gs.length, genresShown, nothing])) {
+      genres.replaceChildren(
+        ...(gs.length
+          ? [
+              h(
+                'section.block',
+                null,
+                sectionHeader(`Genres (${fmt.number(gs.length)})`, null, h('button.link-btn.mb-fix-genres', { type: 'button', onclick: () => fixAll(genreRows(), fixGenres, undoGenres, 'genres') }, 'Add all')),
+                h(
+                  'div.rows.mb-review-rows',
+                  null,
+                  gs.slice(0, SHOWN).map((x) => row({ title: x.m.title, subtitle: genreLine(x), right: fixButton('Add', () => fixGenres(x)), cls: 'mb-genre-row' })),
+                ),
+                gs.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(gs.length - SHOWN)} more: Add all and the download include them.`) : null,
+              ),
+            ]
+          : nothing
+            ? [emptyState('Nothing to fix.')]
+            : []),
+      );
+    }
   }
 
   // (Asked about again below where this couldn't: MusicBrainz not

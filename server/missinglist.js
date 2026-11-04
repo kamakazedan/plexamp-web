@@ -64,9 +64,21 @@ const written = (v) =>
 const OTHER_SCRIPT = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}\p{N}\p{M}\s]/u;
 // Whether there are letters of another script than Latin in it.
 export const otherScript = (v) => OTHER_SCRIPT.test(String(v || ''));
+// (Worked out once for each name, as the same ones are compared again and
+// again: a list's entries for each change made to it, say. NORMS_KEPT at
+// most: past that, they all go, and each is worked out again as it comes.)
+const NORMS_KEPT = 10000;
+const norms = new Map(); // name -> as it's compared
 export const norm = (v) => {
-  const w = written(v);
-  return OTHER_SCRIPT.test(w) ? w : plain(v) || w;
+  const name = String(v || '');
+  let n = norms.get(name);
+  if (n === undefined) {
+    const w = written(name);
+    n = OTHER_SCRIPT.test(w) ? w : plain(name) || w;
+    if (norms.size >= NORMS_KEPT) norms.clear();
+    norms.set(name, n);
+  }
+  return n;
 };
 
 export const sourceOf = (m) => (m.via === 'spotify' ? 'spotify' : 'ai');
@@ -148,10 +160,19 @@ export function applyNote(list, op, { server, prompt } = {}) {
   const here = (m) => m.server === server && String(m.section) === String(op.section);
   const found = new Set(op.found || []);
   const unreal = new Set(op.unreal || []);
-  const gone = (m) => here(m) && (found.has(keyOf(m)) || (unreal.has(keyOf(m)) && m.via !== 'spotify'));
-  const kept = list.filter((m) => !gone(m));
+  // (Each one's key worked out once.)
+  const kept = [];
   const index = new Map();
-  for (const m of kept) if (here(m)) index.set(keyOf(m), m);
+  for (const m of list) {
+    if (!here(m)) {
+      kept.push(m);
+      continue;
+    }
+    const k = keyOf(m);
+    if (found.has(k) || (unreal.has(k) && m.via !== 'spotify')) continue;
+    kept.push(m);
+    index.set(k, m);
+  }
   const noted = new Set();
   // Those noted now, in the order they are: last in the list (see trimMissing).
   const noting = [];
@@ -259,6 +280,7 @@ export function applyMerge(list, entries = [], { server } = {}) {
 // in the library).
 export function applyForget(list, ids = [], { server } = {}) {
   const gone = new Set(ids);
+  if (!gone.size) return list.slice();
   return list.filter((m) => !(m.server === server && gone.has(idOf(m))));
 }
 

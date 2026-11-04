@@ -5,6 +5,9 @@
 #
 #   docker build -t plexamp-web:test . && sh docker/test-container.sh plexamp-web:test
 #
+# --smoke only checks that it starts and its parts answer, with more time for
+# each: for an image of another platform, run under emulation (CI's arm64).
+#
 # The containers' service uses the mock for plex.tv too (PLEX_TV_URL), whose
 # accounts are t (Dan, who owns the server), t2 (Sam, a friend with access)
 # and t3 (Alex, a friend without access). Dan also has a Plex player, which
@@ -12,9 +15,15 @@
 set -eu
 
 IMAGE="${1:-plexamp-web:test}"
+SMOKE=false
+if [ "${2:-}" = --smoke ]; then SMOKE=true; fi
+# Tries, half a second apart, for a container to answer (more under emulation).
+TRIES=40
+if [ "$SMOKE" = true ]; then TRIES=240; fi
 NET="pw-test-$$"
 DATA_VOLUME="pw-data-$$"
 LINK_VOLUME="pw-link-$$"
+STOP_VOLUME="pw-stop-$$"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="python:3.12-alpine"
 CURL="curlimages/curl:8.10.1"
@@ -23,9 +32,9 @@ TV="PLEX_TV_URL=http://pw-plex:32400"
 CERTS=""
 
 cleanup() {
-    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-plex-m1 pw-plex-m2 pw-ollama pw-web pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web5c pw-web5d pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-web11 pw-bad >/dev/null 2>&1 || true
+    docker rm -f pw-plex pw-plex-tls pw-plex-self pw-plex-m1 pw-plex-m2 pw-ollama pw-web pw-web1b pw-web2 pw-web3 pw-web4 pw-web5 pw-web5b pw-web5c pw-web5d pw-web6 pw-web7 pw-web8 pw-web9 pw-web10 pw-web11 pw-bad >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
-    docker volume rm "$DATA_VOLUME" "$LINK_VOLUME" >/dev/null 2>&1 || true
+    docker volume rm "$DATA_VOLUME" "$LINK_VOLUME" "$STOP_VOLUME" >/dev/null 2>&1 || true
     if [ -n "$CERTS" ]; then rm -rf "$CERTS"; fi
 }
 trap cleanup EXIT
@@ -61,7 +70,7 @@ lacks() { # name needle haystack
 }
 
 wait_http() { # container url
-    for _ in $(seq 1 40); do
+    for _ in $(seq 1 "$TRIES"); do
         [ "$(c "$2")" != 000 ] && return 0
         sleep 0.5
     done
@@ -72,7 +81,7 @@ wait_http() { # container url
 
 # The service starts alongside nginx; wait until it answers.
 wait_service() { # container
-    for _ in $(seq 1 40); do
+    for _ in $(seq 1 "$TRIES"); do
         [ "$(c "http://$1/api/health")" = 200 ] && return 0
         sleep 0.5
     done
@@ -82,14 +91,39 @@ wait_service() { # container
 }
 
 docker network create "$NET" >/dev/null
-docker run -d --name pw-plex --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --quiet >/dev/null
-docker run -d --name pw-ollama --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-ollama.py --port 11434 --quiet >/dev/null
+docker run -d --name pw-plex --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --host 0.0.0.0 --quiet >/dev/null
+docker run -d --name pw-ollama --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-ollama.py --port 11434 --host 0.0.0.0 --quiet >/dev/null
 wait_http pw-plex "http://pw-plex:32400/identity"
 wait_http pw-ollama "http://pw-ollama:11434/api/version"
 OLLAMA_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' pw-ollama)"
 
+# ---------- --smoke: it starts, and each part answers ----------
+if [ "$SMOKE" = true ]; then
+    docker run -d --name pw-web --network "$NET" -e "$TV" -e PLEX_SERVER_URL=http://pw-plex:32400 \
+        -e OLLAMA_URL=http://pw-ollama:11434 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
+    wait_http pw-web http://pw-web/ || FAILED=1
+    wait_service pw-web || FAILED=1
+    W=http://pw-web
+    expect "smoke: the app is served" 200 "$(c $W/)"
+    expect "smoke: ...with hls.js" 200 "$(c $W/vendor/hls.min.js)"
+    contains "smoke: the service answers through nginx" '"ok":true' "$(cb $W/api/health)"
+    expect "smoke: Plex through /pms/, each request checked by the service" 200 "$(c "$W/pms/library/sections?X-Plex-Token=t")"
+    expect "smoke: ...and a sign-in no one knows refused" 401 "$(c "$W/pms/library/sections?X-Plex-Token=bad")"
+    expect "smoke: the shared AI model, for someone signed in" 200 "$(c -H 'X-Plex-Token: t' $W/ollama/api/tags)"
+    contains "smoke: tini runs it all, so the stop signal reaches everything" "tini" "$(docker exec pw-web cat /proc/1/cmdline 2>/dev/null | tr '\0' ' ')"
+    # (Under emulation, a process's command line can start with QEMU's.)
+    svc_uid="$(docker exec pw-web sh -c 'for p in /proc/[0-9]*; do if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -Eq "(^|/| )node( -[^ ]*)* [^ ]*[s]erver/index.js"; then awk "/^Uid:/ { print \$2 }" "$p/status"; break; fi; done' 2>/dev/null || true)"
+    expect "smoke: the service isn't root" yes "$(if [ -n "$svc_uid" ] && [ "$svc_uid" != 0 ]; then echo yes; else echo "no (uid ${svc_uid:-unknown})"; fi)"
+    if [ "$FAILED" -ne 0 ]; then
+        docker logs pw-web 2>&1 | tail -40
+        exit 1
+    fi
+    echo "All smoke checks passed"
+    exit 0
+fi
+
 # ---------- 1. Everything on; Ollama reached by a name from /etc/hosts ----------
-docker run -d --name pw-web --network "$NET" --add-host "ollama.box:$OLLAMA_IP" -e "$TV" \
+docker run -d --name pw-web --network "$NET" --add-host "ollama.box:$OLLAMA_IP" -e "$TV" -e NODE_OPTIONS=--title=pw-env-leaked \
     -e PLEX_SERVER_URL=http://pw-plex:32400 -e DISABLE_WEBSOCKETS=true \
     -e OLLAMA_URL=http://ollama.box:11434 -e OLLAMA_MODEL=llama3.1:8b \
     -e MUSICBRAINZ_URL=http://pw-plex:32400 -e MUSICBRAINZ_ADVANCED=true -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pw-plex:32400 \
@@ -106,12 +140,25 @@ expect "app is served" 200 "$(c $W/)"
 expect "hls.js is bundled" 200 "$(c $W/vendor/hls.min.js)"
 # The service starts as root to make its socket, then gives up root and
 # root's groups (a container gives root several).
-svc="$(docker exec pw-web sh -c 'for p in /proc/[0-9]*; do if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -q "^[^ ]*node [^ ]*[s]erver/index.js"; then grep -E "^(Uid|Gid|Groups):" "$p/status"; break; fi; done' 2>/dev/null || true)"
+# (Its process: node, its own options, then the service's script.)
+# shellcheck disable=SC2016 # (for the container's shell to expand)
+service_proc='for p in /proc/[0-9]*; do if tr "\0" " " <"$p/cmdline" 2>/dev/null | grep -Eq "^[^ ]*node( -[^ ]*)* [^ ]*[s]erver/index.js"; then'
+svc="$(docker exec pw-web sh -c "$service_proc"' grep -E "^(Uid|Gid|Groups):" "$p/status"; break; fi; done' 2>/dev/null || true)"
 svc_uid="$(printf '%s\n' "$svc" | awk '/^Uid:/ { print $2 }')"
 svc_gid="$(printf '%s\n' "$svc" | awk '/^Gid:/ { print $2 }')"
 svc_groups="$(printf '%s\n' "$svc" | awk '/^Groups:/ { $1 = ""; print }' | xargs)"
 expect "the service isn't root" yes "$(if [ -n "$svc_uid" ] && [ "$svc_uid" != 0 ]; then echo yes; else echo "no (uid ${svc_uid:-unknown})"; fi)"
 expect "the service has none of root's groups" "${svc_gid:-unknown}" "${svc_groups:-none}"
+# Nothing of the container's environment reaches the service but what
+# Node.js needs: its settings are in service.json, and a PW_SERVICE_ name
+# left in the environment can't change them. (Its environment can't be read
+# from here, but NODE_OPTIONS, set on this container, would have renamed it.)
+contains "the service has nothing of the container's environment (NODE_OPTIONS here)" "server/index.js" \
+    "$(docker exec pw-web sh -c "$service_proc"' tr "\0" " " <"$p/cmdline"; break; fi; done' 2>/dev/null || true)"
+lacks "...not even renamed" "pw-env-leaked" "$(docker exec pw-web sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" " "' 2>/dev/null || true)"
+contains "tini runs it all, so the stop signal reaches the service too" "/sbin/tini -g -s -- /docker-entrypoint.sh nginx" "$(docker exec pw-web cat /proc/1/cmdline 2>/dev/null | tr '\0' ' ')"
+contains "test addresses are said in the log (PLEX_TV_URL)" "PLEX_TV_URL is set (http://pw-plex:32400): every sign-in check goes there" "$(docker logs pw-web 2>&1)"
+contains "...and SPOTIFY_URL" "SPOTIFY_URL is set (http://pw-plex:32400)" "$(docker logs pw-web 2>&1)"
 lacks "nginx's version isn't shown" "nginx/" "$(docker run --rm --network "$NET" "$CURL" -sSI --max-time 20 $W/ 2>/dev/null || true)"
 contains "scripts only from the player itself" "script-src 'self';" "$(docker run --rm --network "$NET" "$CURL" -sSI --max-time 20 $W/ 2>/dev/null || true)"
 
@@ -280,6 +327,14 @@ expect "Your devices: a device needs a proper id" 400 "$(c -H 'X-Plex-Token: t' 
 expect "Your devices: only the one playing says what's playing" 409 "$(c -H 'X-Plex-Token: t' -H "$CMD" -X POST -d '{"server":"mock-server-1","device":{"id":"chk-device-1","name":"Check"},"qid":"1","playing":true}' $W/api/devices/report)"
 lacks "Your devices: one account doesn't see another's" '"chk-device-1"' "$(cb -H 'X-Plex-Token: t2' "$W/api/devices?device=chk-device-2&name=Sam&server=mock-server-1&wait=0")"
 docker logs pw-web 2>&1 | grep -q "WebSockets turned off" && pass "startup log explains settings" || fail "startup log explains settings"
+# nginx's errors quote the request they're about, query string and all (a
+# device's name, here): they're never logged. With the service gone (as
+# while it restarts, with tabs open), nginx answers 502, and says nothing.
+gone="$(docker exec pw-web sh -c 'pkill -f "[s]erver/index.js"; for i in 1 2 3 4 5 6 7 8 9 10; do if wget -q -S -O /dev/null "http://127.0.0.1/api/devices?server=mock-server-1&device=chk-device-1&name=Dan%E2%80%99s+iPhone&wait=0" 2>&1 | grep -q " 502 "; then echo 502; exit 0; fi; sleep 0.1; done; echo none' 2>/dev/null || true)"
+expect "the service gone, nginx answers 502" 502 "$gone"
+wait_service pw-web
+lacks "...and logs no request line" 'request: "' "$(docker logs pw-web 2>&1)"
+lacks "...nor the device's name" "Dan%E2%80%99s" "$(docker logs pw-web 2>&1)"
 # Shared playlists: only with your own Plex friends who can use the
 # server; only those it's shared with see it; kept in /data, the service's
 # own, without anyone's sign-in, and still there after a restart.
@@ -366,12 +421,27 @@ LOG="$(docker logs pw-web 2>&1)"
 lacks "no access log by default (tokens travel in Plex addresses)" "/pms/library/sections" "$LOG"
 lacks "no tokens in the log" "X-Plex-Token=t" "$LOG"
 
+# ---------- 1b. docker stop: the service writes what it has before it goes ----------
+# What the MusicBrainz features look up is written ten seconds after the
+# first answer: stopped sooner, only the stop signal (SIGQUIT, nginx's
+# graceful one, which tini gives the service too) has it written. This
+# needs server/index.js to write on SIGQUIT as on SIGTERM.
+docker run -d --name pw-web1b --network "$NET" -e "$TV" -v "$STOP_VOLUME:/data" -e PLEX_SERVER_URL=http://pw-plex:32400 \
+    -e MUSICBRAINZ_URL=http://pw-plex:32400 -e MUSICBRAINZ_ADVANCED=true "$IMAGE" >/dev/null
+wait_service pw-web1b
+cb -H 'X-Plex-Token: t2' -H 'Content-Type: application/json' -X POST -d '{"name":"Glass Harbor"}' http://pw-web1b/api/musicbrainz/artist >/dev/null
+docker stop pw-web1b >/dev/null
+expect "docker stop: the service writes what it has first (what MusicBrainz said, due ten seconds later)" yes \
+    "$(docker run --rm -v "$STOP_VOLUME:/data" --entrypoint sh "$IMAGE" -c 'test -s /data/musicbrainz.json && echo yes || echo no')"
+expect "...and stops cleanly" 0 "$(docker inspect -f '{{.State.ExitCode}}' pw-web1b)"
+docker rm -f pw-web1b >/dev/null
+
 # ---------- 2. Nothing set ----------
 docker run -d --name pw-web2 --network "$NET" -v "$DATA_VOLUME:/data" "$IMAGE" >/dev/null
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
 lacks "defaults: with a volume at /data, nothing is said about it" "which isn't a volume" "$(docker logs pw-web2 2>&1)"
-expect "defaults: Play Together, your devices, shared playlists, and account settings and missing tracks, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true, missingSync: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together, your devices, shared playlists, account settings and missing tracks, and playlists from Spotify's download of your data, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true, missingSync: true, spotifyFiles: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
 contains "defaults: Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner)" "Play on with Plex players needs PLEX_SERVER_URL" "$(docker logs pw-web2 2>&1)"
 expect "defaults: ...so the service has no players for anyone" 404 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/cast/players)"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
@@ -486,6 +556,7 @@ wait_service pw-web5b
 contains "offline mode: config.js says so" "offline: true" "$(cb http://pw-web5b/config.js)"
 lacks "offline mode: the password isn't in config.js" "offline-pwd-for-tests" "$(cb http://pw-web5b/config.js)"
 lacks "offline mode: ...nor in the log" "offline-pwd-for-tests" "$(docker logs pw-web5b 2>&1)"
+contains "a test's own PW_SERVICE_ setting reaches the service, the log saying so" "set for tests, and passed on to the service: PW_SERVICE_OFFLINE_TIMING" "$(docker logs pw-web5b 2>&1)"
 offline_pwd() { c -H 'Content-Type: application/json' -X POST -d "{\"key\":\"$1\"}" http://pw-web5b/api/offline/session; }
 expect "offline mode: not while plex.tv is answering" 409 "$(offline_pwd offline-pwd-for-tests)"
 c "http://pw-plex:32400/__mock/config?tv=down" >/dev/null
@@ -516,7 +587,7 @@ c "http://pw-plex:32400/__mock/config?open=0&honour=0&tv=up" >/dev/null
 # nginx takes turns between them, so the server can't be asked about each
 # request: only the owner gets through, and the log says why.
 for m in pw-plex-m1 pw-plex-m2; do
-    docker run -d --name "$m" --network "$NET" --network-alias pw-plex-multi -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --quiet >/dev/null
+    docker run -d --name "$m" --network "$NET" --network-alias pw-plex-multi -v "$ROOT/dev:/dev-scripts:ro" "$PY" python /dev-scripts/mock-plex.py 32400 --host 0.0.0.0 --quiet >/dev/null
 done
 wait_http pw-plex-m1 "http://pw-plex-m1:32400/identity"
 wait_http pw-plex-m2 "http://pw-plex-m2:32400/identity"
@@ -553,16 +624,20 @@ expect "without debug mode browsers can't write to the log" 404 "$(c -H 'Content
 
 # ---------- 7. Play Together off ----------
 docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRAINZ=true -e SPOTIFY_IMPORT=true -e SPOTIFY_LINK_IMPORT=false \
-    -e OFFLINE_NETWORKS=private -e OLLAMA_AUTH=plex "$IMAGE" >/dev/null
+    -e OFFLINE_NETWORKS=private -e OLLAMA_AUTH=plex -e PLEX_CLAIM=claim-for-plex -e OLLAMA_HOST=0.0.0.0 "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify by link)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true, spotifyFiles: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 # (OFFLINE_NETWORKS=private and OLLAMA_AUTH=plex alone, as Proxmox VE's
 # settings have them: the defaults, so the container starts, as it has.)
 lacks "OFFLINE_NETWORKS=private alone (the default): nothing said of it" "OFFLINE_NETWORKS" "$(docker logs pw-web7 2>&1)"
 lacks "...nor of OLLAMA_AUTH=plex alone" "OLLAMA_AUTH" "$(docker logs pw-web7 2>&1)"
 expect "PLAY_TOGETHER=false: no sessions" 404 "$(c -H 'X-Plex-Token: t' http://pw-web7/api/together/me)"
+# (A stack can give every container the same settings file: Plex's and
+# Ollama's own settings are only warned of.)
+contains "PLEX_ and OLLAMA_ names it doesn't know are warned of, and it starts" "PLEX_CLAIM isn't a setting here, so it's left aside" "$(docker logs pw-web7 2>&1)"
+contains "...OLLAMA_HOST too" "OLLAMA_HOST isn't a setting here, so it's left aside" "$(docker logs pw-web7 2>&1)"
 
 # ---------- 7a. Without Node.js: no Plex proxy (nothing would check what goes through it) ----------
 docker run -d --name pw-web11 --network "$NET" -e NODE_BIN=/no/node -e PLEX_SERVER_URL=http://pw-plex:32400 "$IMAGE" >/dev/null
@@ -574,10 +649,10 @@ docker rm -f pw-web11 >/dev/null
 
 # ---------- 7b. Playing on other Plex players off ----------
 docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
-    -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true -e WEBSOCKETS=on -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
+    -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true -e SPOTIFY_FILE_IMPORT=false -e WEBSOCKETS=on -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false, SYNC_SETTINGS=false and SYNC_MISSING_TRACKS=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone; WEBSOCKETS=on over DISABLE_WEBSOCKETS=true: WebSockets only)" 'window.PW_CONFIG = { websockets: "on", together: true, devices: true, spotify: true };' "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false, SYNC_SETTINGS=false, SYNC_MISSING_TRACKS=false and SPOTIFY_FILE_IMPORT=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone; WEBSOCKETS=on over DISABLE_WEBSOCKETS=true: WebSockets only)" 'window.PW_CONFIG = { websockets: "on", together: true, devices: true, spotify: true };' "$(cb http://pw-web8/config.js | tr -d '\n')"
 contains "WEBSOCKETS=on: the log says so" "WebSockets only: live updates don't fall back" "$(docker logs pw-web8 2>&1)"
 contains "...and that DISABLE_WEBSOCKETS=true is left aside" "DISABLE_WEBSOCKETS=true is left aside: WEBSOCKETS=on says otherwise" "$(docker logs pw-web8 2>&1)"
 expect "SYNC_MISSING_TRACKS=false: no missing tracks kept for each account" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/missing?server=mock-server-1')"
@@ -600,9 +675,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERTS/self.key" -out "$CERTS
 chmod 755 "$CERTS"
 chmod 644 "$CERTS"/*
 docker run -d --name pw-plex-tls --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" -v "$CERTS:/certs:ro" "$PY" \
-    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/server.pem /certs/server.key --quiet >/dev/null
+    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/server.pem /certs/server.key --host 0.0.0.0 --quiet >/dev/null
 docker run -d --name pw-plex-self --network "$NET" -v "$ROOT/dev:/dev-scripts:ro" -v "$CERTS:/certs:ro" "$PY" \
-    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/self.pem /certs/self.key --quiet >/dev/null
+    python /dev-scripts/mock-plex.py 32400 --tls 32443 /certs/self.pem /certs/self.key --host 0.0.0.0 --quiet >/dev/null
 wait_http pw-plex-tls "http://pw-plex-tls:32400/identity"
 wait_http pw-plex-self "http://pw-plex-self:32400/identity"
 ip_of() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"; }
@@ -628,6 +703,8 @@ expect "self-signed HTTPS server: refused at /pms/, as the service can't check i
 contains "self-signed HTTPS server: the log says why" "its certificate is self-signed" "$(docker logs pw-web10 2>&1)"
 contains "at an https:// name, nginx checks the Plex server's certificate too" "proxy_ssl_verify on" "$(docker run --rm -e PLEX_SERVER_URL=https://plex.example.com:32400 --entrypoint sh "$IMAGE" -c '/docker-entrypoint.d/40-plexamp-web.sh >/dev/null 2>&1; cat /etc/nginx/conf.d/pms-proxy.inc')"
 lacks "...where at an address it can't (the service checks it's Plex's own)" "proxy_ssl_verify on" "$(docker exec pw-web9 cat /etc/nginx/conf.d/pms-proxy.inc)"
+contains "at an address, connections to the Plex server are kept open (and their TLS)" "keepalive 16;" "$(docker exec pw-web9 cat /etc/nginx/conf.d/pms-probe.inc)"
+lacks "...not at a name nginx looks up for each request" "upstream plexamp_web_pms" "$(docker exec pw-web cat /etc/nginx/conf.d/pms-probe.inc)"
 
 # ---------- 8. Bad settings stop the container with a clear message ----------
 bad() { # name expected-message docker-run-args...
@@ -656,6 +733,11 @@ bad "rejects a DATA_DIR in a system folder" "DATA_DIR can't be in a system folde
 bad "rejects a DATA_DIR that isn't a folder of its own" "DATA_DIR must be a folder of its own" -e DATA_DIR=/var/lib
 bad "rejects a DATA_DIR in the service's own folder" "DATA_DIR can't be in /opt/plexamp-web/server" -e DATA_DIR=/opt/plexamp-web/server/data
 bad "rejects a SERVICE_USER that doesn't exist" "SERVICE_USER nobody-here doesn't exist" -e SERVICE_USER=nobody-here
+bad "a misspelt setting stops it, saying what it's called" "SYNC_SETING isn't a setting: did you mean SYNC_SETTINGS?" -e SYNC_SETING=false
+bad "...and one like none, saying which are like it" "OFFLINE_PASSWORD isn't a setting: those like it are OFFLINE_PWD, OFFLINE_NETWORKS" -e OFFLINE_PASSWORD=offline-pwd-for-tests
+bad "...as does a PW_SERVICE_ name that doesn't reach the service (left from a test)" "PW_SERVICE_AI_AUTH isn't a setting" -e PW_SERVICE_AI_AUTH=off
+bad "PLEX_TV_URL (for tests) must be https:// but to this machine or a container beside it" "PLEX_TV_URL must be an https:// address" -e PLEX_TV_URL=http://plex.example.com
+bad "...as must SPOTIFY_URL" "SPOTIFY_URL must be an https:// address" -e SPOTIFY_URL=http://spotify.example.com
 off() { # name expected-message docker-run-args...: shared playlists off, the rest still up
     name="$1"
     msg="$2"
@@ -680,6 +762,14 @@ off "refuses a shares.json that's a link" "shares.json must be a file of its own
 docker run --rm -v "$LINK_VOLUME:/data" --entrypoint sh "$IMAGE" -c 'rm -f /data/shares.json && touch /data/notes.txt'
 off "won't take over a folder with other files in it" "has other files in it (notes.txt)" -v "$LINK_VOLUME:/data"
 expect "...and leaves it as it was" "root" "$(docker run --rm -v "$LINK_VOLUME:/data" --entrypoint stat "$IMAGE" -c %U /data/notes.txt)"
+# ...but a file of its own it couldn't read, kept aside by the service, is
+# no one else's: nothing's turned off for it.
+docker run --rm -v "$LINK_VOLUME:/data" --entrypoint sh "$IMAGE" -c 'rm -f /data/notes.txt && echo "{" >/data/shares.json.unreadable-2026-11-03T22-10-00Z'
+docker rm -f pw-bad >/dev/null 2>&1 || true
+docker run -d --name pw-bad -v "$LINK_VOLUME:/data" "$IMAGE" >/dev/null
+sleep 3
+lacks "a data file the service kept aside, as it couldn't read it, isn't taken for another's" "shared playlists are off" "$(docker logs pw-bad 2>&1 || true)"
+docker rm -f pw-bad >/dev/null 2>&1 || true
 bad "rejects an unknown OLLAMA_AUTH" "OLLAMA_AUTH must be plex or off" -e OLLAMA_URL=http://x:11434 -e OLLAMA_AUTH=sometimes
 bad "rejects an address with odd characters" "invalid path" -e 'OLLAMA_URL=http://x:11434/;evil'
 bad "rejects an address with a line break in it" "can't have spaces or line breaks" -e "PLEX_SERVER_URL=$(printf 'http://plex.box:32400\n;evil')"

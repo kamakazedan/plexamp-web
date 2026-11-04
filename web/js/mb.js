@@ -26,7 +26,8 @@
 //     years and genres MusicBrainz has that Plex hasn't, to fix in Plex.
 import { app } from './state.js';
 import { norm } from './missinglist.js';
-import { RELEASE_KINDS, kindOf, plexKind, shortRelease, versionedTracks } from './releases.js';
+import { RELEASE_KINDS, kindOf, plexKind, shortRelease, versionedTracks, placeholderArtist } from './releases.js';
+import { serviceFetch } from './service.js';
 
 // The player has them.
 export const mbFeatures = () => !!app.config.musicbrainzAdvanced;
@@ -41,7 +42,7 @@ export const mbOn = (setting) => mbFeatures() && app.settings[setting] !== false
 // it's been turned off (as it was on to begin with, with those).
 export const skipLiveOn = () => app.settings.skipLive === true || mbOn('mbSkipLive');
 
-export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup, sameTitle, apartFromNamesakes, exactAlbum, shortRelease, kindsAgree } from './releases.js';
+export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup, sameTitle, apartFromNamesakes, exactAlbum, shortRelease, kindsAgree, placeholderArtist } from './releases.js';
 export const KIND_NAMES = Object.fromEntries(RELEASE_KINDS);
 // Shown to begin with among an artist's missing albums.
 export const MISSING_KINDS = ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'];
@@ -62,11 +63,21 @@ const PER_MINUTE = 90;
 const BACKGROUND_PER_MINUTE = 60;
 const asked = []; // when the last ones were asked (performance.now()), oldest first
 let notBefore = 0;
+// (Its watch on `signal` goes with it: a long look through the library
+// waits many times on one signal.)
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => (clearTimeout(t), reject(signal.reason)), { once: true });
+    let timer = 0;
+    const stop = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', stop);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', stop, { once: true });
   });
 const busy = (wait) => Object.assign(new Error('MusicBrainz is busy just now.'), { status: 429, mb: true, retryAfter: Math.max(1, Math.ceil(wait / 1000)) });
 async function myTurn(signal, { background = false, now = false } = {}) {
@@ -85,14 +96,15 @@ async function myTurn(signal, { background = false, now = false } = {}) {
   }
 }
 
+// (Asked with who's asking, as the player checks them for its shared AI
+// model: see service.js. Not waited on for longer than MB_TIMEOUT.)
+const MB_TIMEOUT = 40000;
 async function call(path, body, { signal, background = false, now = false } = {}) {
-  const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '' };
-  if (app.source?.token && app.source.token !== app.auth?.token) headers['X-Plex-Server-Token'] = app.source.token;
   for (let tries = 0; ; tries += 1) {
     await myTurn(signal, { background, now });
     let res;
     try {
-      res = await fetch(`api/musicbrainz/${path}`, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'omit', signal: signal || AbortSignal.timeout(40000) });
+      res = await serviceFetch(`api/musicbrainz/${path}`, { method: 'POST', body, signal, timeout: MB_TIMEOUT, server: true });
     } catch (err) {
       if (signal?.aborted) throw err;
       throw Object.assign(new Error('The player’s MusicBrainz features didn’t answer.'), { status: 0 });
@@ -102,12 +114,7 @@ async function call(path, body, { signal, background = false, now = false } = {}
       notBefore = Math.max(notBefore, performance.now() + Math.min(300, Math.max(1, secs)) * 1000);
       if (tries < 2 && !now) continue;
     }
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      /* empty or not JSON */
-    }
+    const { data } = res;
     if (!res.ok) {
       throw Object.assign(new Error(data?.error || `MusicBrainz couldn’t be asked (HTTP ${res.status}).`), {
         status: res.status,
@@ -353,7 +360,7 @@ export async function withoutLiveOrDemos(tracks, { server = app.server, keep = 1
     // (Not Various Artists': theirs is everyone's, and MusicBrainz has too
     // many to look through.)
     if (k) kinds.set(id, k);
-    else if (mbFeatures() && types[i] && artist && title && norm(artist) !== 'various artists') ask.push({ id, artist, title, year });
+    else if (mbFeatures() && types[i] && artist && title && !placeholderArtist(artist)) ask.push({ id, artist, title, year });
   });
   if (ask.length) {
     const groups = await albumsOnMB(ask, { wait: MB_WAIT, now: true }).catch(() => []);

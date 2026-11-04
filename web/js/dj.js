@@ -15,8 +15,10 @@
 import { app, on } from './state.js';
 import { player } from './player.js';
 import { normTrack, store } from './plex.js';
-import { aiReady, djPick, describeAIError, norm } from './ai.js';
+import { aiReady, djPick, describeAIError } from './ai.js';
+import { norm } from './missinglist.js';
 import { coreTitle } from './membership.js';
+import { placeholderArtist } from './releases.js';
 import { describeError } from './router.js';
 import { toast } from './ui.js';
 import { pickable } from './picks.js';
@@ -76,6 +78,11 @@ async function albumTag(cur, field = 'Genre') {
 async function randomTracks(filters, size = 30) {
   return (await server().list(section(), 10, { sort: 'random', size, filters }).catch(() => ({ items: [] }))).items;
 }
+
+// Some of an artist's tracks, at random: not all of them, which can be
+// thousands, to pick one or two.
+const ARTIST_TRACKS = 100;
+const artistTracks = (artistId) => randomTracks({ 'artist.id': artistId }, ARTIST_TRACKS);
 
 async function sameGenre(cur, size = 30) {
   const genre = await albumTag(cur);
@@ -196,7 +203,7 @@ const PICKERS = {
   async double({ cur, ctx }) {
     if (!cur.artistId) return [];
     let list = await picks(await server().popularTracks(section(), cur.artistId, 25).catch(() => []), ctx);
-    if (list.length < 3) list = list.concat(await picks(await server().allLeaves(cur.artistId).catch(() => []), ctx));
+    if (list.length < 3) list = list.concat(await picks(await artistTracks(cur.artistId), ctx));
     const t = pickOne(list, 10);
     return t ? [{ track: t }] : [];
   },
@@ -217,7 +224,7 @@ const PICKERS = {
 
   async superfan({ cur, ctx }) {
     if (!cur.artistId) return [];
-    const t = pickOne(await picks(await server().allLeaves(cur.artistId).catch(() => []), ctx));
+    const t = pickOne(await picks(await artistTracks(cur.artistId), ctx));
     return t ? [{ track: t }] : [];
   },
 
@@ -254,7 +261,7 @@ async function aiCandidates(cur, ctx, anchor) {
   const artistsOf = (items) =>
     items
       .map((m) => ({ id: String(m.ratingKey && m.type === 'artist' ? m.ratingKey : m.grandparentRatingKey || ''), name: m.type === 'artist' ? m.title : m.grandparentTitle }))
-      .filter((a) => a.id && a.name && !avoid.has(norm(a.name)) && norm(a.name) !== 'various artists' && !listed.has(a.id) && listed.add(a.id));
+      .filter((a) => a.id && a.name && !avoid.has(norm(a.name)) && !placeholderArtist(a.name) && !listed.has(a.id) && listed.add(a.id));
   const lists = [artistsOf(near), artistsOf(similar.filter((m) => m.type === 'artist')), artistsOf(inGenre)];
   // Taken in turn, so each kind has its say.
   let artists = [];

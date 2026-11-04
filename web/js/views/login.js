@@ -3,6 +3,7 @@ import { store, createPin, authUrl, checkPin, getUser, PlexServer } from '../ple
 import { navigate, describeError } from '../router.js';
 import { h, icon, toast } from '../ui.js';
 import { offlineAsked, offlineState, signInOffline } from '../offline.js';
+import { SECRET_INPUT } from './common.js';
 
 const PIN_TTL = 15 * 60 * 1000;
 // How often the page asks whether plex.tv is answering (more often while it
@@ -196,7 +197,7 @@ async function resumeSignIn(button, status) {
 function manualForm() {
   const proxy = proxyUri();
   const url = h('input', { type: 'url', placeholder: 'http://192.168.1.10:32400', autocomplete: 'url', required: !proxy, value: '' });
-  const token = h('input', { type: 'password', placeholder: 'Your X-Plex-Token', autocomplete: 'off', required: true });
+  const token = h('input', { type: 'password', placeholder: 'Your X-Plex-Token', required: true, ...SECRET_INPUT });
   const submit = h('button.btn.btn-secondary.btn-wide', { type: 'submit' }, 'Connect');
   const form = h(
     'form.form.login-form',

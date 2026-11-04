@@ -11,9 +11,11 @@
 //
 // Kept in a file (shares.json in the data folder), written soon after each
 // change, readable by the service only.
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { ServiceError } from './errors.js';
+import { readDataFile, writeDataFile } from './datafile.js';
+import { userId, SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 export const SHARE_LIMITS = {
   tracks: 5000, // in a shared playlist
@@ -23,16 +25,10 @@ export const SHARE_LIMITS = {
   title: 200,
 };
 
-export class ShareError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class ShareError extends ServiceError {}
 
 const ID = /^[a-f0-9]{24}$/;
 const TRACK = /^\d{1,12}$/;
-const SERVER = /^[A-Za-z0-9._-]{1,100}$/;
 const PLAYLIST = /^\d{1,12}$/;
 const ROLES = new Set(['view', 'edit']);
 // How long one of someone's devices has to bring their copy up to date
@@ -43,10 +39,9 @@ const LEASE = /^[a-f0-9]{24}$/;
 // Text as it's kept: one line, at most `n` characters.
 const line = (v, n) =>
   String(v ?? '')
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(CONTROL_CHARACTERS, ' ')
     .trim()
     .slice(0, n);
-const userId = (v) => (Number.isSafeInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
 const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 const unreadable = () => new ShareError(400, 'That request couldn’t be read.');
 
@@ -162,7 +157,7 @@ export function mergeTracks(base, mine, theirs) {
 // A share from the file, checked (the file could have been edited), or null.
 function checked(s) {
   try {
-    if (!s || !ID.test(s.id) || !SERVER.test(s.server) || !userId(s.owner?.id)) return null;
+    if (!s || !ID.test(s.id) || !SERVER_ID.test(s.server) || !userId(s.owner?.id)) return null;
     const members = (Array.isArray(s.members) ? s.members : [])
       .filter((m) => userId(m?.id) && ROLES.has(m.role) && userId(m.id) !== userId(s.owner.id))
       .slice(0, SHARE_LIMITS.members)
@@ -205,17 +200,16 @@ export class Shares {
     this.load();
   }
 
+  // (One that can't be read is kept aside, never written over: see
+  // datafile.js.)
   load() {
-    if (!this.file || !existsSync(this.file)) return;
-    try {
-      const data = JSON.parse(readFileSync(this.file, 'utf8'));
-      for (const raw of Array.isArray(data?.shares) ? data.shares : []) {
+    const read = (data) => {
+      for (const raw of Array.isArray(data.shares) ? data.shares : []) {
         const s = checked(raw);
         if (s) this.list.set(s.id, s);
       }
-    } catch (err) {
-      this.log?.warn(`shared playlists: couldn't read ${this.file} (${err.message}); starting without them`);
-    }
+    };
+    if (!readDataFile(this.file, read, { log: this.log, what: 'shared playlists' })) this.file = null;
   }
 
   // Written soon after a change (a burst of changes, once).
@@ -230,10 +224,8 @@ export class Shares {
 
   write() {
     if (!this.file) return;
-    const tmp = `${this.file}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify({ version: 1, shares: [...this.list.values()] }), { mode: 0o600 });
-      renameSync(tmp, this.file);
+      writeDataFile(this.file, { version: 1, shares: [...this.list.values()] });
     } catch (err) {
       this.log?.error(`shared playlists: couldn't save them to ${this.file}: ${err.message}`);
     }
@@ -290,7 +282,7 @@ export class Shares {
   // members: [{ id, title, role }], checked by the caller to be the owner's
   // Plex friends.
   create(owner, { server, playlist, title, tracks, members = [] }) {
-    if (!SERVER.test(String(server || '')) || !PLAYLIST.test(String(playlist || ''))) throw unreadable();
+    if (!SERVER_ID.test(String(server || '')) || !PLAYLIST.test(String(playlist || ''))) throw unreadable();
     const list = cleanTracks(tracks);
     if (!list.length) throw new ShareError(400, 'Add some tracks to the playlist first.');
     const theirs = [...this.list.values()].filter((s) => s.owner.id === owner.id);

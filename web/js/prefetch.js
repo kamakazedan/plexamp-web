@@ -47,7 +47,10 @@ export const LOAD_AHEAD_BYTES = (() => {
   const touch = !!globalThis.matchMedia?.('(pointer: coarse)').matches;
   return (touch ? 256 : 384) * 1024 * 1024;
 })();
-const LONG_FORM_MS = 20 * 60000; // long mixes play as they come in (and what's after them waits)
+// Tracks at least this long count as long-form (DJ mixes, audiobooks: see
+// player.js, which takes it from here). Long mixes play as they come in
+// (and what's after them waits).
+export const LONG_FORM_MS = 20 * 60000;
 const RETRY_AFTER = 60000; // a track that didn't load is tried again after this long
 const CHECK_EVERY = 3000;
 const WAIT_EVERY = 500; // waiting for the connection, it's looked at this often
@@ -88,6 +91,9 @@ const due = (e) => !e || (e.state === 'failed' && Date.now() >= e.retryAt);
 // More than can be kept: it plays as it comes in, and isn't tried again
 // while it's wanted.
 const tooBig = () => Object.assign(new Error('More than can be kept.'), { tooBig: true });
+// The server's answer wasn't the file (or part): with its status, which says
+// whether asking again could help (see player.js fileComes).
+const answered = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
 
 export class Prefetcher {
   constructor(player) {
@@ -379,7 +385,7 @@ export class Prefetcher {
   pump() {
     clearTimeout(this.timer);
     this.timer = null;
-    if (this.entries.size || this.count || this.keepCount) this.timer = setTimeout(() => this.plan(), CHECK_EVERY);
+    // (Loading: looked at again once it's done, see load.)
     if (this.busy) return;
     // The tracks ahead first; then what's to keep, once played.
     let next = this.aheadNext();
@@ -388,13 +394,32 @@ export class Prefetcher {
       next = this.keepNext();
       keeping = true;
     }
-    if (!next || !this.player.roomToFetch()) return;
+    const room = !!next && this.player.roomToFetch();
+    // Looked at again in a while only while something waits: a track to
+    // load once the track playing has what it needs, or one that didn't
+    // load, to try again. (Otherwise, once the queue, the track, the player
+    // or the settings change: see the constructor.)
+    const again = next && !room ? CHECK_EVERY : this.retryIn();
+    if (again != null) this.timer = setTimeout(() => this.plan(), again);
+    if (!room) return;
     // (Set aside part-read: the rest of it.)
     const had = this.entries.get(next.qid);
     const paused = had?.state === 'paused' ? had : null;
     const src = paused ? paused.src : this.loadable(next, { keeping });
     if (!src || !this.makeRoom(this.sizeOf(next, src) * 1.05 - (paused?.bytes || 0), { keeping })) return;
     this.load(next, { keeping });
+  }
+
+  // How long until a track ahead (or the one playing, to keep) that didn't
+  // load is to be tried again (ms; see RETRY_AFTER), or null for none.
+  retryIn() {
+    const now = Date.now();
+    const keep = this.keepable();
+    const waits = [...this.wanted(), ...(keep ? [keep] : [])]
+      .map((t) => this.entries.get(t.qid))
+      .filter((e) => e?.state === 'failed')
+      .map((e) => Math.max(CHECK_EVERY, e.retryAt - now));
+    return waits.length ? Math.min(...waits) : null;
   }
 
   // An entry for a track, as `src` (see player.sourceFor), as `playback`.
@@ -409,6 +434,7 @@ export class Prefetcher {
     e.expected = this.sizeOf(track, src);
     e.used = false; // played from: played again, it's another playback (see playbackFor)
     e.keep = false; // there to keep, once played (it gives way to the tracks ahead)
+    e.inParts = false; // a file, read a part at a time: what's in can be read on from (see now)
     // A file's address for an audio element: in memory.
     e.objectUrl = () => (e.url ||= URL.createObjectURL(e.blob));
     return e;
@@ -508,7 +534,7 @@ export class Prefetcher {
     await this.room(e);
     const t = performance.now();
     const res = await this.request(e, url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw answered(res.status);
     const got = kind === 'text' ? { body: await res.text(), url: res.url || url } : { body: await res.arrayBuffer(), url: res.url || url };
     await this.pace(e, kind === 'text' ? got.body.length : got.body.byteLength, performance.now() - t);
     return got;
@@ -553,7 +579,7 @@ export class Prefetcher {
       }
       // Asked for from just past its end (it's a whole number of parts).
       if (res.status === 416 && at > 0) break;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw answered(res.status);
       e.type ||= res.headers.get('Content-Type') || '';
       if (body) {
         // Where the part is, and the file's size, where the browser can see
@@ -564,6 +590,7 @@ export class Prefetcher {
         if (size) e.expected = Number(size);
         chunks.push(body);
         e.bytes += body.byteLength;
+        e.inParts = true;
         tries = 0;
         this.over(e);
         if (size ? Number(to) + 1 >= Number(size) : body.byteLength < part) break;
@@ -627,9 +654,21 @@ export class Prefetcher {
     const had = this.ready(track, src);
     if (had) return had;
     const old = this.entries.get(track.qid);
+    // Part-read already, a part at a time (loading ahead, or set aside to
+    // keep): read on from there, not again from the top. (What's in is
+    // copied: the read it was in stops, and what it adds as it does is its
+    // own.)
+    const part = old && !old.src.hls && old.inParts && old.chunks?.length && old.track.partKey === track.partKey ? old : null;
+    const chunks = part ? part.chunks.slice() : null;
+    const type = part?.type;
+    const expected = part?.expected;
     if (old) this.drop(old);
     const e = this.entry(track, src, playback, 'loading');
     e.now = true;
+    if (chunks) {
+      Object.assign(e, { chunks, type, expected, inParts: true });
+      e.bytes = chunks.reduce((n, c) => n + c.byteLength, 0);
+    }
     this.entries.set(track.qid, e);
     try {
       await this.loadFile(e);

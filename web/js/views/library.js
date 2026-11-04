@@ -1,8 +1,9 @@
 import { app, playlistScope, on } from '../state.js';
 import { normTrack, store } from '../plex.js';
-import { navigate, parseHash, refresh, keepState } from '../router.js';
+import { navigate, parseHash, refresh, keepState, dropCached } from '../router.js';
 import { h, icon, pageHeader, backHeader, row, grid, pagedList, sheet, iconButton, iconTile, emptyState, debounce, fmt, sectionHeader } from '../ui.js';
-import { mapLimit, norm } from '../ai.js';
+import { mapLimit } from '../ai.js';
+import { norm } from '../missinglist.js';
 import { albumCard, artistRow, playlistCard, collectionCard, trackRow, numberedList } from '../components.js';
 import { playList } from '../actions.js';
 import { isLovedTitle } from '../ratings.js';
@@ -266,9 +267,11 @@ export async function browseView({ el, params, query, saved, key, onDispose }) {
   };
   // The list as it is, and (while something's typed in the box) what in it
   // matches, shown in its place as you type; each with what loads more of
-  // it, which stops while it's out of sight.
+  // it, which stops while it's out of sight. (What matches is let go of as
+  // soon as something else is typed: only the list itself, and what
+  // matches now, wait for the page to go.)
   const box = (list) => h('div.list-box', null, list);
-  const listed = (wrap, extra, empty) =>
+  const listed = (wrap, extra, empty, stopWith) =>
     pagedList(wrap, {
       pageSize: r.pageSize,
       fetchPage: (start, size) => s.list(sec, type, { sort, start, size, filters: plexFilters({ ...filters, ...extra }) }),
@@ -279,16 +282,17 @@ export async function browseView({ el, params, query, saved, key, onDispose }) {
         wrap.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
       },
       empty,
-      onDispose,
+      onDispose: stopWith,
     });
   const container = r.wrap();
   const all = box(container);
   el.append(all);
-  listed(container, {}, 'Nothing matches.');
+  listed(container, {}, 'Nothing matches.', onDispose);
   const matches = box(null);
   matches.hidden = true;
   el.append(matches);
   let typed = null; // { list, words }
+  onDispose(() => typed?.list.destroy());
 
   function showWords(raw) {
     const words = raw.trim();
@@ -494,15 +498,18 @@ export async function playlistsView({ el, onDispose }) {
   const [pls] = await Promise.all([app.server.playlists(playlistScope()), sharingOn() ? sharesSoon() : null]);
   const menu = iconButton('more', 'Import and back up', playlistsMenu, { cls: 'playlists-menu' });
   el.append(pageHeader('Playlists', { subtitle: pls.length ? fmt.count(pls.length, 'playlist', 'playlists') : null, actions: [menu] }));
-  // Shared with you by Plex friends, to add (or not).
+  // Shared with you by Plex friends, to add (or not). (One added or turned
+  // down: this page again, at once if it's still the one on screen, else
+  // when it's opened again.)
   const invites = h('section.block.invites');
+  const afterInvite = () => (el.isConnected ? refresh() : dropCached((p) => p === '/playlists'));
   const paintInvites = () => {
     const list = invitations();
     invites.hidden = !list.length;
-    invites.replaceChildren(...(list.length ? [sectionHeader('Shared with you'), h('div.rows', null, invitationRows(list, { onChange: () => refresh() }))] : []));
+    invites.replaceChildren(...(list.length ? [sectionHeader('Shared with you'), h('div.rows', null, invitationRows(list, { onChange: afterInvite }))] : []));
   };
   paintInvites();
-  onDispose?.(on('shares', paintInvites));
+  onDispose(on('shares', paintInvites));
   el.append(invites);
   if (!pls.length) {
     el.append(
@@ -534,10 +541,20 @@ async function collectionsView({ el, query }) {
 // ---------- Genres, styles, moods, decades ----------
 
 // How many albums (or artists) have each tag: tags nothing in the library
-// uses any more are left out, and the rest show their count.
+// uses any more are left out, and the rest show their count. Each is
+// counted as it comes near the screen, a few at a time (a library can have
+// hundreds of styles, a request each), and its count kept a while, in a
+// list of their own: not the server's memo, which the rest of the app
+// shares.
+const TAG_COUNTS_AT_ONCE = 6;
+const TAG_COUNT_MS = 10 * 60000; // how long a tag's count is kept
+const TAG_COUNTS_KEPT = 2000; // tags' counts kept, of every list
+const TAG_NEAR = '600px 0px'; // how near the screen a tag is counted
+const tagCounts = new WeakMap(); // server -> Map(tag -> { at, n }), least recently counted first
+
 export async function tagsView({ el, params, query, onDispose }) {
   let disposed = false;
-  onDispose?.(() => (disposed = true));
+  onDispose(() => (disposed = true));
   const { field, type } = params;
   const kind = KINDS[type];
   el.append(backHeader(query.title || 'Browse', { fallback: '/search' }));
@@ -548,39 +565,71 @@ export async function tagsView({ el, params, query, onDispose }) {
     el.append(emptyState('Nothing here.'));
     return;
   }
+  if (!tagCounts.has(s)) tagCounts.set(s, new Map());
+  const kept = tagCounts.get(s);
+  const keyOf = (t) => `${sec}:${type}:${field}:${t.key}`;
+  const keptCount = (t) => {
+    const hit = kept.get(keyOf(t));
+    return hit && Date.now() - hit.at < TAG_COUNT_MS ? hit.n : null;
+  };
   const list = h('div.rows');
-  const rows = tags.map((t) => {
-    const count = h('span.row-count');
+  const show = ({ r, count }, n) => {
+    if (n === 0) {
+      r.remove();
+      if (!list.children.length) list.replaceWith(emptyState('Nothing here.'));
+    } else if (n) count.textContent = fmt.count(n, ...UNITS[kind]);
+  };
+  const countTag = async (x) => {
+    let n = keptCount(x.t);
+    if (n === null) {
+      n = await s.count(sec, type, { [field]: String(x.t.key) }).catch(() => null);
+      if (n === null) return;
+      kept.delete(keyOf(x.t));
+      kept.set(keyOf(x.t), { at: Date.now(), n });
+      while (kept.size > TAG_COUNTS_KEPT) kept.delete(kept.keys().next().value);
+    }
+    if (!disposed) show(x, n);
+  };
+  // Those that come near the screen, counted in turn.
+  const queue = [];
+  let counting = 0;
+  const countNext = () => {
+    while (!disposed && counting < TAG_COUNTS_AT_ONCE && queue.length) {
+      counting += 1;
+      countTag(queue.shift()).finally(() => {
+        counting -= 1;
+        countNext();
+      });
+    }
+  };
+  const byRow = new Map();
+  const near =
+    'IntersectionObserver' in window
+      ? new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) {
+              if (!e.isIntersecting) continue;
+              near.unobserve(e.target);
+              queue.push(byRow.get(e.target));
+            }
+            countNext();
+          },
+          { rootMargin: TAG_NEAR },
+        )
+      : null;
+  onDispose(() => near?.disconnect());
+  for (const t of tags) {
+    // (One counted lately, as it was: no tag nothing has, no wait.)
+    const n = keptCount(t);
+    if (n === 0) continue;
+    const count = h('span.row-count', null, n ? fmt.count(n, ...UNITS[kind]) : null);
     const r = row({ href: browseHref(kind, { [field]: String(t.key), title: t.title }), title: t.title, subtitle: count });
     list.append(r);
-    return { t, r, count };
-  });
-  el.append(list);
-  await mapLimit(rows, 6, async ({ t, r, count }) => {
-    if (disposed) return;
-    const n = await s.memo(`tagCount:${sec}:${type}:${field}:${t.key}`, () => s.count(sec, type, { [field]: String(t.key) }), 10 * 60000).catch(() => null);
-    if (n === 0) r.remove();
-    else if (n) count.textContent = fmt.count(n, ...UNITS[kind]);
-  });
-  if (!list.children.length && !disposed) list.replaceWith(emptyState('Nothing here.'));
-}
-
-// Generic paged listing for any server path (e.g. a genre's albums).
-export async function itemsView({ el, query, onDispose }) {
-  const title = query.title || 'Browse';
-  const countEl = h('div.list-count');
-  el.append(backHeader(title, { fallback: '/search' }), countEl);
-  const r = renderer(query.type, title);
-  const container = r.wrap();
-  el.append(container);
-  pagedList(container, {
-    pageSize: r.pageSize,
-    fetchPage: (start, size) => app.server.byPath(query.path, { start, size }),
-    render: r.render,
-    onTotal: (n) => {
-      countEl.textContent = fmt.count(n, r.unit[0], r.unit[1]);
-      container.style.setProperty('--pos-digits', String(Math.max(2, String(n).length)));
-    },
-    onDispose,
-  });
+    if (n) continue;
+    byRow.set(r, { t, r, count });
+    if (near) near.observe(r);
+    else queue.push(byRow.get(r));
+  }
+  el.append(list.children.length ? list : emptyState('Nothing here.'));
+  countNext();
 }

@@ -1,6 +1,7 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
-import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError, norm } from '../ai.js';
+import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { norm } from '../missinglist.js';
 import { noteMissing, myMissingCount, mbOn, mbWhere, checkSuggestions, missingKeptNote } from '../missing.js';
 import { on, emit } from '../state.js';
 import { playList } from '../actions.js';
@@ -9,6 +10,7 @@ import { navigate } from '../router.js';
 import { h, icon, backHeader, iconButton, toast, fmt } from '../ui.js';
 import { trackRow, numberedList } from '../components.js';
 import { addToPlaylist, addToCollection, isAdminNow } from '../editing.js';
+import { radioArrowKeys } from './common.js';
 
 const SUGGESTIONS = [
   'Late-night drive: moody electronic and trip-hop that slowly builds.',
@@ -28,6 +30,7 @@ const STEPS = [
   ['search', 'Finding tracks in your library'],
   ['order', 'Choosing and ordering tracks'],
 ];
+const LOADING_NOTE = 'Loading the AI model. The first time can take a few minutes.';
 
 // Kept for the session so leaving and coming back shows the last playlist.
 let last = null;
@@ -128,10 +131,11 @@ const leftOut = (verdict) => verdict === 'unknown' || verdict === 'album';
 const missingLine = (m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`);
 
 // Under a playlist, with Show missing tracks on: the songs and artists it
-// suggested that aren't in the library, or that they all are.
-function missingNote(found, onDispose) {
+// suggested that aren't in the library, or that they all are. (`watch`:
+// the page's, for following its MusicBrainz check: see missingBlock.)
+function missingNote(found, watch) {
   if (!aiSettings().missing) return null;
-  if (found?.missing?.length) return missingBlock(found, onDispose);
+  if (found?.missing?.length) return missingBlock(found, watch);
   const one = (list, key) => new Set((list || []).map(key).filter(Boolean)).size;
   const artists = one(found?.seen?.artists, (a) => norm(a));
   const songs = one(found?.seen?.songs, (t) => `${norm(t?.artist)}|${norm(t?.title)}`);
@@ -146,8 +150,9 @@ function missingNote(found, onDispose) {
 }
 
 // What's missing, and (checked on MusicBrainz) what was left out and why,
-// changing as the answers come.
-function missingBlock(found, onDispose) {
+// changing as the answers come: followed while they're coming (`watch`
+// lets go of the one before, the page following one at a time).
+function missingBlock(found, watch) {
   const missing = found.missing;
   const label = h('span');
   const list = h('ul.ai-missing-list');
@@ -202,7 +207,15 @@ function missingBlock(found, onDispose) {
     el.classList.toggle('checking', checking);
   };
   paint();
-  onDispose?.(on('ai-mb', (f) => f === found && paint()));
+  if (found.mb?.state === 'checking') {
+    watch(
+      on('ai-mb', (f) => {
+        if (f !== found) return;
+        paint();
+        if (found.mb?.state !== 'checking') watch(null);
+      }),
+    );
+  }
   return el;
 }
 
@@ -249,31 +262,45 @@ export async function aiPlaylistView({ el, onDispose }) {
     input,
     clear,
   );
-  const lengthRow = h(
-    'div.chips',
-    { role: 'radiogroup', 'aria-label': 'Playlist length' },
-    LENGTHS.map((n) =>
-      h(
-        'button.chip',
-        {
-          type: 'button',
-          role: 'radio',
-          'aria-checked': String(n === length),
-          onclick: (e) => {
-            length = n;
-            lengthRow.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-checked', String(c === e.currentTarget)));
+  const lengthRow = radioArrowKeys(
+    h(
+      'div.chips',
+      { role: 'radiogroup', 'aria-label': 'Playlist length' },
+      LENGTHS.map((n) =>
+        h(
+          'button.chip',
+          {
+            type: 'button',
+            role: 'radio',
+            'aria-checked': String(n === length),
+            onclick: (e) => {
+              length = n;
+              lengthRow.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-checked', String(c === e.currentTarget)));
+            },
           },
-        },
-        `${n} tracks`,
+          `${n} tracks`,
+        ),
       ),
     ),
   );
   const body = h('div.ai-body');
   el.append(backHeader('AI playlist', { fallback: '/search' }), form, lengthRow, body);
 
-  // Pages put aside are kept, and still brought up to date.
+  // Pages put aside are kept, and still brought up to date: what this one
+  // follows is one playlist being made, and one MusicBrainz check, at a
+  // time (the one before let go of as another starts), till it's gone.
   let disposed = false;
-  onDispose?.(() => (disposed = true));
+  let unfollow = null;
+  let unwatch = null;
+  const watch = (off) => {
+    unwatch?.();
+    unwatch = off;
+  };
+  onDispose(() => {
+    disposed = true;
+    unfollow?.();
+    watch(null);
+  });
 
   // A shared model is only for people who can use this player's Plex
   // server: anyone else is told so here, rather than after a wait.
@@ -342,18 +369,21 @@ export async function aiPlaylistView({ el, onDispose }) {
   }
 
   // Shows a playlist being made, step by step, and then the playlist (or
-  // what went wrong).
+  // what went wrong). (A screen reader hears each step as it starts, and
+  // that the model is loading: not the seconds counting.)
   function follow(j) {
-    const steps = STEPS.map(([id, label]) => ({ id, el: h('li.ai-step', null, h('span.ai-step-mark'), h('span', null, label)) }));
+    const steps = STEPS.map(([id, label]) => ({ id, label, el: h('li.ai-step', null, h('span.ai-step-mark'), h('span', null, label)) }));
     const elapsed = h('span');
     const time = () => (elapsed.textContent = `${Math.round((Date.now() - j.started) / 1000)} s`);
     time();
     const tick = setInterval(time, 1000);
-    const loadingNote = h('p.ai-loading', { hidden: true }, 'Loading the AI model. The first time can take a few minutes.');
+    const loadingNote = h('p.ai-loading', { hidden: true }, LOADING_NOTE);
+    const said = h('span.visually-hidden', { role: 'status' });
     body.replaceChildren(
       h(
         'div.ai-progress',
-        { role: 'status' },
+        null,
+        said,
         h('ol.ai-steps', null, steps.map((s) => s.el)),
         loadingNote,
         h(
@@ -373,6 +403,8 @@ export async function aiPlaylistView({ el, onDispose }) {
           s.el.classList.toggle('done', i < at);
           s.el.classList.toggle('active', i === at);
         });
+        const now = [steps[at]?.label, j.loading ? LOADING_NOTE : null].filter(Boolean).join('. ');
+        if (said.textContent !== now) said.textContent = now;
         return undefined;
       }
       stop();
@@ -383,9 +415,11 @@ export async function aiPlaylistView({ el, onDispose }) {
     function stop() {
       clearInterval(tick);
       j.listeners.delete(update);
+      if (unfollow === stop) unfollow = null;
     }
+    unfollow?.();
+    unfollow = stop;
     j.listeners.add(update);
-    onDispose?.(stop);
     update();
   }
 
@@ -395,7 +429,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         'div.ai-error',
         { role: 'alert' },
         h('p', null, describeAIError(err)),
-        err?.missing?.length ? missingNote(err, onDispose) : null,
+        err?.missing?.length ? missingNote(err, watch) : null,
         h(
           'div.button-row',
           null,
@@ -474,7 +508,7 @@ export async function aiPlaylistView({ el, onDispose }) {
         ),
       ),
       list,
-      missingNote(result, onDispose),
+      missingNote(result, watch),
       h('p.ai-based', { hidden: !based.length }, `Based on ${based.slice(0, 12).join(', ')}`),
       h(
         'div.pad',

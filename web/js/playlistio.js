@@ -9,10 +9,13 @@
 // Also used for shared playlists (sharing.js): making a playlist hold a list
 // of tracks, with the fewest changes.
 import { app } from './state.js';
-import { norm, sameTitle, mapLimit, findArtist, titleWord } from './ai.js';
+import { mapLimit, findArtist, titleWord } from './ai.js';
+import { norm } from './missinglist.js';
 import { aliasesOf } from './mb.js';
+import { sameTitle, asides, plexKind } from './releases.js';
 import { saveOrder } from './sorting.js';
 import { toCsv } from './missing.js';
+import { fmt } from './ui.js';
 
 export const FORMAT = 'plexamp-web-playlists';
 const VERSION = 1;
@@ -62,22 +65,18 @@ function cleanEntry(t) {
 
 // ---------- reading a playlist from Plex ----------
 
-// Every entry of a playlist, page by page (at most `limit`): { items, more }.
-// `server`: the Plex server it's on (the one in use, unless given).
-export async function playlistEntries(id, { limit = FILE_LIMITS.tracks, signal, server = app.server } = {}) {
-  const out = [];
-  let more = false;
-  for (let start = 0; ; start += 500) {
+// Every track of a playlist, page by page (at most `limit`): { items, more }
+// (see plex.js readPages). `server`: the Plex server it's on (the one in use,
+// unless given). `ids`: each entry's ids and no more (its track's, and its
+// own), for what needs no more than those.
+export async function playlistEntries(id, { limit = FILE_LIMITS.tracks, signal, server = app.server, ids = false } = {}) {
+  try {
+    const { items, more } = await server.readPlaylist(id, { limit, ids, signal });
+    return { items: items.filter((m) => m.type === 'track' || m.type === undefined), more };
+  } catch (err) {
     if (signal?.aborted) throw abortError();
-    const { items, total } = await server.playlistItems(id, { start, size: 500 });
-    out.push(...items.filter((m) => m.type === 'track' || m.type === undefined));
-    if (out.length >= limit) {
-      more = total > limit;
-      break;
-    }
-    if (!items.length || start + items.length >= total) break;
+    throw err;
   }
-  return { items: out.slice(0, limit), more };
 }
 
 const abortError = () => Object.assign(new Error('Stopped.'), { aborted: true });
@@ -178,8 +177,46 @@ const sameName = (want, have) => {
   return !!w && !!n && (w === n || n.includes(w) || w.includes(n));
 };
 const byArtist = (e, m) => (!e.artist && !e.albumArtist) || [m.originalTitle, m.grandparentTitle].some((a) => sameName(e.artist, a) || sameName(e.albumArtist, a));
-// The same song: the same title (near enough) by the same artist.
-const sameSong = (e, m) => (m?.type === 'track' || m?.type === undefined) && sameTitle(norm(m.title), norm(e.title)) && byArtist(e, m);
+// The other recording a title says it is: what's in its brackets or after a
+// dash that says a remix, a live take, another mix ("Calibre Remix", "Live",
+// "VIP", "Taylor's Version"), as releases.js asides has them; not what only
+// says which cut of the recording it is ("Radio Edit", "Single Version",
+// "Original Mix", "Extended Mix", "Extended"), which a copy's title often
+// leaves out. ("Acoustic" and "Acoustic Version" are one, and so are
+// "Calibre Mix" and "Calibre Remix".)
+const CUT_ONLY = /^(?:(?:radio|single|album|original|short|full|extended|main|clean|explicit)\s+)?(?:edit|version|mix|cut)$|^(?:original|extended)$/;
+const recordingsOf = (title) => asides(title).filter((a) => a.versioned && !CUT_ONLY.test(a.text));
+const recordingOf = (title) =>
+  recordingsOf(title)
+    .map((a) => a.text.replace(/ (?:version|re-?mix|mix)$/, ''))
+    .sort()
+    .join(' | ');
+// A live take, as its title says ("Song - Live at Wembley"): on a live
+// album, its copy's title often doesn't say so (see onIts).
+const liveTake = (title) => {
+  const said = recordingsOf(title);
+  return said.length > 0 && said.every((a) => /\blive\b/.test(a.text));
+};
+// A song's title, as norm has it, without what comes after a dash or a
+// colon ("Song - Remastered 2011" is "song"; brackets norm leaves out).
+const headOf = (title) => norm(String(title || '').split(/\s+[-–—:]\s+/)[0]);
+// Titles of the same song: the same, or spelt alike (as releases.js
+// sameTitle has it), or one the other with what its dash or colon adds,
+// never one with words of its own after it ("One" isn't "One Tree Hill",
+// nor "Song" "Song 2").
+function sameSongTitle(a, b) {
+  const x = norm(a);
+  const y = norm(b);
+  if (!x || !y) return false;
+  if (y.startsWith(`${x} `)) return headOf(b) === x;
+  if (x.startsWith(`${y} `)) return headOf(a) === y;
+  return sameTitle(x, y);
+}
+// The same song: the same title (near enough) by the same artist, and the
+// same recording, as the titles say (a remix isn't the song it remixes, nor
+// another remix of it; nor a live take the studio one).
+const sameRecording = (e, m) => recordingOf(e.title) === recordingOf(m.title);
+const sameSong = (e, m) => (m?.type === 'track' || m?.type === undefined) && sameSongTitle(m.title, e.title) && byArtist(e, m) && sameRecording(e, m);
 
 // How alike a track in the library is to an entry, beyond being the same
 // song: Plex's id for the recording, the exact title, the album, the length,
@@ -223,7 +260,7 @@ const sameAlbum = (e, a) =>
 // differently there ("Song - 2011 Remaster"), the same disc and number and
 // the same length near enough.
 const onAlbum = (e, tracks) =>
-  tracks.find((m) => sameTitle(norm(m.title), norm(e.title))) ||
+  tracks.find((m) => sameSongTitle(m.title, e.title) && sameRecording(e, m)) ||
   tracks.find(
     (m) =>
       e.index !== undefined &&
@@ -295,13 +332,19 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
       return null;
     };
     // Its album, and its number there (the album looked for once, if it's
-    // needed).
+    // needed). A live take whose copy there doesn't say it's live (on Hell
+    // Freezes Over, "Hotel California - Live On MTV, 1994" is "Hotel
+    // California"): the song of its title alone, but only where Plex has
+    // the album as a live one, never a studio album's take of it.
     let albums = null;
     const onIts = async (e) => {
       albums ||= e.album ? s.search(e.album, everywhere, { signal, limit: 10 }).then((r) => r.album || []) : Promise.resolve([]);
       for (const album of (await albums).filter((a) => sameAlbum(e, a)).slice(0, 3)) {
-        const there = onAlbum(e, await s.children(album.ratingKey));
+        const tracks = await s.children(album.ratingKey);
+        const there = onAlbum(e, tracks);
         if (there) return there;
+        const plain = liveTake(e.title) && tracks.find((m) => sameSongTitle(m.title, e.title) && !recordingOf(m.title));
+        if (plain && plexKind(await s.metadata(album.ratingKey).catch(() => null)) === 'live') return plain;
       }
       return null;
     };
@@ -318,16 +361,20 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
     return null;
   };
   const rest = entries.map((e, i) => [e, i]).filter(([, i]) => !out[i]);
-  await mapLimit(rest, 4, async ([e, i]) => {
-    if (signal?.aborted) return;
-    try {
-      out[i] = await lookUp(e);
-    } catch {
-      /* not found this time */
-    }
-    done += 1;
-    tick();
-  });
+  await mapLimit(
+    rest,
+    4,
+    async ([e, i]) => {
+      try {
+        out[i] = await lookUp(e);
+      } catch {
+        /* not found this time */
+      }
+      done += 1;
+      tick();
+    },
+    { signal },
+  );
   if (signal?.aborted) throw abortError();
   return out;
 }
@@ -355,7 +402,7 @@ export const entryLine = (e) => `${e.artist ? `${e.artist} — ` : ''}${e.title}
 export function entryWhere(e) {
   const place = [e.album, e.year].filter(Boolean).join(', ');
   const number = e.index !== undefined ? `${e.disc > 1 ? `disc ${e.disc}, ` : ''}track ${e.index}` : '';
-  const length = e.duration ? clock(e.duration / 1000) : '';
+  const length = e.duration ? fmt.clock(e.duration / 1000) : '';
   return [place, number, length].filter(Boolean).join(' · ');
 }
 
@@ -366,16 +413,8 @@ export const entryText = (e) => `${entryLine(e)}${e.album ? ` — ${e.album}${e.
 export const entriesCsv = (list) =>
   toCsv(
     ['Artist', 'Title', 'Album', 'Album artist', 'Year', 'Disc', 'Track', 'Length'],
-    list.map((e) => [e.artist, e.title, e.album, e.albumArtist, e.year ?? '', e.disc ?? '', e.index ?? '', e.duration ? clock(e.duration / 1000) : '']),
+    list.map((e) => [e.artist, e.title, e.album, e.albumArtist, e.year ?? '', e.disc ?? '', e.index ?? '', e.duration ? fmt.clock(e.duration / 1000) : '']),
   );
-
-const clock = (sec) => {
-  const t = Math.round(sec);
-  const h = Math.floor(t / 3600);
-  const m = Math.floor((t % 3600) / 60);
-  const ss = String(t % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
-};
 
 // ---------- changing a playlist from one list of tracks to another ----------
 
@@ -426,7 +465,7 @@ export function without(list, counts) {
 // account can't have), so the next look can tell what's changed since.
 export async function changePlaylist(id, from, to, { server = app.server, signal } = {}) {
   const s = server;
-  const read = async () => (await playlistEntries(id, { limit: 100000, signal, server: s })).items;
+  const read = async () => (await playlistEntries(id, { limit: 100000, signal, server: s, ids: true })).items;
   const { remove, add } = changesBetween(from, to);
   const entries = await read();
   const gone = new Set();

@@ -45,9 +45,9 @@
 #                       goes to the server owner's Missing tracks, so they can
 #                       see what's missing from their server. Each account's
 #                       follows it to every browser too.
-#   SPOTIFY_FILE_IMPORT "true": Search › From Spotify makes playlists from
-#                       Spotify's download of your data, read in the browser.
-#                       Off unless set, for now.
+#   SPOTIFY_FILE_IMPORT Search › From Spotify makes playlists from Spotify's
+#                       download of your data, read in the browser. On unless
+#                       it's "false".
 #   SPOTIFY_LINK_IMPORT "true": Search › From Spotify makes a playlist from a
 #                       public Spotify playlist's link, with the tracks you
 #                       have. Off unless set: it reads Spotify's public
@@ -61,7 +61,9 @@
 #                       server to let the player in without signing in: see
 #                       docs/configuration.md. 12 to 200 letters, digits and
 #                       . _ ~ + / = : , @ - (openssl rand -base64 24 makes
-#                       one; a # or $ would be read otherwise here).
+#                       one; a # or $ would be read otherwise). Keep it out
+#                       of this file, which is often shared or committed: in
+#                       a file of its own beside it (env_file, below).
 #   OFFLINE_NETWORKS    Where the offline password can be used from:
 #                       "private" (the default: your own networks), "any",
 #                       or addresses and networks, such as 192.168.1.0/24.
@@ -95,9 +97,12 @@ services:
       SYNC_MISSING_TRACKS: "true"
       SPOTIFY_FILE_IMPORT: ""
       SPOTIFY_LINK_IMPORT: ""
-      # OFFLINE_PWD: "a long random password of your own"
       # OFFLINE_NETWORKS: "private"
       DEBUG: ""
+    # Secrets (OFFLINE_PWD, OLLAMA_API_KEY) in a file of their own beside
+    # this one, readable by you alone (chmod 600), one per line, such as
+    # OFFLINE_PWD=..., and never in environment: above (which would win).
+    # env_file: plexamp-web.env
     volumes:
       - plexamp-web-data:/data
     extra_hosts:

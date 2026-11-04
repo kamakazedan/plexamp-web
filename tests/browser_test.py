@@ -334,26 +334,33 @@ with sync_playwright() as pw:
         # Routes to a server: each is asked who it is, and only counts if
         # it's that very server. When its local address doesn't answer, this
         # container's proxy comes next (if it leads there); a plain http
-        # address over the internet isn't used. The question carries the
+        # address over the internet isn't used, nor one on a home network
+        # this browser may not be on (someone else's server's, or your own
+        # while plex.tv says you're elsewhere). The question carries the
         # sign-in: like a real Plex server, the mock only lets a page on
         # another address read who it is when the request has one.
         asked = []
-        page.on('request', lambda r: asked.append(r.url) if r.url.startswith(MOCK + '/identity') else None)
+        # (This page carries on into the next sections: the listener goes at
+        # the end of this one.)
+        to_identity = lambda r: asked.append(r.url) if r.url.startswith(MOCK + '/identity') else None
+        page.on('request', to_identity)
         routes = js(page, """() => Promise.all([import('./js/plex.js'), import('./js/state.js')]).then(async ([p, s]) => {
-            const srv = { id: s.app.source.serverId, token: s.app.source.token, connections: [
+            const srv = { id: s.app.source.serverId, token: s.app.source.token, owned: true, connections: [
                 { uri: 'http://127.0.0.1:9', local: true, relay: false, protocol: 'http' },
                 { uri: '%s', local: false, relay: false, protocol: 'http' }] };
             const home = { ...srv, connections: [{ uri: '%s', local: true, relay: false, protocol: 'http' }] };
             const pick = async (x) => (await p.pickConnection(x, { proxy: s.proxyUri() }))?.kind || null;
             const internet = (await p.probeConnections(srv)).find((c) => c.kind === 'remote')?.why;
-            return [await pick(srv), await pick({ ...srv, id: 'another-server' }), await pick(home), await pick({ ...home, id: 'another-server' }), internet]; })""" % (MOCK, MOCK))
-        check('core: routes to a server: its local address first, then the container\'s proxy; never another server, nor plain http over the internet',
-              routes == ['proxy', None, 'local', None, 'insecure'] and asked and all('X-Plex-Token=' in u for u in asked), f'{routes} {asked}')
+            const away = await Promise.all([{ ...home, owned: false }, { ...home, sameNetwork: false }].map(async (x) => (await p.probeConnections(x))[0].why));
+            return [await pick(srv), await pick({ ...srv, id: 'another-server' }), await pick(home), await pick({ ...home, id: 'another-server' }), internet, ...away]; })""" % (MOCK, MOCK))
+        check('core: routes to a server: its local address first, then the container\'s proxy; never another server, nor plain http over the internet or on a network this browser may not be on',
+              routes == ['proxy', None, 'local', None, 'insecure', 'insecure', 'insecure'] and asked and all('X-Plex-Token=' in u for u in asked), f'{routes} {asked}')
         unsigned = js(page, """() => import('./js/state.js').then(({ app }) => Promise.all(['', '?X-Plex-Token=' + encodeURIComponent(app.source.token)]
             .map((q) => fetch('%s/identity' + q, { headers: { Accept: 'application/json' }, credentials: 'omit' })
                 .then((r) => r.json()).then((j) => j.MediaContainer.machineIdentifier, () => 'refused'))))""" % MOCK)
         check('core: ...which is why the question carries it (asked without, the mock answers as a real server would)',
               unsigned == ['refused', 'mock-server-1'], str(unsigned))
+        page.remove_listener('request', to_identity)
 
     # ---------- ws: live updates over a WebSocket ----------
     if run('ws'):
@@ -656,13 +663,13 @@ with sync_playwright() as pw:
         # Another artist each time: other artists' best-known songs, in the
         # genre of the track it started with.
         with urllib.request.urlopen(f'{OLLAMA}/__mock/config', timeout=20) as r:
-            asked = json.loads(r.read()).get('dj_prompt', '')
-        playing = (re.search(r'^Now playing: (.*?) — ', asked, re.M) or [None, None])[1]
-        offered = [x.split('. ', 1)[1] for x in asked.splitlines() if re.match(r'^\d+\. ', x)]
+            dj_prompt = json.loads(r.read()).get('dj_prompt', '')
+        playing = (re.search(r'^Now playing: (.*?) — ', dj_prompt, re.M) or [None, None])[1]
+        offered = [x.split('. ', 1)[1] for x in dj_prompt.splitlines() if re.match(r'^\d+\. ', x)]
         q = player(page, '({ cur: p.current.artist, next: p.queue[p.index + 1] && p.queue[p.index + 1].artist })')
         check('dj: ...never the artist playing', q['next'] and q['next'] != q['cur'], str(q))
         check('dj: ...choosing from other artists\' popular songs, in the station\'s genre',
-              playing and offered and not any(o.startswith(f'{playing} — ') for o in offered) and '(popular)' in asked and 'The station plays ' in asked, asked[-700:])
+              playing and offered and not any(o.startswith(f'{playing} — ') for o in offered) and '(popular)' in dj_prompt and 'The station plays ' in dj_prompt, dj_prompt[-700:])
         undone = js(page, "() => import('./js/dj.js').then(m => m.guestDJ.set(null))")
         check('dj: turned off, its pick comes out of the queue', not nxt() and undone['removed'] == 1, f'{nxt()} {undone}')
         page.keyboard.press('Escape')
@@ -2350,8 +2357,12 @@ with sync_playwright() as pw:
         check('lists: ...playlists first, then collections, each by name',
               order == sorted(order, key=lambda x: (x[0] != 'playlist', x[1].casefold())), str(order))
         light_in = [urllib.parse.unquote(u) for u in in_reads if '/playlists/' in u or '/library/collections/' in u]
+        # (Ids and whose they are, and what each is, no more: Plex's fields
+        # for the list's size and paging aside.)
+        light_fields = {'ratingKey', 'playlistItemID', 'type', 'parentRatingKey', 'grandparentRatingKey', 'originalTitle', 'size', 'totalSize', 'offset', 'leafCount'}
+        fields_of = lambda u: set((re.search(r'includeFields=([^&]*)', u) or re.search(r'()$', u)).group(1).split(','))
         check('lists: ...lists read as their entries\' ids and whose they are, a page Plex takes at a time',
-              all('includeFields=ratingKey,parentRatingKey,grandparentRatingKey,originalTitle' in u for u in light_in)
+              light_in and all({'ratingKey', 'parentRatingKey', 'grandparentRatingKey', 'originalTitle'} <= fields_of(u) <= light_fields for u in light_in)
               and all(int(re.search(r'X-Plex-Container-Size=(\d+)', u).group(1)) <= 120 for u in light_in if '/library/collections/' in u), str(light_in[:3]))
         in_reads.clear()
         again = appears_in(gh)
@@ -3335,11 +3346,19 @@ with sync_playwright() as pw:
               told and pl_items(cid, 't2') == before == pl_items(wid, 't') and sam.locator('.lock-btn').count() == 0
               and view_line == 'Shared by Dan · you can view it, not edit it', f'{view_line} {before} {pl_items(cid, "t2")}')
 
-        # Dan renames it: Sam's is renamed too.
+        # Dan renames it: Sam's is renamed too. (A few tries: a tab's own
+        # bringing it up to date, every so often, can hold the turn just
+        # then, and the one asked for here waits till next time.)
         plex('PUT', f'/playlists/{wid}?title=Workout+mix', 't')
-        sync(dan)
-        sync(sam)
-        check('sharing: renamed by whoever shared it, everyone\'s is', next((p['title'] for p in mine('t2') if p['ratingKey'] == cid), None) == 'Workout mix')
+        sams_title = None
+        for _ in range(5):
+            sync(dan)
+            sync(sam)
+            sams_title = next((p['title'] for p in mine('t2') if p['ratingKey'] == cid), None)
+            if sams_title == 'Workout mix':
+                break
+            dan.wait_for_timeout(1000)
+        check('sharing: renamed by whoever shared it, everyone\'s is', sams_title == 'Workout mix', str(sams_title))
 
         # Dan stops sharing it: both keep theirs, no longer marked shared.
         dan.goto(APP + f'#/playlist/{wid}')
@@ -3826,6 +3845,9 @@ with sync_playwright() as pw:
             r(0, 2, 3), r(0, 3, 3), r(503, 2, 3), r(undefined, 2, 3), r(429, 2, 3)])""")
         check('stream: a request that fails is tried again (more for no answer or a server error than a client error), never when refused',
               policy == [False, False, True, False, True, False, True, True, True], str(policy))
+        comes = js(page, "() => import('./js/player.js').then(({ fileComes: f }) => f && [200, 206, 0, 401, 403, 404, 410, 400, 429, 500].map(f))")
+        check('stream: a file\'s answer says it comes, didn\'t (none), is refused (401, 403, another client error) or gone (404, 410), or the server\'s failing (500)',
+              comes == [True, True, False, 'refused', 'refused', 'gone', 'gone', 'refused', True, 'failed'], str(comes))
 
         # The server stops the stream part-way (as Plex can): it's started
         # again where it got to, as the same playback, and plays on.
@@ -4110,8 +4132,12 @@ with sync_playwright() as pw:
         player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
         check('stream: ...one that came but couldn\'t be decoded is read in full and played from memory first, and converted only if it won\'t play from there either',
               in_memory and decoded and not play_errors(), str(rate()))
-        # (A connection where files play as they stream again, for the next.)
+        # (A connection where files play as they stream again, for the next.
+        # Nothing loaded ahead or kept meanwhile, as without APP_DEFAULTS: so
+        # each track is read here, never found in memory already.)
         player(page, '(p.readInFull = false, true)')
+        kept_was = js(page, "() => import('./js/state.js').then(({ app }) => ({ loadAhead: app.settings.loadAhead, keepPlayed: app.settings.keepPlayed }))")
+        settings(page, {'loadAhead': 0, 'keepPlayed': 0})
         # One the server hands over (asked for it, without a range: the
         # player's own request) but that doesn't play as it comes, its parts
         # not coming either (as some networks treat a player's stream): read
@@ -4147,8 +4173,6 @@ with sync_playwright() as pw:
         # bitrate, or as it's read), plays as it streams first: never
         # converted for that.
         streams = "p.state === 'playing' && p.time > 0.5 && !p.deck.isHls && !p.deck.forced && !(p.audio.getAttribute('src') || '').startsWith('blob:')"
-        kept_was = js(page, "() => import('./js/state.js').then(({ app }) => ({ loadAhead: app.settings.loadAhead, keepPlayed: app.settings.keepPlayed }))")
-        settings(page, {'loadAhead': 0, 'keepPlayed': 0})
         player(page, '(p.ahead.canReadInFull = () => false, true)')
         play_track(4, 1)
         too_long = wait_for(lambda: player(page, streams), 20, 0.25)
@@ -4189,6 +4213,22 @@ with sync_playwright() as pw:
         skipped = wait_for(lambda: now()['id'] != failing and now()['state'] == 'playing', 20, 0.25)
         check('stream: ...and one the server keeps failing (500, asked three times or more over half a minute) won\'t play here: skipped, saying so (not held for ever)',
               said_so and skipped and len(play_errors()) == 1, f'{now()} {play_errors()}')
+        js(page, '() => { window.__playErrors = []; }')
+        # ...and one the server says isn't there (404): skipped at once,
+        # saying so, never taken for a connection that keeps dropping.
+        play_track(4, 3)
+        wait_for(lambda: now()['t'] > 1, 10, 0.2)
+        gone = now()['id']
+        page.route('**/library/parts/**', lambda route: route.fulfill(status=404, body=''))
+        player(page, f"({not_supported}, {first_load}, p.onError(), true)")
+        said_gone = wait_for(lambda: len(play_errors()) >= 1, 15, 0.2)
+        told = page.locator('.toast').all_text_contents()
+        page.unroute('**/library/parts/**')
+        player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
+        skipped = wait_for(lambda: now()['id'] != gone and now()['state'] == 'playing', 20, 0.25)
+        check('stream: ...and one the server says isn\'t there (404) is skipped at once, saying so (not held as a connection that keeps dropping)',
+              said_gone and skipped and len(play_errors()) == 1 and any('not on the server any more' in x for x in told)
+              and not any('keeps dropping' in x for x in told), f'{now()} {play_errors()} {told}')
         js(page, '() => { window.__playErrors = []; }')
 
         # ...whereas one that doesn't play as it is here stays converted, at
@@ -6085,7 +6125,7 @@ with sync_playwright() as pw:
         shot(page, 'home-04-custom')
         page.goto(APP + '#/settings/home')
         page.wait_for_selector('.home-row')
-        page.click('button:has-text("Reset order")')
+        page.click('button:has-text("Reset Home screen")')
         order = sections_on_home(page)
         check('home: reset brings the defaults back', order[:3] == ['mixes', 'recentPlays', 'recentPlaylists'] and 'decade2020' not in order, str(order))
         ctx.close()
@@ -6674,6 +6714,48 @@ with sync_playwright() as pw:
             app.server.forgetPlaylists();
             for (const p of await app.server.playlists()) if (['Liked Songs', 'Old favourites', 'Road songs', 'Twice'].includes(p.title.replace(/ \\(from Spotify( \\d+)?\\)$/, ''))) await app.server.deletePlaylist(p.ratingKey);
         })""")
+        # Spotify's titles say which recording a track is ("Song - Calibre
+        # Remix", "Song - Live"): a remix comes over only as that very remix
+        # (never the song it remixes, nor another remix of it), a live take
+        # only as one, while what only says which cut it is ("Radio Edit")
+        # doesn't count. A live take whose copy on a live album doesn't say
+        # it's live comes over as that copy, but only from an album Plex has
+        # as a live one. (An artist of their own, with a song and a remix of
+        # it on a studio album, and the same on a live one.)
+        lanterns = mock('/__mock/add-artist?name=Lantern%20Fold&albums=Paper%20Lanterns:2019,Live%20at%20the%20Pier:2021&live=Live%20at%20the%20Pier'
+                        '&tracks=Paper%20Lantern|Paper%20Lantern%20(Glasswork%20Remix)|Tin%20Bell')['MediaContainer']['Metadata'][0]
+        try:
+            versions = json.dumps({'playlists': [{'name': 'Versions', 'lastModifiedDate': '2026-10-22', 'collaborators': [], 'numberOfFollowers': 0, 'items': [
+                item('Paper Lantern - Glasswork Remix', 'Lantern Fold', 'Paper Lanterns'),
+                item('Paper Lantern - Ferro Remix', 'Lantern Fold', 'Paper Lanterns Remixed'),
+                item('Paper Lantern - Radio Edit', 'Lantern Fold', 'Paper Lanterns'),
+                item('Tin Bell - Live', 'Lantern Fold', 'Live at the Pier'),
+                item('Paper Lantern - Live', 'Lantern Fold', 'Paper Lanterns'),
+                item('Paper', 'Lantern Fold', 'Paper Lanterns'),
+            ]}]}).encode()
+            guide()
+            choose_files([('Playlist4.json', versions)])
+            page.wait_for_selector('.spotify-choose-form')
+            page.uncheck('.spotify-choose-form .spotify-keep input')
+            page.click('.spotify-choose-form .btn-primary')
+            page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+            versions_done = page.locator('.import-form:not(.spotify-choose-form)').inner_text()
+            page.click('.dialog-close')
+            page.wait_for_timeout(400)
+            versions_made = js(page, """() => import('./js/state.js').then(async ({ app }) => {
+                app.server.forgetPlaylists();
+                const p = (await app.server.playlists()).find((x) => x.title === 'Versions');
+                if (!p) return null;
+                const { items } = await app.server.playlistItems(p.ratingKey, { start: 0, size: 50 });
+                await app.server.deletePlaylist(p.ratingKey);
+                return items.map((m) => [m.title, m.parentTitle]);
+            })""")
+            check('spotify: a remix comes over only as that very remix (not the song it remixes, nor another remix), a live take only as one (its copy on a live album too, but not a studio album\'s); a radio edit as the song; a title isn\'t a longer one\'s ("Paper" isn\'t "Paper Lantern")',
+                  versions_made == [['Paper Lantern (Glasswork Remix)', 'Paper Lanterns'], ['Paper Lantern', 'Paper Lanterns'], ['Tin Bell', 'Live at the Pier']]
+                  and '3 tracks found' in versions_done and '3 not' in versions_done,
+                  f'{versions_made} {versions_done!r}')
+        finally:
+            mock(f"/__mock/add-artist?remove={lanterns['ratingKey']}")
         # What's read at once is bounded, and the list says what was cut
         # short (here, with the bounds lowered): a file too big is passed
         # over, a playlist past the most tracks has its first ones, and one
@@ -6974,9 +7056,9 @@ with sync_playwright() as pw:
             app.server.forgetPlaylists();
             for (const p of await app.server.playlists()) if (['Road trip classics', 'Road trip classics (from Spotify)', 'Night drive mix'].includes(p.title)) await app.server.deletePlaylist(p.ratingKey);
         })""")
-        # Each way is off unless the container turns it on: on a player with
-        # neither (SPOTIFY_FILE_IMPORT, SPOTIFY_LINK_IMPORT), there's no From
-        # Spotify; with the link alone (by its new name), it's the link.
+        # On a player with neither way (SPOTIFY_FILE_IMPORT=false, and no
+        # SPOTIFY_LINK_IMPORT), there's no From Spotify; with the link alone
+        # (by its new name, and the file import turned off), it's the link.
         login(page, APP_NOWS)
         page.goto(APP_NOWS + '#/search')
         page.wait_for_selector('a.row[href="#/sonic-path"]')  # (in the same block as From Spotify)
@@ -7295,7 +7377,7 @@ with sync_playwright() as pw:
     # logs.
     if run('plexhome') and APP_DEBUG:
         A = APP_DEBUG
-        KID_PIN, WRONG_PIN = '0427', '0913'
+        KID_PIN, WRONG_PIN, DAN_PIN = '0427', '0913', '5150'
 
         def kept_for(token, method='GET'):
             req = urllib.request.Request(A + 'api/settings?server=mock-server-1', method=method, headers={'X-Plex-Token': token, 'Accept': 'application/json'})
@@ -7479,22 +7561,68 @@ with sync_playwright() as pw:
         shown = switch_button(page)
         page.click('.account-card button:has-text("Switch user")')
         kids_rows = home_rows(page)
+        pin_note = page.locator('.sheet.open .home-users-pin').all_inner_texts()
         page.keyboard.press('Escape')
         page.wait_for_selector('.sheet', state='detached')
         check('plexhome: ...and Kid can switch too, with Kid as "You"', shown and page.locator('.account-name').inner_text() == 'Kid'
-              and [r[:2] for r in kids_rows] == [['Dan', 'Admin'], ['Kid', 'You · Managed user'], ['Gran', '']], str(kids_rows))
+              and kids_rows[1:] == [['Kid', 'You · Managed user', False], ['Gran', '', True]], str(kids_rows))
+        check('plexhome: ...but not to Dan, the Home\'s admin and the server\'s owner, who has no PIN: it says to set one in Plex, or sign in as him',
+              kids_rows[0] == ['Dan', 'Admin · Needs a PIN', False] and pin_note == ['To switch to Dan, set a PIN for them in Plex, or sign in as them.'], f'{kids_rows} {pin_note}')
+        # Who isn't offered without a PIN: the Home's admin; the server's owner,
+        # by plex.tv's id for them, or by their name (one who isn't the admin,
+        # with a name of their own to show); and where who owns it can't be
+        # told, everyone but managed users, who can't own a server.
+        rule = js(page, """() => import('./js/plex.js').then(({ homeUsersOffLimits: off }) => {
+            const users = [
+                { id: '1', uuid: 'u1', title: 'Dad', username: 'dad', admin: true },
+                { id: '2', uuid: 'u2', title: 'Mom', username: 'mom_1980' },
+                { id: '3', uuid: 'u3', title: 'Kid', restricted: true },
+                { id: '4', uuid: 'u4', title: 'Gran', username: 'gran', protected: true },
+            ];
+            const names = (servers, id) => users.filter(off(users, servers, id)).map((u) => u.title).join(',');
+            return [
+                names([{ id: 's', owned: true }], 's'),
+                names([{ id: 's', owned: false, ownerId: '2', sharedBy: 'someone' }], 's'),
+                names([{ id: 's', owned: false, sharedBy: 'mom_1980' }], 's'),
+                names([{ id: 's', owned: false, ownerId: '99', sharedBy: 'someone' }], 's'),
+                names([{ id: 's', owned: false, sharedBy: 'someone' }], 's'),
+                names(null, 's'),
+                names([{ id: 'other', owned: true }], 's'),
+                names([{ id: 's', owned: true }], undefined),
+            ];
+        })""")
+        check('plexhome: ...nor to the server\'s owner without a PIN (by plex.tv\'s id for them, or their name), nor, where who owns it can\'t be told, anyone but managed users',
+              rule == ['Dad', 'Dad,Mom', 'Dad,Mom', 'Dad', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom'], str(rule))
 
-        # Back to Dan (no PIN): his own again, as kept for his account.
+        # Back to Dan, once he has a PIN (as plex.tv says from here on; the
+        # mock takes any PIN of his): his own again, as kept for his account.
+        def dan_has_pin(route):
+            u = urllib.parse.urlsplit(route.request.url)
+            home = route.fetch(url=f'{MOCK}{u.path}?{u.query}').json()
+            for user in home.get('users', []):
+                user['protected'] = user['protected'] or user['admin']
+            route.fulfill(status=200, content_type='application/json', body=json.dumps(home), headers={'Access-Control-Allow-Origin': '*'})
+        ctx.route(re.compile(r'https://(clients\.)?plex\.tv/api/v2/home/users(\?.*)?$'), dan_has_pin)
+
+        def switch_by_pin(pg, name, pin, where='.account-card'):
+            switch_to(pg, name, where)
+            pg.wait_for_selector('.sheet.open .ask-form input')
+            pg.wait_for_timeout(250)
+            pg.fill('.sheet.open .ask-form input', pin)
+            pg.click('.sheet.open .ask-form button[type=submit]')
+
+        page.reload()
+        switch_button(page)
         js(page, COVER_WATCH)
         with page.expect_event('load', timeout=15000):
-            switch_to(page, 'Dan')
+            switch_by_pin(page, 'Dan', DAN_PIN)
         page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
         back = who(page)
         dan_again = wait_for(lambda: js(page, "() => import('./js/state.js').then(({ app }) => [app.settings.gridSize, app.settings.skipDisliked])") == ['large', False], 10, 0.3)
         his_missing = wait_for(lambda: 'Dans Secret Song' in js(page, "() => import('./js/missing.js').then((m) => m.missingList().map((x) => x.title))"), 10, 0.5)
         page.goto(A + '#/playlists')
         page.wait_for_selector('.view .grid-playlists .card', timeout=15000)
-        check('plexhome: switching back to Dan (no PIN to ask for): his token, server and library, and his settings, missing tracks and playlists again',
+        check('plexhome: switching back to Dan (by his PIN): his token, server and library, and his settings, missing tracks and playlists again',
               back['token'] == 't' and back['server'] == 'mock-server-1' and back['section'] == section_before and dan_again and his_missing
               and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts(), str(back))
         own_again = js(page, "() => import('./js/state.js').then(({ app }) => ({ quality: app.settings.quality, name: app.settings.playerName, ai: app.settings.ai }))")
@@ -7518,7 +7646,7 @@ with sync_playwright() as pw:
               gran['token'] == 't5' and gran['server'] is None and page.url.endswith('#/setup') and 'Signed in as Gran' in setup_said and at_setup
               and page.locator('.setup-account button:has-text("Sign out")').count() == 1, f'{gran} {page.url} {setup_said!r}')
         with page.expect_event('load', timeout=15000):
-            switch_to(page, 'Dan', where='.setup-account')
+            switch_by_pin(page, 'Dan', DAN_PIN, where='.setup-account')
         page.wait_for_selector('.source-body .row', timeout=20000)
         check('plexhome: ...back to Dan from there, who chooses his (nothing of Gran\'s to go on)', who(page)['token'] == 't' and page.url.endswith('#/setup'), str(who(page)))
         # Signing out: everyone's kept settings go too.
@@ -7535,7 +7663,7 @@ with sync_playwright() as pw:
         pin_here = re.compile(rf'\b({KID_PIN}|{WRONG_PIN})\b')
         stored = js(page, '() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage)')
         check('plexhome: Kid\'s PIN went to plex.tv only: none sent to this app (nor in what the browser logs to it), none kept',
-              [(s['to'], s['pin']) for s in switches] == [('t4', WRONG_PIN), ('t4', KID_PIN), ('t', ''), ('t5', ''), ('t', '')]
+              [(s['to'], s['pin']) for s in switches] == [('t4', WRONG_PIN), ('t4', KID_PIN), ('t', DAN_PIN), ('t5', ''), ('t', DAN_PIN)]
               and not any(pin_here.search(x) for x in to_app) and not pin_here.search(stored) and any('api/debug/log' in x for x in to_app),
               f'{switches} {[x[:120] for x in to_app if pin_here.search(x)]}')
         ctx.close()
@@ -7786,13 +7914,16 @@ with sync_playwright() as pw:
         check('missingsync: signing out leaves the account\'s list, and the next account on that browser gets none of it', titles('t') == before and titles('t2') == sam_before
               and not any(t in here(desk) for t in before), f'{titles("t")} {titles("t2")} {here(desk)}')
         # Signed in over someone (without signing out): theirs isn't the new
-        # account's.
+        # account's, nor is their server and library (signed in to as them):
+        # the new account chooses one.
         js(old, "() => import('./js/state.js').then(({ setAuth, app }) => setAuth({ ...app.auth, token: 't2', username: 'sam' }))")
         old.evaluate("() => { location.hash = '#/'; }")
         old.reload()
-        old.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+        old.wait_for_selector('.source-body', timeout=20000)
         old.wait_for_timeout(2000)
-        check('missingsync: signed in over someone, what that browser had isn\'t the new account\'s', titles('t2') == sam_before and 'Legacy Band' not in here(old), f'{titles("t2")} {here(old)}')
+        over_source = js(old, "() => import('./js/state.js').then(({ app }) => app.source)")
+        check('missingsync: signed in over someone, what that browser had isn\'t the new account\'s', titles('t2') == sam_before and 'Legacy Band' not in here(old) and over_source is None,
+              f'{titles("t2")} {here(old)} {over_source}')
 
         # Clear the list, for the owner: everyone's.
         lists('t2', 'POST', {'ops': [{'type': 'note', 'id': op_id(), 'items': [{'kind': 'artist', 'artist': 'Sams Band'}], 'section': sec, 'library': lib}]})

@@ -15,6 +15,10 @@ import { debugLog } from './debug.js';
 
 const API = 'api/together';
 const WAIT_SECONDS = 25;
+// An answer this quick (ms) saying nothing's changed: this device has other
+// requests waiting already, so it waits this long before asking again.
+const QUICK_ANSWER_MS = 500;
+const UNCHANGED_PAUSE_MS = 3000;
 const INVITES_VISIBLE = 30000;
 const INVITES_HIDDEN = 120000;
 const clientNow = () => performance.timeOrigin + performance.now();
@@ -39,6 +43,17 @@ export class TogetherError extends Error {
   constructor(message, status) {
     super(message);
     this.status = status;
+  }
+}
+
+// After a wait on plex.tv, a server or the service: still on the library
+// `source` is (its server and section, at whatever address), or else what
+// was being done stops, its session not joined (its tracks are its own
+// server's).
+function stillOn(source) {
+  const now = app.source;
+  if (now?.serverId !== source?.serverId || String(now?.sectionKey) !== String(source?.sectionKey)) {
+    throw new TogetherError('Another library was chosen meanwhile, so you didn’t join the session.', 0);
   }
 }
 
@@ -83,13 +98,21 @@ class Together extends EventTarget {
       pause: () => this.pause(),
       toggle: () => this.toggle(),
       seek: (sec) => this.seek(sec),
-      command: (cmd) => this.command(cmd),
+      // (Tracks go as the session needs them, nothing else of them: not
+      // your plays and ratings. Here, as player.js can't import this.)
+      command: (cmd) => this.command(cmd.tracks ? { ...cmd, tracks: cmd.tracks.map(slimTrack) } : cmd),
       ended: (track) => this.command({ type: 'ended', sid: track.sid }, { quiet: true }),
       expectedTime: (sid) => this.expectedTime(sid),
       sleep: () => this.leave({ why: 'sleep' }),
       blocked: () => this.setBlocked(true),
     };
 
+    // Signing out (or switching to someone else in your Plex Home), while
+    // the sign-in still works: out of the session, so the others don't see
+    // you in it any more.
+    on('signing-out', () => {
+      if (this.active) this.api(`sessions/${this.session.id}/leave`, { method: 'POST', keepalive: true }).catch(() => {});
+    });
     on('signout', () => {
       this.detach();
       this.invites = [];
@@ -127,7 +150,8 @@ class Together extends EventTarget {
 
   // ---------- requests ----------
 
-  async api(path, { method = 'GET', body, timeout = 15000, signal } = {}) {
+  // `keepalive`: it goes even as the page does.
+  async api(path, { method = 'GET', body, timeout = 15000, signal, keepalive = false } = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     const abort = () => ctrl.abort();
@@ -138,7 +162,8 @@ class Together extends EventTarget {
       res = await fetch(`${API}/${path}`, {
         method,
         cache: 'no-store',
-        credentials: 'same-origin',
+        credentials: 'omit',
+        keepalive,
         headers: {
           Accept: 'application/json',
           'X-Plex-Token': app.auth?.token || '',
@@ -255,8 +280,10 @@ class Together extends EventTarget {
       if (saved) store.set('together', null);
       return;
     }
+    const src = app.source;
     try {
       const { data } = await this.api(`sessions/${s.id}`);
+      stillOn(src);
       await this.useServer(data.server);
       this.attach(data);
     } catch (err) {
@@ -298,13 +325,24 @@ class Together extends EventTarget {
     // Joining is a tap: warm up the audio now, while the browser still
     // counts it as one (the requests below take a moment).
     player.unlock({ all: true });
+    const was = app.source;
     const sessions = await this.refresh();
+    // (Not once another library's been chosen meanwhile: see stillOn.)
+    stillOn(was);
     const s = sessions.find((x) => x.id === id);
     if (!s) throw new TogetherError('This invitation has ended, or isn’t for you.', 404);
     // Joining another session leaves this one (the service does the same).
     if (this.active && this.session.id !== id) this.detach();
     await this.useServer(s.server);
+    const src = app.source;
     const { data, t0, t1 } = await this.api(`sessions/${id}/join`, { method: 'POST' });
+    try {
+      stillOn(src);
+    } catch (err) {
+      // (Another library chosen meanwhile: out of the session again.)
+      this.api(`sessions/${id}/leave`, { method: 'POST' }).catch(() => {});
+      throw err;
+    }
     this.sample(data.now, t0, t1);
     this.invites = this.invites.filter((x) => x.id !== id);
     this.emit('invites');
@@ -320,7 +358,9 @@ class Together extends EventTarget {
   }
 
   // Tracks in a session are the session server's, so this device switches
-  // to that server and library first if it's on another one.
+  // to that server and library first if it's on another one. (Not once
+  // another library's been chosen meanwhile: that one stays, and the
+  // session isn't joined.)
   async useServer(server) {
     const src = app.source;
     if (src?.serverId === server.id) {
@@ -334,9 +374,11 @@ class Together extends EventTarget {
       throw new TogetherError(`This session plays from ${server.name}. Switch to it in Settings › Source first.`, 400);
     }
     const servers = await listServers(app.auth.token);
+    stillOn(src);
     const srv = servers.find((x) => x.id === server.id);
     if (!srv) throw new TogetherError(`You can’t play from ${server.name}. Ask its owner to share their music library with you.`, 403);
     const conn = await pickConnection(srv, { proxy: proxyUri(), prefer: app.settings.route });
+    stillOn(src);
     if (!conn) throw new TogetherError(`Can’t reach ${server.name} from this browser.`, 0);
     this.prevSource = src;
     setSource({
@@ -447,6 +489,7 @@ class Together extends EventTarget {
     let backoff = 1000;
     while (gen === this.gen && this.active) {
       try {
+        const asked = clientNow();
         const { data } = await this.api(`sessions/${this.session.id}?since=${this.session.version}&wait=${WAIT_SECONDS}`, {
           timeout: (WAIT_SECONDS + 15) * 1000,
           signal: this.ctrl.signal,
@@ -458,6 +501,9 @@ class Together extends EventTarget {
         }
         backoff = 1000;
         if (!data.unchanged) this.apply(data);
+        // An answer at once with nothing new (this device has other
+        // requests waiting already): a moment before asking again.
+        else if (clientNow() - asked < QUICK_ANSWER_MS) await sleep(UNCHANGED_PAUSE_MS);
       } catch (err) {
         if (gen !== this.gen || err.aborted) return;
         if (err.status === 404 || err.status === 410) return this.ended('The session has ended.');

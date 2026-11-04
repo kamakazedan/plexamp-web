@@ -41,7 +41,38 @@ export const norm = (v) => {
   return OTHER_SCRIPT.test(w) ? w : plain(v) || w;
 };
 
-function editDistance(a, b) {
+// Credits that name no one in particular: a compilation's "Various
+// Artists", "Unknown Artist", "Traditional" (as norm has them, and as
+// they're often written in other languages). Never taken for an artist of
+// that name: not looked up on MusicBrainz, merged, mixed or counted as one.
+export const PLACEHOLDER_ARTISTS = new Set([
+  'various artists',
+  'various',
+  'va',
+  'v a',
+  'various artist',
+  'verschiedene interpreten',
+  'artistes divers',
+  'artistes varies',
+  'varios artistas',
+  'artisti vari',
+  'diverse artiesten',
+  'diversos artistas',
+  'unknown artist',
+  'unknown',
+  'anonymous',
+  'traditional',
+  'trad',
+  'オムニバス',
+  '群星',
+  'різні виконавці',
+  'разные исполнители',
+]);
+export const placeholderArtist = (name) => PLACEHOLDER_ARTISTS.has(norm(name));
+
+// How many letters one has to change, add or take away to make one into the
+// other.
+export function editDistance(a, b) {
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
     const cur = [i];
@@ -51,17 +82,26 @@ function editDistance(a, b) {
   return prev[b.length];
 }
 
-// Titles (as norm has them) close enough to be the same: one the other with
-// more after it, or a letter or two different (not in Chinese, Japanese or
-// Korean, where one character can be another word, nor a number).
+// Titles (as norm has them) a letter or two different, one in ten at most
+// (not in Chinese, Japanese or Korean, where one character can be another
+// word, nor with other numbers, in any script's digits: Symphony No. 5
+// isn't No. 6; No. 02 is No. 2).
 const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
+function spelledAlike(a, b) {
+  const shorter = Math.min(a.length, b.length);
+  const most = Math.max(1, Math.floor(shorter / 10)); // letters that may differ
+  // (Never fewer than their lengths differ by: that's told at once.)
+  if (shorter < 6 || Math.abs(a.length - b.length) > most) return false;
+  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b) || numbersOf(a) !== numbersOf(b)) return false;
+  return editDistance(a, b) <= most;
+}
+
+// Titles (as norm has them) close enough to be the same: one the other with
+// more after it, or spelt alike (see spelledAlike).
 export function sameTitle(a, b) {
   if (!a || !b) return false;
-  if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
-  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
-  if (numbersOf(a) !== numbersOf(b)) return false;
-  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
+  return a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `) || spelledAlike(a, b);
 }
 
 // The kinds of release, as an artist's page groups them, in that order.
@@ -271,9 +311,7 @@ export function exactGroup(groups, title, year = null) {
 // isn't "Rivers of Babylon: Presenting Boney M.").
 export function sameAlbumTitle(a, b) {
   if (!a || !b) return false;
-  if (a === b) return true;
-  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b) || numbersOf(a) !== numbersOf(b)) return false;
-  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
+  return a === b || spelledAlike(a, b);
 }
 
 // Whether two titles are of the same recording, as far as they say: the

@@ -8,16 +8,14 @@ import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import { isIP } from 'node:net';
 import { checkServerIdentity } from 'node:tls';
 import { log } from './log.js';
+import { ServiceError } from './errors.js';
+import { CONTROL_CHARACTERS } from './clean.js';
 
 const CLIENT_ID = `plexamp-web-service-${randomBytes(6).toString('hex')}`;
 const TOKEN_SHAPE = /^[A-Za-z0-9_.~-]{1,200}$/;
 
-export class AuthError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+// plex.tv didn't accept a sign-in (401).
+export class AuthError extends ServiceError {}
 
 export const validToken = (t) => typeof t === 'string' && TOKEN_SHAPE.test(t);
 const hash = (t) => createHash('sha256').update(t).digest('hex');
@@ -81,21 +79,32 @@ const pmsAgents = {
   nginx: new HttpAgent({ keepAlive: true, maxSockets: 24 }),
 };
 
+const tooLong = () => Object.assign(new Error('answer too long'), { code: 'TOO_LONG' });
+
 // GET from the Plex server: at its address (`url`), with its certificate
 // checked as above, or through nginx (`socketPath`, and the request's
-// `path`): see PlexAuth.pmsAnswer.
+// `path`): see PlexAuth.pmsAnswer. Answered in `timeout` ms in all (an
+// answer that trickles in doesn't keep it waiting), and up to
+// MAX_PMS_ANSWER bytes.
 function pmsGet({ url, socketPath, path }, headers, timeout) {
   return new Promise((resolve, reject) => {
+    const failed = (err) => {
+      clearTimeout(deadline);
+      reject(err);
+    };
     const answered = (res) => {
       const chunks = [];
       let size = 0;
       res.on('data', (c) => {
         size += c.length;
-        if (size > MAX_PMS_ANSWER) req.destroy(Object.assign(new Error('answer too long'), { code: 'TOO_LONG' }));
+        if (size > MAX_PMS_ANSWER) req.destroy(tooLong());
         else chunks.push(c);
       });
-      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
-      res.on('error', reject);
+      res.on('end', () => {
+        clearTimeout(deadline);
+        resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') });
+      });
+      res.on('error', failed);
     };
     let req;
     if (socketPath) {
@@ -105,8 +114,8 @@ function pmsGet({ url, socketPath, path }, headers, timeout) {
       const send = u.protocol === 'https:' ? httpsRequest : httpRequest;
       req = send(u, { method: 'GET', headers, agent: pmsAgents[u.protocol], checkServerIdentity: plexServerIdentity }, answered);
     }
-    req.setTimeout(timeout, () => req.destroy(Object.assign(new Error('timed out'), { code: 'TimeoutError' })));
-    req.on('error', reject);
+    const deadline = setTimeout(() => req.destroy(Object.assign(new Error('timed out'), { code: 'TimeoutError' })), timeout);
+    req.on('error', failed);
     req.end();
   });
 }
@@ -114,7 +123,12 @@ function pmsGet({ url, socketPath, path }, headers, timeout) {
 // An answer's body, up to `max` bytes (more is an error, not cut short).
 export async function readCapped(res, max) {
   const reader = res.body?.getReader?.();
-  if (!reader) return String((await res.text?.()) ?? '').slice(0, max);
+  if (!reader) {
+    // (One that can't be read a piece at a time: as a whole.)
+    const text = String((await res.text?.()) ?? '');
+    if (Buffer.byteLength(text) > max) throw tooLong();
+    return text;
+  }
   const chunks = [];
   let size = 0;
   for (;;) {
@@ -123,14 +137,15 @@ export async function readCapped(res, max) {
     size += value.length;
     if (size > max) {
       reader.cancel().catch(() => {});
-      throw Object.assign(new Error('answer too long'), { code: 'TOO_LONG' });
+      throw tooLong();
     }
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString('utf8');
 }
 
-// A small cache with expiry and a size cap.
+// A small cache with expiry and a size cap: full, the one asked for least
+// lately goes (so those in use stay, however many come and go).
 class TTLCache {
   constructor(max = 2000) {
     this.max = max;
@@ -139,24 +154,49 @@ class TTLCache {
   get(key) {
     const hit = this.map.get(key);
     if (!hit) return undefined;
-    if (hit.exp < Date.now()) {
-      this.map.delete(key);
-      return undefined;
-    }
+    this.map.delete(key);
+    if (hit.exp < Date.now()) return undefined;
+    this.map.set(key, hit);
     return hit.value;
   }
   set(key, value, ttl) {
+    this.map.delete(key);
     if (this.map.size >= this.max) this.map.delete(this.map.keys().next().value);
     this.map.set(key, { value, exp: Date.now() + ttl });
   }
+  delete(key) {
+    this.map.delete(key);
+  }
 }
 
+// Accounts whose sign-ins and servers are kept checked (see identify and
+// serverAccess): enough for every account a busy player has in use.
+const ACCOUNTS_KEPT = 20000;
+// How long what plex.tv says is kept (and what the Plex server says of a
+// sign-in it's asked about: see serverAccepts).
+const KEPT_MS = {
+  user: 15 * 60000, // whose a sign-in is
+  taken: 24 * 3600000, // ...and that plex.tv took it, so asking again isn't a new sign-in (see knows)
+  refused: 60000, // ...or that it's no sign-in
+  servers: 10 * 60000, // the servers an account can use
+  resources: 60000, // its devices, with their connections (for Play on)
+  friends: 5 * 60000, // its Plex friends
+  accepted: 2 * 60000, // the Plex server taking a sign-in
+  notAccepted: 60000, // ...or not
+};
+// ...and for how many sign-ins, of their devices and their friends.
+const RESOURCE_LISTS_KEPT = 500;
+const FRIEND_LISTS_KEPT = 200;
+
+// (A character's number past the last there is, as &#99999999; says, is
+// left as it's written: it's no character.)
+const LAST_CODE_POINT = 0x10ffff;
 const decodeXml = (s) =>
   s.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (m, e) => {
     const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e.toLowerCase()];
     if (named) return named;
     const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-    return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+    return code <= LAST_CODE_POINT ? String.fromCodePoint(code) : m;
   });
 
 export function attrs(tag) {
@@ -166,7 +206,7 @@ export function attrs(tag) {
 }
 
 const safeThumb = (url) => (typeof url === 'string' && /^https:\/\/([a-z0-9-]+\.)*plex\.tv\//i.test(url) ? url.slice(0, 500) : null);
-const cleanName = (s) => String(s || '').replace(/[\u0000-\u001f]/g, '').slice(0, 80);
+const cleanName = (s) => String(s || '').replace(CONTROL_CHARACTERS, '').slice(0, 80);
 
 export class PlexAuth {
   // pmsProbe: nginx's socket for the service's own requests to the Plex
@@ -202,11 +242,13 @@ export class PlexAuth {
     // (Looked up every few seconds, so a time it had more than one address is
     // seen, whatever's asked meanwhile.)
     if (this.pmsName) setInterval(() => this.lookUpAddresses(), 5000).unref();
-    this.users = new TTLCache();
+    this.users = new TTLCache(ACCOUNTS_KEPT);
+    this.taken = new TTLCache(ACCOUNTS_KEPT); // token hash -> true: sign-ins plex.tv took lately (see knows)
     this.denied = new TTLCache();
-    this.access = new TTLCache();
-    this.friendLists = new TTLCache(200);
-    this.resourceLists = new TTLCache(500);
+    this.access = new TTLCache(); // `pms|${token hash}`: whether the server at PLEX_SERVER_URL accepts the token (see serverAccepts)
+    this.serverLists = new TTLCache(ACCOUNTS_KEPT); // token hash -> Map(server id -> owned): the servers the account can use
+    this.friendLists = new TTLCache(FRIEND_LISTS_KEPT);
+    this.resourceLists = new TTLCache(RESOURCE_LISTS_KEPT);
     this.serverId = null;
     this.identifying = new Map(); // token hash -> its check under way (asked once, however many requests wait)
     this.asking = 0; // questions for plex.tv under way
@@ -215,7 +257,7 @@ export class PlexAuth {
     // asked anything.
     this.tv = { down: false, since: Date.now(), tried: 0, pinged: 0 };
     this.askingOwnersOnly = new Map(); // token hash -> the server being asked (see showsOwnersOnly)
-    this.accessAsking = new Map(); // `${token hash}|${server}` -> plex.tv being asked (see serverAccess)
+    this.serversAsking = new Map(); // token hash -> plex.tv being asked for its servers (see serversOf)
     // The Plex server, as last found (see ownersOnlyShown), and said.
     this.cantTellUntil = 0;
     this.tellsTroubleUntil = 0;
@@ -269,12 +311,16 @@ export class PlexAuth {
     if (this.tv.down && Date.now() - Math.max(this.tv.tried, this.tv.pinged) > PLEX_TV_TIMING.pingMs) this.pingPlexTv();
   }
 
-  // Whether this token has been checked lately (or is being checked now):
-  // asking again costs plex.tv nothing.
+  // Whether this token has been checked lately (or is being checked now),
+  // so asking again costs plex.tv nothing, or plex.tv took it in the last
+  // day: then it's asked again, but isn't counted as a new sign-in from its
+  // address (see index.js checkable). Only made-up sign-ins need counting,
+  // and one plex.tv took isn't made up: so behind a reverse proxy, where
+  // everyone's one address, those in use aren't held up every 15 minutes.
   knows(token) {
     if (!validToken(token)) return true;
     const key = hash(token);
-    return this.users.get(key) !== undefined || this.denied.get(key) !== undefined || this.identifying.has(key);
+    return this.users.get(key) !== undefined || this.taken.get(key) !== undefined || this.denied.get(key) !== undefined || this.identifying.has(key);
   }
 
   // At most PLEX_TV_AT_ONCE questions for plex.tv at a time, and a limited
@@ -433,10 +479,14 @@ export class PlexAuth {
           title: cleanName(u.friendlyName || u.title || u.username || 'Plex user'),
           thumb: safeThumb(u.thumb),
         };
-        this.users.set(key, user, 15 * 60000);
+        this.users.set(key, user, KEPT_MS.user);
+        this.taken.set(key, true, KEPT_MS.taken);
         return user;
       } catch (err) {
-        if (err instanceof AuthError) this.denied.set(key, true, 60000);
+        if (err instanceof AuthError) {
+          this.denied.set(key, true, KEPT_MS.refused);
+          this.taken.delete(key);
+        }
         throw err;
       }
     })().finally(() => this.identifying.delete(key));
@@ -448,21 +498,31 @@ export class PlexAuth {
   // account own it? { ok, owned }
   async serverAccess(token, serverId) {
     if (!serverId) return { ok: false, owned: false };
-    const key = `${hash(token)}|${serverId}`;
-    const hit = this.access.get(key);
-    if (hit !== undefined) return hit;
-    // (Asked once, however many requests wait for it.)
-    if (this.accessAsking.has(key)) return this.accessAsking.get(key);
+    const servers = await this.serversOf(token);
+    return { ok: servers.has(serverId), owned: servers.get(serverId) === true };
+  }
+
+  // The Plex servers an account can use, as plex.tv lists them: Map(server
+  // id -> whether it owns it). Asked once a sign-in, whatever servers it's
+  // asked about (an id made up isn't another question for plex.tv), however
+  // many requests wait for it, and kept ten minutes.
+  async serversOf(token) {
+    const key = hash(token);
+    const hit = this.serverLists.get(key);
+    if (hit) return hit;
+    if (this.serversAsking.has(key)) return this.serversAsking.get(key);
     const job = (async () => {
+      // (All of them: an account that's used Plex a long time can have
+      // hundreds of devices listed, more than resources keeps.)
       const list = await this.fetchJSON(`${this.plexTv}/api/v2/resources?includeHttps=1`, token);
-      const r = (Array.isArray(list) ? list : []).find(
-        (x) => x?.clientIdentifier === serverId && String(x.provides || '').split(',').includes('server'),
-      );
-      const access = { ok: !!r, owned: !!r?.owned };
-      this.access.set(key, access, 10 * 60000);
-      return access;
-    })().finally(() => this.accessAsking.delete(key));
-    this.accessAsking.set(key, job);
+      const servers = new Map();
+      for (const x of Array.isArray(list) ? list : []) {
+        if (x?.clientIdentifier && String(x.provides || '').split(',').includes('server')) servers.set(String(x.clientIdentifier), !!x.owned);
+      }
+      this.serverLists.set(key, servers, KEPT_MS.servers);
+      return servers;
+    })().finally(() => this.serversAsking.delete(key));
+    this.serversAsking.set(key, job);
     return job;
   }
 
@@ -474,7 +534,7 @@ export class PlexAuth {
     if (hit) return hit;
     const list = await this.fetchJSON(`${this.plexTv}/api/v2/resources?includeHttps=1&includeRelay=0&includeIPv6=1`, token);
     const out = Array.isArray(list) ? list.slice(0, 200) : [];
-    this.resourceLists.set(key, out, 60000);
+    this.resourceLists.set(key, out, KEPT_MS.resources);
     return out;
   }
 
@@ -488,7 +548,7 @@ export class PlexAuth {
   ownerLately(token) {
     if (!this.serverId || !validToken(token)) return false;
     const key = hash(token);
-    return this.users.get(key) !== undefined && this.access.get(`${key}|${this.serverId}`)?.owned === true;
+    return this.users.get(key) !== undefined && this.serverLists.get(key)?.get(this.serverId) === true;
   }
 
   // ---------- the Plex server, as nginx reaches it ----------
@@ -731,7 +791,7 @@ export class PlexAuth {
     const hit = this.access.get(key);
     if (hit !== undefined) return hit;
     const yes = await this.pmsShows('/library/sections?X-Plex-Container-Size=0', token);
-    this.access.set(key, yes, yes ? 2 * 60000 : 60000);
+    this.access.set(key, yes, yes ? KEPT_MS.accepted : KEPT_MS.notAccepted);
     return yes;
   }
 
@@ -755,7 +815,7 @@ export class PlexAuth {
         servers,
       });
     }
-    this.friendLists.set(key, users, 5 * 60000);
+    this.friendLists.set(key, users, KEPT_MS.friends);
     return users;
   }
 }

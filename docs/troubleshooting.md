@@ -37,6 +37,7 @@ Start with [debug mode](configuration.md#debug-mode): most set-up problems show 
 - **A friend doesn't see a playlist you shared**: they find it on the Playlists tab, under Shared with you, signed in with Plex on the same player address. "Can't play from …" in the share list means your server isn't shared with them in Plex.
 - **No Share with friends… in a playlist's menu**: shared playlists are off. The container's log says why when it starts (`shared playlists are off: …`): `PLAYLIST_SHARING=false`, or something about the `/data` folder, such as other files in it (give shared playlists a volume of their own).
 - **Shared playlists went after an update**: the container had no volume at `/data` (its log says so when it starts). Add one, as in `docker-compose.yml`. Everyone still has their copy, as an ordinary playlist: share it again.
+- **The log says it "couldn't read" a file in `/data`, "so it's kept aside"**: the file was damaged (a disk problem, say), so the player starts without what it held, rather than writing over it, and keeps it as it was beside the new one (`shares.json.unreadable-` and when, say). From 0.37.0 each is written in full before it takes the old one's place, so a power cut can't leave one half written (but `musicbrainz.json`, which only saves asking MusicBrainz again: its answers are asked for again).
 
 ## Play on
 

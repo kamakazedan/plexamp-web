@@ -1,7 +1,7 @@
 import { app, on, saveSettings, setSource, signOut, switchAccount, proxyUri } from '../state.js';
-import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, switchHomeUser, getUser, store } from '../plex.js';
+import { APP_INFO, PlexServer, listServers, pickConnection, probeConnections, routeRank, clientId, canPlayCodec, canPlayHlsNatively, homeUsers, homeUsersOffLimits, switchHomeUser, getUser, store } from '../plex.js';
 import { navigate, clearViewCache, describeError, dropCached, refresh } from '../router.js';
-import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, askText, avatar as personAvatar } from '../ui.js';
+import { h, icon, pageHeader, backHeader, row, sheet, spinner, emptyState, errorState, toast, fmt, debounce, toggleRow, choiceRow, askText, avatar } from '../ui.js';
 import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, sharedModelName, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
@@ -16,16 +16,13 @@ import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
 import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.js';
 import { keptCount } from '../outbox.js';
+import { joinWithAnd, radioArrowKeys, SECRET_INPUT } from './common.js';
+import { setUpServer } from '../service.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
 // ---------- Settings index ----------
 
-function badge(text) {
-  return h('span.badge-circle', { 'aria-hidden': 'true' }, (text || '?').trim().charAt(0).toUpperCase());
-}
-
-const avatar = (url, name) => personAvatar(url, name);
 // Who's signed in: their Plex picture, or the offline password's lock.
 const authAvatar = (auth, size = 24) => (auth.offline ? h('span.badge-circle', { 'aria-hidden': 'true' }, icon('lock', size)) : avatar(auth.thumb, auth.username));
 
@@ -45,7 +42,7 @@ export async function settingsView({ el }) {
         subtitle: auth.offline ? 'Signed in with the offline password' : auth.username || 'Signed in',
         right: authAvatar(auth),
       }),
-      row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: badge(src?.serverName) }),
+      row({ href: '/settings/source', lead: lead('note'), title: 'Source', subtitle: src ? `${src.sectionTitle} (${src.serverName})` : 'Not chosen', right: avatar(null, src?.serverName) }),
       row({ href: '/settings/experience', lead: lead('sliders'), title: 'Experience', subtitle: 'Appearance, player, Home screen and more' }),
       row({
         href: '/settings/playback',
@@ -100,7 +97,7 @@ function accountView({ el }) {
         'div.account-sub',
         null,
         auth.offline
-          ? 'Plex’s sign-in isn’t answering, so you’re signed in with the offline password, as the server’s owner. Play Together, your devices and shared playlists need a Plex sign-in. You’ll be signed out once Plex is back.'
+          ? 'Signed in with the offline password, as the server’s owner, until Plex is back.'
           : auth.manual
             ? 'Signed in with a server address and token'
             : 'Signed in with your Plex account',
@@ -118,14 +115,15 @@ function accountButtons() {
   const auth = app.auth || {};
   const switchBtn = h('button.btn.btn-secondary.account-switch', { type: 'button', hidden: true }, icon('switchUser', 20), h('span', null, 'Switch user'));
   if (!auth.manual && auth.token) {
-    Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null)])
-      .then(([users, me]) => {
+    // (Your servers too, for who owns the one this is on: see chooseHomeUser.)
+    Promise.all([homeUsers(auth.token), getUser(auth.token).catch(() => null), listServers(auth.token).catch(() => null)])
+      .then(([users, me, servers]) => {
         if (app.auth?.token !== auth.token || !me?.uuid) return;
         // (Which of them is you, by plex.tv's id for you: never offered
         // yourself, as switching to you would clear what's kept for you.)
         const mine = (u) => u.uuid === String(me.uuid);
         if (users.length < 2 || !users.some(mine)) return;
-        switchBtn.onclick = () => chooseHomeUser(users, mine, String(me.uuid));
+        switchBtn.onclick = () => chooseHomeUser(users, mine, String(me.uuid), servers);
         switchBtn.hidden = false;
       })
       .catch(() => {});
@@ -165,10 +163,12 @@ function confirmSignOut() {
   });
 }
 
-// Whether settings follow the account (sync.js), with a switch for it.
+// Whether settings follow the account (sync.js), with a switch for it:
+// shown on till the player says (it's on unless it's been turned off), then
+// as the player says, whether the page is on screen or put aside by then
+// (but not once the switch has been used: then it's as that made it).
 function accountSyncRows() {
   const rows = h('div.rows');
-  const mine = 'Some, like Streaming quality, stay on each device.';
   if (!app.config.settingsSync || app.auth?.offline) {
     rows.append(
       row({
@@ -178,13 +178,15 @@ function accountSyncRows() {
     );
     return rows;
   }
+  let switchUsed = false;
   const paint = (on) =>
     rows.replaceChildren(
       toggleRow({
         title: 'On all your devices',
-        subtitle: `${on === null ? 'Couldn’t check just now. ' : ''}Your settings follow your Plex account. ${mine}`,
+        subtitle: on === null ? 'Couldn’t check just now.' : 'Your settings follow your Plex account, except a few like Streaming quality.',
         checked: on !== false,
         onChange: async (v) => {
+          switchUsed = true;
           try {
             await setAccountSync(v);
             toast(v ? 'Your settings follow your Plex account again.' : 'Each device keeps its own settings now.');
@@ -196,35 +198,49 @@ function accountSyncRows() {
       }),
     );
   paint(true);
-  accountSyncState().then((on) => rows.isConnected !== false && paint(on));
+  accountSyncState().then((on) => switchUsed || paint(on));
   return rows;
 }
 
 // ---------- Plex Home: switching to someone else in it ----------
 
 // The people in your Plex Home (`mine`: which is you, `myId`: your Plex
-// account's id), to switch to.
-function chooseHomeUser(users, mine, myId) {
+// account's id), to switch to. Never, without a PIN, the Home's admin, or
+// the owner of the server this is on, or anyone who may be, where that
+// can't be told (see plex.js homeUsersOffLimits: `servers`, yours, as
+// plex.tv lists them, null where it didn't): nobody gets into the server
+// owner's account with a tap. For them: a PIN in Plex, or signing in as
+// them.
+function chooseHomeUser(users, mine, myId, servers = null) {
+  const offLimitsHere = homeUsersOffLimits(users, servers, app.source?.serverId);
   const list = h('div.rows.home-users');
+  const notOffered = [];
   let panel = null;
   for (const u of users) {
     const you = mine(u);
-    const what = [you ? 'You' : null, u.admin ? 'Admin' : u.guest ? 'Guest' : u.restricted ? 'Managed user' : null, u.protected && !you ? 'Has a PIN' : null]
+    const offLimits = !you && offLimitsHere(u);
+    if (offLimits) notOffered.push(u.title);
+    const what = [
+      you ? 'You' : null,
+      u.admin ? 'Admin' : u.guest ? 'Guest' : u.restricted ? 'Managed user' : null,
+      offLimits ? 'Needs a PIN' : u.protected && !you ? 'Has a PIN' : null,
+    ]
       .filter(Boolean)
       .join(' · ');
     list.append(
       row({
-        onClick: you
-          ? null
-          : async () => {
-              await panel?.close();
-              switchToHomeUser(u, myId);
-            },
+        onClick:
+          you || offLimits
+            ? null
+            : async () => {
+                await panel?.close();
+                switchToHomeUser(u, myId);
+              },
         lead: avatar(u.thumb, u.title),
         title: u.title,
         subtitle: what,
         right: you ? icon('check', 22, 'home-user-you') : null,
-        chevron: !you,
+        chevron: !you && !offLimits,
         cls: 'home-user',
       }),
     );
@@ -236,6 +252,7 @@ function chooseHomeUser(users, mine, myId) {
       'div',
       null,
       list,
+      notOffered.length ? h('p.home-users-note.home-users-pin', null, `To switch to ${joinWithAnd(notOffered)}, set a PIN for them in Plex, or sign in as them.`) : null,
       h(
         'p.home-users-note',
         null,
@@ -247,10 +264,26 @@ function chooseHomeUser(users, mine, myId) {
 
 // To them: their PIN first, where they have one. Then plex.tv's token for
 // them, the server and library this is on (where they can use those), and
-// the page afresh as them (state.js switchAccount).
+// the page afresh as them (state.js switchAccount). Never anyone
+// chooseHomeUser doesn't offer, by plex.tv's word just before, not the
+// list's from when it opened (who's in the Home, their PIN, who owns the
+// server this is on).
 let switching = false;
-async function switchToHomeUser(u, myId) {
-  if (switching) return;
+async function switchToHomeUser(chosen, myId) {
+  if (switching || chosen.uuid === myId) return;
+  const asked = app.auth?.token;
+  let u;
+  try {
+    const [users, servers] = await Promise.all([homeUsers(asked), listServers(asked).catch(() => null)]);
+    u = users.find((x) => x.uuid === chosen.uuid);
+    if (u && homeUsersOffLimits(users, servers, app.source?.serverId)(u)) {
+      return toast(`To switch to ${u.title}, set a PIN for them in Plex, or sign in as them.`, { timeout: 6000 });
+    }
+  } catch (err) {
+    return toast(`Couldn’t switch to ${chosen.title}. ${describeError(err)}`, { timeout: 6000 });
+  }
+  if (!u) return toast(`${chosen.title} isn’t in your Plex Home now.`);
+  if (switching || app.auth?.token !== asked) return;
   let pin = null;
   if (u.protected) {
     pin = await askText({ title: `Switch to ${u.title}`, label: 'Their PIN', confirm: 'Switch', maxLength: 4, type: 'password', inputMode: 'numeric', secret: true, message: `${u.title} has a PIN on Plex.` });
@@ -323,7 +356,12 @@ async function showServers(body) {
   // The server this container is set up for (PLEX_SERVER_URL) is usually one
   // of yours on plex.tv too: then it's listed once, as that one (which goes
   // through this container when that's the best route: Settings ›
-  // Connection).
+  // Connection). Which it is, the service says (service.js setUpServer):
+  // nobody's sign-in goes through /pms/ to find out. On its own, through
+  // this container, only where it can't be one plex.tv lists for you
+  // (signed in with a server's address and token, or plex.tv not saying),
+  // or it can't be told which it is: where plex.tv's list came and it isn't
+  // on it, it isn't one you can use, and your sign-in has no business there.
   const [servers, proxied] = await Promise.all([
     auth.manual
       ? []
@@ -331,15 +369,10 @@ async function showServers(body) {
           listError = err;
           return [];
         }),
-    proxy
-      ? new PlexServer({ uri: proxy, token: auth.token })
-          .identity({ timeout: 5000 })
-          .then((mc) => mc?.machineIdentifier || null)
-          .catch(() => null)
-      : null,
+    proxy ? setUpServer() : null,
   ]);
   const same = proxied ? servers.find((s) => s.id === proxied) : null;
-  if (proxy && !same) entries.push({ kind: 'proxy', name: 'Server set up for this app', uri: proxy, token: auth.token, connections: [] });
+  if (proxy && !same && (auth.manual || listError || !proxied)) entries.push({ kind: 'proxy', name: 'Server set up for this app', uri: proxy, token: auth.token, connections: [] });
   entries.push(...servers.map((s) => ({ ...s, kind: 'discovered', setUp: s === same })));
 
   const whose = (s) => (s.owned ? 'Your server' : s.sharedBy ? `Shared by ${s.sharedBy}` : 'Shared with you');
@@ -366,17 +399,106 @@ async function showServers(body) {
   body.append(list);
 }
 
+// An address typed in, as the app uses it (without a slash at the end), or
+// null where it isn't one: http or https, a host, and nothing after the
+// path.
+function serverAddress(text) {
+  let u;
+  try {
+    u = new URL(text);
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/.test(u.protocol) || !u.hostname || u.username || u.password || u.search || u.hash) return null;
+  return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+}
+
+// Where a route goes, to tell one typed in from plex.tv's: its address (or
+// name) and port ("192.168.1.10:32400"); `decoded`, a plex.direct name's
+// as the address it's for ("192-168-1-10.<the server's>.plex.direct").
+const PLEX_DIRECT = /^(\d{1,3}(?:-\d{1,3}){3})\.[0-9a-f]+\.plex\.direct$/i;
+function routeAddress(uri, { decoded = false } = {}) {
+  try {
+    const u = new URL(uri);
+    const named = decoded && u.hostname.match(PLEX_DIRECT);
+    return `${named ? named[1].replaceAll('-', '.') : u.hostname}:${u.port || (u.protocol === 'https:' ? '443' : '80')}`;
+  } catch {
+    return null;
+  }
+}
+
+// Who's at an address, by its answer to /identity, asked with nothing of
+// yours (no sign-in, not even this player's name), and not by way of
+// anywhere else (a redirect isn't followed): { id } where it answered and
+// its answer could be read, { timedOut } where nothing answered in time.
+async function identityOf(uri, timeout) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const res = await fetch(`${uri}/identity`, { headers: { Accept: 'application/json' }, credentials: 'omit', cache: 'no-store', redirect: 'error', signal: ctrl.signal });
+    const id = res.ok ? (await res.json())?.MediaContainer?.machineIdentifier : null;
+    return { id: typeof id === 'string' && id ? id : null, timedOut: false };
+  } catch {
+    return { id: null, timedOut: ctrl.signal.aborted };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Which of your servers (`servers`: as plex.tv lists them) is at an address
+// typed in, found out before it's sent anything of yours. First it's asked
+// who it is, with nothing of yours at all (Plex answers that without a
+// sign-in): an answer that's none of your servers is the end of it. But
+// anything can answer that it's yours, and a Plex server only lets a page
+// on another address read its answer when the request has a sign-in, so
+// the address is only used where it's one plex.tv has for one of your
+// servers (its address and port: a plex.direct name's too), tried as each
+// of plex.tv's routes to a server is (plex.js probeConnections): with that
+// server's own sign-in, only where the rules for routes let that go, and
+// only if it's that very server that answers. Anywhere else nothing is
+// sent, and it says why.
+const ADDRESS_WAIT = 8000; // ms an address typed in is given to answer
+async function yourServerAt(uri, servers) {
+  const said = await identityOf(uri, ADDRESS_WAIT);
+  if (said.timedOut) throw Object.assign(new Error('unreachable'), { unreachable: true });
+  if (said.id && !servers.some((s) => s.id === said.id)) throw new Error('That isn’t one of your Plex servers.');
+  // (By the very name typed, or a bare address typed as one of plex.tv's
+  // plex.direct names is for: a plex.direct name is a server's own, by its
+  // second part, so another's, for the same address, is never yours.)
+  const here = routeAddress(uri);
+  const routesHere = (s) => (s.connections || []).filter((c) => !c.relay && (routeAddress(c.uri) === here || routeAddress(c.uri, { decoded: true }) === here));
+  const listed = servers.filter((s) => (!said.id || s.id === said.id) && routesHere(s).length);
+  if (!listed.length) throw new Error('That isn’t an address Plex has for your servers. Add it to the server’s Custom server access URLs in Plex.');
+  if (listed.length > 1) throw new Error('Several of your servers have that address, so it wasn’t used.');
+  const [mine] = listed;
+  const typed = { uri, local: routesHere(mine).some((c) => c.local), relay: false, protocol: new URL(uri).protocol.slice(0, -1) };
+  // (As the server plex.tv lists, whose it is and all: the rules for routes
+  // go by that.)
+  const [route] = await probeConnections({ ...mine, connections: [typed] }, { timeout: ADDRESS_WAIT });
+  if (route.ok) return mine;
+  if (route.why === 'http') throw new Error('This page is https, so it can’t use an http address.');
+  if (route.why === 'insecure') throw new Error('That’s plain http, unencrypted, so it wasn’t used.');
+  if (route.why === 'other') throw new Error('Another server answers at that address.');
+  if (route.why === 'status') throw Object.assign(new Error(`HTTP ${route.status}`), { status: route.status });
+  throw Object.assign(new Error('unreachable'), { unreachable: true });
+}
+
 function manualForm(body, servers) {
   const url = h('input', { type: 'url', placeholder: 'http://192.168.1.10:32400', required: true, autocomplete: 'url', 'aria-label': 'Server address' });
   const go = h('button.btn.btn-primary', { type: 'submit' }, 'Connect');
   const form = h(
     'form.form',
     {
-      onsubmit: (e) => {
+      onsubmit: async (e) => {
         e.preventDefault();
-        const uri = url.value.trim().replace(/\/+$/, '');
-        if (!/^https?:\/\//.test(uri)) return toast('Start the address with http:// or https://');
-        connect({ kind: 'manual', name: new URL(uri).hostname, uri, token: app.auth.token, connections: [] }, null, null, body, servers);
+        const typed = url.value.trim();
+        if (!/^https?:\/\//i.test(typed)) return toast('Start the address with http:// or https://');
+        const uri = serverAddress(typed);
+        if (!uri) return toast('That isn’t a server address. For example http://192.168.1.10:32400');
+        // (No sign-in goes with it: see connect.)
+        go.disabled = true;
+        await connect({ kind: 'manual', name: new URL(uri).hostname, uri, connections: [] }, null, null, body, servers);
+        go.disabled = false;
       },
     },
     h('label.field', null, h('span', null, 'Server address'), url),
@@ -399,12 +521,21 @@ async function connect(entry, rowEl, subEl, body, servers) {
     if (entry.kind === 'discovered') {
       conn = await pickConnection(entry, { proxy: proxyUri(), prefer: app.settings.route });
       if (!conn) throw Object.assign(new Error('unreachable'), { unreachable: true });
+    } else if (entry.kind === 'manual') {
+      // An address typed in gets a sign-in only once it's known to be one
+      // of your servers', and then that server's own.
+      const mine = await yourServerAt(entry.uri, servers);
+      conn = { uri: entry.uri, kind: 'manual' };
+      token = mine.token;
+      serverId = mine.id;
+      name = mine.name || name;
     } else {
       conn = { uri: entry.uri, kind: entry.kind };
     }
     let ps = new PlexServer({ uri: conn.uri, token });
     const root = await ps.get('/', null, { timeout: 8000 });
-    if (entry.kind !== 'discovered') {
+    if (entry.kind === 'manual' && root.machineIdentifier && root.machineIdentifier !== serverId) throw new Error('Another server answers at that address.');
+    if (entry.kind === 'proxy') {
       serverId = root.machineIdentifier || entry.uri;
       name = root.friendlyName || name;
       // A shared server needs its own access token rather than the account token.
@@ -422,7 +553,7 @@ async function connect(entry, rowEl, subEl, body, servers) {
     if (err.unreachable || err.network) {
       toast(`Can’t reach ${entry.name}. Check it’s online and the address is right.`, { timeout: 6000 });
     } else {
-      toast(describeError(err));
+      toast(describeError(err), { timeout: 6000 });
     }
   }
 }
@@ -466,14 +597,17 @@ function showLibraries(body, srv, sections, servers) {
   );
 }
 
-// Quick library switcher behind "on <server>" on the home screen.
-export async function openSourceSheet() {
+// Quick library switcher behind "on <server>" on the home screen (`e`: the
+// tap on it). Not over another page, if you've gone to one meanwhile.
+export async function openSourceSheet(e) {
+  const from = e?.currentTarget;
   let sections = [];
   try {
     sections = await app.server.musicSections();
   } catch {
     /* still offer "change server" */
   }
+  if (from && !from.isConnected) return;
   sheet({
     title: app.source.serverName,
     subtitle: 'Music libraries',
@@ -504,11 +638,7 @@ const QUALITIES = [
 ];
 
 const FADES = [
-  [
-    'smart',
-    'Smart',
-    'Fades where the music ends, with albums gapless. Without Plex’s loudness analysis, at the very end.',
-  ],
+  ['smart', 'Smart', 'Fades where the music ends, and keeps albums gapless.'],
   ['always', 'Always', 'Fades between every track.'],
   ['off', 'Off', 'No fades.'],
 ];
@@ -635,7 +765,7 @@ function playbackView({ el }) {
       }),
       toggleRow({
         title: 'Skip tracks you’ve rated down',
-        subtitle: 'Leaves thumbs-down and one-star tracks out of radio, mixes, shuffles, Guest DJs and AI playlists.',
+        subtitle: 'Leaves them out of radio, mixes, shuffles, Guest DJs and AI playlists.',
         checked: app.settings.skipDisliked !== false,
         onChange: (v) => saveSettings({ skipDisliked: v }),
       }),
@@ -666,39 +796,43 @@ function playbackView({ el }) {
   }
 }
 
-// options: [[value, title, subtitle]]
+// options: [[value, title, subtitle]]. (Changed in place, so what has the
+// keyboard's focus keeps it: see common.js radioArrowKeys.)
 function radioRows(label, options, current, onChange) {
-  const list = h('div.rows', { role: 'radiogroup', 'aria-label': label });
   let value = current;
-  const render = () =>
-    list.replaceChildren(
-      ...options.map(([v, title, sub]) =>
-        h(
-          'button.row.radio-row',
-          {
-            type: 'button',
-            role: 'radio',
-            'aria-checked': String(v === value),
-            onclick: () => {
-              value = v;
-              render();
-              onChange(v);
-            },
-          },
-          h('div.row-main', null, h('div.row-title', null, title), sub ? h('div.row-sub', null, sub) : null),
-          v === value ? icon('check', 24, 'radio-check') : h('span.radio-empty'),
-        ),
-      ),
-    );
-  render();
-  return list;
+  const mark = (v) => (v === value ? icon('check', 24, 'radio-check') : h('span.radio-empty'));
+  const buttons = options.map(([v, title, sub]) =>
+    h(
+      'button.row.radio-row',
+      {
+        type: 'button',
+        role: 'radio',
+        'aria-checked': String(v === value),
+        onclick: () => {
+          value = v;
+          paint();
+          onChange(v);
+        },
+      },
+      h('div.row-main', null, h('div.row-title', null, title), sub ? h('div.row-sub', null, sub) : null),
+      mark(v),
+    ),
+  );
+  const paint = () =>
+    buttons.forEach((b, i) => {
+      b.setAttribute('aria-checked', String(options[i][0] === value));
+      b.lastChild.replaceWith(mark(options[i][0]));
+    });
+  return radioArrowKeys(h('div.rows', { role: 'radiogroup', 'aria-label': label }, buttons));
 }
 
 // ---------- Connection / diagnostics ----------
 
 // The routes to a server (see plex.js ROUTE_RANKS), as Settings › Connection
-// names them.
-const ROUTE_NAMES = { local: 'On your network', proxy: 'Through this app', remote: 'Over the internet', relay: 'Plex relay (slow)' };
+// names them (and an address you entered), and as a sentence has them
+// ("Now connected on your network").
+const ROUTE_NAMES = { local: 'On your network', proxy: 'Through this app', remote: 'Over the internet', relay: 'Plex relay (slow)', manual: 'Address you entered' };
+const ROUTE_WORDS = { local: 'on your network', proxy: 'through this app', remote: 'over the internet', relay: 'through Plex’s relay' };
 const ROUTE_CHOICES = [
   ['best', 'Best that works', 'Tries your network, this app, the internet, then Plex’s relay.'],
   ['container', 'Through this app', 'Always through this app.'],
@@ -723,7 +857,7 @@ function routeResult(r) {
   if (r.ok) return `${fmt.number(r.ms)} ms`;
   return {
     http: 'Can’t be used from this secure (https) page',
-    insecure: 'Not used: unencrypted over the internet',
+    insecure: 'Not used: plain http, unencrypted',
     timeout: 'No answer within 6 seconds',
     network: 'No answer',
     status: `Answered with an error (${r.status})`,
@@ -758,10 +892,8 @@ async function noAnswer(err, took, src, timeout) {
 function debugView({ el, onDispose }) {
   const src = app.source || {};
   const kv = (k, v) => h('div.kv', null, h('div.kv-k', null, k), h('div.kv-v', null, v ?? '—'));
-  const kinds = { local: 'On your network', remote: 'Over the internet', relay: 'Plex relay (slow)', manual: 'Address you entered', proxy: 'Through this app' };
-  // Every route to the server, tried (a server of the account's only).
   // Every route to the server, tried when the connection is tested (not
-  // each time the page opens).
+  // each time the page opens; a server of the account's only).
   const routeList = h('div.rows.route-rows');
   const routeHint = h('p.hint.route-hint');
   const routes = h('div.routes', { hidden: true });
@@ -803,11 +935,14 @@ function debugView({ el, onDispose }) {
     try {
       const srv = (await listServers(app.auth.token)).find((x) => x.id === src.serverId);
       const conn = srv && (await pickConnection(srv, { proxy: proxyUri(), prefer }));
-      const words = (kind) => (kind === 'proxy' ? 'through this app' : kind === 'local' ? 'on your network' : kind === 'remote' ? 'over the internet' : 'through Plex’s relay');
+      const words = (kind) => ROUTE_WORDS[kind] || ROUTE_WORDS.relay;
       if (conn && conn.uri !== app.source?.uri && app.source === src) {
         setSource({ ...src, uri: conn.uri, kind: conn.kind, token: srv.token, connections: srv.connections });
         toast(`Now connected ${words(conn.kind)}`);
-        refresh();
+        // (This page again, as it is now: at once if it's still the one on
+        // screen, else when it's opened again.)
+        if (el.isConnected) refresh();
+        else dropCached((p) => p === '/settings/debug');
         return;
       }
       if (conn) toast(`Still connected ${words(conn.kind)}: that’s the route for this choice`);
@@ -844,7 +979,7 @@ function debugView({ el, onDispose }) {
       kv('Server', src.serverName),
       kv('Library', src.sectionTitle),
       kv('Address', src.uri),
-      h('div.kv', null, h('div.kv-k', null, 'Connection'), h('div.kv-v', null, kinds[src.kind] || src.kind || '—'), h('div.kv-note.route-note', null, routeNote(src))),
+      h('div.kv', null, h('div.kv-k', null, 'Connection'), h('div.kv-v', null, ROUTE_NAMES[src.kind] || src.kind || '—'), h('div.kv-note.route-note', null, routeNote(src))),
       h('div.kv', null, h('div.kv-k', null, 'Response time'), status),
       h('div.kv', null, h('div.kv-k', null, 'Live updates'), liveStatus, liveNote),
       kv('Browser formats', support),
@@ -868,7 +1003,7 @@ function debugView({ el, onDispose }) {
             live.start();
             const t0 = performance.now();
             try {
-              await app.server.identity({ timeout: 15000 });
+              await app.server.checkIdentity({ timeout: 15000 });
               const ms = Math.round(performance.now() - t0);
               status.textContent = `${fmt.number(ms)} ms${ms > 3000 ? ' (slow)' : ''}`;
             } catch (err) {
@@ -929,7 +1064,7 @@ function missingSection(onDispose) {
   paint();
   // An AI playlist made meanwhile can add to it (and the player says whose
   // the server is).
-  onDispose?.(on('missing', paint));
+  onDispose(on('missing', paint));
   return h(
     'div.ai-missing-settings',
     null,
@@ -998,7 +1133,11 @@ function aiView({ el, onDispose }) {
   const missing = missingSection(onDispose);
   // (Friends' too, for the server's owner, once the player has said: then
   // the list is shown with AI off on this device as well.)
-  onDispose?.(on('missing', () => (missing.hidden = chosen() === 'off' && !missingCount())));
+  onDispose(on('missing', () => (missing.hidden = chosen() === 'off' && !missingCount())));
+
+  // (Which loadModels is the latest: what one before it gets back, from an
+  // Ollama asked about before, isn't shown.)
+  let modelsAsked = 0;
 
   el.append(
     h(
@@ -1028,6 +1167,7 @@ function aiView({ el, onDispose }) {
     sharedBox.replaceChildren(...(mode === 'auto' ? sharedParts() : []));
     customBox.replaceChildren(...(mode === 'custom' ? customForm(aiSettings()) : []));
     modelBox.replaceChildren();
+    modelsAsked += 1;
     waitBox.hidden = mode === 'off';
     notes.hidden = mode === 'off';
     missing.hidden = mode === 'off' && !missingCount();
@@ -1075,7 +1215,7 @@ function aiView({ el, onDispose }) {
 
   function customForm(s) {
     const url = h('input', { type: 'url', placeholder: 'http://localhost:11434', autocomplete: 'url', value: s.url, required: true });
-    const key = h('input', { type: 'password', placeholder: 'Optional', autocomplete: 'off', value: s.apiKey });
+    const key = h('input', { type: 'password', placeholder: 'Optional', value: s.apiKey, ...SECRET_INPUT });
     const insecure = () => location.protocol === 'https:' && /^http:\/\//i.test(url.value) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url.value);
     const warn = h('p.hint.warn', { hidden: !insecure() }, 'Browsers block http addresses here, except localhost. Use https.');
     url.addEventListener('input', () => (warn.hidden = !insecure()));
@@ -1125,6 +1265,7 @@ function aiView({ el, onDispose }) {
   }
 
   async function loadModels() {
+    const mine = ++modelsAsked;
     const s = aiSettings();
     const target = aiTarget(s);
     if (!target) return;
@@ -1133,14 +1274,16 @@ function aiView({ el, onDispose }) {
     let models;
     try {
       const [version, list] = await Promise.all([aiVersion(target).catch(() => ''), listModels(target)]);
+      if (mine !== modelsAsked) return;
       models = list;
       status.textContent = `Connected${version ? ` to Ollama ${version}` : ''}. ${fmt.count(models.length, 'model', 'models')} installed.`;
     } catch (err) {
+      if (mine !== modelsAsked) return;
       status.textContent = describeAIError(err, target);
       status.classList.add('warn');
       return;
     }
-    if (!el.isConnected) return;
+    // (Shown on a page put aside meanwhile too, for when it's back.)
     if (!models.length) {
       status.textContent += ' Install one with “ollama pull”, for example ollama pull llama3.1:8b.';
       return;
@@ -1224,7 +1367,7 @@ function aboutView({ el }) {
   el.append(
     backHeader('About', { fallback: '/settings' }),
     h(
-      'div.about',
+      'div.about-page',
       null,
       h('img.about-mark', { src: 'icons/icon.svg', alt: '', width: 72, height: 72 }),
       h('div.about-name', null, APP_INFO.product),

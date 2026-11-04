@@ -13,6 +13,8 @@ import { pickable, withoutDisliked } from './picks.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 const REMOTE_LIMIT = 500; // tracks sent to a Play Together session at once (player.js)
+const PLAY_PAGE = 250; // a playlist's entries asked for at a time, to play
+const RADIO_LENGTH = 100; // tracks in a radio
 
 export async function guard(fn) {
   try {
@@ -85,13 +87,7 @@ async function playlistItems(pl, { start = 0, limit = PLAYLIST_PLAY_LIMIT, sampl
     const seen = new Set();
     return chunks.flatMap((c) => c.items).filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey));
   }
-  const items = [];
-  for (let off = start; off < start + limit; off += 250) {
-    const { items: page, total: t } = await s.playlistItems(pl.ratingKey, { start: off, size: Math.min(250, start + limit - off) });
-    items.push(...page);
-    if (!page.length || off + page.length >= (t || total)) break;
-  }
-  return items;
+  return (await s.readPlaylist(pl.ratingKey, { start, limit, size: PLAY_PAGE })).items;
 }
 
 // Large playlists are sampled rather than loaded whole.
@@ -132,7 +128,8 @@ export const artistRadio = (artist) =>
       similar.filter((a) => a.type === 'artist').slice(0, 8).map((a) => s.popularTracks(section, a.ratingKey, 6).catch(() => [])),
     );
     let tracks = [...own, ...others.flat()];
-    if (tracks.length < 10) tracks = tracks.concat(await s.allLeaves(artist.ratingKey));
+    // (Too few: some of the artist's own, any of them.)
+    if (tracks.length < 10) tracks = tracks.concat(await anyOf(artist.ratingKey, RADIO_LENGTH));
     const seen = new Set();
     const list = await pickable(shuffleArray(tracks.filter((m) => !seen.has(m.ratingKey) && seen.add(m.ratingKey))).map(normTrack), { keep: 10 });
     playList(list, 0, ctx(`${artist.title} radio`, `/artist/${artist.ratingKey}`));
@@ -159,6 +156,13 @@ export const similarRadio = (track) =>
 // ---------- radio from your music ----------
 
 const pick = (list, n) => shuffleArray(list.slice()).slice(0, n);
+// `n` of an artist's tracks, any of them (Plex picks them at random), from
+// the library in use; or, for an artist of another library (with Search all
+// music libraries on, say), their first `n`, from theirs.
+const anyOf = async (artistId, n) => {
+  const { items } = await app.server.list(app.source.sectionKey, 10, { sort: 'random', size: n, filters: { 'artist.id': artistId } });
+  return items.length ? items : app.server.allLeaves(artistId, { size: n }).catch(() => []);
+};
 const once = (list) => {
   const seen = new Set();
   return list.filter((m) => m?.type === 'track' && !seen.has(String(m.ratingKey)) && seen.add(String(m.ratingKey)));
@@ -183,7 +187,7 @@ async function tracksFrom(artists, each) {
     await Promise.all(
       artists.map(async (a) => {
         const popular = await s.popularTracks(section, a, each).catch(() => []);
-        return popular.length >= Math.min(3, each) ? popular : pick(await s.allLeaves(a).catch(() => []), each);
+        return popular.length >= Math.min(3, each) ? popular : await anyOf(a, each).catch(() => []);
       }),
     )
   ).flat();
@@ -201,7 +205,7 @@ export const playlistRadio = (pl) =>
     // (The playlist's own, as they are, but those rated down; what's
     // added, picked for you.)
     more = await pickable(once(more));
-    const list = shuffleArray(once([...pick(withoutDisliked(own), 40), ...more])).slice(0, 100).map(normTrack);
+    const list = shuffleArray(once([...pick(withoutDisliked(own), 40), ...more])).slice(0, RADIO_LENGTH).map(normTrack);
     playList(list, 0, ctx(`${pl.title} radio`, `/playlist/${pl.ratingKey}`));
   });
 
@@ -219,7 +223,7 @@ export const favouritesRadio = () =>
     const [theirs, others] = await Promise.all([tracksFrom(artists, 6), tracksFrom(alike, 4)]);
     // (Your favourites, as they are; the rest, picked for you.)
     const picked = await pickable(once([...theirs, ...others]));
-    const list = shuffleArray(once([...pick(loved, 20), ...picked])).slice(0, 100).map(normTrack);
+    const list = shuffleArray(once([...pick(loved, 20), ...picked])).slice(0, RADIO_LENGTH).map(normTrack);
     playList(list, 0, ctx('Favourites radio', `/playlist/${pl.ratingKey}`));
   });
 
@@ -237,7 +241,7 @@ export const deepCutsRadio = () =>
     const { items } = await app.server.list(app.source.sectionKey, 10, { sort: 'viewCount:asc', size: 400 });
     const unplayed = items.filter((m) => !m.viewCount);
     const pool = await pickable(shuffleArray(unplayed.length >= 20 ? unplayed : items).slice(0, 150).map(normTrack), { keep: 20 });
-    playList(pool.slice(0, 100), 0, ctx('Deep cuts radio', null));
+    playList(pool.slice(0, RADIO_LENGTH), 0, ctx('Deep cuts radio', null));
   });
 
 // A random decade from this library, and tracks from its albums.
@@ -435,7 +439,7 @@ export function queueMenu() {
         label: 'Add to a collection…',
         onSelect: () => addToCollection({ kind: 'track', what: fmt.count(n, 'track', 'tracks'), load: upcoming }),
       },
-      player.upcoming.length > 0 && { icon: 'close', label: 'Clear Up next', onSelect: () => player.clearUpcoming() },
+      player.queue.length > player.index + 1 && { icon: 'close', label: 'Clear Up next', onSelect: () => player.clearUpcoming() },
     ],
   });
 }

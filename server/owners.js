@@ -7,8 +7,8 @@
 // no good, or isn't theirs. In the data folder (owners.json, the service's
 // alone), so a restart meanwhile doesn't lose them; in memory only without
 // one.
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { readDataFile, writeDataFile } from './datafile.js';
 
 export const OWNER_LIMITS = {
   keepMs: 30 * 24 * 3600 * 1000,
@@ -31,20 +31,19 @@ export class OwnerSignIns {
     this.load();
   }
 
+  // (One that can't be read is kept aside, never written over: see
+  // datafile.js.)
   load() {
-    if (!this.file || !existsSync(this.file)) return;
-    try {
-      const data = JSON.parse(readFileSync(this.file, 'utf8'));
-      const list = data && data.version === FILE_VERSION && data.owners && typeof data.owners === 'object' ? Object.entries(data.owners) : [];
+    const read = (data) => {
+      const list = data.version === FILE_VERSION && data.owners && typeof data.owners === 'object' ? Object.entries(data.owners) : [];
       const cutoff = this.now() - OWNER_LIMITS.keepMs;
       for (const [k, at] of list.sort((a, b) => Number(a[1]) - Number(b[1]))) {
         if (FINGERPRINT.test(k) && Number.isFinite(Number(at)) && Number(at) > cutoff) this.map.set(k, Number(at));
       }
       while (this.map.size > OWNER_LIMITS.kept) this.map.delete(this.map.keys().next().value);
       this.saved = new Map(this.map);
-    } catch (err) {
-      this.log?.warn(`owner sign-ins: couldn't read ${this.file} (${err.message}): starting afresh`);
-    }
+    };
+    if (!readDataFile(this.file, read, { log: this.log, what: 'owner sign-ins' })) this.file = null;
   }
 
   // Whether a fingerprint is one of the owner's, used in the last 30 days.
@@ -93,10 +92,8 @@ export class OwnerSignIns {
 
   write() {
     if (!this.file) return;
-    const tmp = `${this.file}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify({ version: FILE_VERSION, owners: Object.fromEntries(this.map) }), { mode: 0o600 });
-      renameSync(tmp, this.file);
+      writeDataFile(this.file, { version: FILE_VERSION, owners: Object.fromEntries(this.map) });
       this.saved = new Map(this.map);
     } catch (err) {
       this.log?.error(`owner sign-ins: couldn't save them to ${this.file}: ${err.message}`);

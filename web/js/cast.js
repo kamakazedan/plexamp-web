@@ -9,7 +9,7 @@
 // to the queue go to the play queue, and the player is told to look again.
 import { app, on, plexAccount } from './state.js';
 import { player } from './player.js';
-import { normTrack, store } from './plex.js';
+import { normTrack, store, asArray } from './plex.js';
 import { popOverlay, describeError } from './router.js';
 import { h, icon, sheet, toast, shuffleArray } from './ui.js';
 import { together } from './together.js';
@@ -37,7 +37,7 @@ async function api(path, { method = 'GET', body } = {}) {
     res = await fetch(`api/cast/${path}`, {
       method,
       cache: 'no-store',
-      credentials: 'same-origin',
+      credentials: 'omit',
       headers: { Accept: 'application/json', 'X-Plex-Token': app.auth?.token || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(12000),
@@ -55,12 +55,10 @@ async function api(path, { method = 'GET', body } = {}) {
   return data || {};
 }
 
-const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
-
 // The play queue's entries as queue tracks: each keeps its entry's id, so it
 // keeps its place (and its qid) while it's in the queue.
 function entriesOf(mc) {
-  return asList(mc.Metadata)
+  return asArray(mc.Metadata)
     .filter((m) => m.type === 'track' && m.playQueueItemID != null)
     .map((m) => ({ ...normTrack(m), qid: `c:${m.playQueueItemID}`, pqid: String(m.playQueueItemID) }));
 }
@@ -109,7 +107,7 @@ class Cast extends EventTarget {
 
   async players() {
     if (!this.available) return [];
-    return asList((await api('players')).players);
+    return asArray((await api('players')).players);
   }
 
   // A temporary token from the server, for whatever device plays: it never
@@ -217,6 +215,8 @@ class Cast extends EventTarget {
       this.emit('change');
       this.startPolling();
     } catch {
+      // (Not left as its remote, if it got that far: back to this device.)
+      this.stop({ here: false, quiet: true });
       store.set(key, null);
     }
   }
@@ -478,7 +478,7 @@ class Cast extends EventTarget {
   setShuffle(on) {
     player.shuffle = on;
     player.emit('mode');
-    if (!on || player.upcoming.length < 2) return;
+    if (!on || player.upcomingCount < 2) return;
     const q = player.queue;
     const i = player.index;
     this.resend([...q.slice(0, i + 1), ...shuffleArray(q.slice(i + 1))], i);
@@ -545,6 +545,16 @@ function fetchMediaToken(then) {
     },
   );
 }
+
+// A track that failed while AirPlay or Cast plays: the temporary token may
+// be one the server doesn't take any more (it's restarted since, say), so a
+// new one's asked for (not the one kept, which may be that one), for what
+// plays from here.
+player.addEventListener('renewtoken', () => {
+  if (!player.useMediaToken) return;
+  cast.token = null;
+  fetchMediaToken();
+});
 
 // Opens the browser's own device picker for the element that's playing.
 function promptRemote() {

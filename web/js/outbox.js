@@ -171,6 +171,17 @@ async function send() {
   const s = app.server;
   const server = app.source?.serverId;
   if (!s || !server) return;
+  // Nothing goes until the server answers (the browser saying it's online,
+  // or a while gone by, doesn't say so, and what answers at its address
+  // may not be it: see connection.js serverAnswers). Asked only when
+  // something's due to go.
+  if (!load().some((x) => x.server === server && senders.has(x.kind) && due(x))) return;
+  if (!(await serverAnswers())) {
+    if (app.server !== s) return;
+    failedAt = performance.now();
+    connectionLost();
+    return;
+  }
   // (Each once in a go, even were taking it out not kept.)
   const done = new Set();
   const name = (x) => `${x.server}|${x.key}|${x.at}`;

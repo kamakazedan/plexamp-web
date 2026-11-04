@@ -40,9 +40,9 @@
 #                       tracks here, for all of its devices, and syncing
 #                       everyone's into the Plex server owner's, so they can
 #                       see what's missing from their server (on by default)
-#   SPOTIFY_FILE_IMPORT "true" turns on Search › From Spotify with Spotify's
-#                       download of your data: its playlist files, read in
-#                       the browser (off by default)
+#   SPOTIFY_FILE_IMPORT Search › From Spotify with Spotify's download of your
+#                       data: its playlist files, read in the browser (on by
+#                       default; "false" turns it off)
 #   SPOTIFY_LINK_IMPORT "true" turns on Search › From Spotify with a public
 #                       playlist's link, read from Spotify's public page for
 #                       it (off by default: see server/spotify.js).
@@ -68,6 +68,9 @@
 #                       service's alone.
 #   DEBUG               "true" writes extra detail to the container log, with
 #                       tokens and keys removed
+#
+# A setting it doesn't know, with a name like one of these, stops the
+# container, saying what it's called (see "settings it doesn't know").
 set -eu
 
 HTML_DIR="${HTML_DIR:-/usr/share/nginx/html}"
@@ -139,6 +142,9 @@ data_dir_problem() {
             case "${e##*/}" in
                 # (and what file systems and file browsers leave around)
                 shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | musicbrainz.json | musicbrainz.json.tmp | owners.json | owners.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
+                # (One the service couldn't read, kept aside by it as it was,
+                # for whoever looks after it. Never changed here.)
+                shares.json.unreadable-* | settings.json.unreadable-* | missing.json.unreadable-* | musicbrainz.json.unreadable-* | owners.json.unreadable-*) ;;
                 *)
                     echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give it a folder of its own (a new or empty one, or a volume)"
                     return
@@ -266,6 +272,90 @@ prepare_upstream() {
 # A URL with any user:password@ hidden, for the log.
 safe_url() { printf '%s' "$1" | sed -E 's#^(([A-Za-z]+://)?)[^/@]*@#\1***@#'; }
 
+# ---------- settings it doesn't know ----------
+
+# A setting whose name this doesn't know (a misspelt one, say) would do
+# nothing, unseen. One with a name like the app's own stops the container,
+# saying what it's called. The names it knows are those this script reads
+# (as ${NAME:-...} or ${NAME:+...}), so the list is the script itself, and
+# what it suggests are those described at the top. PLEX_ and OLLAMA_ names
+# are only warned of: Plex's and Ollama's own containers have settings of
+# theirs (PLEX_CLAIM, OLLAMA_HOST), and a stack can give all its
+# containers the same settings file.
+SCRIPT="$0"
+# shellcheck disable=SC2016 # (a $ to be found, not expanded)
+known_settings="$(grep -o '\${[A-Z][A-Z0-9_]*:[-+]' "$SCRIPT" 2>/dev/null | sed -e 's/^\${//' -e 's/:.$//' | sort -u | tr '\n' ' ' || true)"
+described_settings="$(sed -n '1,/^set -eu$/s/^#   \([A-Z][A-Z0-9_]*\) .*/\1/p' "$SCRIPT" 2>/dev/null | tr '\n' ' ' || true)"
+# (Only when this is the script itself, as it always is: never every name
+# taken for unknown.)
+case " $known_settings " in
+    *" PLEX_SERVER_URL "*)
+        unknown="$(awk -v known="$known_settings" -v described="$described_settings" '
+            # How many letters to change, add or take out to make one name the other.
+            function dist(a, b,    la, lb, i, j, c, x, prev, cur) {
+                la = length(a)
+                lb = length(b)
+                for (j = 0; j <= lb; j++) prev[j] = j
+                for (i = 1; i <= la; i++) {
+                    cur[0] = i
+                    for (j = 1; j <= lb; j++) {
+                        c = substr(a, i, 1) == substr(b, j, 1) ? 0 : 1
+                        x = prev[j - 1] + c
+                        if (prev[j] + 1 < x) x = prev[j] + 1
+                        if (cur[j - 1] + 1 < x) x = cur[j - 1] + 1
+                        cur[j] = x
+                    }
+                    for (j = 0; j <= lb; j++) prev[j] = cur[j]
+                }
+                return prev[lb]
+            }
+            BEGIN {
+                n = split(known, k, " ")
+                for (i = 1; i <= n; i++) is_known[k[i]] = 1
+                m = split(described, d, " ")
+                for (name in ENVIRON) {
+                    if (name in is_known) continue
+                    if (name ~ /^(PLEX|OLLAMA)_/) kind = "warn"
+                    else if (name ~ /^(MUSICBRAINZ|SPOTIFY|OFFLINE|SYNC|PLAYLIST|PLAY|WEBSOCKETS|CASTING|PW_SERVICE)_/) kind = "stop"
+                    else continue
+                    # A near miss (a letter or few), or the start of one, is
+                    # suggested; otherwise the settings that start alike.
+                    best = ""
+                    low = 4
+                    alike = ""
+                    first = substr(name, 1, index(name, "_"))
+                    for (i = 1; i <= m; i++) {
+                        x = dist(name, d[i])
+                        if (index(d[i], name) == 1 && x > 1) x = 1
+                        if (x < low) { low = x; best = d[i] }
+                        if (index(d[i], first) == 1) alike = alike (alike == "" ? "" : ", ") d[i]
+                    }
+                    print kind, name, (best == "" ? "-" : best), (alike == "" ? "-" : alike)
+                }
+            }')"
+        stops=""
+        while read -r kind name suggestion alike; do
+            [ -n "$name" ] || continue
+            if [ "$suggestion" != - ]; then
+                hint="did you mean $suggestion?"
+            elif [ "$alike" != - ]; then
+                hint="those like it are $alike."
+            else
+                hint="they're listed in docs/configuration.md."
+            fi
+            if [ "$kind" = warn ]; then
+                say "$name isn't a setting here, so it's left aside: fine if it's for another container (Plex's or Ollama's own, say), or else $hint" >&2
+            else
+                echo "plexamp-web: $name isn't a setting: $hint" >&2
+                stops="$stops $name"
+            fi
+        done <<UNKNOWN
+$unknown
+UNKNOWN
+        [ -z "$stops" ] || fail "rename or take out:$stops (plexamp-web doesn't start till then, so that nothing you've set is left aside unseen)"
+        ;;
+esac
+
 PMS_CONF="$CONF_DIR/pms-proxy.inc"
 PMS_PROBE_CONF="$CONF_DIR/pms-probe.inc"
 AI_CONF="$CONF_DIR/ai-proxy.inc"
@@ -295,15 +385,37 @@ ACCESS_LOG="${NGINX_ACCESS_LOG:-/dev/stdout}"
 case "$ACCESS_LOG" in
     "" | *[!A-Za-z0-9=:,._/-]*) fail "NGINX_ACCESS_LOG can only be a path or syslog:… (got: $ACCESS_LOG)" ;;
 esac
+
+# udp_taken PORT: something here already listens for UDP on 127.0.0.1:PORT
+# (or on every address), as /proc/net/udp and udp6 say.
+udp_taken() {
+    port_hex="$(printf '%04X' "$1")"
+    for table in /proc/net/udp /proc/net/udp6; do
+        [ -r "$table" ] || continue
+        awk -v port="$port_hex" 'FNR > 1 { split($2, a, ":"); if (a[2] == port && (a[1] == "0100007F" || a[1] ~ /^0+$/ || a[1] == "0000000000000000FFFF00000100007F")) found = 1 } END { exit !found }' "$table" && return 0
+    done
+    return 1
+}
+
+# nginx's own errors quote the request they're about, query string and all
+# (a Plex token, a device's name), and where it came from: they're never
+# logged, for any of its servers here, but in debug mode, where they go
+# through the service, which removes tokens (see server/syslog.js). Not
+# there either if something else already listens where they'd be sent (a
+# log collector on the host's network, say), which would have them as they
+# are.
+NGINX_ERROR_LOG="error_log stderr emerg;"
 if [ "$DEBUG_ON" = true ]; then
     echo "access_log $ACCESS_LOG pw_debug;" >"$LOG_CONF"
-    # nginx's errors for proxied Plex requests quote the request (and so the
-    # token); in debug mode they go through the service, which removes it.
-    PMS_ERROR_LOG="error_log syslog:server=127.0.0.1:${NGINX_LOG_PORT},tag=nginx,nohostname warn;"
+    if udp_taken "$NGINX_LOG_PORT"; then
+        say "debug mode: something else here already listens on UDP port $NGINX_LOG_PORT, where nginx's errors would go to be cleaned of tokens, so they're left out of the log (NGINX_LOG_PORT can be another port)" >&2
+    else
+        NGINX_ERROR_LOG="error_log syslog:server=127.0.0.1:${NGINX_LOG_PORT},tag=nginx,nohostname warn;"
+    fi
 else
     echo 'access_log off;' >"$LOG_CONF"
-    PMS_ERROR_LOG="error_log stderr emerg;"
 fi
+echo "$NGINX_ERROR_LOG" >>"$LOG_CONF"
 
 # ---------- Play Together ----------
 
@@ -379,24 +491,55 @@ if truthy MUSICBRAINZ_ADVANCED "${MUSICBRAINZ_ADVANCED:-}"; then
     MB_ADV=true
 fi
 
+# near_host URL: the address's host is this machine (127.x, ::1,
+# localhost), or a name without a dot, as a container is reached by on the
+# same Docker network (the tests' mocks are): nothing a name server on the
+# internet could answer for.
+near_host() {
+    h="${1#*://}"
+    h="${h%%/*}"
+    case "$h" in
+        \[*) h="${h%%]*}]" ;;
+        *:*) h="${h%:*}" ;;
+    esac
+    h="$(lower "$h")"
+    [ "$h" = localhost ] || [ "$h" = "[::1]" ] || whole "$h" '^127(\.[0-9]{1,3}){3}$' || whole "$h" '^[a-z][a-z0-9-]*$'
+}
+
+# test_address NAME URL DEFAULT WHAT: an address for the tests (the mock's),
+# in place of DEFAULT. Said in the log whenever it's set, so one left over
+# is seen, and plain http:// only where it goes nowhere near the internet.
+test_address() {
+    [ "${2%/}" != "$3" ] || return 0
+    case "$2" in
+        https://*) ;;
+        *) near_host "$2" || fail "$1 must be an https:// address (got: $(safe_url "$2")): plain http:// is only for this machine, or a container beside this one, as in the tests" ;;
+    esac
+    say "$1 is set ($(safe_url "$2")): $4. It's for tests: take it out otherwise." >&2
+}
+
+# plex.tv, where every sign-in check goes, with the sign-in's token.
+# PLEX_TV_URL is for tests (the mock's address).
 PLEX_TV="${PLEX_TV_URL:-https://plex.tv}"
 case "$PLEX_TV" in
     http://* | https://*) ;;
     *) fail "PLEX_TV_URL must start with http:// or https:// (got: $(safe_url "$PLEX_TV"))" ;;
 esac
 whole "$PLEX_TV" '^https?://[]A-Za-z0-9._:[-]+(/[A-Za-z0-9._~/-]*)?$' || fail "PLEX_TV_URL isn't a plain address (got: $(safe_url "$PLEX_TV"))"
+test_address PLEX_TV_URL "$PLEX_TV" https://plex.tv "every sign-in check goes there, with its Plex token, instead of to plex.tv"
 
 # ---------- Spotify imports ----------
 
-# Each way is off unless it's turned on. From Spotify's download of your data
-# (SPOTIFY_FILE_IMPORT): its playlist files, read in the browser; nothing goes
-# to this container or to Spotify, so it doesn't need the service. From a
-# public playlist's link (SPOTIFY_LINK_IMPORT; SPOTIFY_IMPORT before 0.22.0,
-# which it overrides when both are set): read from Spotify's public pages,
-# which Spotify's terms don't allow (see server/spotify.js). SPOTIFY_URL is
-# for tests (the mock's address).
+# From Spotify's download of your data (SPOTIFY_FILE_IMPORT, on unless it's
+# turned off: since 0.37.0, as it's been tried with real downloads): its
+# playlist files, read in the browser; nothing goes to this container or to
+# Spotify, so it doesn't need the service. From a public playlist's link
+# (SPOTIFY_LINK_IMPORT, off unless it's turned on; SPOTIFY_IMPORT before
+# 0.22.0, which it overrides when both are set): read from Spotify's public
+# pages, which Spotify's terms don't allow (see server/spotify.js).
+# SPOTIFY_URL is for tests (the mock's address).
 SPOTIFY_FILES=false
-if truthy SPOTIFY_FILE_IMPORT "${SPOTIFY_FILE_IMPORT:-}"; then SPOTIFY_FILES=true; fi
+if truthy SPOTIFY_FILE_IMPORT "${SPOTIFY_FILE_IMPORT:-}" true; then SPOTIFY_FILES=true; fi
 SPOTIFY=false
 if truthy SPOTIFY_IMPORT "${SPOTIFY_IMPORT:-}"; then SPOTIFY=true; fi
 if [ -n "${SPOTIFY_LINK_IMPORT:-}" ]; then
@@ -404,6 +547,7 @@ if [ -n "${SPOTIFY_LINK_IMPORT:-}" ]; then
 fi
 SPOTIFY_URL="${SPOTIFY_URL:-https://open.spotify.com}"
 whole "$SPOTIFY_URL" '^https?://[]A-Za-z0-9._:[-]+$' || fail "SPOTIFY_URL isn't a plain address (got: $(safe_url "$SPOTIFY_URL"))"
+test_address SPOTIFY_URL "$SPOTIFY_URL" https://open.spotify.com "Spotify playlists' links are read from there instead of from open.spotify.com"
 
 # ---------- the service (/api/) ----------
 
@@ -440,6 +584,28 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
     # oneAddress in server/plex.js.)
     PMS_NS=""
     if [ -n "$PMS_RESOLVER" ]; then PMS_NS="$(nameserver | tr -d '[]')"; fi
+    # Where the server's address is known as nginx starts, it keeps its
+    # connections to it open between requests (and, for https://, their
+    # TLS). Not at a name it looks up for each request: that takes an
+    # upstream that looks names up itself, which Debian's nginx can't.
+    PMS_UPSTREAM=""
+    PMS_PASS="$PMS_URL"
+    if [ -z "$PMS_RESOLVER" ]; then
+        pms_at="${UP_URL#*://}"
+        pms_port=80
+        case "$UP_URL" in https://*) pms_port=443 ;; esac
+        case "$pms_at" in
+            \[*\]) pms_at="$pms_at:$pms_port" ;;
+            \[*) ;;
+            *:*) ;;
+            *) pms_at="$pms_at:$pms_port" ;;
+        esac
+        PMS_UPSTREAM="upstream plexamp_web_pms {
+    server ${pms_at};
+    keepalive 16;
+}"
+        PMS_PASS="${UP_URL%%://*}://plexamp_web_pms${UP_PATH}"
+    fi
     # The service checks each request: nothing goes through that the Plex
     # server would take for its owner's, unless it's theirs (see pmsAuth in
     # server/index.js). The server's notification streams are checked as
@@ -473,9 +639,9 @@ elif [ -n "${PLEX_SERVER_URL:-}" ]; then
             ;;
     esac
     # Shared by the locations below, and the service's socket. (Its resolver,
-    # for a name, is at http level: see pms-probe.inc.)
-    PMS_PROXY="${PMS_ERROR_LOG}
-    ${PMS_TLS}
+    # for a name, is at http level: see pms-probe.inc. Its errors are
+    # logged as all of nginx's are: see "debug mode and logging".)
+    PMS_PROXY="${PMS_TLS}
     proxy_http_version 1.1;
     proxy_set_header Host ${PMS_HOST};
     proxy_set_header Upgrade \$pw_upgrade;
@@ -547,7 +713,7 @@ location /pms/ {
     # Every request to Plex carries a token; refuse the rest here.
     if (\$pms_has_token = 0) { return 401; }
     ${PMS_AUTH}
-    proxy_pass ${PMS_URL}\$pms_path_sent;
+    proxy_pass ${PMS_PASS}\$pms_path_sent;
     ${PMS_PROXY}
 }
 # The server's notification streams (a WebSocket, or an event stream), by
@@ -555,7 +721,7 @@ location /pms/ {
 location ~* ^/pms/:/[^?]*(?:websocket|eventsource|notification) {
     if (\$pms_has_token = 0) { return 401; }
     ${PMS_AUTH_STREAM}
-    proxy_pass ${PMS_URL}\$pms_path;
+    proxy_pass ${PMS_PASS}\$pms_path;
     ${PMS_PROXY}
 }
 # The playlists and segments of a stream Plex converts are fetched from
@@ -564,7 +730,7 @@ location ~* ^/pms/:/[^?]*(?:websocket|eventsource|notification) {
 # matched them (the normalised path), so a path that only looks like one of
 # these can't reach anything else.
 location ~ ^/pms/(audio|music)/:/transcode/universal/session/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+$ {
-    proxy_pass ${PMS_URL}\$pms_uri\$is_args\$args;
+    proxy_pass ${PMS_PASS}\$pms_uri\$is_args\$args;
     ${PMS_PROXY}
 }
 CONF
@@ -572,7 +738,6 @@ CONF
         cat <<CONF
 location = /$1 {
     internal;
-    ${PMS_ERROR_LOG}
     proxy_pass http://unix:${SERVICE_SOCKET}:/api/internal/$2;
     proxy_method GET;
     proxy_pass_request_body off;
@@ -610,16 +775,19 @@ CONF
     # service (and nginx, and root) can reach this socket: see "start the
     # service".
     # (A name is looked up by one resolver, for all of it: one answer kept for
-    # everything that reaches the server, the service's requests too.)
+    # everything that reaches the server, the service's requests too. An
+    # address is one upstream, for both.)
     cat >"$PMS_PROBE_CONF" <<CONF
 ${PMS_RESOLVER}
+${PMS_UPSTREAM}
 server {
     listen unix:${PMS_PROBE_SOCKET};
     server_name _;
     access_log off;
+    ${NGINX_ERROR_LOG}
     set \$pms_offline "";
     location / {
-        proxy_pass ${PMS_URL}\$request_uri;
+        proxy_pass ${PMS_PASS}\$request_uri;
         ${PMS_PROXY}
     }
 }
@@ -1008,17 +1176,40 @@ fi
 # proxmox/install.sh).
 if [ "$SERVICE" = true ] && [ "${SERVICE_START:-true}" != false ]; then
     rm -f "$SERVICE_SOCKET"
-    # Restarted if it ever stops. nginx runs as PID 1, so when the container
-    # stops this goes with it. UV_USE_IO_URING=0: without io_uring, giving up
-    # root really gives it all up (CVE-2024-22017), and Node.js lets it.
+    # Its settings are all in service.json: it's given nothing of the
+    # container's environment but what Node.js needs, so nothing left there
+    # (a PW_SERVICE_ name it reads for its tests, say) can change them. Only
+    # the tests' own few reach it, and the log says when one does.
+    # UV_USE_IO_URING=0: without io_uring, giving up root really gives it all
+    # up (CVE-2024-22017), and Node.js lets it.
+    for_tests=""
+    [ -z "${PW_SERVICE_OFFLINE_TIMING:-}" ] || for_tests="$for_tests PW_SERVICE_OFFLINE_TIMING"
+    [ -z "${PW_SERVICE_PMS_PROBE:-}" ] || for_tests="$for_tests PW_SERVICE_PMS_PROBE"
+    [ -z "${PW_SERVICE_CAST_LOOPBACK:-}" ] || for_tests="$for_tests PW_SERVICE_CAST_LOOPBACK"
+    [ -z "$for_tests" ] || say "set for tests, and passed on to the service:$for_tests (see server/index.js). Take them out otherwise." >&2
+    # Restarted if it ever stops. When the container stops, it has the stop
+    # signal too (tini gives it to nginx and everything it started: see the
+    # Dockerfile), so it keeps what it has to before it goes. So it has
+    # nginx's others too: SIGUSR1 (reopen your logs) mustn't open Node.js's
+    # inspector, which --disable-sigusr1 sees to, where Node.js has it.
+    NODE_SIGNAL_FLAG=""
+    if "$NODE_BIN" --disable-sigusr1 -e '' </dev/null >/dev/null 2>&1; then NODE_SIGNAL_FLAG=--disable-sigusr1; fi
+    # ($RUN_DIR/stop, and the loop's process id in service-loop.pid, are for
+    # a test setup that runs this outside Docker: there, they stop it.)
     (
         set +e
         while :; do
-            UV_USE_IO_URING=0 "$NODE_BIN" "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null
+            env -i PATH="$PATH" ${TZ:+"TZ=$TZ"} ${NODE_EXTRA_CA_CERTS:+"NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS"} UV_USE_IO_URING=0 \
+                ${PW_SERVICE_OFFLINE_TIMING:+"PW_SERVICE_OFFLINE_TIMING=$PW_SERVICE_OFFLINE_TIMING"} \
+                ${PW_SERVICE_PMS_PROBE:+"PW_SERVICE_PMS_PROBE=$PW_SERVICE_PMS_PROBE"} \
+                ${PW_SERVICE_CAST_LOOPBACK:+"PW_SERVICE_CAST_LOOPBACK=$PW_SERVICE_CAST_LOOPBACK"} \
+                "$NODE_BIN" ${NODE_SIGNAL_FLAG:+"$NODE_SIGNAL_FLAG"} "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null
             code=$?
             [ -f "$RUN_DIR/stop" ] && exit 0
-            echo "plexamp-web: the service stopped (exit $code); restarting it in 2 seconds" >&2
+            # (A container that's stopping is gone before this.)
             sleep 2
+            [ -f "$RUN_DIR/stop" ] && exit 0
+            echo "plexamp-web: the service stopped (exit $code), so it's started again" >&2
         done
     ) &
     echo "$!" >"$RUN_DIR/service-loop.pid"

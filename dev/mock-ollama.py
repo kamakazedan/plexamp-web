@@ -22,6 +22,10 @@ whose OLLAMA_ORIGINS doesn't list the site, &refuse=0 stops that.
 
 In the app, choose Settings > AI > My own Ollama server and enter
 http://127.0.0.1:11434.
+
+It listens on 127.0.0.1 only (its /__mock/ switches need no sign-in):
+--host 0.0.0.0 has it listen on every address, for containers to reach it
+(the tests run it in one).
 """
 
 import argparse
@@ -38,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--port', type=int, default=11434)
+ap.add_argument('--host', default='127.0.0.1', help='where to listen (0.0.0.0: every address)')
 ap.add_argument('--origins', default='', help='extra allowed origins, comma separated ("*" for any)')
 ap.add_argument('--delay', type=float, default=0.01, help='seconds between streamed chunks')
 ap.add_argument('--reject-think', action='store_true')
@@ -313,5 +318,5 @@ class Server(ThreadingHTTPServer):
 
 
 if __name__ == '__main__':
-    print(f'Mock Ollama on http://127.0.0.1:{ARGS.port}', flush=True)
-    Server(('0.0.0.0', ARGS.port), Handler).serve_forever()
+    print(f'Mock Ollama on port {ARGS.port} on every address' if ARGS.host == '0.0.0.0' else f'Mock Ollama on http://{ARGS.host}:{ARGS.port}', flush=True)
+    Server((ARGS.host, ARGS.port), Handler).serve_forever()

@@ -10,11 +10,14 @@
 // With MUSICBRAINZ_ADVANCED, the app's MusicBrainz features too (see the
 // end of this file): what MusicBrainz says of the library's artists and
 // albums, by artist, kept on disk for a month.
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { norm } from './missinglist.js';
-import { albumKey, matchGroup, exactAlbum, exactKey, titlesAgree, trackKey, tracksInCommon, releaseSizes } from './releases.js';
+import { albumKey, matchGroup, exactAlbum, exactKey, sameTitle, titlesAgree, trackKey, tracksInCommon, releaseSizes, PLACEHOLDER_ARTISTS } from './releases.js';
+import { ServiceError } from './errors.js';
+import { CONTROL_CHARACTERS } from './clean.js';
+import { readCapped } from './plex.js';
+import { readDataFile, writeDataFile } from './datafile.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org
@@ -39,6 +42,7 @@ export const MB_LIMITS = {
   perUser: 2, // requests from the app under way, for each person
   checks: 4, // and for everyone (each waits for the others' turns)
   timeoutMs: 15000,
+  answerBytes: 8 * 1024 * 1024, // an answer read, at most (a box set's tracks are a few hundred KB)
 };
 
 // Whoever asked has gone: what's left isn't checked.
@@ -54,12 +58,7 @@ export function retryAfterMs(header, now = Date.now()) {
   return Math.min(MB_LIMITS.busyMaxMs, Math.max(5000, ms));
 }
 
-export class MusicBrainzError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class MusicBrainzError extends ServiceError {}
 
 // Names are compared as the app compares them (missinglist.js norm, a copy
 // of the app's): case, accents, "the" and punctuation aside, and a name in
@@ -73,31 +72,10 @@ const phrase = (v) => `"${String(v).replace(/["\\]/g, ' ').replace(/\s+/g, ' ').
 // The names in an artist credit ("Underworld & Gabriel Yared").
 const credited = (credit) => (Array.isArray(credit) ? credit : []).flatMap((c) => [c?.name, c?.artist?.name]).filter(Boolean).map(norm);
 
-function editDistance(a, b) {
-  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    prev = cur;
-  }
-  return prev[b.length];
-}
-
-// Close enough to be the same title: "Out of Space" and "Out Of Space
-// (Remastered)", or a letter or two different (as the app judges it: not
-// in Chinese, Japanese or Korean, where one character can be another word,
-// nor a number).
-const ONE_CHARACTER_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-const numbersOf = (s) => s.replace(/\P{Nd}+/gu, ' ').trim().replace(/(^| )0+(?=\p{Nd})/gu, '$1');
-export function sameTitle(a, b) {
-  if (!a || !b) return false;
-  if (a === b || a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
-  if (ONE_CHARACTER_WORDS.test(a) || ONE_CHARACTER_WORDS.test(b)) return false;
-  // (Nor are titles with other numbers, in any script's digits: Symphony
-  // No. 5 isn't No. 6. No. 02 is No. 2.)
-  if (numbersOf(a) !== numbersOf(b)) return false;
-  return Math.min(a.length, b.length) >= 6 && editDistance(a, b) <= Math.max(1, Math.floor(Math.min(a.length, b.length) / 10));
-}
+// Songs' titles are close enough to be the same as releases.js sameTitle
+// has it ("Out of Space" and "Out Of Space (Remastered)", or a letter or two
+// different, but not in Chinese, Japanese or Korean, nor another number), as
+// the app judges them.
 
 // musicbrainz.org itself (or one of its own names), as opposed to a server
 // of your own.
@@ -187,8 +165,11 @@ export class MusicBrainz {
       const stop = () => ctrl.abort();
       signal?.addEventListener('abort', stop, { once: true });
       try {
+        // (Never followed elsewhere: what's asked goes to this MusicBrainz,
+        // and the answer is its own.)
         const res = await this.fetch(url, {
           headers: { Accept: 'application/json', 'User-Agent': this.agent },
+          redirect: 'error',
           signal: ctrl.signal,
         });
         const took = Date.now() - started;
@@ -208,7 +189,7 @@ export class MusicBrainz {
         if (res.status >= 500) this.unwell();
         // (A server of your own needs its search indexes for these.)
         if (!res.ok) throw Object.assign(new MusicBrainzError(502, this.public ? `MusicBrainz answered ${res.status}.` : `The player’s MusicBrainz server answered ${res.status}. Searching it needs its search indexes.`), { answered: res.status });
-        return await res.json();
+        return JSON.parse(await readCapped(res, MB_LIMITS.answerBytes));
       } catch (err) {
         if (err instanceof MusicBrainzError) throw err;
         if (signal?.aborted) throw new Gone();
@@ -395,7 +376,7 @@ export class MusicBrainz {
     if (kept !== undefined) return kept;
     // (Not Various Artists, by any name: on MusicBrainz, theirs are
     // everyone's compilations, far too many to look through for one.)
-    if (byId ? SPECIAL_ARTISTS.has(id) : VARIOUS.has(want)) return this.adv.set(key, null);
+    if (byId ? SPECIAL_ARTISTS.has(id) : PLACEHOLDER_ARTISTS.has(want)) return this.adv.set(key, null);
     this.resting();
     const opts = { background };
     let hit = byId ? { id } : null;
@@ -453,7 +434,7 @@ export class MusicBrainz {
   // which Plex can have as one artist (see the app's mb.js).
   async namesakes(name, { but = null, signal, background = false } = {}) {
     const want = norm(name);
-    if (!this.adv || !want || VARIOUS.has(want)) return [];
+    if (!this.adv || !want || PLACEHOLDER_ARTISTS.has(want)) return [];
     const key = `namesakes|${want}`;
     let list = this.had(key);
     if (list === undefined) {
@@ -521,7 +502,7 @@ export class MusicBrainz {
     const who = norm(artist);
     const byId = MBID.test(String(id));
     if (!this.adv || (!who && !byId)) return null;
-    if (byId ? SPECIAL_ARTISTS.has(id) : VARIOUS.has(who)) return null;
+    if (byId ? SPECIAL_ARTISTS.has(id) : PLACEHOLDER_ARTISTS.has(who)) return null;
     // (An id MusicBrainz doesn't know: by name, as artistInfo goes.)
     let info = byId ? this.had(`artistid|${id}`) : this.had(`artist|${who}`);
     if (info === null && byId && who) info = this.had(`artist|${who}`);
@@ -729,13 +710,13 @@ export class MusicBrainz {
             this.done(key);
             continue;
           }
-          // MusicBrainz busy or out of reach: a rest, and again (three
+          // MusicBrainz busy or out of reach: a rest, and again (`tries`
           // times at most, each to the back of the queue).
-          this.todo.delete(key);
           it.tries += 1;
-          if (it.tries < 3) this.todo.set(key, it);
-          else {
+          if (it.tries < MB_ADVANCED_LIMITS.tries) {
+            this.todo.delete(key);
             this.todo.set(key, it);
+          } else {
             this.done(key);
             this.log?.debug(`musicbrainz: gave up on "${it.title}" by ${it.artist}: ${err.message}`);
           }
@@ -755,21 +736,21 @@ export class MusicBrainz {
   // artist's and the album's MusicBrainz ids, where Plex has them, so no
   // search is needed, how many tracks Plex has of it, and with `check`,
   // those tracks.) `strict` and `check`: as album has them.
+  // While it waits, only those still pending are looked at again.
   async albums(items, { genres = false, waitMs = 0, signal, who = '', strict = false, check = false } = {}) {
     const bySearch = (it) => !MBID.test(String(it.artistId)) || this.had(`artistid|${it.artistId}`) === null;
     const how = (it) => ({ genres, year: it.year, id: it.artistId, albumId: it.albumId, strict, tracks: it.tracks, check, trackList: it.trackList || null });
-    const answer = () =>
-      items.map((it) => {
-        const v = this.knownAlbum(it.artist, it.title, how(it));
-        if (v !== undefined) return v;
-        return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
-      });
-    let out = answer();
+    const answer = (it) => {
+      const v = this.knownAlbum(it.artist, it.title, how(it));
+      if (v !== undefined) return v;
+      return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
+    };
+    let out = items.map(answer);
     out.forEach((v, i) => v === 'pending' && this.later(items[i].artist, items[i].title, { ...how(items[i]), who }));
     const until = Date.now() + Math.max(0, Math.min(Number(waitMs) || 0, MB_ADVANCED_LIMITS.waitMs));
     while (out.includes('pending') && Date.now() < until && !signal?.aborted) {
-      await new Promise((r) => setTimeout(r, 200));
-      out = answer();
+      await new Promise((r) => setTimeout(r, MB_ADVANCED_LIMITS.pendingMs));
+      out = out.map((v, i) => (v === 'pending' ? answer(items[i]) : v));
     }
     return out;
   }
@@ -798,6 +779,8 @@ export const MB_ADVANCED_LIMITS = {
   namesakes: 3, // other artists of an artist's name, looked at for their page
   artistMs: 30000, // how long one artist's lookups may take for the app
   restMs: 30000, // after MusicBrainz doesn't answer, in the background
+  tries: 3, // ...and what's looked up there is tried this many times at most
+  pendingMs: 200, // how often what a request from the app waits for is looked at again
 };
 
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -820,31 +803,8 @@ const SPECIAL_ARTISTS = new Set([
   '90068d37-bae7-4292-be4a-704c145bd616',
   '80a8851f-444c-4539-892b-ad2a49292aa9',
 ]);
-const VARIOUS = new Set([
-  'various artists',
-  'various',
-  'va',
-  'v a',
-  'various artist',
-  'verschiedene interpreten',
-  'artistes divers',
-  'artistes varies',
-  'varios artistas',
-  'artisti vari',
-  'diverse artiesten',
-  'diversos artistas',
-  'unknown artist',
-  'unknown',
-  'anonymous',
-  'traditional',
-  'trad',
-  'オムニバス',
-  '群星',
-  'різні виконавці',
-  'разные исполнители',
-]);
 const DATE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
-const text = (v, n) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, n) : '');
+const text = (v, n) => (typeof v === 'string' ? v.replace(CONTROL_CHARACTERS, ' ').trim().slice(0, n) : '');
 
 // The artist among MusicBrainz's search results: one of that name, or else
 // one with it among their other names, and a good match either way (never
@@ -876,9 +836,10 @@ function cleanNamesake(a) {
 // most (see checkedAlbum, which goes by their tracks).
 function sameTitled(groups, title) {
   const want = exactKey(title);
-  if (!want) return [];
-  return (Array.isArray(groups) ? groups : [])
-    .filter((g) => g && exactKey(g.title) === want)
+  if (!want || !Array.isArray(groups)) return [];
+  const keys = titleKeys(groups, 'exact');
+  return groups
+    .filter((g, i) => g && keys[i] === want)
     .sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'))
     .slice(0, 3);
 }
@@ -914,11 +875,37 @@ function remembered(map, key, v, most) {
   return v;
 }
 
-// An album's release group among its artist's (see MusicBrainz album).
+// A list of release groups' titles as they're matched (`kind`: 'album',
+// as releases.js albumKey has them, or 'exact', as exactKey does), in
+// order: worked out once for each list as it's kept, not again for each
+// album looked for among them, each time it's looked for.
+const keysOf = new WeakMap(); // a list of release groups -> { album, exact }
+function titleKeys(groups, kind) {
+  let keys = keysOf.get(groups);
+  if (!keys) keysOf.set(groups, (keys = {}));
+  keys[kind] ||= groups.map((g) => (kind === 'album' ? albumKey(g?.title) : exactKey(g?.title)));
+  return keys[kind];
+}
+
+// An album's release group among its artist's (see MusicBrainz album): by
+// the rules in releases.js, given those of the artist's that could be it (by
+// their keys, worked out once: see titleKeys), which come out the same.
 function pickAlbum(groups, title, { year = null, albumId = null, strict = false, tracks = 0 } = {}) {
   const id = MBID.test(String(albumId)) ? albumId : null;
-  if (strict) return exactAlbum(groups, title, { id, year, tracks });
-  return (id && groups.find((g) => g?.id === id)) || matchGroup(groups, title, null, year);
+  if (strict) {
+    // (Plex's id for it, or its exact title.)
+    const want = exactKey(title);
+    const keys = titleKeys(groups, 'exact');
+    return exactAlbum(groups.filter((g, i) => (id && g?.id === id) || (want && keys[i] === want)), title, { id, year, tracks });
+  }
+  const byId = id && groups.find((g) => g?.id === id);
+  if (byId) return byId;
+  // (Its title, or else a title near it.)
+  const want = albumKey(title);
+  if (!want) return null;
+  const keys = titleKeys(groups, 'album');
+  const same = groups.filter((g, i) => keys[i] === want);
+  return matchGroup(same.length ? same : groups.filter((g, i) => sameTitle(keys[i], want)), title, null, year);
 }
 
 // A release group as it's kept, or null.
@@ -958,17 +945,24 @@ function topGenres(list) {
     .map((g) => text(genreName(g.name), 60));
 }
 
-// A kept answer, checked as it's read back (undefined: it doesn't check out).
 // A list of release groups as it's kept: as it is, or (more than were
 // asked for) { capped: true, groups }. As releaseGroups gives it: the list,
-// `capped` where it is.
+// `capped` where it is (the same list each time, for what's kept: see
+// titleKeys).
+const listed = new WeakMap(); // { capped, groups } as kept -> the list
 function groupList(v) {
   if (Array.isArray(v)) return v;
-  const list = Array.isArray(v?.groups) ? v.groups.slice() : [];
-  if (v?.capped === true) list.capped = true;
+  if (!v || typeof v !== 'object') return [];
+  let list = listed.get(v);
+  if (!list) {
+    list = Array.isArray(v.groups) ? v.groups.slice() : [];
+    if (v.capped === true) list.capped = true;
+    listed.set(v, list);
+  }
   return list;
 }
 
+// A kept answer, checked as it's read back (undefined: it doesn't check out).
 function cleanKept(key, v) {
   if (key.startsWith('artist|') || key.startsWith('artistid|')) return v === null ? null : cleanArtist(v) || undefined;
   if (key.startsWith('groups|')) {
@@ -1031,16 +1025,16 @@ export class MBKept {
     this.map.delete(key);
   }
 
+  // (One that can't be read is kept aside, never written over: see
+  // datafile.js.)
   load() {
-    if (!this.file || !existsSync(this.file)) return;
-    try {
-      const data = JSON.parse(readFileSync(this.file, 'utf8'));
-      const rows = Array.isArray(data?.kept) ? data.kept : [];
+    const read = (data) => {
+      const rows = Array.isArray(data.kept) ? data.kept : [];
       const now = this.now();
       // (Kept before 0.34.0, when a search that found no one at all was
       // taken at its word: those artists found by a search that weren't,
       // and the namesakes of those that had none, are asked again.)
-      const before = !(Number(data?.version) >= 2);
+      const before = !(Number(data.version) >= 2);
       for (const row of rows) {
         if (!Array.isArray(row) || typeof row[0] !== 'string' || row[0].length > 500 || !Number.isFinite(row[2])) continue;
         if (row[2] > now || now - row[2] > MB_ADVANCED_LIMITS.keepMs) continue;
@@ -1050,15 +1044,13 @@ export class MBKept {
       }
       clearTimeout(this.timer);
       this.timer = null;
-    } catch (err) {
-      this.log?.warn(`musicbrainz: couldn't read ${this.file} (${err.message}); starting without what was kept`);
-    }
+    };
+    if (!readDataFile(this.file, read, { log: this.log, what: 'musicbrainz' })) this.file = null;
   }
 
   // Written soon after the first change since the service started, then at
-  // most every writeDelayMs (a burst of changes, once). In a container the
-  // service stops without being told (nginx is PID 1), so what's waiting to
-  // be written then is lost; a stop systemd asks for is written first.
+  // most every writeDelayMs (a burst of changes, once), and as the service
+  // is asked to stop (see index.js).
   changed() {
     if (!this.file || this.timer) return;
     // (Never longer than writeDelayMs, should the clock be put back.)
@@ -1072,12 +1064,10 @@ export class MBKept {
 
   write() {
     if (!this.file) return;
-    const tmp = `${this.file}.tmp`;
     // (Tried again no sooner than the next time it would be written.)
     this.wrote = Date.now();
     try {
-      writeFileSync(tmp, JSON.stringify({ version: 2, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) }), { mode: 0o600 });
-      renameSync(tmp, this.file);
+      writeDataFile(this.file, { version: 2, kept: [...this.map].map(([k, { v, at }]) => [k, v, at]) }, { durable: false });
     } catch (err) {
       this.log?.error(`musicbrainz: couldn't save what was looked up to ${this.file}: ${err.message}`);
     }

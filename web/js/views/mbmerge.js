@@ -20,23 +20,12 @@ import { artistOnMB, mbFeatures, mbidOf } from '../mb.js';
 import { mbWhere } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
-import { joinedParts } from '../releases.js';
+import { joinedParts, placeholderArtist } from '../releases.js';
+import { mapLimit } from '../ai.js';
+import { joinWithAnd } from './common.js';
 
 const PAGE = 500; // artists read from Plex at a time
 const COUNTS_AT_ONCE = 4; // artists' album counts asked of Plex at once
-// (Names compilations and works by no one known go by: never one artist.)
-const NOBODY = new Set(['various artists', 'various', 'unknown artist', 'unknown', 'anonymous', 'traditional']);
-
-const listOf = (names) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
-
-// Each of several, `n` at a time.
-async function inTurn(items, n, fn) {
-  let i = 0;
-  const one = async () => {
-    while (i < items.length) await fn(items[i++]);
-  };
-  await Promise.all(Array.from({ length: Math.min(n, items.length) }, one));
-}
 
 // What Plex's MusicBrainz ids for them say (Plex's own match, nothing
 // looked up): order 0, two or more of them the same artist on
@@ -77,7 +66,7 @@ export async function mbMergeView({ el, onDispose }) {
   const s = app.server;
   const sec = app.source.sectionKey;
   let gone = false;
-  onDispose?.(() => {
+  onDispose(() => {
     gone = true;
   });
 
@@ -101,7 +90,7 @@ export async function mbMergeView({ el, onDispose }) {
     const byName = new Map();
     for (const a of artists) {
       const n = norm(a.title);
-      if (!n || NOBODY.has(n) || joinedParts(a.title)) continue;
+      if (!n || placeholderArtist(a.title) || joinedParts(a.title)) continue;
       if (!byName.has(n)) byName.set(n, []);
       byName.get(n).push(a);
     }
@@ -149,7 +138,7 @@ export async function mbMergeView({ el, onDispose }) {
           'div.row-main',
           null,
           h('div.row-title', null, g.joined.title),
-          h('div.row-sub', null, `${albumsText(g.joined)}, with ${listOf(g.with)}.`),
+          h('div.row-sub', null, `${albumsText(g.joined)}, with ${joinWithAnd(g.with)}.`),
           h('div.mb-merge-links', null, openLink(g.joined, 'Open'), ...g.members.map((a) => openLink(a, `${a.title} (${albumsText(a)})`))),
         ),
       );
@@ -206,7 +195,7 @@ export async function mbMergeView({ el, onDispose }) {
     const named = [...found.twice, ...found.unsure, ...found.apart];
     const listed = [...new Map(named.flatMap((g) => g.members).concat(found.joined.flatMap((g) => [g.joined, ...g.members])).map((a) => [String(a.ratingKey), a])).values()];
     if (listed.length) busy('Counting their albums…');
-    await inTurn(listed, COUNTS_AT_ONCE, async (a) => {
+    await mapLimit(listed, COUNTS_AT_ONCE, async (a) => {
       if (gone) return;
       try {
         counts.set(String(a.ratingKey), await s.count(sec, 9, { 'artist.id': a.ratingKey }));
@@ -221,7 +210,7 @@ export async function mbMergeView({ el, onDispose }) {
     const ids = [...new Set(named.flatMap((g) => g.members.map(mbidOf)).filter((id) => id && !onMB.has(id)))];
     let n = 0;
     if (ids.length) busy(`Looking up ${fmt.count(ids.length, 'artist', 'artists')} on ${mbWhere()}…`);
-    await inTurn(ids, app.config.musicbrainz === 'own' ? 4 : 1, async (id) => {
+    await mapLimit(ids, app.config.musicbrainz === 'own' ? 4 : 1, async (id) => {
       if (gone) return;
       try {
         const { artist } = await artistOnMB('', { id, groups: false, note: true, background: true });

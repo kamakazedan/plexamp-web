@@ -5,7 +5,7 @@
 import { debugLog, safeUrl } from './debug.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.36.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.37.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -79,8 +79,9 @@ export const store = {
   },
 };
 
-// 16 random hex characters.
-const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+// Twice `bytes` random hex characters (16 to begin with).
+export const randomHex = (bytes = 8) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
+const randomId = () => randomHex(8);
 
 export function clientId() {
   let id = store.get('clientId');
@@ -160,7 +161,17 @@ function withParams(url, params) {
   return u.toString();
 }
 
-const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+// A list as Plex gives one: a list, one thing on its own, or nothing.
+export const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+
+// `list` in parts of `size`.
+export const chunks = (list, size) => {
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+};
+
+const stoppedError = () => Object.assign(new Error('aborted'), { aborted: true, network: false });
 
 // `discard`: the answer isn't needed, so it isn't read (Plex can answer a
 // change with the whole list it changed: sorting a long playlist makes
@@ -168,7 +179,9 @@ const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 // `body`: bytes to send (a picture); they go without a Content-Type, as
 // Plex works out what they are, so the request needs no CORS preflight.
 // `cache`: the browser's cache mode for it ('no-store': never from there).
+// (Not sent at all once `signal` has said stop.)
 async function request(url, { method = 'GET', timeout = 20000, signal, discard = false, body, cache } = {}) {
+  if (signal?.aborted) throw stoppedError();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const onAbort = () => ctrl.abort();
@@ -259,12 +272,35 @@ export async function homeUsers(token) {
       id: String(u.id ?? ''),
       uuid: String(u.uuid),
       title: String(u.friendlyName || u.title || u.username || 'Plex user').slice(0, 100),
+      username: String(u.username || '').slice(0, 100),
       thumb: typeof u.thumb === 'string' && /^https:\/\//.test(u.thumb) ? u.thumb : null,
       admin: yes(u.admin),
       restricted: yes(u.restricted),
       guest: yes(u.guest),
       protected: yes(u.protected),
     }));
+}
+
+// Who in the Plex Home can't be switched to without a PIN (`users`, as
+// homeUsers has them; `servers`: yours, as listServers has them, or null
+// where plex.tv didn't say; `serverId`: the server this is on, if any): the
+// Home's admin, and the owner of the server this is on, so nobody gets into
+// the server owner's account with a tap. Where it can't be told who owns it
+// (no server chosen yet, plex.tv didn't list it, or its owner is named as
+// nobody in the Home is), everyone but managed users, who can't own a
+// server. A PIN they have, plex.tv asks for. Returns (user) -> true for
+// those not offered.
+export function homeUsersOffLimits(users, servers, serverId) {
+  const same = (a, b) => !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+  const server = serverId && Array.isArray(servers) ? servers.find((s) => s.id === serverId) : null;
+  let owners = null; // ids of the Home's people who may own it; null: can't be told
+  if (server?.owned) owners = new Set(); // yours (and you're never offered)
+  else if (server?.ownerId) owners = new Set(users.filter((u) => u.id === server.ownerId).map((u) => u.id)); // (none: not in the Home)
+  else if (server?.sharedBy) {
+    const named = users.filter((u) => same(u.username, server.sharedBy) || same(u.title, server.sharedBy));
+    if (named.length) owners = new Set(named.map((u) => u.id));
+  }
+  return (u) => !u.protected && (u.admin || (owners ? owners.has(u.id) : !u.restricted));
 }
 
 // Switches to one of them (`pin`: theirs, where they have one): plex.tv's
@@ -280,6 +316,11 @@ export async function switchHomeUser(token, uuid, pin) {
 
 // ---------- server discovery ----------
 
+// The Plex servers an account can use, as plex.tv lists them, each with its
+// own sign-in for it (`token`: the account's own is only ever one of its own
+// servers', never sent to someone else's), and whether plex.tv says this
+// browser is on the server's network (`sameNetwork`: their public addresses
+// are the same; undefined where it doesn't say).
 export async function listServers(token) {
   const params = { includeHttps: 1, includeRelay: 1, includeIPv6: 1, ...plexParams(token) };
   let resources;
@@ -296,7 +337,9 @@ export async function listServers(token) {
       name: r.name,
       owned: !!r.owned,
       sharedBy: r.sourceTitle || null,
-      token: r.accessToken || token,
+      ownerId: r.ownerId != null && String(r.ownerId) !== '' ? String(r.ownerId) : null,
+      token: r.accessToken || (r.owned ? token : null),
+      sameNetwork: r.publicAddressMatches == null ? undefined : yes(r.publicAddressMatches),
       connections: asArray(r.connections).map((c) => ({
         uri: c.uri,
         local: !!c.local,
@@ -328,24 +371,30 @@ export const routeRank = (kind, prefer = 'best') => (ROUTE_RANKS[prefer] || ROUT
 
 // Every route to a server, tried at once: [{ uri, kind, ok, ms, why }], `why`
 // saying why one can't be used ('http': a plain http address, which a page
-// served over https can't use; 'insecure': a plain http address over the
-// internet, which would carry your sign-in unencrypted; 'timeout';
-// 'network'; 'status' (it answered with an error, `status`); 'other': it
-// leads to another server). Each is asked who it is, and only counts if
-// it's this very server. The question carries the server's sign-in, as the
-// app's requests over that route would: a Plex server only lets a page on
-// another address read its answer when the request carries one, so without
-// it every route but this container's proxy looks dead (as in 0.16.0). It
-// only goes where the route rules above allow: https addresses, whose
-// certificate the browser checks (a plex.direct one is made for this very
-// server), plain http only on the home network, and this player's own
-// address.
+// served over https can't use; 'insecure': a plain http address that would
+// carry your sign-in unencrypted to whoever answers there, where that can't
+// be counted on to be the server: over the internet, or on a home network
+// this browser isn't known to be on; 'timeout'; 'network'; 'status' (it
+// answered with an error, `status`); 'other': it leads to another server).
+// Each is asked who it is, and only counts if it's this very server. The
+// question carries the server's sign-in, as the app's requests over that
+// route would: a Plex server answers who it is to anyone, but only lets a
+// page on another address read the answer when the request carries a
+// sign-in, so without it every route but this container's proxy looks dead
+// (as in 0.16.0). It only goes where the route rules above allow: https
+// addresses, whose certificate the browser checks (a plex.direct one is
+// made for this very server), this player's own address, and plain http
+// only on the server's home network: a server of your own (someone else's
+// home network isn't one you're on, and an address on it can be anyone's
+// on yours), and not while plex.tv says this browser is on another network
+// (see listServers' sameNetwork).
 export async function probeConnections(server, { proxy = null, timeout = 6000 } = {}) {
   const pageIsHttps = location.protocol === 'https:';
+  const onItsNetwork = !!server.owned && server.sameNetwork !== false;
   const candidates = server.connections.map((c) => {
     const kind = c.relay ? 'relay' : c.local ? 'local' : 'remote';
     const http = c.protocol === 'http' || /^http:/i.test(c.uri);
-    return { uri: c.uri, kind, why: http && pageIsHttps ? 'http' : http && kind !== 'local' ? 'insecure' : null };
+    return { uri: c.uri, kind, why: http && pageIsHttps ? 'http' : http && (kind !== 'local' || !onItsNetwork) ? 'insecure' : null };
   });
   if (proxy) candidates.push({ uri: proxy, kind: 'proxy', why: null });
   return Promise.all(
@@ -420,23 +469,18 @@ export function ultraBlurOf(item) {
   return cleanColors(asArray(item?.UltraBlurColors)[0]);
 }
 
-// Listings that may be opened from a link (see byPath).
-export function isListingPath(path) {
-  return typeof path === 'string' && /^\/library\/sections\/\d+\/all(\?[^#]*)?$/.test(path) && !path.includes('..');
-}
-
 export const TAG_FIELDS = new Set(['genre', 'style', 'mood', 'decade', 'year', 'studio', 'country']);
 const MEMO_LIMIT = 300;
 const TYPES_LIMIT = 5000; // albums' release types kept (see albumTypes)
 const WRITE_BATCH = 200; // items per request when adding to a playlist or collection
 const HUB_COUNT = 100; // items in each of an artist's hubs (see artistHubs)
 const ARTIST_PAGE = 1000; // albums asked for at a time (see artistAlbums)
-// What's in a list as no more than each entry's id and whose it is (its
-// album's and artist's ids, and who a track's credited to), and the list's
-// size: Plex leaves the rest out, where it can (a server that can't sends
-// it all).
+// What's in a list as no more than each entry's id (a playlist's entries
+// have one of their own too) and whose it is (its album's and artist's ids,
+// and who a track's credited to), what it is, and the list's size: Plex
+// leaves the rest out, where it can (a server that can't sends it all).
 const LIGHT = {
-  includeFields: 'ratingKey,parentRatingKey,grandparentRatingKey,originalTitle,size,totalSize,offset,leafCount',
+  includeFields: 'ratingKey,playlistItemID,type,parentRatingKey,grandparentRatingKey,originalTitle,size,totalSize,offset,leafCount',
   excludeElements: 'Media,Genre,Mood,Style,Collection,Label,Guid,Field,Image,UltraBlurColors,Country',
 };
 // Albums' details as albumTypes asks for them: their release types, without
@@ -446,14 +490,55 @@ const TYPES_ONLY = {
   excludeElements: `${LIGHT.excludeElements},Review,Location,Similar`,
   excludeFields: 'summary',
 };
+const LIST_PAGE = 500; // a list's entries asked for at a time (see readPages)
 
-const chunks = (list, size) => {
-  const out = [];
-  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
-  return out;
-};
+// Every entry of a list (a playlist's, a collection's), a page at a time:
+// `read(start, size, ids)` gives a page as playlistItems and collectionItems
+// do ({ items, counted }). From `start`, at most `limit` of them, `size` at
+// a time, on until Plex's count of them, or a page short of what was asked
+// for where it gives none (one bigger than was asked for is a server that
+// gave them all at once, and the same page again one that doesn't page).
+// `ids`: each entry's ids and no more, as LIGHT asks (a server that leaves
+// even those out is read in full). Resolves to { items, more } (`more`:
+// there are more after those).
+export async function readPages(read, { start = 0, limit = Infinity, size = LIST_PAGE, ids = false, signal } = {}) {
+  const items = [];
+  let at = start;
+  let last = null;
+  for (;;) {
+    if (signal?.aborted) throw stoppedError();
+    const ask = Math.min(size, limit - items.length);
+    const page = await read(at, ask, ids);
+    if (ids && page.items.length && !page.items.some((m) => m?.ratingKey != null)) {
+      ids = false;
+      continue;
+    }
+    // (By each entry's own id where it has one: a playlist can have a track
+    // twice, a page apart.)
+    const sig = page.items.map((m) => m?.playlistItemID ?? m?.ratingKey).join(',');
+    if (at > start && sig === last) break;
+    last = sig;
+    items.push(...page.items);
+    at += page.items.length;
+    if (!page.items.length || page.items.length > ask || (page.counted != null ? at >= page.counted : page.items.length < ask)) break;
+    if (items.length >= limit) return { items: items.slice(0, limit), more: true };
+  }
+  return { items: items.slice(0, limit), more: items.length > limit };
+}
+
+// Ids that go into the address of a change (a removal, say) are numbers, so
+// one that's missing can't make it another address: DELETE
+// /playlists/{id}/items/ is the whole list's.
+const ID = /^\d+$/;
+function idsOnly(...ids) {
+  if (!ids.every((id) => ID.test(String(id ?? '')))) throw Object.assign(new Error('That isn’t an item on your server.'), { status: 400 });
+}
 
 // ---------- Plex Media Server ----------
+
+// A server's id as Plex knows it (its machineIdentifier), not an address in
+// its place (one signed in to by address, that didn't say).
+const knownId = (id) => !!id && !/^https?:/.test(String(id));
 
 export class PlexServer {
   constructor({ uri, token, name, id }) {
@@ -474,9 +559,16 @@ export class PlexServer {
     return withParams(this.uri + path, { ...params, ...plexParams(token) });
   }
 
+  // Every answer Plex reads out has its MediaContainer: one without (empty,
+  // or not JSON at all, as a Wi-Fi sign-in page is) is an error, never taken
+  // for one that says there's nothing there (a playlist deleted, or empty).
   async get(path, params, opts) {
     const data = await request(this.url(path, params), opts);
-    return data.MediaContainer || {};
+    if (!data.MediaContainer || typeof data.MediaContainer !== 'object') {
+      debugLog('plex', `GET ${safeUrl(this.uri + path)} answered with something that isn’t Plex’s`, 'warn');
+      throw Object.assign(new Error('Your Plex server’s answer couldn’t be read.'), { unreadable: true });
+    }
+    return data.MediaContainer;
   }
 
   // Small memo for data that rarely changes during a session. It holds at
@@ -504,6 +596,16 @@ export class PlexServer {
     return this.get('/identity', null, opts);
   }
 
+  // Its identity, where it's this very server that answers at its address
+  // (an address on one network can be another server's on the next): where
+  // another answers, an error (`other`). (A server known only by its
+  // address, as one signed in to by address can be, takes any answer.)
+  async checkIdentity(opts) {
+    const mc = await this.identity(opts);
+    if (knownId(this.id) && mc.machineIdentifier !== this.id) throw Object.assign(new Error('Another Plex server answers at this address.'), { other: true });
+    return mc;
+  }
+
   async musicSections(opts) {
     const mc = await this.get('/library/sections', null, opts);
     return asArray(mc.Directory).filter((d) => d.type === 'artist');
@@ -527,15 +629,6 @@ export class PlexServer {
       'X-Plex-Container-Size': 0,
     });
     return mc.totalSize ?? mc.size ?? 0;
-  }
-
-  // Page through a library listing the server handed us (e.g. a genre's
-  // fastKey). These paths can arrive in a link, so only library listings
-  // are accepted: a crafted link can't send the server anywhere else.
-  async byPath(path, { start = 0, size = 60 } = {}) {
-    if (!isListingPath(path)) throw Object.assign(new Error('That isn’t a library listing.'), { status: 400 });
-    const mc = await this.get(path, { 'X-Plex-Container-Start': start, 'X-Plex-Container-Size': size });
-    return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0 };
   }
 
   // (`params`: { includeGuids: 1 } for the other services' ids for it, say:
@@ -579,8 +672,11 @@ export class PlexServer {
     return out;
   }
 
-  async allLeaves(id) {
-    return asArray((await this.get(`/library/metadata/${id}/allLeaves`)).Metadata);
+  // Every track of an artist's (or an album's), or (`size`) the first that
+  // many.
+  async allLeaves(id, { size } = {}) {
+    const first = size ? { 'X-Plex-Container-Start': 0, 'X-Plex-Container-Size': size } : null;
+    return asArray((await this.get(`/library/metadata/${id}/allLeaves`, first)).Metadata);
   }
 
   // Secondary listings: genre, style, mood, decade... filtered by item type.
@@ -652,6 +748,12 @@ export class PlexServer {
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.leafCount ?? mc.size ?? 0, counted: mc.totalSize ?? mc.leafCount ?? null };
   }
 
+  // A playlist's entries, from `start`, at most `limit`, as readPages reads
+  // them (`ids`: each entry's ids and no more): { items, more }.
+  readPlaylist(id, { start, limit, size, ids, signal } = {}) {
+    return readPages((at, n, light) => this.playlistItems(id, { start: at, size: n, ids: light, signal }), { start, limit, size, ids, signal });
+  }
+
   // Plex's hubs for an artist's page (Plexamp's rows: their releases by
   // kind, what they appear on, their popular tracks...), `count` items in
   // each at most. See hubs.js.
@@ -708,21 +810,26 @@ export class PlexServer {
   }
 
   // Several items' details, kept as memo() keeps them (under `kind:id`, for
-  // `ttl`): those not asked about lately in one request. In the same order
-  // as `ids`, null for any Plex didn't give.
+  // `ttl`, the most recently used last): those not asked about lately in
+  // one request. In the same order as `ids`, null for any Plex didn't give.
+  // (What's to be given back is held here, so keeping no more than
+  // MEMO_LIMIT can't take any of it away first.)
   async manyKept(kind, ids, ttl) {
     const want = ids.map(String);
-    const fresh = (id) => {
-      const hit = this.cache.get(`${kind}:${id}`);
-      return hit && Date.now() - hit.at < ttl;
+    const found = new Map(); // id -> its details (a promise of them, as memo keeps them)
+    const keep = (id, entry) => {
+      this.cache.delete(`${kind}:${id}`);
+      this.cache.set(`${kind}:${id}`, entry);
+      found.set(id, entry.value);
     };
-    const ask = [...new Set(want.filter((id) => !fresh(id)))];
-    if (ask.length) {
-      const got = await this.metadataMany(ask);
-      for (const m of got) this.cache.set(`${kind}:${m.ratingKey}`, { at: Date.now(), value: Promise.resolve(m) });
-      while (this.cache.size > MEMO_LIMIT) this.cache.delete(this.cache.keys().next().value);
+    for (const id of new Set(want)) {
+      const hit = this.cache.get(`${kind}:${id}`);
+      if (hit && Date.now() - hit.at < ttl) keep(id, hit);
     }
-    return Promise.all(want.map((id) => (fresh(id) ? this.cache.get(`${kind}:${id}`).value : Promise.resolve(null)).catch(() => null)));
+    const ask = [...new Set(want)].filter((id) => !found.has(id));
+    if (ask.length) for (const m of await this.metadataMany(ask)) keep(String(m.ratingKey), { at: Date.now(), value: Promise.resolve(m) });
+    while (this.cache.size > MEMO_LIMIT) this.cache.delete(this.cache.keys().next().value);
+    return Promise.all(want.map((id) => (found.get(id) || Promise.resolve(null)).catch(() => null)));
   }
 
   // Tracks' full details (their streams' formats included), as trackDetail
@@ -803,7 +910,7 @@ export class PlexServer {
   }
 
   async machineId() {
-    if (this.id && !/^https?:/.test(this.id)) return this.id;
+    if (knownId(this.id)) return this.id;
     const mc = await this.identity();
     this.id = mc.machineIdentifier;
     return this.id;
@@ -836,21 +943,23 @@ export class PlexServer {
   // A picture (its bytes) becomes the item's.
   async uploadPoster(id, bytes) {
     await this.send('POST', `/library/metadata/${id}/posters`, {}, { body: bytes, discard: true, timeout: 90000 });
-    this.forgetPictures(id);
+    this.forgetPictures();
   }
 
   // One the item had before (from posters()).
   async selectPoster(id, poster) {
     await this.send('PUT', `/library/metadata/${id}/poster`, { url: poster }, { discard: true });
-    this.forgetPictures(id);
+    this.forgetPictures();
   }
 
   // Back to the picture Plex makes (for a playlist, its tracks' covers).
   async removePoster(id) {
     await this.send('DELETE', `/library/metadata/${id}/thumb`, {}, { discard: true });
-    this.forgetPictures(id);
+    this.forgetPictures();
   }
 
+  // (The lists of playlists and collections, with their pictures: nothing's
+  // kept of one on its own.)
   forgetPictures() {
     this.forgetPlaylists();
     for (const k of this.cache.keys()) if (k.startsWith('collections:')) this.cache.delete(k);
@@ -875,13 +984,16 @@ export class PlexServer {
 
   // Playlist entries have their own ids (playlistItemID): the same track can
   // be in a playlist twice. Removing an entry leaves the track in the library.
+  // (Never without its id: see idsOnly.)
   async removeFromPlaylist(id, itemId) {
+    idsOnly(id, itemId);
     await this.send('DELETE', `/playlists/${id}/items/${itemId}`);
     this.forgetPlaylists();
   }
 
   // Moves an entry to just after another one, or to the top without one.
   async movePlaylistItem(id, itemId, afterId = null) {
+    idsOnly(id, itemId, ...(afterId ? [afterId] : []));
     await this.send('PUT', `/playlists/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {}, { discard: true });
     this.forgetPlaylists();
   }
@@ -898,6 +1010,7 @@ export class PlexServer {
   }
 
   async deletePlaylist(id) {
+    idsOnly(id);
     await this.send('DELETE', `/playlists/${id}`);
     this.forgetPlaylists();
   }
@@ -918,12 +1031,14 @@ export class PlexServer {
   }
 
   async removeFromCollection(id, itemId) {
+    idsOnly(id, itemId);
     await this.send('DELETE', `/library/collections/${id}/items/${itemId}`);
     this.forgetCollections();
   }
 
   // Items keep a custom order only once the collection is sorted "custom".
   async moveCollectionItem(id, itemId, afterId = null) {
+    idsOnly(id, itemId, ...(afterId ? [afterId] : []));
     await this.send('PUT', `/library/collections/${id}/items/${itemId}/move`, afterId ? { after: afterId } : {}, { discard: true });
   }
 
@@ -937,6 +1052,7 @@ export class PlexServer {
   }
 
   async deleteCollection(id) {
+    idsOnly(id);
     await this.send('DELETE', `/library/collections/${id}`);
     this.forgetCollections();
   }
@@ -1052,7 +1168,7 @@ export class PlexServer {
       'X-Plex-Session-Identifier': playback || undefined,
     });
     // (Not waited on for ever: see outbox.js.)
-    return fetch(url, { headers: { Accept: 'application/json' }, keepalive: true, signal: AbortSignal.timeout(15000) }).then(
+    return fetch(url, { headers: { Accept: 'application/json' }, credentials: 'omit', keepalive: true, signal: AbortSignal.timeout(15000) }).then(
       (res) => res.status,
       () => 0,
     );

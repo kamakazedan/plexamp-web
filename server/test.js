@@ -5,22 +5,23 @@ import { Together, cleanTrack, TogetherError } from './together.js';
 import { redact, oneLine } from './log.js';
 import { cleanSyslogLine } from './syslog.js';
 import { Cast, CastError, privateAddress, parseTimeline } from './cast.js';
-import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped, PLEX_TV_TIMING } from './plex.js';
+import { isPlexDirectCert, plexServerIdentity, certProblem, PlexAuth, readCapped, attrs, PLEX_TV_TIMING } from './plex.js';
 import { OwnerSignIns, OWNER_LIMITS } from './owners.js';
 import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
-import { MusicBrainz, MusicBrainzError, isPublic, sameTitle, MBKept, MB_ADVANCED_LIMITS, MB_LIMITS, retryAfterMs } from './musicbrainz.js';
-import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, asides, exactKey, exactGroup, exactAlbum, titlesAgree, sameAlbumTitle, sameVersion, versionedTracks, shortRelease, kindsAgree } from './releases.js';
+import { MusicBrainz, MusicBrainzError, isPublic, MBKept, MB_ADVANCED_LIMITS, MB_LIMITS, retryAfterMs } from './musicbrainz.js';
+import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, asides, exactKey, exactGroup, exactAlbum, titlesAgree, sameAlbumTitle, sameTitle, sameVersion, versionedTracks, shortRelease, kindsAgree } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
 import { applyNote, applyMerge, applyRestore, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
+import { readDataFile } from './datafile.js';
 import { createServer, request as httpRequest } from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync, chownSync, chmodSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, existsSync, statSync, writeFileSync, rmSync, chownSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -117,6 +118,13 @@ test('"ended" only advances when the clock agrees', () => {
   assert.equal(s.index, 1);
 });
 
+test('a session started at a track past the end of its queue starts at its first, wherever it was in it', () => {
+  const tg = new Together({ now: () => 1_000_000 });
+  const s = tg.create(dan, { server, queue: [track(1, 10000), track(2, 3000)], index: 2, position: 8000 });
+  assert.equal(s.index, 0);
+  assert.equal(tg.position(s), 8000, 'within the first track, not the last');
+});
+
 test('track data from members is cleaned', () => {
   assert.equal(cleanTrack({ id: '1 OR 1=1' }), null);
   const t = cleanTrack({
@@ -181,6 +189,14 @@ test('long-poll waits for a change', async () => {
   tg.command(s, dan, { type: 'pause' });
   assert.equal(await p, true);
   assert.equal(await tg.wait(s, s.version, 10), false);
+  // ...and ends as soon as whoever waits has gone.
+  const ctrl = new AbortController();
+  const started = Date.now();
+  const gone = tg.wait(s, s.version, 5000, { signal: ctrl.signal });
+  ctrl.abort();
+  assert.equal(await gone, false);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(s.waiters.size, 0);
 });
 
 test('nginx errors relayed in debug mode lose their tokens', () => {
@@ -270,6 +286,83 @@ test('sign-ins: checked once however many requests ask at once, and remembered',
   }
 });
 
+test('sign-ins: one plex.tv took in the last day isn\'t a new sign-in when it\'s checked again, and one it then refuses is', async () => {
+  let takes = true;
+  let asked = 0;
+  const tv = createServer((req, res) => {
+    asked += 1;
+    res.writeHead(takes ? 200 : 401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(takes ? { id: 7, uuid: 'u7', username: 'sam' } : {}));
+  });
+  await new Promise((r) => tv.listen(0, '127.0.0.1', r));
+  const realNow = Date.now;
+  let later = 0;
+  Date.now = () => realNow() + later;
+  try {
+    const auth = new PlexAuth({ plexTvUrl: `http://127.0.0.1:${tv.address().port}` });
+    const token = 'sam-token-1234567890';
+    assert.equal(auth.knows(token), false, 'never seen: a new sign-in, counted');
+    await auth.identify(token);
+    assert.equal(auth.knows(token), true);
+    // An hour on, whose it is is asked of plex.tv again, but it isn't counted as new
+    later = 3600000;
+    assert.equal(auth.knows(token), true);
+    await auth.identify(token);
+    assert.equal(asked, 2);
+    // More than a day after plex.tv last took it, it's new again
+    later += 25 * 3600000;
+    assert.equal(auth.knows(token), false);
+    // Taken again, then refused (signed out on plex.tv, say): once the refusal's minute is up, it's counted
+    await auth.identify(token);
+    later += 3600000;
+    takes = false;
+    await assert.rejects(auth.identify(token), (e) => e.status === 401);
+    assert.equal(auth.knows(token), true, 'refused a moment ago: nothing to ask plex.tv');
+    later += 2 * 60000;
+    assert.equal(auth.knows(token), false);
+  } finally {
+    Date.now = realNow;
+    tv.close();
+  }
+});
+
+test('sign-ins: the servers an account can use are asked about once, whatever ids are asked for; and the checks in use stay kept', async () => {
+  const asked = { user: 0, resources: 0 };
+  const tv = createServer((req, res) => {
+    const token = String(req.headers['x-plex-token'] || '');
+    const n = /^tok(\d+)$/.exec(token)?.[1];
+    res.writeHead(n ? 200 : 401, { 'Content-Type': 'application/json' });
+    if (req.url.startsWith('/api/v2/user')) {
+      asked.user += 1;
+      return res.end(JSON.stringify({ id: Number(n), uuid: `u${n}`, username: `user${n}` }));
+    }
+    asked.resources += 1;
+    return res.end(JSON.stringify([{ clientIdentifier: `srv${n}`, provides: 'server', owned: true }, { clientIdentifier: `player${n}`, provides: 'player', owned: true }]));
+  });
+  await new Promise((r) => tv.listen(0, '127.0.0.1', r));
+  try {
+    const auth = new PlexAuth({ plexTvUrl: `http://127.0.0.1:${tv.address().port}` });
+    // Made-up server ids, however many: one question for plex.tv
+    const ids = Array.from({ length: 50 }, (_, i) => `made-up-${i}`);
+    assert.deepEqual(await Promise.all(ids.map((id) => auth.canUseServer('tok1', id))), ids.map(() => false));
+    assert.deepEqual(await auth.serverAccess('tok1', 'srv1'), { ok: true, owned: true });
+    assert.equal(await auth.canUseServer('tok1', 'player1'), false, 'a player isn\'t a server');
+    assert.equal(asked.resources, 1);
+    // A sign-in asked about all along stays checked while others come and go
+    // (here past the most kept): the one least lately asked about goes.
+    await auth.identify('tok1');
+    for (let n = 2; n <= 20001; n += 1) {
+      auth.users.set(`other-${n}`, { id: n }, 60000);
+      if (n % 5000 === 0) await auth.identify('tok1');
+    }
+    const before = asked.user;
+    await auth.identify('tok1');
+    assert.equal(asked.user, before, 'tok1 was still kept');
+  } finally {
+    tv.close();
+  }
+});
+
 test('plex.tv: never followed elsewhere, and answers read up to a limit', async () => {
   const tv = createServer((req, res) => {
     if (req.url.startsWith('/api/v2/user')) {
@@ -286,8 +379,29 @@ test('plex.tv: never followed elsewhere, and answers read up to a limit', async 
     await assert.rejects(auth.identify('good-token'), (e) => e.network === true);
     await assert.rejects(readCapped(await fetch(`${base}/big`), 1000), (e) => e.code === 'TOO_LONG');
     assert.equal((await readCapped(await fetch(`${base}/big`), 10000)).length, 5000);
+    // (One that can't be read a piece at a time is read as a whole: not cut short either.)
+    await assert.rejects(readCapped({ text: async () => 'x'.repeat(2000) }, 1000), (e) => e.code === 'TOO_LONG');
+    assert.equal(await readCapped({ text: async () => 'é'.repeat(400) }, 1000), 'é'.repeat(400));
   } finally {
     tv.close();
+  }
+});
+
+test('the Plex server: an answer that trickles in is given up on in time, as one that never comes', { timeout: 10000 }, async () => {
+  const pms = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const drip = setInterval(() => res.write(' '), 50);
+    res.on('close', () => clearInterval(drip));
+  });
+  await new Promise((r) => pms.listen(0, '127.0.0.1', r));
+  try {
+    const auth = new PlexAuth({ plexTvUrl: 'https://plex.tv.invalid', plexServerUrl: `http://127.0.0.1:${pms.address().port}` });
+    const started = Date.now();
+    await assert.rejects(auth.pmsAnswer('/identity', null, { timeout: 400 }), (e) => e.network === true && /TimeoutError/.test(e.message));
+    assert.ok(Date.now() - started < 1500, `${Date.now() - started} ms`);
+  } finally {
+    pms.closeAllConnections?.();
+    pms.close();
   }
 });
 
@@ -360,6 +474,14 @@ test('commands are built by the service, with the target and a command id', asyn
   assert.equal(calls[1].url.searchParams.get('offset'), '61000');
   assert.equal(calls[2].url.searchParams.get('volume'), '55');
   assert.deepEqual(calls.map((c) => c.url.searchParams.get('commandID')), ['1', '2', '3']);
+  // ...each player's going on from its last while it's in use, however many others are sent to (past 5,000, they all
+  // began again at once).
+  for (let i = 0; i < 5000; i++) {
+    await cast.send(me, 'tok', { id: `other-${i}`, url: 'http://192.168.1.60:32500', name: 'Other' }, 'playback/pause');
+    if (i % 1000 === 999) await cast.command(me, 'tok', 'p1', { command: 'pause' });
+  }
+  assert.equal(calls.at(-1).url.searchParams.get('commandID'), '8');
+  calls.length = 3;
   for (const bad of [{ command: 'navigation/home' }, { command: 'seekTo', offset: -5 }, { command: 'setParameters', volume: 500 }, { command: 'skipTo', key: '/system/x' }]) {
     await assert.rejects(cast.command(me, 'tok', 'p1', bad), (e) => e.status === 400, JSON.stringify(bad));
   }
@@ -386,6 +508,14 @@ test('timelines are read for the music, and nothing else', async () => {
   assert.deepEqual(parseTimeline('<html>login</html>'), { state: 'stopped' });
   assert.equal(parseTimeline('{"MediaContainer":{"Timeline":[{"type":"music","state":"paused","time":"5"}]}}').state, 'paused');
   assert.equal(parseTimeline('<Timeline type="music" state="evil" ratingKey="1;rm"/>').ratingKey, null);
+});
+
+test('characters written as numbers are read as they are, and one past the last there is left as written (it threw: a player\'s timeline failed, and friends answered 503)', async () => {
+  assert.deepEqual(attrs('title="Caf&#xE9; &#233; &amp; &#99999999; &#x110000;"'), { title: 'Café é & &#99999999; &#x110000;' });
+  assert.deepEqual(parseTimeline('<MediaContainer><Timeline type="music" state="&#99999999;" time="5"/></MediaContainer>').time, 5);
+  const auth = new PlexAuth({ plexTvUrl: 'https://plex.tv.invalid' });
+  auth.fetchJSON = async () => '<MediaContainer><User id="5" title="Odd &#99999999; name" username="odd"><Server machineIdentifier="srv-1"/></User></MediaContainer>';
+  assert.deepEqual((await auth.friends('some-token')).map((f) => [f.id, f.title, f.servers]), [[5, 'Odd &#99999999; name', ['srv-1']]]);
 });
 
 // ---------- your devices ----------
@@ -556,6 +686,11 @@ test('the shared AI model: its name, whether it is ready and loaded, nothing els
     assert.equal(await first.model(), 'llama3.1:8b');
     assert.ok(seen.every((l) => l.startsWith('GET /api/tags') || l.startsWith('GET /api/ps')), seen.join('; '));
     assert.ok(seen[0].endsWith('Bearer sk-1'));
+    // Whether it's in memory, asked by many at once: asked once.
+    const many = new SharedModel({ url, model: 'llama3.1:8b' });
+    const before = seen.filter((l) => l.startsWith('GET /api/ps')).length;
+    assert.deepEqual(await Promise.all([1, 2, 3].map(() => many.loaded('llama3.1:8b'))), [true, true, true]);
+    assert.equal(seen.filter((l) => l.startsWith('GET /api/ps')).length, before + 1);
   } finally {
     ollama.close();
   }
@@ -624,6 +759,9 @@ test('the shared AI model: what Ollama turned down once is left out from then on
   assert.equal(errorText('{"error":"model requires more system memory (12.3 GiB) than is available"}'), 'model requires more system memory (12.3 GiB) than is available');
 });
 
+// An answer of JSON, as fetch gives it (MusicBrainz's, say).
+const jsonAnswer = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+
 test('MusicBrainz: real songs and artists, albums taken for songs, and made-up ones', async () => {
   const asked = [];
   const known = {
@@ -643,7 +781,7 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
   const fetchImpl = async (url, init) => {
     const u = new URL(url);
     asked.push({ path: u.pathname, query: u.searchParams.get('query'), fmt: u.searchParams.get('fmt'), agent: init.headers['User-Agent'], at: Date.now() });
-    return { ok: true, status: 200, json: async () => answer(u.pathname, u.searchParams.get('query')) };
+    return jsonAnswer(answer(u.pathname, u.searchParams.get('query')));
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 60 });
   const results = await mb.check([
@@ -665,14 +803,14 @@ test('MusicBrainz: real songs and artists, albums taken for songs, and made-up o
   await mb.check([{ kind: 'track', artist: 'Groove Armada', title: 'At "the" River' }]);
   assert.ok(asked.filter((a) => a.query.includes('River')).every((a) => (a.query.match(/"/g) || []).length === 4), asked.map((a) => a.query).join(' | '));
   // MusicBrainz busy, or unreachable: said so, not taken for "made up".
-  const busy = new MusicBrainz({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }), gapMs: 0 });
+  const busy = new MusicBrainz({ fetchImpl: async () => jsonAnswer({}, 503), gapMs: 0 });
   await assert.rejects(busy.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 503);
   const down = new MusicBrainz({ fetchImpl: async () => { throw new Error('ECONNREFUSED'); }, gapMs: 0 });
   await assert.rejects(down.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502);
   // Busy part way: what it found so far, the rest unchecked (null).
   let calls = 0;
   const tiring = new MusicBrainz({
-    fetchImpl: async () => (++calls > 1 ? { ok: false, status: 503, json: async () => ({}) } : { ok: true, status: 200, json: async () => ({ artists: [{ name: 'A', score: 100 }] }) }),
+    fetchImpl: async () => (++calls > 1 ? jsonAnswer({}, 503) : jsonAnswer({ artists: [{ name: 'A', score: 100 }] })),
     gapMs: 0,
   });
   assert.deepEqual(await tiring.check([{ kind: 'artist', artist: 'A' }, { kind: 'artist', artist: 'B' }, { kind: 'artist', artist: 'C' }]), ['real', null, null]);
@@ -683,9 +821,9 @@ test('MusicBrainz: an artist in another script, and their songs, are checked by 
     const u = new URL(url);
     // Whatever's asked for: an artist in the same script, and someone
     // else's song of that title.
-    if (u.pathname === '/ws/2/artist') return { ok: true, status: 200, json: async () => ({ artists: [{ name: 'Кино', score: 100 }] }) };
-    if (u.pathname === '/ws/2/recording') return { ok: true, status: 200, json: async () => ({ recordings: [{ title: 'First Love', score: 100, 'artist-credit': [{ name: 'Someone Else' }] }] }) };
-    return { ok: true, status: 200, json: async () => ({ 'release-groups': [] }) };
+    if (u.pathname === '/ws/2/artist') return jsonAnswer({ artists: [{ name: 'Кино', score: 100 }] });
+    if (u.pathname === '/ws/2/recording') return jsonAnswer({ recordings: [{ title: 'First Love', score: 100, 'artist-credit': [{ name: 'Someone Else' }] }] });
+    return jsonAnswer({ 'release-groups': [] });
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 });
   assert.deepEqual(
@@ -698,7 +836,7 @@ test('MusicBrainz: musicbrainz.org once a second, your own server ten times a se
   const seen = [];
   const fetchImpl = async (url, init) => {
     seen.push({ host: new URL(url).host, at: Date.now(), agent: init.headers['User-Agent'] });
-    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+    return jsonAnswer({ artists: [] });
   };
   const items = ['A', 'B', 'C'].map((artist) => ({ kind: 'artist', artist }));
   assert.ok(isPublic('https://musicbrainz.org') && isPublic('https://beta.musicbrainz.org/') && !isPublic('http://192.168.1.30:5000') && !isPublic('https://musicbrainz.org.example.com'));
@@ -714,7 +852,7 @@ test('MusicBrainz: musicbrainz.org once a second, your own server ten times a se
   assert.ok(seen.slice(1).every((s, i) => s.at - seen[i].at >= 1000), seen.map((s) => s.at - t0).join(','));
   assert.equal(seen[0].agent, 'plexamp-web ( https://github.com/kamakazedan/plexamp-web )');
   // Your own server failing a search: most likely its search indexes.
-  const noIndexes = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+  const noIndexes = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async () => jsonAnswer({}, 503) });
   await assert.rejects(noIndexes.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502 && /search indexes/.test(e.message));
 });
 
@@ -731,7 +869,7 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   const starts = [];
   const quick = async () => {
     starts.push(Date.now());
-    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+    return jsonAnswer({ artists: [] });
   };
   const own = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: quick });
   await Promise.all([1, 2, 3, 4].map((i) => own.ask('/ws/2/artist', { query: `a${i}` })));
@@ -747,7 +885,7 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
       fetchImpl: async () => {
         times.push(Date.now());
         if (times.length === 1) await new Promise((r) => setTimeout(r, 150));
-        return { ok: true, status: 200, json: async () => ({}) };
+        return jsonAnswer({});
       },
     });
     await slow.ask('/ws/2/artist', { query: 'x' });
@@ -759,7 +897,7 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   }
   // "Too many requests" (429): nothing new asked of it for as long as it said, and the features say so, with how long.
   let n = 0;
-  const busy = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (n++, { ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '45' : null) }, json: async () => ({}) }) }).advanced(new MBKept());
+  const busy = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (n++, jsonAnswer({}, 429, { 'retry-after': '45' })) }).advanced(new MBKept());
   await assert.rejects(busy.artistInfo('Somebody'), (e) => e instanceof MusicBrainzError && e.status === 503 && /busy/.test(e.message));
   await assert.rejects(busy.artistInfo('Somebody Else'), (e) => e instanceof MusicBrainzError && e.status === 503 && e.retryAfter > 40 && e.retryAfter <= 45);
   assert.equal(n, 1);
@@ -772,12 +910,12 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   // server of your own answers) is it being busy too; a search's is its
   // search indexes (above).
   let m = 0;
-  const limited = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (m++, { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) }) });
+  const limited = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => (m++, jsonAnswer({}, 503)) });
   await assert.rejects(limited.ask('/ws/2/artist/0383dadf-2a4e-4d10-a46a-e9e041da8eb3', { inc: 'aliases' }), (e) => e.status === 503 && /busy/.test(e.message) && e.retryAfter === 60);
   await assert.rejects(limited.ask('/ws/2/release-group', { artist: '0383dadf-2a4e-4d10-a46a-e9e041da8eb3' }), (e) => e.status === 503 && /busy/.test(e.message));
   assert.equal(m, 1);
   // A longer wait is said in minutes.
-  const later = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => ({ ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '240' : null) }, json: async () => ({}) }) });
+  const later = new MusicBrainz({ base: 'http://mb.local:5000', gapMs: 0, fetchImpl: async () => jsonAnswer({}, 429, { 'retry-after': '240' }) });
   await assert.rejects(later.ask('/ws/2/artist', { query: 'x' }), (e) => /in 4 minutes/.test(e.message) && e.retryAfter === 240);
 });
 
@@ -785,7 +923,7 @@ test('MusicBrainz: a check stops when whoever asked has gone, or its time is up'
   const asked = [];
   const fetchImpl = async (url) => {
     asked.push(new URL(url).searchParams.get('query'));
-    return { ok: true, status: 200, json: async () => ({ artists: [] }) };
+    return jsonAnswer({ artists: [] });
   };
   const items = ['A', 'B', 'C', 'D', 'E'].map((artist) => ({ kind: 'artist', artist }));
   // Gone after the second request: nothing more is asked.
@@ -817,6 +955,35 @@ test('MusicBrainz: a check stops when whoever asked has gone, or its time is up'
   await first;
 });
 
+test('MusicBrainz: its answers are read up to a limit, and a redirect is never followed (what\'s asked goes to that MusicBrainz alone)', async () => {
+  const asked = [];
+  const srv = createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    asked.push(u.pathname);
+    const name = /"(.*)"/.exec(u.searchParams.get('query') || '')?.[1] || '';
+    if (name === 'Moved') {
+      res.writeHead(302, { Location: `/elsewhere${u.pathname}${u.search}` });
+      return res.end();
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ artists: [{ name, score: 100, disambiguation: name === 'Big' ? 'x'.repeat(5000) : '' }] }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const was = MB_LIMITS.answerBytes;
+  try {
+    // (Each its own, as one that doesn't answer is given a rest.)
+    const mb = () => new MusicBrainz({ base: `http://127.0.0.1:${srv.address().port}`, gapMs: 0 });
+    await assert.rejects(mb().artist('Moved'), (e) => e instanceof MusicBrainzError && e.status === 502);
+    assert.ok(!asked.some((p) => p.startsWith('/elsewhere')), asked.join(' '));
+    MB_LIMITS.answerBytes = 2000;
+    await assert.rejects(mb().artist('Big'), (e) => e instanceof MusicBrainzError && e.status === 502);
+    assert.equal(await mb().artist('Small'), 'real');
+  } finally {
+    MB_LIMITS.answerBytes = was;
+    srv.close();
+  }
+});
+
 // ---------- the MusicBrainz features (MUSICBRAINZ_ADVANCED) ----------
 
 const MB_ID = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -840,7 +1007,7 @@ function fakeMusicBrainz({ groups = 3, fail = () => false } = {}) {
   const fetchImpl = async (url, init) => {
     const u = new URL(url);
     asked.push({ path: u.pathname, query: u.searchParams.get('query'), offset: u.searchParams.get('offset'), inc: u.searchParams.get('inc'), at: Date.now(), agent: init.headers['User-Agent'] });
-    if (fail(u)) return { ok: false, status: 503, json: async () => ({}) };
+    if (fail(u)) return jsonAnswer({}, 503);
     let body = {};
     if (u.pathname === '/ws/2/artist') {
       const names = [...(u.searchParams.get('query') || '').matchAll(/:"([^"]*)"/g)].map((m) => m[1].toLowerCase());
@@ -854,7 +1021,7 @@ function fakeMusicBrainz({ groups = 3, fail = () => false } = {}) {
     } else if (u.pathname.startsWith('/ws/2/release-group/')) {
       body = { genres: u.pathname.endsWith(MB_ID(101)) ? [{ name: 'post-rock', count: 3 }, { name: 'dream pop', count: 1 }] : [] };
     }
-    return { ok: true, status: 200, json: async () => body };
+    return jsonAnswer(body);
   };
   return { asked, fetchImpl };
 }
@@ -922,7 +1089,7 @@ test('MusicBrainz features: an album of a title the artist has more of, by the y
     let body = {};
     if (u.pathname === '/ws/2/artist') body = { artists: [{ id: W, name: 'Weezer', score: 100 }, { id: VA, name: 'Various Artists', score: 100, aliases: [{ name: 'Compilation Hits' }] }] };
     else if (u.pathname === `/ws/2/artist/${W}`) body = { id: W, name: 'Weezer', aliases: [], genres: [] };
-    else if (u.pathname.startsWith('/ws/2/artist/')) return { ok: false, status: 404, json: async () => ({}) };
+    else if (u.pathname.startsWith('/ws/2/artist/')) return jsonAnswer({}, 404);
     else if (u.pathname === '/ws/2/release-group') {
       body = {
         'release-group-count': 3,
@@ -933,7 +1100,7 @@ test('MusicBrainz features: an album of a title the artist has more of, by the y
         ],
       };
     }
-    return { ok: true, status: 200, json: async () => body };
+    return jsonAnswer(body);
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   assert.equal((await mb.album('Weezer', 'Weezer', { year: 2001 })).date, '2001-05-15');
@@ -987,8 +1154,8 @@ test('MusicBrainz features: for its year and genres to be fixed, an album is the
     if (u.pathname === `/ws/2/artist/${B}`) body = { id: B, name: 'Bob Sinclar', aliases: [], genres: [] };
     else if (u.pathname === '/ws/2/release-group' && u.searchParams.get('artist') === B) body = { 'release-group-count': groups.length, 'release-groups': groups };
     else if (u.pathname.startsWith('/ws/2/release-group/')) body = { id: u.pathname.split('/').pop(), genres: [{ name: 'house', count: 3 }] };
-    else return { ok: false, status: 404, json: async () => ({}) };
-    return { ok: true, status: 200, json: async () => body };
+    else return jsonAnswer({}, 404);
+    return jsonAnswer(body);
   };
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const strict = { id: B, strict: true };
@@ -1076,7 +1243,7 @@ test('MusicBrainz features: on a MusicBrainz of your own, an album is checked by
       const r = releases[groupOf(id)].find((x) => x.id === id);
       body = { id, date: r.date, 'release-group': groups.find((g) => g.id === groupOf(id)), media: [{ 'track-count': r.tracks.length, tracks: r.tracks }] };
     } else if (u.pathname.startsWith('/ws/2/release-group/')) body = { id, genres: [{ name: 'folk', count: 2 }] };
-    return body ? { ok: true, status: 200, json: async () => body } : { ok: false, status: 404, json: async () => ({}) };
+    return body ? jsonAnswer(body) : jsonAnswer({}, 404);
   };
   const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const plexTracks = (list) => list.map((t) => ({ title: t.title, ms: t.length }));
@@ -1292,6 +1459,57 @@ test('MusicBrainz features: albums not known yet are looked up in the background
   }
 });
 
+test('MusicBrainz features: albums waited for are looked at again alone, and an artist\'s titles are worked out once for their list, with the same answers', async () => {
+  // (Slower than the request waits: what isn't known stays pending.)
+  const fetchImpl = async () => (await sleep(1500), jsonAnswer({ artists: [] }));
+  const kept = new MBKept();
+  const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(kept);
+  const g = (n, title, primary = 'Album', date = '2001-01-01') => ({ id: MB_ID(1000 + n), title, primary, secondary: [], date });
+  const groups = [
+    g(1, 'Rumours', 'Album', '1977-02-04'),
+    g(2, 'Rumours', 'Album', '2004-03-22'),
+    g(3, 'Tusk'),
+    g(4, 'Tusk', 'EP'),
+    g(5, 'Out of Space', 'Single'),
+    g(6, 'Mirage (Deluxe Edition)'),
+    g(7, 'Then Play On'),
+    g(8, 'Penguin'),
+    ...Array.from({ length: 490 }, (_, i) => g(100 + i, `Some Album Title Number ${i} (Deluxe Edition)`)),
+  ];
+  kept.set('artist|prolific artist', { id: MB_ID(1), name: 'Prolific Artist', aliases: [], genres: [] });
+  kept.set(`groups|${MB_ID(1)}`, { capped: true, groups });
+  // The rules' own answers, from the whole list (releases.js), against what's found by the keys kept for it.
+  const titles = ['Rumours', 'Tusk', 'Tusk - EP', 'Mirage', 'Mirage (2016 Remaster)', 'Then Play Onn', 'Peguin', 'Out of Space', 'Some Album Title Number 7', 'Nothing Like It'];
+  for (const title of titles) {
+    for (const year of [null, 1977, 2004]) {
+      assert.deepEqual(mb.knownAlbum('Prolific Artist', title, { year }), matchGroup(groups, title, null, year), `${title} ${year}`);
+      for (const tracks of [3, 10]) {
+        assert.deepEqual(mb.knownAlbum('Prolific Artist', title, { year, strict: true, tracks }), exactAlbum(groups, title, { year, tracks }), `${title} ${year} ${tracks} (strict)`);
+      }
+    }
+  }
+  assert.equal(mb.knownAlbum('Prolific Artist', 'Penguin', { albumId: MB_ID(1003) }).title, 'Tusk', 'Plex\'s id for it first');
+  // 199 albums not among the artist's 500, one that is, and one by an artist not known yet: the first look at them...
+  const items = [
+    ...Array.from({ length: 199 }, (_, i) => ({ artist: 'Prolific Artist', title: `Not Here At All ${i}`, year: 2001, tracks: 10 })),
+    { artist: 'Prolific Artist', title: 'Some Album Title Number 7', year: 2001, tracks: 10 },
+    { artist: 'Someone New', title: 'Anything', year: 2001, tracks: 10 },
+  ];
+  let started = Date.now();
+  await mb.albums(items, { strict: true });
+  // (Each worked an album's title out for every one of the artist's release groups again: 0.6 s.)
+  assert.ok(Date.now() - started < 300, `${Date.now() - started} ms`);
+  // ...and while one's waited for, only it is looked at again (all were, every 200 ms).
+  let looked = 0;
+  const knownAlbum = mb.knownAlbum.bind(mb);
+  mb.knownAlbum = (...args) => ((looked += 1), knownAlbum(...args));
+  started = Date.now();
+  const out = await mb.albums(items, { waitMs: 1000, who: 'user|1' });
+  assert.ok(Date.now() - started >= 900);
+  assert.deepEqual([out.slice(0, 199).every((x) => x === null), out[199]?.id, out[200]], [true, MB_ID(1107), 'pending']);
+  assert.ok(looked <= items.length + 1000 / MB_ADVANCED_LIMITS.pendingMs + 1, `${looked}`);
+});
+
 test('MusicBrainz features: what\'s looked up is kept in a file only the service can read, for a month, and read back checked', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pw-mb-'));
   try {
@@ -1371,7 +1589,7 @@ test('MusicBrainz features: a server of your own whose search finds no one isn\'
       const any = works && query === CHECKS[u.pathname];
       body = { [index]: any ? [{ id: MB_ID(index === 'recordings' ? 301 : 302), title: 'Anything' }] : [] };
     }
-    return { ok: true, status: 200, json: async () => body };
+    return jsonAnswer(body);
   };
   const log = { warned: [], warn(m) { this.warned.push(m); }, info() {}, debug() {} };
   const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0, log, checkSearch: true }).advanced(new MBKept());
@@ -2061,8 +2279,10 @@ test('missing tracks: a change sent again after another device\'s is made once (
   asOwner(st, Array.from({ length: 40 }, (_, i) => noteOp([song('Z', `Z${i}`)])));
   asOwner(st, [clear]);
   assert.ok(mineOf(st, dan.id).some((m) => m.title === 'Two'));
-  const later = store({ now: () => (AT + 50 * 86400) * 1000 });
-  asOwner(later, [clear]);
+  let at = AT * 1000;
+  const later = store({ now: () => at });
+  asOwner(later, [noteOp([song('A', 'One')]), clear]);
+  at += 50 * 86400 * 1000;
   asOwner(later, [noteOp([song('B', 'Two')], { at: AT + 50 * 86400 })]);
   asOwner(later, [clear]);
   assert.ok(mineOf(later, dan.id).some((m) => m.title === 'Two'), 'remembered for 50 days');
@@ -2070,6 +2290,72 @@ test('missing tracks: a change sent again after another device\'s is made once (
   const one = store();
   asOwner(one, [noteOp([{ kind: 'album', artist: 'X', title: 'Y' }, song('C', 'Three')])]);
   assert.deepEqual(mineOf(one, dan.id).map((m) => m.title), ['Three']);
+});
+
+test('missing tracks: nothing\'s kept for an account with no list, and a list cleared goes once it remembers no changes (counted till then)', () => {
+  let at = AT * 1000;
+  const st = store({ now: () => at });
+  const kept = (who) => st.servers.get(SRV)?.accounts.has(who.id) ?? false;
+  asOwner(st, [noteOp([song('A', 'One')])]);
+  // Changes that do nothing, to a list the account hasn't got: nothing's kept for it (once, 2,000 of their ids were).
+  const oneId = idOf({ ...song('A', 'One'), section: '1' });
+  asFriend(st, sam, [{ type: 'clear', id: opId() }, { type: 'forget', id: opId(), ids: [oneId] }, { type: 'mb', id: opId(), real: [], dropped: [] }]);
+  assert.equal(kept(sam), false);
+  // One cleared remembers its changes (each made once), and is counted as a list while it does...
+  asFriend(st, eve, [noteOp([song('B', 'Two')]), { type: 'clear', id: opId() }]);
+  assert.deepEqual(mineOf(st, eve.id), []);
+  assert.equal(st.view(eve.id, SRV).done.length, 2);
+  const rev = st.revs(SRV, eve.id).mine;
+  const was = MISSING_STORE_LIMITS.accounts;
+  MISSING_STORE_LIMITS.accounts = 2;
+  try {
+    const one = noteOp([song('C', 'Three')]);
+    assert.deepEqual(asFriend(st, sam, [one]).refused, [one.id]);
+    assert.equal(kept(sam), false, 'nor for a change refused');
+    // ...for 60 days: then it goes, and so does what it counted for.
+    at += MISSING_STORE_LIMITS.doneMs + 1000;
+    asFriend(st, sam, [noteOp([song('C', 'Three')], { at: AT + 61 * 86400 })]);
+    assert.deepEqual([kept(eve), kept(sam)], [false, true]);
+  } finally {
+    MISSING_STORE_LIMITS.accounts = was;
+  }
+  // (A list made again for it has none of the revs it had.)
+  asFriend(st, eve, [noteOp([song('D', 'Four')], { at: AT + 61 * 86400 })]);
+  assert.notEqual(st.revs(SRV, eve.id).mine, rev);
+});
+
+test('missing tracks: a full list\'s changes are quick (each entry\'s name worked out once, the list changed as one copy)', () => {
+  const st = store();
+  const many = (n, p, extra) => noteOp(Array.from({ length: n }, (_, i) => song(`Artist ${p}${i} and the Band`, `A Fairly Long Song Title Number ${i} (Live at Somewhere)`)), extra);
+  asOwner(st, [many(MISSING_LIMITS.ai, 'a')]);
+  asOwner(st, [many(MISSING_LIMITS.spotify, 's', { via: 'spotify', list: listId('Gym') })]);
+  assert.equal(st.total, MISSING_LIMITS.ai + MISSING_LIMITS.spotify);
+  const nothing = Array.from({ length: MISSING_STORE_LIMITS.ops }, () => ({ type: 'forget', id: opId(), ids: [] }));
+  const notes = Array.from({ length: MISSING_STORE_LIMITS.ops }, (_, i) => noteOp([song('New', `New ${i}`)]));
+  const before = st.revs(SRV, dan.id).mine;
+  const started = Date.now();
+  asOwner(st, nothing);
+  assert.equal(st.revs(SRV, dan.id).mine, before, 'nothing changed, so no new rev');
+  asOwner(st, notes);
+  const took = Date.now() - started;
+  // (Each change copied the list, worked every name out twice and compared each entry as JSON: 0.5 and 1.4 s.)
+  assert.ok(took < 400, `${took} ms`);
+  const mine = mineOf(st, dan.id);
+  assert.equal(mine.length, MISSING_LIMITS.ai + MISSING_LIMITS.spotify);
+  assert.equal(mine.filter((m) => m.artist === 'New').length, MISSING_STORE_LIMITS.ops, 'the latest of each kept, the oldest gone');
+  assert.notEqual(st.revs(SRV, dan.id).mine, before);
+  // ...and one refused for want of room leaves the list as it was, as the change before it in the request left it.
+  const few = store();
+  const was = MISSING_STORE_LIMITS.entries;
+  MISSING_STORE_LIMITS.entries = 3;
+  try {
+    asOwner(few, [noteOp([song('A', 'One')])]);
+    const big = noteOp([song('A', 'One'), song('X', '1'), song('X', '2'), song('X', '3')]);
+    assert.deepEqual(asOwner(few, [noteOp([song('A', 'One')]), big]).refused, [big.id]);
+    assert.deepEqual(mineOf(few, dan.id).map((m) => [m.title, m.times]), [['One', 2]]);
+  } finally {
+    MISSING_STORE_LIMITS.entries = was;
+  }
 });
 
 test('missing tracks: the app sends what fits in one request (names in other scripts are bigger)', () => {
@@ -2327,6 +2613,54 @@ test('missing tracks: kept in a file only the service can read, and read back (w
   }
 });
 
+test('the data folder: a file that can\'t be read is kept aside, never written over, and each is written whole', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-data-'));
+  const said = [];
+  const log = { info() {}, debug() {}, warn: (m) => said.push(m), error: (m) => said.push(m) };
+  try {
+    const stores = [
+      ['shares.json', () => new Shares({ dir, log }), (st) => st.create(dan, { server: SRV, playlist: '1', title: 'P', tracks: ['1'] })],
+      ['settings.json', () => new SettingsStore({ dir, log }), (st) => st.update(dan.id, { set: { gapless: true } })],
+      ['missing.json', () => new MissingStore({ dir, log, now: () => AT * 1000 }), (st) => asOwner(st, [noteOp([song('A', 'One')])])],
+      ['musicbrainz.json', () => new MBKept({ dir, log }), (st) => st.set('genres|x', ['Rock'])],
+      ['owners.json', () => new OwnerSignIns({ dir, log }), (st) => st.add(createHash('sha256').update('t').digest('hex'))],
+    ];
+    for (const [name, make, change] of stores) {
+      const file = join(dir, name);
+      // (Cut short by a power cut, say; empty; or not what was written.)
+      for (const broken of ['{"shares":[{"id":', '', '[1, 2]']) {
+        writeFileSync(file, broken);
+        said.length = 0;
+        const st = make();
+        const aside = readdirSync(dir).filter((f) => f.startsWith(`${name}.unreadable-`));
+        assert.equal(aside.length, 1, `${name}: ${readdirSync(dir).join(' ')}`);
+        assert.match(aside[0], /\.unreadable-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\dZ$/);
+        assert.equal(readFileSync(join(dir, aside[0]), 'utf8'), broken);
+        assert.match(said.join('\n'), new RegExp(`couldn't read .*${name}.*kept aside as ${name.replace('.', '\\.')}\\.unreadable-`));
+        // Changed, it's written afresh (whole, then in its place), and the one kept aside stays as it was.
+        change(st);
+        st.flush();
+        assert.ok(JSON.parse(readFileSync(file, 'utf8')), name);
+        assert.equal(statSync(file).mode & 0o777, 0o600);
+        assert.ok(!existsSync(`${file}.tmp`));
+        assert.equal(readFileSync(join(dir, aside[0]), 'utf8'), broken);
+        rmSync(join(dir, aside[0]));
+      }
+    }
+    // One whose reading went wrong partway is kept aside too...
+    writeFileSync(join(dir, 'odd.json'), '{}');
+    assert.equal(readDataFile(join(dir, 'odd.json'), () => { throw new Error('not as expected'); }, { log, what: 'test' }), true);
+    assert.ok(readdirSync(dir).some((f) => f.startsWith('odd.json.unreadable-')));
+    // ...and one that can't even be moved aside (here, its name too long for more) is left as it is, never to be written over.
+    const long = join(dir, `${'x'.repeat(240)}.json`);
+    writeFileSync(long, '{');
+    assert.equal(readDataFile(long, () => {}, { log, what: 'test' }), false);
+    assert.equal(readFileSync(long, 'utf8'), '{');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('missing tracks: the app\'s rules note a playlist as before (applyNote)', () => {
   const one = applyNote([], noteOp([song('A', 'One')]), { server: SRV, prompt: 'chill' });
   assert.deepEqual(one.keys, [keyOf(song('A', 'One'))]);
@@ -2352,9 +2686,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // people's are theirs). state.nobody: it shows nobody what only its owner
 // may see (its settings, who's playing); state.tokenless: what it answers
 // a request for its library without a sign-in (0: as above). state.down:
-// plex.tv answers 503.
+// plex.tv answers 503 (state.tvStatus: what it answers at each of these
+// paths instead).
 async function fakePlex() {
-  const state = { open: false, honour: false, down: false, noSessions: false, broken: false, nobody: false, tokenless: 0 };
+  const state = { open: false, honour: false, down: false, noSessions: false, broken: false, nobody: false, tokenless: 0, tvStatus: {} };
   const accounts = {
     'owner-token': { id: 1, uuid: 'u1', username: 'dan', friendlyName: 'Dan' },
     'sam-token': { id: 2, uuid: 'u2', username: 'sam', friendlyName: 'Sam' },
@@ -2388,6 +2723,7 @@ async function fakePlex() {
     if (t) tvTokens.push(t);
     tvAsked.push({ path: u.pathname, token: t });
     if (state.down) return json(res, 503, {});
+    if (state.tvStatus[u.pathname]) return json(res, state.tvStatus[u.pathname], {});
     if (u.pathname === '/api/v2/ping') return json(res, 200, { pong: true });
     const a = accounts[t];
     if (!a) return json(res, 401, {});
@@ -2784,6 +3120,23 @@ async function startService(env, dir) {
   };
 }
 
+test('api/server: which Plex server this is set up for, as it says itself, asked of it without anyone\'s sign-in', async () => {
+  const p = await fakePlex();
+  const dirs = [mkdtempSync(join(tmpdir(), 'pw-service-')), mkdtempSync(join(tmpdir(), 'pw-service-'))];
+  const withServer = await startService({ PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv }, dirs[0]);
+  const without = await startService({ PW_SERVICE_PLEX_TV_URL: p.tv }, dirs[1]);
+  try {
+    assert.deepEqual(await fetch(`${withServer.url}/api/server`).then((r) => r.json()), { setUp: true, id: 'srv-1' });
+    assert.ok(p.asked.filter((a) => a.path === '/identity').every((a) => !a.token), 'the server is asked who it is without a sign-in');
+    assert.deepEqual(await fetch(`${without.url}/api/server`).then((r) => r.json()), { setUp: false, id: null });
+  } finally {
+    await withServer.stop();
+    await without.stop();
+    p.close();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test('/pms/, end to end: the owner, friends the server knows as themselves, made-up sign-ins, the notification stream, plex.tv not answering, and the offline password', async () => {
   const p = await fakePlex();
   const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
@@ -2951,6 +3304,137 @@ test('/pms/: nobody else\'s requests keep the owner out, a sign-in\'s many reque
   } finally {
     await svc.stop();
     p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('long-polls: Play Together\'s and your devices\' are counted apart, and one ends as soon as whoever waited has gone (a page reloaded)', async () => {
+  const p = await fakePlex();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const svc = await startService({ PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_TOGETHER: 'true' }, dir);
+  const headers = { 'X-Plex-Token': 'owner-token' };
+  const held = []; // long-polls left open, each with its AbortController
+  const hold = (path) => {
+    const ctrl = new AbortController();
+    fetch(`${svc.url}${path}`, { headers, signal: ctrl.signal }).catch(() => {});
+    held.push(ctrl);
+    return ctrl;
+  };
+  // A long-poll's answer, and how long it took.
+  const poll = async (path) => {
+    const t = Date.now();
+    const r = await fetch(`${svc.url}${path}`, { headers });
+    return { status: r.status, body: await r.json(), ms: Date.now() - t };
+  };
+  try {
+    const made = await fetch(`${svc.url}/api/together/sessions`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server: { id: 'srv-1', name: 'Test', section: '1' }, queue: [] }),
+    });
+    assert.equal(made.status, 201);
+    const session = await made.json();
+    const together = (wait) => `/api/together/sessions/${session.id}?since=${session.version}&wait=${wait}`;
+    // As many of your devices' long-polls as an account may have open (two each of twelve devices)...
+    const device = (n) => `/api/devices?server=srv-1&device=device-${String(n).padStart(4, '0')}&name=D${n}`;
+    for (let n = 0; n < 12; n++) assert.equal((await poll(device(n))).status, 200);
+    const devicesWaiting = [];
+    for (let n = 0; n < 12; n++) for (let k = 0; k < 2; k++) devicesWaiting.push(hold(`${device(n)}&since=999999&wait=25`));
+    await sleep(300);
+    // ...and Play Together's still waits (it was answered straight away, as one of too many).
+    let r = await poll(together(1));
+    assert.ok(r.ms >= 800 && r.body.unchanged, `${r.ms} ms`);
+    // Gone, they're not counted (they were for 25 seconds): a device waits again.
+    for (const c of devicesWaiting) c.abort();
+    await sleep(300);
+    r = await poll(`${device(0)}&since=999999&wait=1`);
+    assert.ok(r.ms >= 800, `${r.ms} ms`);
+    // Four of Play Together's at once from one person (four tabs): the fifth is answered straight away...
+    const tabs = Array.from({ length: 4 }, () => hold(together(25)));
+    await sleep(300);
+    r = await poll(together(1));
+    assert.ok(r.ms < 500 && r.body.unchanged, `${r.ms} ms`);
+    // ...but not once those have gone.
+    for (const c of tabs) c.abort();
+    await sleep(300);
+    r = await poll(together(1));
+    assert.ok(r.ms >= 800 && r.body.unchanged, `${r.ms} ms`);
+  } finally {
+    for (const c of held) c.abort();
+    await svc.stop();
+    p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Play on and Play Together: a sign-in plex.tv refuses is said so, and plex.tv not answering never leaves those invited out unsaid', async () => {
+  const p = await fakePlex();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const svc = await startService({ PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_TOGETHER: 'true' }, dir);
+  const headers = { 'X-Plex-Token': 'owner-token', 'Content-Type': 'application/json' };
+  const start = (body) => fetch(`${svc.url}/api/together/sessions`, { method: 'POST', headers, body: JSON.stringify({ server: { id: 'srv-1', name: 'Test', section: '1' }, queue: [], ...body }) });
+  try {
+    // Play on: plex.tv refusing the sign-in, asked about its servers, is a sign-in refused (it was "couldn't be asked").
+    p.state.tvStatus['/api/v2/resources'] = 401;
+    assert.equal((await fetch(`${svc.url}/api/cast/players`, { headers })).status, 401);
+    delete p.state.tvStatus['/api/v2/resources'];
+    // Play Together: a session, then plex.tv not answering who the host's friends are.
+    const made = await start({});
+    assert.equal(made.status, 201);
+    const { id } = await made.json();
+    p.state.tvStatus['/api/users'] = 503;
+    assert.equal((await start({ invite: [2] })).status, 503); // (it was started, with no one invited)
+    assert.equal((await fetch(`${svc.url}/api/together/sessions/${id}/invite`, { method: 'POST', headers, body: JSON.stringify({ invite: [2] }) })).status, 503);
+    const me = await (await fetch(`${svc.url}/api/together/me`, { headers })).json();
+    assert.deepEqual(me.sessions.map((x) => x.id), [id]);
+  } finally {
+    await svc.stop();
+    p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// An Ollama: one model, loaded at once, and a chat answered in a line; and
+// what it was asked.
+async function fakeOllama() {
+  const asked = [];
+  const srv = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      asked.push(req.url);
+      const answers = { '/api/tags': { models: [{ name: 'test-model' }] }, '/api/generate': {}, '/api/chat': { message: { role: 'assistant', content: 'Hello' }, done: true } };
+      const answer = answers[req.url];
+      res.writeHead(answer ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(answer ? `${JSON.stringify(answer)}\n` : '');
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, asked, close: () => srv.close() };
+}
+
+test('request bodies are taken as JSON only: another site\'s page can\'t have a browser chat with the shared model (OLLAMA_AUTH=off), or write to the debug log', async () => {
+  const ollama = await fakeOllama();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const svc = await startService({ PW_SERVICE_OLLAMA_URL: ollama.url, PW_SERVICE_OLLAMA_MODEL: 'test-model', PW_SERVICE_AI_AUTH: 'off', PW_SERVICE_DEBUG: 'true' }, dir);
+  const chat = JSON.stringify({ messages: [{ role: 'user', content: 'Hi' }] });
+  const lines = JSON.stringify({ client: 'x', entries: [{ message: 'hi' }] });
+  const post = (path, body, type, more = {}) => fetch(`${svc.url}${path}`, { method: 'POST', headers: { ...(type ? { 'Content-Type': type } : {}), ...more }, body });
+  try {
+    // (What a page can send anywhere without asking first: and fetch's own type for text.)
+    for (const type of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x', null]) {
+      assert.equal((await post('/api/ai/chat', chat, type, { 'X-PW-Route': 'ai' })).status, 415, type);
+      assert.equal((await post('/api/debug/log', lines, type)).status, 415, type);
+    }
+    assert.ok(!ollama.asked.includes('/api/chat'), ollama.asked.join(' '));
+    // As JSON, as the app sends them, they're answered; and a request with nothing in it needn't say.
+    const r = await post('/api/ai/chat', chat, 'application/json', { 'X-PW-Route': 'ai' });
+    assert.equal(r.status, 200);
+    assert.match(await r.text(), /Hello/);
+    assert.equal((await post('/api/debug/log', lines, 'application/json; charset=utf-8')).status, 204);
+    assert.equal((await fetch(`${svc.url}/api/debug/log`, { method: 'POST' })).status, 204);
+  } finally {
+    await svc.stop();
+    ollama.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3124,7 +3608,7 @@ test('MusicBrainz features: other artists of a name, and their release groups, l
     } else if (u.pathname === '/ws/2/release-group') {
       body = { 'release-group-count': 1, 'release-groups': [{ id: '44444444-4444-4444-8444-444444444444', title: u.searchParams.get('artist') === ids.b ? 'Cocaine' : 'Bloom', 'primary-type': 'Album', 'first-release-date': '2026-01-01' }] };
     }
-    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    return jsonAnswer(body);
   };
   const mb = new MusicBrainz({ base: 'http://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const others = await mb.namesakes('Maduk', { but: ids.a });

@@ -6,6 +6,8 @@
 // works through proxies that block WebSockets. Positions are worked out from
 // the clock, so tracks advance on time even if nobody is sending anything.
 import { randomBytes } from 'node:crypto';
+import { ServiceError } from './errors.js';
+import { SERVER_ID, CONTROL_CHARACTERS } from './clean.js';
 
 export const LIMITS = {
   sessions: 100,
@@ -20,16 +22,10 @@ export const LIMITS = {
   waitMs: 25000,
 };
 
-export class TogetherError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+export class TogetherError extends ServiceError {}
 
 const ID = /^\d{1,12}$/;
-const SERVER_ID = /^[A-Za-z0-9._:-]{1,100}$/;
-const str = (v, max) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max);
+const str = (v, max) => String(v ?? '').replace(CONTROL_CHARACTERS, '').slice(0, max);
 const int = (v, max) => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && n >= 0 && n <= max ? n : 0;
@@ -120,6 +116,8 @@ export class Together {
     if (this.sessions.size >= LIMITS.sessions) throw new TogetherError(429, 'This player has too many sessions running. Try again later.');
     const now = this.now();
     const items = this.items(queue, host).slice(0, LIMITS.queue);
+    // (The track it starts at: the first, where `index` isn't one of the queue's.)
+    const start = items.length ? int(index, items.length - 1) : 0;
     const s = {
       id: randomBytes(12).toString('base64url'),
       createdAt: now,
@@ -128,9 +126,9 @@ export class Together {
       members: new Map([[host.id, { ...person(host), host: true, seen: now }]]),
       invited: new Map(),
       queue: items,
-      index: items.length ? Math.min(int(index, items.length - 1), items.length - 1) : 0,
+      index: start,
       playing: !!playing && items.length > 0,
-      position: Math.min(int(position, 24 * 3600000), items[Math.min(int(index, items.length), items.length - 1)]?.duration || Infinity),
+      position: Math.min(int(position, 24 * 3600000), items[start]?.duration || Infinity),
       at: now,
       version: 1,
       events: [],
@@ -459,18 +457,23 @@ export class Together {
     this.onChange(s);
   }
 
-  // Resolves when the session changes after `since`, or after `ms`.
-  wait(s, since, ms) {
+  // Resolves when the session changes after `since` (true), or after `ms`,
+  // or as soon as `signal` says whoever's waiting has gone (false).
+  wait(s, since, ms, { signal } = {}) {
     if (s.version > since || s.ended) return Promise.resolve(true);
+    if (signal?.aborted) return Promise.resolve(false);
     return new Promise((resolve) => {
       const done = (changed) => {
         clearTimeout(timer);
         s.waiters.delete(wake);
+        signal?.removeEventListener('abort', gone);
         resolve(changed);
       };
       const wake = () => done(true);
+      const gone = () => done(false);
       const timer = setTimeout(() => done(false), Math.max(0, Math.min(ms, LIMITS.waitMs)));
       s.waiters.add(wake);
+      signal?.addEventListener('abort', gone, { once: true });
     });
   }
 

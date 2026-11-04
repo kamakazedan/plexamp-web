@@ -645,12 +645,14 @@ export const fileDate = () => new Date().toISOString().slice(0, 10);
 
 // ---------- toasts ----------
 
+// (Said by screen readers as #toasts' own live region has it: once, not
+// as a status of its own too, which some say twice.)
 let toastTimer;
 export function toast(message, { action, onAction, timeout = 3500 } = {}) {
   const root = document.getElementById('toasts');
   const el = h(
     'div.toast',
-    { role: 'status' },
+    null,
     h('span', null, message),
     action ? h('button.toast-action', { type: 'button', onclick: () => { onAction?.(); el.remove(); } }, action) : null,
   );
@@ -907,7 +909,9 @@ function farAway(entries) {
 
 // Fills `container` page by page as the user scrolls. fetchPage(start, size)
 // must resolve to { items, total }. Pass the view's onDispose so the list
-// stops watching the page once it's gone.
+// stops watching the page once it's gone. A page that can't be loaded says
+// so under the list (nothing's thrown: the pages after the first are asked
+// for as it scrolls, where nothing could catch it).
 export function pagedList(container, { fetchPage, render, pageSize = 60, empty = 'Nothing here.', onTotal, onItems, onDispose }) {
   let start = 0;
   let total = Infinity;
@@ -939,11 +943,11 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
       if (!items.length || start >= total) finish();
     } catch (err) {
       finish();
-      if (destroyed) throw err;
-      const state = errorState(err?.network ? "Can't reach your server." : 'This list could not be loaded.', () => location.reload());
-      added.push(state);
-      container.after(state);
-      throw err;
+      if (!destroyed) {
+        const state = errorState(err?.network ? "Can't reach your server." : 'This list could not be loaded.', () => location.reload());
+        added.push(state);
+        container.after(state);
+      }
     } finally {
       loading = false;
     }
@@ -969,7 +973,7 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
   let destroyed = false;
   const more = hasIO ? new IntersectionObserver((es) => es[0].isIntersecting && load(), { rootMargin: '800px 0px' }) : null;
   more?.observe(sentinel);
-  load().catch(() => {});
+  load();
   const dispose = () => {
     done = true;
     more?.disconnect();
@@ -980,6 +984,14 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
     items: all,
     load,
     dispose,
+    // What's on the server changed in the part of the list loaded already
+    // (`by`: entries taken out of it, -1, or put back in it, +1), so what's
+    // asked for next starts that much sooner or later: nothing is left out,
+    // or shown twice, once the list's scrolled on.
+    shift(by) {
+      start = Math.max(0, start + by);
+      if (Number.isFinite(total)) total = Math.max(0, total + by);
+    },
     // Stops, and takes away what it put after the list (to start it again).
     destroy() {
       destroyed = true;

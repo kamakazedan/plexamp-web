@@ -157,15 +157,12 @@ export async function lovedPlaylist() {
   return all.find((p) => p.smart) || all[0] || null;
 }
 
-// The playlist's entries for a track (a track can be in it more than once).
+// The playlist's entries for a track (a track can be in it more than once),
+// from its first LOVED_READ entries, read as their ids and no more.
+const LOVED_READ = 20000;
 async function entriesFor(pl, id) {
-  const found = [];
-  for (let start = 0; start < 20000; start += 500) {
-    const { items, total } = await app.server.playlistItems(pl.ratingKey, { start, size: 500 });
-    for (const m of items) if (String(m.ratingKey) === id && m.playlistItemID != null) found.push(m.playlistItemID);
-    if (!items.length || start + items.length >= total) break;
-  }
-  return found;
+  const { items } = await app.server.readPlaylist(pl.ratingKey, { limit: LOVED_READ, ids: true });
+  return items.filter((m) => String(m.ratingKey) === id && m.playlistItemID != null).map((m) => m.playlistItemID);
 }
 
 // One change at a time, each for the rating the track has by then.
