@@ -3346,11 +3346,19 @@ with sync_playwright() as pw:
               told and pl_items(cid, 't2') == before == pl_items(wid, 't') and sam.locator('.lock-btn').count() == 0
               and view_line == 'Shared by Dan · you can view it, not edit it', f'{view_line} {before} {pl_items(cid, "t2")}')
 
-        # Dan renames it: Sam's is renamed too.
+        # Dan renames it: Sam's is renamed too. (A few tries: a tab's own
+        # bringing it up to date, every so often, can hold the turn just
+        # then, and the one asked for here waits till next time.)
         plex('PUT', f'/playlists/{wid}?title=Workout+mix', 't')
-        sync(dan)
-        sync(sam)
-        check('sharing: renamed by whoever shared it, everyone\'s is', next((p['title'] for p in mine('t2') if p['ratingKey'] == cid), None) == 'Workout mix')
+        sams_title = None
+        for _ in range(5):
+            sync(dan)
+            sync(sam)
+            sams_title = next((p['title'] for p in mine('t2') if p['ratingKey'] == cid), None)
+            if sams_title == 'Workout mix':
+                break
+            dan.wait_for_timeout(1000)
+        check('sharing: renamed by whoever shared it, everyone\'s is', sams_title == 'Workout mix', str(sams_title))
 
         # Dan stops sharing it: both keep theirs, no longer marked shared.
         dan.goto(APP + f'#/playlist/{wid}')
