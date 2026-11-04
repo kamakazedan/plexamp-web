@@ -173,11 +173,17 @@ jobs:
           retention-days: 14
       - name: Test the arm64 build starts, and its parts answer (under emulation)
         if: github.event_name != 'pull_request'
+        shell: bash # with pipefail
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker pull --platform linux/arm64 "$IMAGE@$DIGEST"
-          docker tag "$IMAGE@$DIGEST" plexamp-web:arm64
+          # The build's own arm64 image, by its own digest: Docker keeps one
+          # image for each digest, and the build's is amd64's here already.
+          arm64="$(docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw |
+            jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else empty end')"
+          [ -n "$arm64" ] || { echo "::error title=arm64::the build hasn't one linux/arm64 image"; exit 1; }
+          docker pull --platform linux/arm64 "$IMAGE@$arm64"
+          docker tag "$IMAGE@$arm64" plexamp-web:arm64
           [ "$(docker image inspect -f '{{.Architecture}}' plexamp-web:arm64)" = arm64 ]
           sh docker/test-container.sh plexamp-web:arm64 --smoke
 
@@ -224,6 +230,7 @@ jobs:
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.IMAGE }}
+          flavor: latest=false # (latest only as below: not for a tag pushed)
           tags: |
             type=raw,value=latest,enable=${{ steps.newest.outputs.newest }}
             type=raw,value=${{ needs.image.outputs.version }},enable=${{ steps.newest.outputs.newest }}
