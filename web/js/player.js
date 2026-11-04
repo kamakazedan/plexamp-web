@@ -955,7 +955,7 @@ class Player extends EventTarget {
     this.applyVolume();
     this.applySpeed();
     this.persist();
-    if (this.loadAutoplay) this._play();
+    if (this.loadAutoplay) this._play({ loaded: true });
     else this.setState('paused');
     // Streaming quality changed while it loaded: the new way, from here.
     if (app.settings.quality !== quality) this.qualityChanged();
@@ -1528,7 +1528,8 @@ class Player extends EventTarget {
     this._play();
   }
 
-  _play() {
+  // (`loaded`: as a track's just been loaded to play, not asked for.)
+  _play({ loaded = false } = {}) {
     if (!this.current || this.cast) return;
     this.unlock();
     // (Waiting for the connection: tried again now, playing once it's back.)
@@ -1552,8 +1553,8 @@ class Player extends EventTarget {
       return;
     }
     // (One that couldn't be played, three in a row, say: tried again, where
-    // it got to, now that it's asked for.)
-    if (this.audio.error) {
+    // it got to, now that it's asked for. Not as it's just been loaded.)
+    if (!loaded && this.audio.error) {
       this.load(this.index, { startAt: this.time || 0, reportPrev: false, resume: true });
       return;
     }
