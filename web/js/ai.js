@@ -151,7 +151,7 @@ async function send(target, path, init) {
   let res;
   try {
     res = await fetch(`${target.base}${path}`, init);
-    if (res.status === 401 && target.kind === 'shared' && init.headers['X-Plex-Server-Token']) {
+    if ((res.status === 401 || res.status === 403) && target.kind === 'shared' && init.headers['X-Plex-Server-Token']) {
       refuseServerToken();
       const headers = { ...init.headers };
       delete headers['X-Plex-Server-Token'];

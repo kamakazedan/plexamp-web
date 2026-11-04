@@ -17,6 +17,7 @@ import { setAccountSync, accountSyncState } from '../sync.js';
 import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.js';
 import { keptCount } from '../outbox.js';
 import { joinWithAnd, radioArrowKeys, SECRET_INPUT } from './common.js';
+import { setUpServer } from '../service.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -355,7 +356,12 @@ async function showServers(body) {
   // The server this container is set up for (PLEX_SERVER_URL) is usually one
   // of yours on plex.tv too: then it's listed once, as that one (which goes
   // through this container when that's the best route: Settings ›
-  // Connection).
+  // Connection). Which it is, the service says (service.js setUpServer):
+  // nobody's sign-in goes through /pms/ to find out. On its own, through
+  // this container, only where it can't be one plex.tv lists for you
+  // (signed in with a server's address and token, or plex.tv not saying),
+  // or it can't be told which it is: where plex.tv's list came and it isn't
+  // on it, it isn't one you can use, and your sign-in has no business there.
   const [servers, proxied] = await Promise.all([
     auth.manual
       ? []
@@ -363,15 +369,10 @@ async function showServers(body) {
           listError = err;
           return [];
         }),
-    proxy
-      ? new PlexServer({ uri: proxy, token: auth.token })
-          .identity({ timeout: 5000 })
-          .then((mc) => mc?.machineIdentifier || null)
-          .catch(() => null)
-      : null,
+    proxy ? setUpServer() : null,
   ]);
   const same = proxied ? servers.find((s) => s.id === proxied) : null;
-  if (proxy && !same) entries.push({ kind: 'proxy', name: 'Server set up for this app', uri: proxy, token: auth.token, connections: [] });
+  if (proxy && !same && (auth.manual || listError || !proxied)) entries.push({ kind: 'proxy', name: 'Server set up for this app', uri: proxy, token: auth.token, connections: [] });
   entries.push(...servers.map((s) => ({ ...s, kind: 'discovered', setUp: s === same })));
 
   const whose = (s) => (s.owned ? 'Your server' : s.sharedBy ? `Shared by ${s.sharedBy}` : 'Shared with you');
@@ -412,14 +413,14 @@ function serverAddress(text) {
   return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
 }
 
-// Where a route goes, to tell one typed in from plex.tv's: its address and
-// port ("192.168.1.10:32400"), the address as a plex.direct name has it
-// too ("192-168-1-10.<the server's>.plex.direct").
+// Where a route goes, to tell one typed in from plex.tv's: its address (or
+// name) and port ("192.168.1.10:32400"); `decoded`, a plex.direct name's
+// as the address it's for ("192-168-1-10.<the server's>.plex.direct").
 const PLEX_DIRECT = /^(\d{1,3}(?:-\d{1,3}){3})\.[0-9a-f]+\.plex\.direct$/i;
-function routeAddress(uri) {
+function routeAddress(uri, { decoded = false } = {}) {
   try {
     const u = new URL(uri);
-    const named = u.hostname.match(PLEX_DIRECT);
+    const named = decoded && u.hostname.match(PLEX_DIRECT);
     return `${named ? named[1].replaceAll('-', '.') : u.hostname}:${u.port || (u.protocol === 'https:' ? '443' : '80')}`;
   } catch {
     return null;
@@ -461,8 +462,11 @@ async function yourServerAt(uri, servers) {
   const said = await identityOf(uri, ADDRESS_WAIT);
   if (said.timedOut) throw Object.assign(new Error('unreachable'), { unreachable: true });
   if (said.id && !servers.some((s) => s.id === said.id)) throw new Error('That isn’t one of your Plex servers.');
+  // (By the very name typed, or a bare address typed as one of plex.tv's
+  // plex.direct names is for: a plex.direct name is a server's own, by its
+  // second part, so another's, for the same address, is never yours.)
   const here = routeAddress(uri);
-  const routesHere = (s) => (s.connections || []).filter((c) => !c.relay && routeAddress(c.uri) === here);
+  const routesHere = (s) => (s.connections || []).filter((c) => !c.relay && (routeAddress(c.uri) === here || routeAddress(c.uri, { decoded: true }) === here));
   const listed = servers.filter((s) => (!said.id || s.id === said.id) && routesHere(s).length);
   if (!listed.length) throw new Error('That isn’t an address Plex has for your servers. Add it to the server’s Custom server access URLs in Plex.');
   if (listed.length > 1) throw new Error('Several of your servers have that address, so it wasn’t used.');

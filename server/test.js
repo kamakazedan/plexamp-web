@@ -3120,6 +3120,23 @@ async function startService(env, dir) {
   };
 }
 
+test('api/server: which Plex server this is set up for, as it says itself, asked of it without anyone\'s sign-in', async () => {
+  const p = await fakePlex();
+  const dirs = [mkdtempSync(join(tmpdir(), 'pw-service-')), mkdtempSync(join(tmpdir(), 'pw-service-'))];
+  const withServer = await startService({ PW_SERVICE_PLEX_SERVER_URL: p.pms, PW_SERVICE_PLEX_TV_URL: p.tv }, dirs[0]);
+  const without = await startService({ PW_SERVICE_PLEX_TV_URL: p.tv }, dirs[1]);
+  try {
+    assert.deepEqual(await fetch(`${withServer.url}/api/server`).then((r) => r.json()), { setUp: true, id: 'srv-1' });
+    assert.ok(p.asked.filter((a) => a.path === '/identity').every((a) => !a.token), 'the server is asked who it is without a sign-in');
+    assert.deepEqual(await fetch(`${without.url}/api/server`).then((r) => r.json()), { setUp: false, id: null });
+  } finally {
+    await withServer.stop();
+    await without.stop();
+    p.close();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test('/pms/, end to end: the owner, friends the server knows as themselves, made-up sign-ins, the notification stream, plex.tv not answering, and the offline password', async () => {
   const p = await fakePlex();
   const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));

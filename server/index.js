@@ -1505,6 +1505,14 @@ async function handle(req, res) {
         offline: offline.configured,
         debug: config.debug,
       });
+    // Which Plex server this is set up for (PLEX_SERVER_URL), by its id, as
+    // the server itself says to anyone who asks it (/identity): so the app
+    // can tell it among an account's servers without anyone's sign-in going
+    // through /pms/ to find out. `setUp`: whether there's one at all (its id
+    // is null till it's answered).
+    if (area === 'server' && !rest.length && req.method === 'GET') {
+      return send(res, 200, { setUp: !!config.plexServerUrl, id: config.plexServerUrl ? await auth.loadServerId() : null });
+    }
     if (area === 'internal' && rest[0] === 'pms-auth' && rest.length <= 2 && (rest.length === 1 || rest[1] === 'stream') && routeOf(req) === 'internal') return await pmsAuth(req, res, { stream: rest[1] === 'stream' });
     if (area === 'offline') return await offlineRoute(req, res, rest);
     if (area === 'debug' && rest[0] === 'log' && req.method === 'POST') return await browserLog(req, res);
