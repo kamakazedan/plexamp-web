@@ -325,7 +325,10 @@ class Together extends EventTarget {
     // Joining is a tap: warm up the audio now, while the browser still
     // counts it as one (the requests below take a moment).
     player.unlock({ all: true });
+    const was = app.source;
     const sessions = await this.refresh();
+    // (Not once another library's been chosen meanwhile: see stillOn.)
+    stillOn(was);
     const s = sessions.find((x) => x.id === id);
     if (!s) throw new TogetherError('This invitation has ended, or isn’t for you.', 404);
     // Joining another session leaves this one (the service does the same).

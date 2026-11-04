@@ -40,7 +40,9 @@ export async function serverAnswers() {
     await s.checkIdentity({ timeout: 5000, cache: 'no-store' });
     return true;
   } catch (err) {
-    return !unreachable(err);
+    // (Plex says who it is to anyone: a refusal there, 401, 403 or 404, is
+    // from something in between, a proxy's or a firewall's, not the server.)
+    return !unreachable(err) && !(err.status >= 400 && err.status < 500);
   }
 }
 

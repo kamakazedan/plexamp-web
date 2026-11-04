@@ -872,13 +872,22 @@ class Player extends EventTarget {
         // as it came, converted (it can't play here otherwise), saying so.
         // The server saying no (see fileComes): a track that won't play
         // here. Not there: a drop.
+        // (As it's wanted now: paused, or moved, while it was read.)
+        const wanted = { autoplay: this.loadAutoplay, startAt: this.pendingSeek ?? startAt };
         const refusal = fileComes(err?.status);
-        if (err?.tooBig && !viaMemory) this.load(this.index, { autoplay, startAt, reportPrev: false, resume: true, asStream: true });
+        if (err?.tooBig && !viaMemory) this.load(this.index, { ...wanted, reportPrev: false, resume: true, asStream: true });
         else if (err?.tooBig) {
           this.emit('converted', { track, kbps: this.sourceFor(track, true).kbps });
-          this.load(this.index, { autoplay, startAt, transcode: true, reportPrev: false, resume: true });
-        } else if (refusal === 'refused' || refusal === 'gone') this.couldntPlayHere(track, err, { refusal, status: err.status });
-        else this.dropped(track, { at: valueNow(startAt) || 0, autoplay, startAt });
+          this.load(this.index, { ...wanted, transcode: true, reportPrev: false, resume: true });
+        } else if (refusal === 'refused' || refusal === 'gone') {
+          // (Only the server's own word, as it answers as itself: a refusal
+          // from in between, a proxy's, waits as a drop does.)
+          serverAnswers().then((answers) => {
+            if (token !== this.loadToken || this.current !== track) return;
+            if (answers && !(this.useMediaToken && refusal === 'refused')) this.couldntPlayHere(track, err, { refusal, status: err.status, autoplay: this.loadAutoplay });
+            else this.dropped(track, { at: valueNow(wanted.startAt) || 0, ...wanted });
+          });
+        } else this.dropped(track, { at: valueNow(wanted.startAt) || 0, ...wanted });
         return;
       }
       if (token !== this.loadToken) return;
@@ -1542,6 +1551,12 @@ class Player extends EventTarget {
       this.load(this.index, { startAt: this.restoredAt || 0, reportPrev: false, transcode: held?.forced || false, resume: !!held });
       return;
     }
+    // (One that couldn't be played, three in a row, say: tried again, where
+    // it got to, now that it's asked for.)
+    if (this.audio.error) {
+      this.load(this.index, { startAt: this.time || 0, reportPrev: false, resume: true });
+      return;
+    }
     this.transition?.inn.el.play()?.catch(() => {});
     this.audio.play()?.catch((err) => this.onPlayError(err));
   }
@@ -1774,7 +1789,7 @@ class Player extends EventTarget {
     if (!this.remote && !this.cast) {
       const at = this.time;
       const token = this.loadToken;
-      const autoplay = this.loadAutoplay || this.state === 'playing' || this.state === 'loading';
+      const autoplay = this.loadAutoplay || this.state === 'playing';
       serverAnswers().then((answers) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
         if (answers || this.remote || this.cast) this.couldntPlay(track, err, media, { at, autoplay });
@@ -1796,7 +1811,7 @@ class Player extends EventTarget {
       return;
     }
     if (this.transcoding || !track.partKey) {
-      this.couldntPlayHere(track, err);
+      this.couldntPlayHere(track, err, { autoplay });
       return;
     }
     // The browser couldn't play the file as it is, it says ("not supported"):
@@ -1825,26 +1840,32 @@ class Player extends EventTarget {
       this.fileAnswer(track).then((status) => {
         if (this.current !== track || this.loadToken !== token || this.held) return;
         const comes = fileComes(status);
+        // (AirPlay's or Cast's temporary token refused: a new one's on its
+        // way, so the file's asked for again with it, as for a drop.)
+        if (comes === 'refused' && this.useMediaToken && (status === 401 || status === 403)) {
+          this.dropped(track, { at, autoplay, startAt });
+          return;
+        }
         if (comes === 'refused' || comes === 'gone') {
-          this.couldntPlayHere(track, err, { refusal: comes, status });
+          this.couldntPlayHere(track, err, { refusal: comes, status, autoplay });
           return;
         }
         if (comes === 'failed') {
           const was = this.fileFails?.qid === track.qid ? this.fileFails : { n: 0, since: Date.now() };
           this.fileFails = { qid: track.qid, n: was.n + 1, since: was.since };
           if (this.fileFails.n >= FILE_FAILS.times && Date.now() - was.since >= FILE_FAILS.overMs) {
-            this.couldntPlayHere(track, err);
+            this.couldntPlayHere(track, err, { autoplay });
             return;
           }
         } else if (comes === true && !asIs && !dropping) {
-          this.fromMemoryOrConverted(track, { startAt });
+          this.fromMemoryOrConverted(track, { startAt, autoplay });
           return;
         }
         this.dropped(track, { at, autoplay, startAt });
       });
       return;
     }
-    this.fromMemoryOrConverted(track, { startAt });
+    this.fromMemoryOrConverted(track, { startAt, autoplay });
   }
 
   // A file that came, but didn't play as it came: read in full, and played
@@ -1853,12 +1874,12 @@ class Player extends EventTarget {
   // it). Only once that doesn't play either is it a file this browser can't
   // play as it is, which the server converts (as it does a file of a format
   // it can't play: see sourceFor). Never another quality for the network.
-  fromMemoryOrConverted(track, { startAt }) {
+  fromMemoryOrConverted(track, { startAt, autoplay = true }) {
     if (this.deck.prefetched?.qid === track.qid) {
-      this.load(this.index, { startAt, transcode: true, reportPrev: false, resume: true });
+      this.load(this.index, { autoplay, startAt, transcode: true, reportPrev: false, resume: true });
       return;
     }
-    this.load(this.index, { startAt, reportPrev: false, resume: true, viaMemory: true });
+    this.load(this.index, { autoplay, startAt, reportPrev: false, resume: true, viaMemory: true });
   }
 
   // The connection to a track's stream dropped, or it didn't come: the same
@@ -1874,7 +1895,7 @@ class Player extends EventTarget {
     const n = (recent ? this.drops.n : 0) + 1;
     this.drops = { qid: track.qid, n, at };
     if (n >= 2) this.emit('dropping', { track });
-    const again = { startAt, transcode: this.deck.forced || false, reportPrev: false, resume: true };
+    const again = { autoplay, startAt, transcode: this.deck.forced || false, reportPrev: false, resume: true };
     if (n === 1 || (this.remote && n <= 3)) {
       this.load(this.index, again);
       return;
@@ -1904,10 +1925,12 @@ class Player extends EventTarget {
     }
   }
 
-  // A track that won't play on this device: the next one, as it can.
+  // A track that won't play on this device: the next one, as it can, to
+  // play only if this one was to (`autoplay`: one loaded paused, at the end
+  // of the sleep timer's track, say, leaves the next one paused too).
   // `refusal`: the server said no to its file (see fileComes), its answer's
   // `status` being this.
-  couldntPlayHere(track, err, { refusal = null, status = 0 } = {}) {
+  couldntPlayHere(track, err, { refusal = null, status = 0, autoplay = this.loadAutoplay || this.isPlaying } = {}) {
     this.errorsInRow += 1;
     // Why, for what's said (nowplaying.js): a 401 to the account's own
     // token (not the temporary one AirPlay and Cast have) is a sign-in Plex
@@ -1928,7 +1951,12 @@ class Player extends EventTarget {
       this.setState('paused');
       return;
     }
-    setTimeout(() => this.current === track && this.next(), SKIP_AFTER_MS);
+    setTimeout(() => {
+      if (this.current !== track) return;
+      if (autoplay) return this.next();
+      const ni = this.nextIndex();
+      if (ni !== -1) this.load(ni, { autoplay: false });
+    }, SKIP_AFTER_MS);
   }
 
   // A stream the server converts failed part-way, after hls.js had tried
