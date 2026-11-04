@@ -12,7 +12,7 @@ import { app } from './state.js';
 import { mapLimit, findArtist, titleWord } from './ai.js';
 import { norm } from './missinglist.js';
 import { aliasesOf } from './mb.js';
-import { sameTitle, asides } from './releases.js';
+import { sameTitle, asides, plexKind } from './releases.js';
 import { saveOrder } from './sorting.js';
 import { toCsv } from './missing.js';
 import { fmt } from './ui.js';
@@ -181,20 +181,42 @@ const byArtist = (e, m) => (!e.artist && !e.albumArtist) || [m.originalTitle, m.
 // dash that says a remix, a live take, another mix ("Calibre Remix", "Live",
 // "VIP", "Taylor's Version"), as releases.js asides has them; not what only
 // says which cut of the recording it is ("Radio Edit", "Single Version",
-// "Original Mix", "Extended Mix"), which a copy's title often leaves out.
-// ("Acoustic" and "Acoustic Version" are one.)
-const CUT_ONLY = /^(?:(?:radio|single|album|original|short|full|extended|main|clean|explicit)\s+)?(?:edit|version|mix|cut)$|^original$/;
+// "Original Mix", "Extended Mix", "Extended"), which a copy's title often
+// leaves out. ("Acoustic" and "Acoustic Version" are one, and so are
+// "Calibre Mix" and "Calibre Remix".)
+const CUT_ONLY = /^(?:(?:radio|single|album|original|short|full|extended|main|clean|explicit)\s+)?(?:edit|version|mix|cut)$|^(?:original|extended)$/;
+const recordingsOf = (title) => asides(title).filter((a) => a.versioned && !CUT_ONLY.test(a.text));
 const recordingOf = (title) =>
-  asides(title)
-    .filter((a) => a.versioned && !CUT_ONLY.test(a.text))
-    .map((a) => a.text.replace(/ (?:version|mix)$/, ''))
+  recordingsOf(title)
+    .map((a) => a.text.replace(/ (?:version|re-?mix|mix)$/, ''))
     .sort()
     .join(' | ');
+// A live take, as its title says ("Song - Live at Wembley"): on a live
+// album, its copy's title often doesn't say so (see onIts).
+const liveTake = (title) => {
+  const said = recordingsOf(title);
+  return said.length > 0 && said.every((a) => /\blive\b/.test(a.text));
+};
+// A song's title, as norm has it, without what comes after a dash or a
+// colon ("Song - Remastered 2011" is "song"; brackets norm leaves out).
+const headOf = (title) => norm(String(title || '').split(/\s+[-–—:]\s+/)[0]);
+// Titles of the same song: the same, or spelt alike (as releases.js
+// sameTitle has it), or one the other with what its dash or colon adds,
+// never one with words of its own after it ("One" isn't "One Tree Hill",
+// nor "Song" "Song 2").
+function sameSongTitle(a, b) {
+  const x = norm(a);
+  const y = norm(b);
+  if (!x || !y) return false;
+  if (y.startsWith(`${x} `)) return headOf(b) === x;
+  if (x.startsWith(`${y} `)) return headOf(a) === y;
+  return sameTitle(x, y);
+}
 // The same song: the same title (near enough) by the same artist, and the
 // same recording, as the titles say (a remix isn't the song it remixes, nor
 // another remix of it; nor a live take the studio one).
 const sameRecording = (e, m) => recordingOf(e.title) === recordingOf(m.title);
-const sameSong = (e, m) => (m?.type === 'track' || m?.type === undefined) && sameTitle(norm(m.title), norm(e.title)) && byArtist(e, m) && sameRecording(e, m);
+const sameSong = (e, m) => (m?.type === 'track' || m?.type === undefined) && sameSongTitle(m.title, e.title) && byArtist(e, m) && sameRecording(e, m);
 
 // How alike a track in the library is to an entry, beyond being the same
 // song: Plex's id for the recording, the exact title, the album, the length,
@@ -238,7 +260,7 @@ const sameAlbum = (e, a) =>
 // differently there ("Song - 2011 Remaster"), the same disc and number and
 // the same length near enough.
 const onAlbum = (e, tracks) =>
-  tracks.find((m) => sameTitle(norm(m.title), norm(e.title)) && sameRecording(e, m)) ||
+  tracks.find((m) => sameSongTitle(m.title, e.title) && sameRecording(e, m)) ||
   tracks.find(
     (m) =>
       e.index !== undefined &&
@@ -310,13 +332,19 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
       return null;
     };
     // Its album, and its number there (the album looked for once, if it's
-    // needed).
+    // needed). A live take whose copy there doesn't say it's live (on Hell
+    // Freezes Over, "Hotel California - Live On MTV, 1994" is "Hotel
+    // California"): the song of its title alone, but only where Plex has
+    // the album as a live one, never a studio album's take of it.
     let albums = null;
     const onIts = async (e) => {
       albums ||= e.album ? s.search(e.album, everywhere, { signal, limit: 10 }).then((r) => r.album || []) : Promise.resolve([]);
       for (const album of (await albums).filter((a) => sameAlbum(e, a)).slice(0, 3)) {
-        const there = onAlbum(e, await s.children(album.ratingKey));
+        const tracks = await s.children(album.ratingKey);
+        const there = onAlbum(e, tracks);
         if (there) return there;
+        const plain = liveTake(e.title) && tracks.find((m) => sameSongTitle(m.title, e.title) && !recordingOf(m.title));
+        if (plain && plexKind(await s.metadata(album.ratingKey).catch(() => null)) === 'live') return plain;
       }
       return null;
     };

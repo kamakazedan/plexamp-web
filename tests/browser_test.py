@@ -6708,15 +6708,20 @@ with sync_playwright() as pw:
         # Remix", "Song - Live"): a remix comes over only as that very remix
         # (never the song it remixes, nor another remix of it), a live take
         # only as one, while what only says which cut it is ("Radio Edit")
-        # doesn't count. (An artist of their own, with a song and a remix of
-        # it.)
-        lanterns = mock('/__mock/add-artist?name=Lantern%20Fold&albums=Paper%20Lanterns:2019&tracks=Paper%20Lantern|Paper%20Lantern%20(Glasswork%20Remix)|Tin%20Bell')['MediaContainer']['Metadata'][0]
+        # doesn't count. A live take whose copy on a live album doesn't say
+        # it's live comes over as that copy, but only from an album Plex has
+        # as a live one. (An artist of their own, with a song and a remix of
+        # it on a studio album, and the same on a live one.)
+        lanterns = mock('/__mock/add-artist?name=Lantern%20Fold&albums=Paper%20Lanterns:2019,Live%20at%20the%20Pier:2021&live=Live%20at%20the%20Pier'
+                        '&tracks=Paper%20Lantern|Paper%20Lantern%20(Glasswork%20Remix)|Tin%20Bell')['MediaContainer']['Metadata'][0]
         try:
             versions = json.dumps({'playlists': [{'name': 'Versions', 'lastModifiedDate': '2026-10-22', 'collaborators': [], 'numberOfFollowers': 0, 'items': [
                 item('Paper Lantern - Glasswork Remix', 'Lantern Fold', 'Paper Lanterns'),
                 item('Paper Lantern - Ferro Remix', 'Lantern Fold', 'Paper Lanterns Remixed'),
                 item('Paper Lantern - Radio Edit', 'Lantern Fold', 'Paper Lanterns'),
                 item('Tin Bell - Live', 'Lantern Fold', 'Live at the Pier'),
+                item('Paper Lantern - Live', 'Lantern Fold', 'Paper Lanterns'),
+                item('Paper', 'Lantern Fold', 'Paper Lanterns'),
             ]}]}).encode()
             guide()
             choose_files([('Playlist4.json', versions)])
@@ -6735,8 +6740,9 @@ with sync_playwright() as pw:
                 await app.server.deletePlaylist(p.ratingKey);
                 return items.map((m) => [m.title, m.parentTitle]);
             })""")
-            check('spotify: a remix comes over only as that very remix (not the song it remixes, nor another remix), a live take only as one; a radio edit as the song',
-                  versions_made == [['Paper Lantern (Glasswork Remix)', 'Paper Lanterns'], ['Paper Lantern', 'Paper Lanterns']] and '2 tracks found' in versions_done and '2 not' in versions_done,
+            check('spotify: a remix comes over only as that very remix (not the song it remixes, nor another remix), a live take only as one (its copy on a live album too, but not a studio album\'s); a radio edit as the song; a title isn\'t a longer one\'s ("Paper" isn\'t "Paper Lantern")',
+                  versions_made == [['Paper Lantern (Glasswork Remix)', 'Paper Lanterns'], ['Paper Lantern', 'Paper Lanterns'], ['Tin Bell', 'Live at the Pier']]
+                  and '3 tracks found' in versions_done and '3 not' in versions_done,
                   f'{versions_made} {versions_done!r}')
         finally:
             mock(f"/__mock/add-artist?remove={lanterns['ratingKey']}")

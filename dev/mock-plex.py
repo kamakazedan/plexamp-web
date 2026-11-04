@@ -69,7 +69,7 @@ testing, these endpoints need no token:
         smartcollection=1|0: a smart collection (Electronic picks) listed,
         whose items carry no tag for it, or not
     /__mock/add-artist?name=...[&eps=N][&noalbum=1][&albums=T:Y,...][&mb=0]
-                       [&format=Single][&tracks=T|T][&first=YYYY-MM-DD][&firsttracks=T:SECS|T:SECS]
+                       [&format=Single][&live=T|T][&tracks=T|T][&first=YYYY-MM-DD][&firsttracks=T:SECS|T:SECS]
                        [&guids=1|release]
                                   adds an artist with an album and a track of
                                   their own (and N EPs, a track on each;
@@ -77,7 +77,8 @@ testing, these endpoints need no token:
                                   albums of these titles and years instead,
                                   as a second artist of a name Plex made
                                   from files tagged otherwise; format: of
-                                  that kind; tracks: with tracks of these
+                                  that kind; live: those of these titles
+                                  live albums; tracks: with tracks of these
                                   titles; first: MusicBrainz has them first
                                   out then; firsttracks: their first release
                                   has these tracks, not the library's),
@@ -2248,6 +2249,7 @@ class Handler(BaseHTTPRequestHandler):
             if with_ids:  # (mbid=...: another artist's MusicBrainz id, as Plex can have for one of a name)
                 a['Guid'] = [{'id': 'mbid://' + mb_id('artist|' + q.get('mbid', [name])[0])}]
             fmt_asked = q.get('format', [''])[0] or None
+            live_asked = {t for t in q.get('live', [''])[0].split('|') if t}
             titles_asked = [t for t in q.get('tracks', [''])[0].split('|') if t]
             first_asked = q.get('first', [''])[0]
             # (firsttracks=T:SECS|...: the first release's tracks, not the library's.)
@@ -2268,7 +2270,8 @@ class Handler(BaseHTTPRequestHandler):
                 names = titles_asked or [f'{name} Song' if fmt == 'Album' else f'{title} Song']
                 al = dict(albums[0], ratingKey=ak, key=f'/library/metadata/{ak}/children', title=title, titleSort=title.lower(),
                           parentRatingKey=k, parentTitle=name, parentThumb=a['thumb'], thumb=f'/library/metadata/{ak}/thumb/1', leafCount=len(names),
-                          year=year or 2020 + n, originallyAvailableAt=f'{year or 2020 + n}-05-01', Format=[{'tag': fmt}], Subformat=[])
+                          year=year or 2020 + n, originallyAvailableAt=f'{year or 2020 + n}-05-01', Format=[{'tag': fmt}],
+                          Subformat=[{'tag': 'Live'}] if title in live_asked else [])
                 al.pop('Guid', None)
                 if with_ids:
                     gid = mb_id('group|' + name + '|' + title)
