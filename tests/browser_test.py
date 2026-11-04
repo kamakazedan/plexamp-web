@@ -4132,8 +4132,12 @@ with sync_playwright() as pw:
         player(page, '(p.decks.forEach((d) => delete d.el.error), true)')
         check('stream: ...one that came but couldn\'t be decoded is read in full and played from memory first, and converted only if it won\'t play from there either',
               in_memory and decoded and not play_errors(), str(rate()))
-        # (A connection where files play as they stream again, for the next.)
+        # (A connection where files play as they stream again, for the next.
+        # Nothing loaded ahead or kept meanwhile, as without APP_DEFAULTS: so
+        # each track is read here, never found in memory already.)
         player(page, '(p.readInFull = false, true)')
+        kept_was = js(page, "() => import('./js/state.js').then(({ app }) => ({ loadAhead: app.settings.loadAhead, keepPlayed: app.settings.keepPlayed }))")
+        settings(page, {'loadAhead': 0, 'keepPlayed': 0})
         # One the server hands over (asked for it, without a range: the
         # player's own request) but that doesn't play as it comes, its parts
         # not coming either (as some networks treat a player's stream): read
@@ -4169,8 +4173,6 @@ with sync_playwright() as pw:
         # bitrate, or as it's read), plays as it streams first: never
         # converted for that.
         streams = "p.state === 'playing' && p.time > 0.5 && !p.deck.isHls && !p.deck.forced && !(p.audio.getAttribute('src') || '').startsWith('blob:')"
-        kept_was = js(page, "() => import('./js/state.js').then(({ app }) => ({ loadAhead: app.settings.loadAhead, keepPlayed: app.settings.keepPlayed }))")
-        settings(page, {'loadAhead': 0, 'keepPlayed': 0})
         player(page, '(p.ahead.canReadInFull = () => false, true)')
         play_track(4, 1)
         too_long = wait_for(lambda: player(page, streams), 20, 0.25)
