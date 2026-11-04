@@ -76,10 +76,10 @@ docker run -d --name pwb-web --network "$NET" -p 127.0.0.1:8081:80 -e "$TV" -e S
     -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e SPOTIFY_IMPORT=true -e SPOTIFY_URL=http://pwb-plex:32400 \
     -e SPOTIFY_FILE_IMPORT=true "$IMAGE" >/dev/null
 docker run -d --name pwb-web2 --network "$NET" -p 127.0.0.1:8082:80 -e "$TV" -e SYNC_SETTINGS=false \
-    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
+    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DISABLE_WEBSOCKETS=true -e SPOTIFY_FILE_IMPORT=false "$IMAGE" >/dev/null
 docker run -d --name pwb-web3 --network "$NET" -p 127.0.0.1:8083:80 -e "$TV" \
     -e PLEX_SERVER_URL=http://pwb-plex:32400 -e DEBUG=true -e WEBSOCKETS=on \
-    -e SPOTIFY_LINK_IMPORT=true -e SPOTIFY_URL=http://pwb-plex:32400 \
+    -e SPOTIFY_LINK_IMPORT=true -e SPOTIFY_URL=http://pwb-plex:32400 -e SPOTIFY_FILE_IMPORT=false \
     -e OLLAMA_URL=http://pwb-ollama2:11435 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
 docker run -d --name pwb-web4 --network "$NET" -p 127.0.0.1:8084:80 -e PLEX_TV_URL=http://pwb-plex-big:32401 -e SYNC_SETTINGS=false \
     -e PLEX_SERVER_URL=http://pwb-plex-big:32401 "$IMAGE" >/dev/null

@@ -343,8 +343,8 @@ MUSICBRAINZ_URL=$MUSICBRAINZ_URL
 # docs/features.md). Nothing else needs them. They look your whole library
 # up, so a mirror of your own is best.
 MUSICBRAINZ_ADVANCED=
-# true: Search › From Spotify makes playlists from Spotify's download of your
-# data, read in the browser (see docs/configuration.md).
+# false: no playlists from Spotify's download of your data in Search › From
+# Spotify (read in the browser: see docs/configuration.md). Empty: they're on.
 SPOTIFY_FILE_IMPORT=
 # true: Search › From Spotify makes a playlist from a Spotify playlist's link,
 # read from Spotify's public page for it (see docs/configuration.md).

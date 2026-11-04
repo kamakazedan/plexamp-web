@@ -101,8 +101,8 @@ expected="$(printf '%s\n' '# plexamp-web settings, the same as the Docker image'
     '# kind for albums Plex hasn'"'"'t typed for Skip live tracks and demos: see' \
     '# docs/features.md). Nothing else needs them. They look your whole library' \
     '# up, so a mirror of your own is best.' 'MUSICBRAINZ_ADVANCED=' \
-    '# true: Search › From Spotify makes playlists from Spotify'"'"'s download of your' \
-    '# data, read in the browser (see docs/configuration.md).' 'SPOTIFY_FILE_IMPORT=' \
+    '# false: no playlists from Spotify'"'"'s download of your data in Search › From' \
+    '# Spotify (read in the browser: see docs/configuration.md). Empty: they'"'"'re on.' 'SPOTIFY_FILE_IMPORT=' \
     '# true: Search › From Spotify makes a playlist from a Spotify playlist'"'"'s link,' \
     '# read from Spotify'"'"'s public page for it (see docs/configuration.md).' 'SPOTIFY_LINK_IMPORT=' \
     '# Offline mode, with PLEX_SERVER_URL: while plex.tv isn'"'"'t answering, this' \

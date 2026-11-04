@@ -441,7 +441,7 @@ docker run -d --name pw-web2 --network "$NET" -v "$DATA_VOLUME:/data" "$IMAGE" >
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
 lacks "defaults: with a volume at /data, nothing is said about it" "which isn't a volume" "$(docker logs pw-web2 2>&1)"
-expect "defaults: Play Together, your devices, shared playlists, and account settings and missing tracks, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true, missingSync: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together, your devices, shared playlists, account settings and missing tracks, and playlists from Spotify's download of your data, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true, missingSync: true, spotifyFiles: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
 contains "defaults: Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner)" "Play on with Plex players needs PLEX_SERVER_URL" "$(docker logs pw-web2 2>&1)"
 expect "defaults: ...so the service has no players for anyone" 404 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/cast/players)"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
@@ -627,7 +627,7 @@ docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRA
     -e OFFLINE_NETWORKS=private -e OLLAMA_AUTH=plex -e PLEX_CLAIM=claim-for-plex -e OLLAMA_HOST=0.0.0.0 "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify by link)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true, spotifyFiles: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 # (OFFLINE_NETWORKS=private and OLLAMA_AUTH=plex alone, as Proxmox VE's
 # settings have them: the defaults, so the container starts, as it has.)
@@ -649,10 +649,10 @@ docker rm -f pw-web11 >/dev/null
 
 # ---------- 7b. Playing on other Plex players off ----------
 docker run -d --name pw-web8 --network "$NET" -e "$TV" -e CASTING=false -e MUSICBRAINZ=false -e MUSICBRAINZ_URL=https://musicbrainz.org -e PLAYLIST_SHARING=false -e SYNC_SETTINGS=false \
-    -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true -e WEBSOCKETS=on -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
+    -e SYNC_MISSING_TRACKS=false -e SPOTIFY_LINK_IMPORT=true -e SPOTIFY_FILE_IMPORT=false -e WEBSOCKETS=on -e DISABLE_WEBSOCKETS=true "$IMAGE" >/dev/null
 wait_http pw-web8 http://pw-web8/
 wait_service pw-web8
-expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false, SYNC_SETTINGS=false and SYNC_MISSING_TRACKS=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone; WEBSOCKETS=on over DISABLE_WEBSOCKETS=true: WebSockets only)" 'window.PW_CONFIG = { websockets: "on", together: true, devices: true, spotify: true };' "$(cb http://pw-web8/config.js | tr -d '\n')"
+expect "CASTING=false, MUSICBRAINZ=false (MUSICBRAINZ_URL set too), PLAYLIST_SHARING=false, SYNC_SETTINGS=false, SYNC_MISSING_TRACKS=false and SPOTIFY_FILE_IMPORT=false: not in config.js (SPOTIFY_LINK_IMPORT=true: Spotify by link alone; WEBSOCKETS=on over DISABLE_WEBSOCKETS=true: WebSockets only)" 'window.PW_CONFIG = { websockets: "on", together: true, devices: true, spotify: true };' "$(cb http://pw-web8/config.js | tr -d '\n')"
 contains "WEBSOCKETS=on: the log says so" "WebSockets only: live updates don't fall back" "$(docker logs pw-web8 2>&1)"
 contains "...and that DISABLE_WEBSOCKETS=true is left aside" "DISABLE_WEBSOCKETS=true is left aside: WEBSOCKETS=on says otherwise" "$(docker logs pw-web8 2>&1)"
 expect "SYNC_MISSING_TRACKS=false: no missing tracks kept for each account" 404 "$(c -H 'X-Plex-Token: t' 'http://pw-web8/api/missing?server=mock-server-1')"

@@ -40,9 +40,9 @@
 #                       tracks here, for all of its devices, and syncing
 #                       everyone's into the Plex server owner's, so they can
 #                       see what's missing from their server (on by default)
-#   SPOTIFY_FILE_IMPORT "true" turns on Search › From Spotify with Spotify's
-#                       download of your data: its playlist files, read in
-#                       the browser (off by default)
+#   SPOTIFY_FILE_IMPORT Search › From Spotify with Spotify's download of your
+#                       data: its playlist files, read in the browser (on by
+#                       default; "false" turns it off)
 #   SPOTIFY_LINK_IMPORT "true" turns on Search › From Spotify with a public
 #                       playlist's link, read from Spotify's public page for
 #                       it (off by default: see server/spotify.js).
@@ -530,15 +530,16 @@ test_address PLEX_TV_URL "$PLEX_TV" https://plex.tv "every sign-in check goes th
 
 # ---------- Spotify imports ----------
 
-# Each way is off unless it's turned on. From Spotify's download of your data
-# (SPOTIFY_FILE_IMPORT): its playlist files, read in the browser; nothing goes
-# to this container or to Spotify, so it doesn't need the service. From a
-# public playlist's link (SPOTIFY_LINK_IMPORT; SPOTIFY_IMPORT before 0.22.0,
-# which it overrides when both are set): read from Spotify's public pages,
-# which Spotify's terms don't allow (see server/spotify.js). SPOTIFY_URL is
-# for tests (the mock's address).
+# From Spotify's download of your data (SPOTIFY_FILE_IMPORT, on unless it's
+# turned off: since 0.37.0, as it's been tried with real downloads): its
+# playlist files, read in the browser; nothing goes to this container or to
+# Spotify, so it doesn't need the service. From a public playlist's link
+# (SPOTIFY_LINK_IMPORT, off unless it's turned on; SPOTIFY_IMPORT before
+# 0.22.0, which it overrides when both are set): read from Spotify's public
+# pages, which Spotify's terms don't allow (see server/spotify.js).
+# SPOTIFY_URL is for tests (the mock's address).
 SPOTIFY_FILES=false
-if truthy SPOTIFY_FILE_IMPORT "${SPOTIFY_FILE_IMPORT:-}"; then SPOTIFY_FILES=true; fi
+if truthy SPOTIFY_FILE_IMPORT "${SPOTIFY_FILE_IMPORT:-}" true; then SPOTIFY_FILES=true; fi
 SPOTIFY=false
 if truthy SPOTIFY_IMPORT "${SPOTIFY_IMPORT:-}"; then SPOTIFY=true; fi
 if [ -n "${SPOTIFY_LINK_IMPORT:-}" ]; then

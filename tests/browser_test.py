@@ -7040,9 +7040,9 @@ with sync_playwright() as pw:
             app.server.forgetPlaylists();
             for (const p of await app.server.playlists()) if (['Road trip classics', 'Road trip classics (from Spotify)', 'Night drive mix'].includes(p.title)) await app.server.deletePlaylist(p.ratingKey);
         })""")
-        # Each way is off unless the container turns it on: on a player with
-        # neither (SPOTIFY_FILE_IMPORT, SPOTIFY_LINK_IMPORT), there's no From
-        # Spotify; with the link alone (by its new name), it's the link.
+        # On a player with neither way (SPOTIFY_FILE_IMPORT=false, and no
+        # SPOTIFY_LINK_IMPORT), there's no From Spotify; with the link alone
+        # (by its new name, and the file import turned off), it's the link.
         login(page, APP_NOWS)
         page.goto(APP_NOWS + '#/search')
         page.wait_for_selector('a.row[href="#/sonic-path"]')  # (in the same block as From Spotify)

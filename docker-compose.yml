@@ -45,9 +45,9 @@
 #                       goes to the server owner's Missing tracks, so they can
 #                       see what's missing from their server. Each account's
 #                       follows it to every browser too.
-#   SPOTIFY_FILE_IMPORT "true": Search › From Spotify makes playlists from
-#                       Spotify's download of your data, read in the browser.
-#                       Off unless set, for now.
+#   SPOTIFY_FILE_IMPORT Search › From Spotify makes playlists from Spotify's
+#                       download of your data, read in the browser. On unless
+#                       it's "false".
 #   SPOTIFY_LINK_IMPORT "true": Search › From Spotify makes a playlist from a
 #                       public Spotify playlist's link, with the tracks you
 #                       have. Off unless set: it reads Spotify's public

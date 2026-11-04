@@ -74,7 +74,7 @@ Friends with access to your server can import a file you send them, and get the 
 
 ## From Spotify
 
-**Search › From Spotify** makes playlists here from your Spotify ones, using Spotify's own download of your data: all your playlists, however long, and your Liked Songs. It works with a free Spotify account, and is turned on with `SPOTIFY_FILE_IMPORT=true` on the container (it's off unless you turn it on, for now: see [configuration.md](configuration.md#container-settings)).
+**Search › From Spotify** makes playlists here from your Spotify ones, using Spotify's own download of your data: all your playlists, however long, and your Liked Songs. It works with a free Spotify account. It's on unless the container turns it off (`SPOTIFY_FILE_IMPORT=false`: see [configuration.md](configuration.md#container-settings)); before 0.37.0 it was off unless turned on, while it was tried with real downloads from Spotify.
 
 - **Why a download**: Spotify only lets other apps read your playlists through its developer programme, which needs a Premium account and allows five people (only a business with 250,000 users can have more). But anyone can download their own data from Spotify.
 - **Asking for it**: on spotify.com, open your account's **Privacy settings**, tick **Account data** under **Download your data**, and request it. Spotify emails you to confirm, then again when it's ready, usually within a few days (it allows itself up to 30). The guide in the app links to the page.
