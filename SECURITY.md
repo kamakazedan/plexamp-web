@@ -212,6 +212,32 @@ These come with how the player works:
 
 ## Reviews
 
+### 0.37.0
+
+A review of all of the code (the browser app, the service, the container and its start-up script, the Proxmox scripts, CI and the tests), for anything written carelessly, found these that bear on security and privacy, all fixed in 0.37.0:
+
+| Area | What was wrong | What changed |
+| --- | --- | --- |
+| Switch user | The Plex Home's admin was offered to everyone in the Home: where the admin had no PIN, a managed user got into the server owner's account with one tap. | The Home's admin, and the owner of the server the app is on, are offered only with a PIN, and switching refuses an admin without one. |
+| Enter a server address | Your Plex sign-in went to whatever address was typed (a typo, or one pasted from someone), often over plain http, before it was known which server answered. | Asked who it is with nothing of yours, and used only where plex.tv has it for one of your servers, and only if that very server answers. |
+| Signing in | Signing in as another account without signing out first kept the last person's server, library (with their sign-in for it), queue, lists and settings on the device. | It clears what signing out clears. |
+| Routes | A connection check counted any answer at the server's address, from another server or something that isn't Plex too; plain http addresses on a home network were tried for servers shared with you, with their token; a late check could switch back to a server chosen meanwhile. | Only that very server counts, by its id; plain http home-network routes only for your own server; and nothing switches once another is chosen. |
+| Plays and ratings kept offline | Sent as soon as the browser was online, to whatever answered at the server's address. | Sent only once that very server answers. |
+| Shared playlists | A page that isn't Plex's answer (a Wi-Fi sign-in page, say) was taken for an empty one, so a copy looked deleted, which stopped the share for everyone, or empty. | Every answer must be Plex's, or it's an error; a copy is gone only when Plex says 404. |
+| Play Together | Play now, Play next and Add to queue sent whole tracks to the session, with your play counts, ratings and when you last played them. | Only what's needed to play a track goes. |
+| Sign-in fields | The sign-in page's token field and the Ollama key field could be kept by password managers. | They're marked as codes not to keep, as the PIN's is. |
+| Service | Request bodies were taken whatever they said they were, so another site's page could have a visitor's browser send the service a request without asking first (a chat with the shared model, with `OLLAMA_AUTH=off`, say). | Only JSON, said so in the request, which a browser asks first for (and isn't let). |
+| Service | One signed-in person could have the container ask plex.tv about a made-up server id each time, filling its queue for everyone; and past 2,000 people signed in lately, nearly every request asked plex.tv again. | The servers an account can use are asked about once a sign-in; 20,000 sign-ins are kept, by last use. |
+| Service | plex.tv not answering was taken as "no access" where the service checks an account can use a server. | It says it can't tell (503), and nothing is taken away. |
+| Service | MusicBrainz's answers were read whatever their size, and its redirects followed. | Read up to 8 MB; a redirect is never followed. |
+| Service | A data file that couldn't be read was written over at the next change, losing what was in it. | It's kept aside, as `<name>.unreadable-<when>`, and the log says so. |
+| Service | A sign-in checked again after its 15 minutes counted as a new one from its address, so behind a reverse proxy (everyone one address) people were turned away past about 450 at once. | One plex.tv took in the last day isn't counted again; made-up ones still are. |
+| Container log | nginx's own errors, outside debug mode, could quote the requests they were about (a device's name in one, say). | They're logged only in debug mode, through the service, which takes tokens out; and not even then if something else listens where they'd be sent. |
+| Container | The service was given the container's whole environment, its secrets among them (`OLLAMA_API_KEY`, `OFFLINE_PWD`), though it reads its settings from a file of its own. | It's started with nothing of it but what Node.js needs. |
+| Container | `PLEX_TV_URL` and `SPOTIFY_URL` (for tests) could send sign-ins or links to any address, over plain http, without a word. | https only (but to a test's own machine), and the log says when either is set. |
+| CI | The image published wasn't the one tested (it was built again to publish), the arm64 one never ran, `stable` and `latest` could go back to an older build, and hls.js was checked only against the registry's checksum. | One build is tested by its digest and published as it is (arm64 started under emulation); nothing moves backwards; hls.js's checksum is kept in the repository. |
+| Proxmox install | The installer and the app it installed could be different commits; an update that didn't start was left that way; Debian's other packages never got their security fixes. | One commit, its own installer; an update that doesn't start is put back; Debian's packages are upgraded with each install and update. |
+
 ### 0.30.0
 
 A review of 0.30.0's checks at `/pms/` and offline mode, before it was released, found ways the first version of them could be got round, all fixed before release:

@@ -3,6 +3,146 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.37.0 - 2026-11-04
+
+A review of all of plexamp-web's code, for anything written carelessly and
+anything that could let what's yours out: what it found that bears on
+security and privacy is in [SECURITY.md](SECURITY.md#0370).
+
+### Changed
+
+- **Playlists from Spotify's download of your data are on** unless the
+  container turns them off (`SPOTIFY_FILE_IMPORT=false`): they were off
+  while the import was tried with real downloads from Spotify, and it has
+  been. It reads the files in your browser and asks nothing of Spotify.
+  The import from a link, which reads Spotify's pages, is still off unless
+  it's turned on.
+- **Spotify imports bring a remix over only as that very remix**: each
+  track is matched to the same recording, as the titles say. "Song -
+  Glasswork Remix" isn't "Song", nor "Song (Harbour Remix)", and a live
+  take isn't the studio one, while what only says which cut it is (Radio
+  Edit, Single Version, Original Mix, Extended Mix) doesn't count.
+  Playlist files are matched the same way.
+- **Switch user offers the Plex Home's admin only with a PIN**, and the
+  owner of the server the app is on too: without one, anyone in the Home
+  could get into their account with a tap. They're listed, with what to
+  do (give them a PIN in Plex, or sign in as them).
+- **Enter a server address sends nothing of yours to an address until
+  it's yours**: it's asked who it is with nothing of yours, then used only
+  where plex.tv has it for one of your servers, and only if that very
+  server answers. Before, your Plex sign-in went to whatever was typed (a
+  typo, or an address pasted from someone), often over plain http.
+- **A collection's page loads a page at a time**, as a playlist's does: a
+  smart collection of 10,000 tracks was one answer of megabytes, and
+  10,000 rows on a phone.
+- **Genres, Styles and Moods count a tag's albums as its row comes near
+  the screen**, rather than every tag as the page opens (700 styles were
+  700 requests a visit, and pushed everything else out of what the app
+  keeps of the server's answers).
+- **Home screen editor: Reset order is Reset Home screen**, as it brings
+  back hidden sections and each section's period too.
+- **A data file the container can't read is kept aside**, as
+  `<name>.unreadable-<date>`, rather than written over at the next
+  change, and the log says so. Each is written onto the disk whole before
+  it takes the old one's place, so a power cut can't leave part of one.
+- **A setting name the container doesn't know stops it**, saying what it's
+  called and what you may have meant, where it's like one of the app's own
+  (`SPOTIFY_FILE_IMPORTS`, say): it was left aside unseen. `PLEX_` and
+  `OLLAMA_` names are only warned of, as a stack can give its containers
+  one settings file.
+- **The Docker image published is the very one tested**, for both
+  platforms (the arm64 one started too, under emulation), and `stable` and
+  `latest` never go back to an older build. hls.js is checked against a
+  checksum kept in the repository, not only the registry's.
+- **Proxmox VE: an update that doesn't start is put back** as it was, saying
+  why (a setting the new version won't take, say); the installer and the
+  app it installs are always the same commit; each install or update
+  upgrades Debian's packages too, for their security fixes; and there's no
+  falling back to `main`.
+- **The Plex proxy keeps its connections to your server open** (where
+  `PLEX_SERVER_URL` is an address, or a name in the container's hosts
+  file), rather than opening one for each request.
+
+### Fixed
+
+- **Removing a track from a playlist or a collection**, on a row Plex gave
+  no id of its own, could send the request for the whole list's entries:
+  such rows have no Remove or Move now, and nothing is removed or moved but
+  by its own id.
+- **Signing in as someone else without signing out first** kept the last
+  person's server, library (with their sign-in for it), queue, Missing
+  tracks and settings: it does what signing out does now.
+- **A page that isn't Plex's answer** (a Wi-Fi sign-in page, say) was
+  taken for an empty one: a shared playlist's copy then looked deleted,
+  which stopped the share for everyone. It's an error now, as the server
+  being out of reach is.
+- **Plays and ratings kept while the server was out of reach** were sent
+  to whatever answered at its address once the browser was online again
+  (another server, on another network): they wait for that very server.
+  Live updates, Test connection and the app's own check of its connection
+  took any server at the address for yours too.
+- **A file the server refuses or no longer has** (401, 403, 404, 410) was
+  taken for a dropped connection: loaded again and again, and never
+  skipped. It's skipped now, saying why (with Sign in again, where Plex no
+  longer takes your sign-in).
+- **While a track was read in full**, the one before stayed loaded: its
+  clock showed, a seek moved it, pause and play played it, and its end
+  skipped the track being read.
+- **A next track that failed to load ahead** was loaded again four times
+  a second (a new conversion each time, for a converted one): it waits ten
+  seconds now.
+- **AirPlay and Cast stopped after Plex restarted**: the temporary token
+  they're given wasn't renewed. A track that fails now gets a new one.
+- **Signing out, switching user or choosing another server** left this
+  device playing in Plex's dashboard, and your other devices waited about
+  50 seconds before letting it go: they're told at once.
+- **Play Together sent your play counts, ratings and when you last played
+  each track** to the session, with every track added: only what's needed
+  to play it goes now.
+- **Listen here** kept the other device's volume, rather than going back
+  to this device's own.
+- **Years and genres to fix drew its rows again every five seconds** while
+  albums were looked up, losing the keyboard's place and where it was
+  scrolled to.
+- **Album and artist bios** were styled as Settings › About: centred, in a
+  narrow column.
+- **Artist pages** said nothing when Plex couldn't give their albums: they
+  say so now, with Try again.
+- **Screen readers** read the AI playlist's progress out every second, and
+  each toast twice. Settings' choices work with the arrow keys, as radio
+  buttons do, and password managers leave the sign-in token and the
+  Ollama key alone.
+- **The settings-sync switch** (Settings › Account) could show "on" while
+  sync was off; **an Ollama's model list from before** (Settings › AI)
+  could appear after its address had changed; **Play Together's Copy
+  link** only ever showed the link on a page served over plain http.
+- **A sheet** (the library switcher, a playlist's Picture) could open over
+  the page you'd gone to meanwhile, and an Undo or a failed change rebuilt
+  whichever page was on screen.
+- **docker stop lost what the service hadn't written yet** (the last few
+  seconds' changes, and up to five minutes of what the MusicBrainz features
+  looked up): the image starts under tini, which tells the service to stop,
+  and it writes everything first.
+- **nginx's own errors could quote the requests they were about** (a
+  device's name in one, say) in the container's log, outside debug mode:
+  they're only logged in debug mode now, with tokens taken out. And the
+  service is given nothing of the container's settings it doesn't need.
+- **The container's service**:
+  - plex.tv not answering was taken as "no access" where it checks an
+    account can use a server (a device stopped seeing your others; shared
+    playlists seemed gone): it says it can't tell (503) now.
+  - Past 2,000 people signed in lately, nearly every request asked plex.tv
+    again: 20,000 are kept, by last use, and each sign-in's servers are
+    asked about once, however many server ids it asks about. Behind a
+    reverse proxy (where everyone's one address), past about 450 people at
+    once some were turned away every 15 minutes, as each sign-in checked
+    again counted as a new one: one plex.tv took in the last day doesn't.
+  - The shared AI model's busy count could keep someone who'd gone, for
+    good; long-polls end when their page goes; Play Together's invites say
+    when plex.tv didn't answer, rather than inviting no one; Missing
+    tracks' changes take a fraction of the time they did; MusicBrainz's
+    answers are read up to a limit, and its redirects never followed.
+
 ## 0.36.0 - 2026-11-03
 
 ### Changed
