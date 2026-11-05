@@ -13,7 +13,7 @@
 import { app, on } from './state.js';
 import { store, canPlayCodec, canPlayHlsNatively, isLossless, playbackId } from './plex.js';
 import { shuffleArray } from './ui.js';
-import { debugLog, debugOn } from './debug.js';
+import { debugLog, debugOn, megabytes, seconds } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
 import { Prefetcher, cachedLoader, recordingLoader, LONG_FORM_MS } from './prefetch.js';
 import { connection, connectionLost, connectionBack, serverAnswers } from './connection.js';
@@ -125,6 +125,11 @@ const STALL_LONGEST = 4;
 // away when the page is looked at again, or the connection's back (a phone
 // whose screen was off may have held the browser back meanwhile).
 const STALL_KICK = 4000;
+// Debug mode: waits for data part-way through a track are written from
+// this long (seconds: as short as a stutter can be), at most STALL_LINES of
+// them a minute (see noteStall).
+const STALL_NOTED_S = 0.05;
+const STALL_LINES = 30;
 // A track whose connection drops again, after playing on this many seconds
 // since it last did, is as one whose connection drops the first time (see
 // dropped).
@@ -449,6 +454,7 @@ class Player extends EventTarget {
     this.readInFull = false;
     this.stallRetry = null; // the one loaded again after waiting for data too long (see watchStall)
     this.stallLimits = { ...STALL };
+    this.stallLines = null; // debug mode: waits written this minute (see noteStall)
     this.restoredAt = 0;
     this.pendingSeek = null; // seconds, or a function returning seconds (see setPendingSeek)
     this.startingAt = null; // where it was when set, in seconds
@@ -653,6 +659,7 @@ class Player extends EventTarget {
     deck.onFatal = (data) => (mine() ? this.onStreamError(deck, data) : spareFailed());
     el.addEventListener('playing', () => {
       // (A next track starts playing before it's the current one.)
+      if (!deck.played) this.notePlays(deck);
       deck.played = true;
       if (this.rescue && this.rescue.qid === deck.qid) this.rescue.played = true;
       deck.waitingSince = 0;
@@ -861,6 +868,7 @@ class Player extends EventTarget {
       // or moves, meanwhile, and the clock and the length are this one's.)
       this.deck.el.pause();
       this.deck.reset();
+      const reading = performance.now();
       try {
         pre = await this.ahead.now(track, playback);
       } catch (err) {
@@ -894,7 +902,7 @@ class Player extends EventTarget {
       src = pre.src;
       debugLog(
         'player',
-        `“${track.title}” ${viaMemory ? 'didn’t play as it came, so it was' : 'was'} read in full and plays from memory (${Math.round(pre.bytes / 1048576)} MB)${viaMemory ? '' : ': files don’t play as they come on this connection'}`,
+        `“${track.title}” ${viaMemory ? 'didn’t play as it came, so it was' : 'was'} read in full and plays from memory (${megabytes(pre.bytes)} MB in ${seconds(performance.now() - reading)} s)${viaMemory ? '' : ': files don’t play as they come on this connection'}`,
       );
     }
 
@@ -1074,25 +1082,68 @@ class Player extends EventTarget {
   }
 
   // Debug mode: how long playback waited for data part-way through a track
-  // (`over`: it plays again), how much was buffered, and whether the next
-  // track was loading meanwhile.
+  // (`over`: it plays again), however short (a stutter can be a tenth of a
+  // second), how the track plays, how much was buffered, and what else was
+  // loading as it started to wait. At most STALL_LINES waits a minute are
+  // written, saying how many weren't (a connection that keeps it waiting
+  // would fill the log).
   noteStall(deck, over = false) {
     if (!debugOn()) return;
     const el = deck.el;
     if (!over) {
-      if (deck.played && !deck.stall) deck.stall = { since: performance.now(), t: el.currentTime, ahead: bufferedEnd(el, el.currentTime) - el.currentTime };
+      if (deck.played && !deck.stall) {
+        const t = el.currentTime;
+        deck.stall = { since: performance.now(), t, ahead: bufferedEnd(el, t) - t, moved: el.seeking, meanwhile: this.loadingMeanwhile() };
+      }
       return;
     }
     const s = deck.stall;
     deck.stall = null;
-    const waited = s ? (performance.now() - s.since) / 1000 : 0;
-    if (waited < 0.3) return;
-    const spare = this.spare;
-    const next = spare.loadingQid != null || spare.qid != null ? 'the next track loading' : 'nothing else loading';
+    const now = performance.now();
+    if (!s || now - s.since < STALL_NOTED_S * 1000) return;
+    let lines = this.stallLines;
+    if (!lines || now - lines.since >= 60000) lines = this.stallLines = { since: now, n: 0, left: lines?.left || 0 };
+    if (lines.n >= STALL_LINES) {
+      lines.left += 1;
+      return;
+    }
+    lines.n += 1;
+    const left = lines.left ? `; ${lines.left} more waits before this one weren’t written` : '';
+    lines.left = 0;
     debugLog(
       'player',
-      `waited ${waited.toFixed(1)} s for “${this.current?.title}” at ${s.t.toFixed(1)} s of ${this.duration.toFixed(1)} (${deck.isHls ? 'converted' : 'original file'}, ${s.ahead.toFixed(1)} s buffered, ${next})`,
+      `waited ${seconds(now - s.since)} s for “${this.current?.title}” at ${s.t.toFixed(1)} s of ${this.duration.toFixed(1)}${s.moved ? ', moved to there' : ''} (${this.howItPlays(deck)}, ${s.ahead.toFixed(1)} s buffered, ${s.meanwhile}${left})`,
     );
+  }
+
+  // Debug mode: how a deck's track plays, from memory (loaded ahead, kept,
+  // or read in full: see prefetch.js) or as it comes from the server; its
+  // file, or converted.
+  howItPlays(deck) {
+    const e = deck.prefetched;
+    const from = e ? `from memory${e.now ? ', read in full' : ''}, ${megabytes(e.bytes)} MB` : 'as it comes from the server';
+    return deck.isHls ? `converted${deck.kbps ? ` to ${deck.kbps} kbps` : ''}, ${from}` : from;
+  }
+
+  // Debug mode: what else is loading, besides the track playing: the next
+  // track coming in as it will play, and what Load ahead is reading.
+  loadingMeanwhile() {
+    const spare = this.spare;
+    const also = [];
+    if (spare.hasSource() && !spare.prefetched) also.push('the next track coming in');
+    const busy = this.ahead.busy;
+    if (busy) also.push(`Load ahead reading “${busy.track?.title}”${busy.keep ? ' to keep' : ''}`);
+    return also.length ? also.join(' and ') : 'nothing else loading';
+  }
+
+  // Debug mode: how each track plays, as it starts (or starts again, loaded
+  // again part-way). One read in full was said as it was (see load).
+  notePlays(deck) {
+    if (!debugOn() || deck.prefetched?.now) return;
+    const qid = deck.qid ?? deck.loadingQid;
+    const track = qid == null ? null : this.queue.find((t) => t.qid === qid);
+    const t = deck.el.currentTime;
+    if (track) debugLog('player', `“${track.title}” starts playing${t >= 1 ? ` at ${t.toFixed(1)} s` : ''}: ${this.howItPlays(deck)}`);
   }
 
   // An original file waiting for data: said once it's waited a while (debug

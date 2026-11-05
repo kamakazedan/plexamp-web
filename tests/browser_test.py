@@ -7156,6 +7156,45 @@ with sync_playwright() as pw:
         after_skips = logged(f'paused “{later}” at ', 'warn')
         check('debug: ...and the browser\'s own pause is still told apart after changes of track',
               after_skips and ': the browser or the system, not this app (' in after_skips[-1]['message'], str([e['message'] for e in lines() if e['area'] == 'player'][-4:]))
+        # For stutters: how each track plays as it starts (as it comes from
+        # the server, or from memory), what Load ahead loads (how much, how
+        # fast), and every wait for data, however short.
+        # (Load ahead was off till now, so the tracks above came as they played.)
+        came = [e for e in lines() if e['message'].endswith(' starts playing: as it comes from the server')]
+        settings(page, {'loadAhead': 1})
+        play_first_album_track(page, APP_DEBUG)
+        nxt = player(page, 'p.queue[p.index + 1]?.title')
+        ahead = [e for e in logged(f'loaded “{nxt}” ahead: ') or [] if e['area'] == 'load ahead']
+        was = player(page, 'String(p.current.qid)')
+        player(page, 'p.next()')
+        wait_for(lambda: player(page, f"p.state === 'playing' && String(p.current.qid) !== {json.dumps(was)}"), 10, 0.2)
+        memory = logged(f'“{nxt}” starts playing: from memory, ')
+        check('debug: each track says how it plays as it starts (as it comes from the server, or from memory), and Load ahead what it loaded, how much and how fast',
+              came and memory and ahead and re.search(r': [\d.]+ MB in [\d.]+ s \([\d.]+ MB/s\)', ahead[0]['message']),
+              str([e['message'] for e in lines() if e['area'] in ('player', 'load ahead')][-5:]))
+
+        def stutter(ms):
+            # (The browser's own events for a wait for data, and its end.)
+            return player(page, "new Promise((done) => { p.audio.dispatchEvent(new Event('waiting')); "
+                                f"setTimeout(() => {{ p.audio.dispatchEvent(new Event('playing')); done(true); }}, {ms}); }})")
+
+        stutter(120)
+        short = logged(f's for “{nxt}” at ')
+        check('debug: a wait for data as short as a stutter is written, saying how the track plays and what else was loading',
+              short and re.search(r'^waited 0\.\d\d s for “[^”]+” at [\d.]+ s of [\d.]+ \(from memory, [\d.]+ MB, [\d.]+ s buffered, '
+                                  r'(nothing else loading|the next track coming in|Load ahead reading “[^”]+”)', short[-1]['message']), str(short[-1:]))
+        player(page, '(p.stallLines = null, true)')
+        for _ in range(32):
+            stutter(60)
+        player(page, '(p.stallLines.since -= 61000, true)')
+        stutter(60)
+        capped = logged('; 2 more waits before this one weren’t written)')
+        written = [e for e in lines() if e['message'].startswith('waited ') and f' for “{nxt}” at ' in e['message']]
+        check('debug: ...at most 30 waits a minute, then how many weren\'t written', capped and len(written) == 1 + 30 + 1, f'{len(written)} {capped[-1:]}')
+        # The page held up (a busy computer, or the app): in a task of the
+        # page's own (what Playwright runs isn't one the browser times).
+        js(page, '() => new Promise((done) => setTimeout(() => { const t = performance.now(); while (performance.now() - t < 700); done(true); }, 0))')
+        check('debug: the page held up for half a second or more is written', logged('held up for '), str([e['message'] for e in lines() if e['area'] == 'page'][-3:]))
         player(page, 'p.pause()')
         # The shared model here won't take "think": the container passes on
         # what it said (as a line of the answer, which has started by then),

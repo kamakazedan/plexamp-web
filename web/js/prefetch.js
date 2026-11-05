@@ -34,6 +34,7 @@
 // browser's cache.
 import { app, on } from './state.js';
 import { playbackId, canPlayHlsNatively } from './plex.js';
+import { debugLog, debugOn, megabytes, seconds } from './debug.js';
 
 export const LOAD_AHEAD_MAX = 10; // tracks
 export const KEEP_PLAYED_MAX = 5; // tracks
@@ -466,9 +467,16 @@ export class Prefetcher {
     try {
       if (e.src.hls) await this.loadStream(e);
       else await this.loadFile(e);
-      if (this.entries.get(e.qid) === e) e.state = 'done';
+      if (this.entries.get(e.qid) === e) {
+        e.state = 'done';
+        if (debugOn()) debugLog('load ahead', `${e.keep ? 'kept' : 'loaded'} “${track.title}”${e.keep ? '' : ' ahead'}: ${this.howItWent(e)}`);
+      }
     } catch (err) {
       if (this.entries.get(e.qid) === e) {
+        if (err?.tooBig) debugLog('load ahead', `“${track.title}” is more than can be kept, so it plays as it comes`);
+        else if (!err?.parked && err?.name !== 'AbortError') {
+          debugLog('load ahead', `couldn’t ${e.keep ? 'keep' : 'load ahead'} “${track.title}” (${err?.message || err?.name}): tried again in a minute`, 'warn');
+        }
         if (err?.parked) {
           // Given way to a track ahead: what's in stays, and the rest is
           // read once the tracks ahead are in (see keepNext).
@@ -489,6 +497,17 @@ export class Prefetcher {
       if (this.busy === e) this.busy = null;
       if (this.entries.size) this.pump();
     }
+  }
+
+  // Debug mode: how loading `e` went: how much, in how long (the time the
+  // connection was read: not waiting its turn, for the track playing, held
+  // back or set aside), and so how fast.
+  howItWent(e) {
+    const total = performance.now() - e.started;
+    const idle = e.waited + e.rested;
+    const busy = Math.max(1, total - idle);
+    const rate = e.bytes / 1048576 / (busy / 1000);
+    return `${megabytes(e.bytes)} MB in ${seconds(busy)} s (${rate < 1 ? rate.toFixed(2) : rate.toFixed(1)} MB/s)${idle >= 1000 ? `, after ${seconds(idle)} s waiting its turn` : ''}`;
   }
 
   // Until the track playing has what it needs (while it doesn't, nothing

@@ -1,7 +1,8 @@
 // Debug mode (DEBUG=true on the container). Problems in the browser (failed
-// requests, playback errors, script errors, connection choices) are written
-// to the browser console and sent to the container's log, so whoever runs
-// the container can see what went wrong for someone else.
+// requests, playback errors and stutters, script errors, connection
+// choices, the page held up) are written to the browser console and sent to
+// the container's log, so whoever runs the container can see what went
+// wrong for someone else.
 //
 // Tokens and keys are removed before anything is logged or sent, and URLs
 // lose their query strings. With debug mode off this does nothing.
@@ -24,6 +25,19 @@ const client = () => {
 };
 
 export const debugOn = () => enabled;
+
+// For lines here: `ms` as seconds, to a hundredth under one (a stutter can
+// be a tenth of a second).
+export function seconds(ms) {
+  const s = Math.max(0, Number(ms) || 0) / 1000;
+  return s < 1 ? s.toFixed(2) : s.toFixed(1);
+}
+
+// ...and `bytes` as megabytes, to a tenth under ten.
+export function megabytes(bytes) {
+  const mb = Math.max(0, Number(bytes) || 0) / 1048576;
+  return mb < 10 ? mb.toFixed(1) : String(Math.round(mb));
+}
 
 // As the service does (server/log.js): in query strings (also inside another
 // address, URL-encoded), headers and JSON.
@@ -76,6 +90,33 @@ function flush(unloading = false) {
     });
 }
 
+// The page held up for HELD_UP_MS or more (a busy computer, or the app
+// itself), where the browser says so (Chrome and Edge do): a line at most
+// every HELD_UP_EVERY_MS, saying how many more there were since the last.
+const HELD_UP_MS = 500;
+const HELD_UP_EVERY_MS = 30000;
+function watchHoldUps() {
+  if (!globalThis.PerformanceObserver?.supportedEntryTypes?.includes('longtask')) return;
+  let last = -Infinity;
+  let more = 0;
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.duration < HELD_UP_MS) continue;
+        if (e.startTime - last < HELD_UP_EVERY_MS) {
+          more += 1;
+          continue;
+        }
+        debugLog('page', `held up for ${seconds(e.duration)} s${more ? ` (and ${more} more times since the last line like this)` : ''}`);
+        last = e.startTime;
+        more = 0;
+      }
+    }).observe({ type: 'longtask', buffered: true });
+  } catch {
+    /* not here after all */
+  }
+}
+
 if (enabled) {
   window.addEventListener('error', (e) => debugLog('page', `${e.message} (${safeUrl(e.filename || '')}:${e.lineno || 0})`, 'error'));
   window.addEventListener('unhandledrejection', (e) => {
@@ -84,4 +125,5 @@ if (enabled) {
   });
   window.addEventListener('pagehide', () => flush(true));
   debugLog('app', `opened in ${navigator.userAgent} (${window.innerWidth}x${window.innerHeight}, ${navigator.onLine ? 'online' : 'offline'})`);
+  watchHoldUps();
 }
