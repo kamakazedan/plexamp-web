@@ -3,6 +3,21 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.37.1 - 2026-11-05
+
+### Changed
+
+- **Debug mode writes down every stutter**: each time playback waits for
+  data part-way through a track, however short (it was only from 0.3
+  seconds, and a stutter can be a tenth of one), with how the track plays
+  (from memory, or as it comes from the server), how much was buffered and
+  what else was loading. At most 30 waits a minute are written, saying how
+  many more there were. It also says how each track plays as it starts,
+  how long a track read in full took, what Load ahead loads (how much, and
+  how fast), and when the page was held up for half a second or more (a
+  busy computer, say). [troubleshooting.md](docs/troubleshooting.md) says
+  what these lines tell you about a stutter.
+
 ## 0.37.0 - 2026-11-04
 
 A review of all of plexamp-web's code, for anything written carelessly and
