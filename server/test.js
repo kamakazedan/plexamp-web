@@ -1004,6 +1004,7 @@ function fakeMusicBrainz({ groups = 3, fail = () => false } = {}) {
     ],
     [MB_ID(2)]: [],
   };
+  const genresOf = (id) => (id === MB_ID(101) ? [{ name: 'post-rock', count: 3 }, { name: 'dream pop', count: 1 }] : []);
   const fetchImpl = async (url, init) => {
     const u = new URL(url);
     asked.push({ path: u.pathname, query: u.searchParams.get('query'), offset: u.searchParams.get('offset'), inc: u.searchParams.get('inc'), at: Date.now(), agent: init.headers['User-Agent'] });
@@ -1017,9 +1018,11 @@ function fakeMusicBrainz({ groups = 3, fail = () => false } = {}) {
     } else if (u.pathname === '/ws/2/release-group') {
       const all = groupsOf[u.searchParams.get('artist')] || [];
       const from = Number(u.searchParams.get('offset')) || 0;
-      body = { 'release-group-count': all.length, 'release-groups': all.slice(from, from + 100) };
+      // (With inc=genres, each with its genres, as MusicBrainz has it.)
+      const withGenres = (u.searchParams.get('inc') || '').split(/[ +]/).includes('genres');
+      body = { 'release-group-count': all.length, 'release-groups': all.slice(from, from + 100).map((g) => (withGenres ? { ...g, genres: genresOf(g.id) } : g)) };
     } else if (u.pathname.startsWith('/ws/2/release-group/')) {
-      body = { genres: u.pathname.endsWith(MB_ID(101)) ? [{ name: 'post-rock', count: 3 }, { name: 'dream pop', count: 1 }] : [] };
+      body = { genres: genresOf(u.pathname.split('/').pop()) };
     }
     return jsonAnswer(body);
   };
@@ -1368,28 +1371,168 @@ test('MusicBrainz features: an artist by name or other name, their other names a
   assert.equal(asked.length, m + 1);
 });
 
-test('MusicBrainz features: an artist\'s release groups (100 to a page) and an album\'s, with its genres, by artist', async () => {
+test('MusicBrainz features: an artist\'s release groups (100 to a page), each with its genres, and an album\'s, by artist (no request of its own for its genres, from 0.38.0)', async () => {
   const { asked, fetchImpl } = fakeMusicBrainz({ groups: 150 });
   const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept());
   const info = await mb.artistInfo('Sigur Rós');
   const groups = await mb.releaseGroups(info.id);
   assert.equal(groups.length, 153);
-  assert.deepEqual(asked.filter((x) => x.path === '/ws/2/release-group').map((x) => x.offset), ['0', '100']);
-  assert.deepEqual(groups[0], { id: MB_ID(101), title: 'Ágætis byrjun', primary: 'Album', secondary: [], date: '1999-06-12' });
+  assert.deepEqual(asked.filter((x) => x.path === '/ws/2/release-group').map((x) => [x.offset, x.inc]), [['0', 'genres'], ['100', 'genres']]);
+  assert.deepEqual(groups[0], { id: MB_ID(101), title: 'Ágætis byrjun', primary: 'Album', secondary: [], date: '1999-06-12', genres: ['Post-Rock', 'Dream Pop'] });
   const before = asked.length;
   const album = await mb.album('Sigur Ros', 'Ágætis byrjun (Deluxe Edition)', { genres: true });
-  assert.deepEqual(album, { ...groups[0], genres: ['Post-Rock', 'Dream Pop'] });
-  assert.equal(asked.length, before + 1, 'only its genres were asked about');
+  assert.deepEqual(album, groups[0]);
+  assert.equal(asked.length, before, 'its genres came with its artist\'s release groups');
+  // (Without its genres where they aren't wanted, as before.)
+  assert.deepEqual(await mb.album('Sigur Rós', 'Ágætis byrjun'), { id: MB_ID(101), title: 'Ágætis byrjun', primary: 'Album', secondary: [], date: '1999-06-12' });
   assert.equal((await mb.album('Sigur Rós', 'Inni')).secondary[0], 'Live');
   assert.equal(await mb.album('Sigur Rós', 'An Album They Never Made'), null);
   assert.equal(await mb.album('Nobody At All', 'Anything'), null);
-  assert.equal(asked.length, before + 2, 'the rest from what was kept (and nobody\'s looked for once)');
+  assert.equal(asked.length, before + 1, 'the rest from what was kept (and nobody\'s looked for once)');
   // Known without asking, or not.
   assert.equal(mb.knownAlbum('Sigur Rós', 'Takk...').date, '2005-09-12');
-  assert.equal(mb.knownAlbum('Sigur Rós', 'Takk...', { genres: true }), undefined, 'its genres not asked about yet');
+  assert.deepEqual(mb.knownAlbum('Sigur Rós', 'Takk...', { genres: true }).genres, [], 'known with its genres (none), from its artist\'s');
   assert.equal(mb.knownAlbum('Someone Never Asked About', 'X'), undefined);
   assert.equal(mb.knownAlbum('Nobody At All', 'Anything'), null);
   assert.equal(groups.capped, undefined); // (all they have)
+  // Release groups kept before 0.38.0, without their genres: an album's asked for, where they're wanted.
+  const kept = new MBKept();
+  kept.set(`artistid|${MB_ID(1)}`, info);
+  kept.set(`groups|${MB_ID(1)}`, groups.map((g) => Object.fromEntries(Object.entries(g).filter(([k]) => k !== 'genres'))));
+  const old = fakeMusicBrainz();
+  const older = new MusicBrainz({ base: 'https://mb.test', fetchImpl: old.fetchImpl, gapMs: 0 }).advanced(kept);
+  assert.equal(older.knownAlbum('Sigur Rós', 'Takk...', { id: MB_ID(1), genres: true }), undefined);
+  assert.deepEqual((await older.album('Sigur Rós', 'Ágætis byrjun', { id: MB_ID(1), genres: true })).genres, ['Post-Rock', 'Dream Pop']);
+  assert.deepEqual(old.asked.map((x) => x.path), [`/ws/2/release-group/${MB_ID(101)}`]);
+});
+
+test('MusicBrainz: a server of your own is asked four things at once at most (from 0.38.0), still ten a second at most; musicbrainz.org one at a time', async () => {
+  let under = 0;
+  let most = 0;
+  const starts = [];
+  const fetchImpl = async () => {
+    starts.push(Date.now());
+    under += 1;
+    most = Math.max(most, under);
+    await new Promise((r) => setTimeout(r, 450));
+    under -= 1;
+    return jsonAnswer({ artists: [] });
+  };
+  const own = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl });
+  const t0 = Date.now();
+  await Promise.all(Array.from({ length: 8 }, (_, i) => own.ask('/ws/2/artist', { query: `a${i}` })));
+  assert.equal(most, MB_LIMITS.ownAtOnce);
+  assert.ok(starts.slice(1).every((t, i) => t - starts[i] >= MB_LIMITS.ownGapMs - 5), starts.map((t) => t - t0).join(','));
+  assert.ok(Date.now() - t0 < 4 * 450, `${Date.now() - t0} ms: not one at a time`);
+  under = 0;
+  most = 0;
+  const pub = new MusicBrainz({ base: 'https://musicbrainz.org', fetchImpl, gapMs: 0 });
+  await Promise.all([1, 2, 3].map((i) => pub.ask('/ws/2/artist', { query: `p${i}` })));
+  assert.equal(most, 1);
+});
+
+test('MusicBrainz features: on a server of your own, albums are looked up several at once (from 0.38.0), each artist\'s by one worker, and those checked by their tracks first', async () => {
+  const artists = [61, 62, 63, 64, 65].map(MB_ID);
+  const groups = Object.fromEntries(
+    artists.map((id, n) => [id, [1, 2, 3].map((k) => ({ id: MB_ID(600 + n * 10 + k), title: `Album ${n}${k}`, 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '2001-01-01', genres: [] }))]),
+  );
+  const release = (gid) => MB_ID(Number(gid.slice(-4)) + 3000);
+  const asked = [];
+  let under = 0;
+  let most = 0;
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    asked.push(`${u.pathname}?${u.searchParams.get('artist') || u.searchParams.get('release-group') || ''}`);
+    under += 1;
+    most = Math.max(most, under);
+    await new Promise((r) => setTimeout(r, 40));
+    under -= 1;
+    const id = u.pathname.split('/').pop();
+    if (u.pathname.startsWith('/ws/2/artist/')) return jsonAnswer({ id, name: `Artist ${artists.indexOf(id)}`, aliases: [], genres: [] });
+    if (u.pathname === '/ws/2/release-group') {
+      const all = groups[u.searchParams.get('artist')] || [];
+      return jsonAnswer({ 'release-group-count': all.length, 'release-groups': all });
+    }
+    if (u.pathname === '/ws/2/release') return jsonAnswer({ 'release-count': 1, releases: [{ id: release(u.searchParams.get('release-group')), date: '2000-05-01', media: [{ 'track-count': 2 }] }] });
+    if (u.pathname.startsWith('/ws/2/release/')) return jsonAnswer({ id, date: '2000-05-01', media: [{ 'track-count': 2, tracks: [{ title: 'One', length: 200000 }, { title: 'Two', length: 210000 }] }] });
+    return jsonAnswer({}, 404);
+  };
+  const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+  const item = (n, k) => ({ artist: `Artist ${n}`, title: `Album ${n}${k}`, artistId: artists[n] });
+  const items = [0, 1, 2].flatMap((n) => [1, 2, 3].map((k) => item(n, k)));
+  assert.ok((await mb.albums(items, { check: true })).every((v) => v === 'pending'));
+  const got = await mb.albums(items, { check: true, waitMs: 5000 });
+  assert.ok(got.every((g) => g?.toCheck === true), JSON.stringify(got));
+  assert.ok(most > 1 && most <= MB_LIMITS.ownAtOnce, `${most} at once`);
+  for (const id of artists.slice(0, 3)) {
+    assert.equal(asked.filter((x) => x === `/ws/2/artist/${id}?`).length, 1, 'each artist asked about once');
+    assert.equal(asked.filter((x) => x === `/ws/2/release-group?${id}`).length, 1, '...and their release groups once');
+  }
+  // One checked by its tracks goes first, before what was waiting before
+  // it (here, with one worker, to see the order).
+  mb.atOnce = 1;
+  asked.length = 0;
+  const tracks = [{ title: 'One', ms: 200000 }, { title: 'Two', ms: 210000 }];
+  const later = [item(3, 1), item(4, 1)];
+  assert.deepEqual(await mb.albums(later, { check: true }), ['pending', 'pending']);
+  assert.deepEqual(await mb.albums([{ ...item(0, 1), trackList: tracks }], { check: true }), ['pending']);
+  const checked = await mb.albums([{ ...item(0, 1), trackList: tracks }], { check: true, waitMs: 5000 });
+  assert.deepEqual([checked[0]?.checked, checked[0]?.date], [true, '2000-05-01']);
+  const order = asked.map((x) => (x.endsWith(groups[artists[0]][0].id) ? 'checked' : x.includes(artists[3]) ? 'artist 3' : x.includes(artists[4]) ? 'artist 4' : x));
+  assert.ok(order.indexOf('checked') < order.indexOf('artist 4'), order.join(', '));
+  await mb.albums(later, { check: true, waitMs: 5000 });
+});
+
+test('MusicBrainz features: each album\'s answer is kept by itself (from 0.38.0), so a library looked through again is answered at once, where it got to', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-mba-'));
+  try {
+    const { asked, fetchImpl } = fakeMusicBrainz();
+    const kept = new MBKept({ dir });
+    const mb = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(kept);
+    const items = [{ artist: 'Sigur Rós', title: 'Ágætis byrjun' }, { artist: 'Nobody At All', title: 'X' }];
+    assert.deepEqual(await mb.albums(items, { genres: true, who: 'user|sam' }), ['pending', 'pending']);
+    const got = await mb.albums(items, { genres: true, waitMs: 3000, who: 'user|sam' });
+    assert.deepEqual([got[0]?.title, got[0]?.genres, got[1]], ['Ágætis byrjun', ['Post-Rock', 'Dream Pop'], null]);
+    // What MusicBrainz said of the artist let go (a library of tens of
+    // thousands of albums asks about more than that keeps): the albums'
+    // answers are still there.
+    for (const key of [...kept.map.keys()]) kept.drop(key);
+    const n = asked.length;
+    assert.deepEqual(await mb.albums(items, { genres: true }), got);
+    assert.equal(asked.length, n);
+    // ...and after a restart, from the file (with nothing of who asked).
+    kept.flush();
+    const file = join(dir, 'musicbrainz.json');
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(data.answers.length, 2);
+    assert.ok(!JSON.stringify(data).includes('sam'));
+    const again = new MusicBrainz({ base: 'https://mb.test', fetchImpl, gapMs: 0 }).advanced(new MBKept({ dir }));
+    assert.deepEqual(await again.albums(items, { genres: true, who: 'sam' }), got);
+    assert.equal(asked.length, n);
+    // Kept as albums were found another way (another answersVersion): let go, to be looked up again.
+    writeFileSync(file, JSON.stringify({ ...data, answersVersion: 0, answers: [...data.answers, ['bad', { id: 'nope' }, Date.now()]] }));
+    const other = new MBKept({ dir });
+    assert.equal(other.answers.size, 0);
+    // (A bad one is let go too.)
+    writeFileSync(file, JSON.stringify({ ...data, answers: [...data.answers, ['bad', { id: 'nope' }, Date.now()]] }));
+    assert.equal(new MBKept({ dir }).answers.size, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MusicBrainz features: a release group\'s releases are read from as many as came (MusicBrainz sends fewer than asked for where they\'d have more than 500 tracks)', async () => {
+  const all = Array.from({ length: 150 }, (_, i) => ({ id: MB_ID(7000 + i), date: '2001-01-01', media: [{ 'track-count': 12 }] }));
+  const offsets = [];
+  const fetchImpl = async (url) => {
+    const from = Number(new URL(url).searchParams.get('offset'));
+    offsets.push(from);
+    return jsonAnswer({ 'release-count': all.length, releases: all.slice(from, from + 41) });
+  };
+  const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+  const list = await mb.groupReleases(MB_ID(70));
+  assert.deepEqual(offsets, [0, 41, 82]);
+  assert.equal(list.length, 123);
 });
 
 test('MusicBrainz features: an artist with more release groups than are asked for has a list that says so, as it\'s kept too', async () => {
@@ -1440,9 +1583,9 @@ test('MusicBrainz features: albums not known yet are looked up in the background
   }
   // At most so many waiting.
   const full = new MusicBrainz({ base: 'https://mb.test', fetchImpl: async () => new Promise(() => {}), gapMs: 0 }).advanced(new MBKept());
-  // (Nothing's looked up here, only how many can wait: as if it were busy
-  // with one already.)
-  full.working = true;
+  // (Nothing's looked up here, only how many can wait: as if as many
+  // workers as there can be were busy already.)
+  full.workers = full.atOnce;
   const limit = MB_ADVANCED_LIMITS.queued;
   const each = MB_ADVANCED_LIMITS.queuedEach;
   MB_ADVANCED_LIMITS.queued = 3;

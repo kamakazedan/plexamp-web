@@ -3,6 +3,40 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.38.0 - 2026-11-06
+
+### Changed
+
+- **Years and genres to fix picks up where it left off**: the player keeps
+  each album's answer for a month, so leaving the page, closing the app or
+  coming back another day carries on from where it got to, rather than
+  starting again (your albums are read from Plex again, and those it had
+  done are answered at once). While the app's open it carries on whatever
+  page you're on, and back on it, the list is as it was; **Look again**
+  reads your library as it is now.
+- **...is quicker**: on a MusicBrainz server of your own, the player asks
+  it up to four things at once (one at a time before; still ten a second
+  at most, and less often while it's slow to answer), and looks up several
+  albums at once, each album's check by its tracks first in line (it waited
+  behind up to 2,000 others). Everywhere, an album's genres come with its
+  artist's release groups, rather than a request each, and the page asks
+  about 1,000 albums at a time. With a made-up library on a
+  server taking 0.3 seconds to answer, about three and a half times as
+  many albums a minute; on musicbrainz.org it's still once a second, its
+  rule.
+- **...says how far it's got at each step**: reading your albums, then
+  their artists, then checking them, from the first ones. Before, it said
+  it had read your albums for minutes on end, while it read their artists
+  and asked about every album once.
+- **...and each album's title, and its artist's name, open their pages.**
+
+### Fixed
+
+- **A release group with many releases**, checked by an album's tracks on
+  a server of your own, had only its first page of releases looked at
+  where MusicBrainz sent fewer than were asked for (it sends no more than
+  500 tracks' worth), as that was taken for the last page.
+
 ## 0.37.1 - 2026-11-05
 
 ### Changed

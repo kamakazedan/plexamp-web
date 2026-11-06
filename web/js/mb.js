@@ -178,8 +178,8 @@ export function artistOnMB(name, { groups = true, id = null, namesakes = false, 
   return artists.get(key);
 }
 
-const ALBUMS_ASKED = 200; // albums to a request, at most (as the player takes them)...
-const ALBUMS_BYTES = 160 * 1024; // ...and its size, at most (the player takes 256 KB)
+const ALBUMS_ASKED = 1000; // albums to a request, at most (as the player takes them)...
+const ALBUMS_BYTES = 240 * 1024; // ...and its size, at most (the player takes 256 KB)
 
 // Albums' release groups ([{ artist, title, year, artistId, albumId,
 // tracks }]: `year`, the year Plex has for it, tells albums of one title

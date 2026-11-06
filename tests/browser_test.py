@@ -8186,10 +8186,32 @@ with sync_playwright() as pw:
         tidal = albums_of()['Tidal Lines']['ratingKey']
         mock(f'/__mock/config?nogenre={tidal}')
         try:
+            # (What the status line says on the way, each time it changes.)
+            js(page, """() => { window.__mbSaid = []; new MutationObserver(() => { const t = document.querySelector('.mb-review-status')?.textContent?.trim();
+                if (t && window.__mbSaid[window.__mbSaid.length - 1] !== t) window.__mbSaid.push(t); }).observe(document.body, { subtree: true, childList: true, characterData: true }); return true; }""")
             page.goto(APP_MB + '#/settings/mbreview')
             page.wait_for_selector('.mb-year-row:has-text("Hearthstone")', timeout=30000)
             page.wait_for_selector('.mb-genre-row:has-text("Tidal Lines")', timeout=30000)
             shot(page, 'mb-04-review')
+            said_on_the_way = js(page, '() => window.__mbSaid')
+            check('mb: years and genres: each step says how far it\'s got (reading the albums, their artists, then checking them), and that the page can be left',
+                  any(t.startswith('Reading your albums from') for t in said_on_the_way) and any(t.startswith('Reading their artists') for t in said_on_the_way)
+                  and any(re.match(r'^Checking your albums on the player’s own MusicBrainz server… [\d,]+ of [\d,]+$', t) for t in said_on_the_way)
+                  and 'picks up where it left off' in page.locator('.mb-review-leave').inner_text(), str(said_on_the_way))
+            heart = albums_of()['Hearthstone']
+            hrefs = page.locator('.mb-year-row', has_text='Hearthstone').locator('a.mb-review-link').evaluate_all('(as) => as.map((a) => [a.textContent, a.getAttribute("href")])')
+            check('mb: ...each album\'s title, and its artist\'s name, open their pages',
+                  hrefs == [['Hearthstone', f"#/album/{heart['ratingKey']}"], [heart['parentTitle'], f"#/artist/{heart['parentRatingKey']}"]], str(hrefs))
+            # Leaving it for an album, and back: as it was, not read again.
+            page.locator('.mb-year-row', has_text='Hearthstone').locator('a.mb-review-link').first.click()
+            page.wait_for_selector('.hero-album', timeout=10000)
+            album_opened = page.url.endswith(f"#/album/{heart['ratingKey']}")
+            js(page, '() => (window.__mbSaid = [], true)')
+            page.go_back()
+            page.wait_for_selector('.mb-year-row:has-text("Hearthstone")', timeout=3000)
+            back_said = js(page, '() => window.__mbSaid')
+            check('mb: ...and back from it, the list is as it was, not read from Plex again',
+                  album_opened and not any(t.startswith('Reading') for t in back_said), f'{page.url} {back_said}')
             year_line = page.locator('.mb-year-row', has_text='Hearthstone').inner_text()
             page.locator('.mb-year-row', has_text='Hearthstone').locator('button').click()
             wait_for(lambda: edits(), 10, 0.3)
@@ -8262,7 +8284,12 @@ with sync_playwright() as pw:
         try:
             page.goto(APP_MB + '#/')
             page.goto(APP_MB + '#/settings/mbreview')
+            page.wait_for_selector('.mb-review-again', timeout=60000)
+            kept_rows = page.locator('.mb-year-row .row-title').all_inner_texts()
+            page.click('.mb-review-again')
             page.wait_for_selector('.mb-year-row:has-text("Glass Rain")', timeout=60000)
+            check('mb: ...the look kept while the app\'s open (its albums as they were), and Look again reads the library as it is now (albums added since)',
+                  'Glass Rain' not in kept_rows, str(kept_rows))
             page.wait_for_function("() => { const s = document.querySelector('.mb-review-status'); return s && !s.querySelector('.spinner'); }", timeout=60000)
             years_listed = page.locator('.mb-year-row .row-title').all_inner_texts()
             bloom_line = page.locator('.mb-year-row', has_text='Glass Rain').inner_text()
@@ -8298,6 +8325,17 @@ with sync_playwright() as pw:
             on_pages = [card_year('Signal Bloom', 'Glass Rain'), card_year('Signal Drift', 'Night Swim'), card_year('Signal Hollow', 'Hollow Bell'), card_year('Signal Echo', 'Echo Field')]
             check('mb: ...as an artist\'s page does (Original release years), by its tracks too on a MusicBrainz of your own: a single by its title alone is found, a remix or one re-recorded since isn\'t',
                   on_pages == ['2004', '2019', '2003', '2018'], str(on_pages))
+            # Another time (the app opened afresh): each album's answer as the
+            # player kept it, nothing asked of MusicBrainz again.
+            wait_for(mb_settled, 20, 0.1)
+            mb_was = mock('/__mock/musicbrainz')['MediaContainer']['requests']
+            page.goto(APP_MB + '#/settings/mbreview')
+            page.reload()
+            page.wait_for_selector('.mb-review-again', timeout=60000)
+            again_rows = page.locator('.mb-year-row .row-title').all_inner_texts()
+            check('mb: years and genres looked through again another time pick up where they left off: each album\'s answer as the player kept it, nothing asked of MusicBrainz again',
+                  mock('/__mock/musicbrainz')['MediaContainer']['requests'] == mb_was and 'Glass Rain' in again_rows and 'Hollow Bell' in again_rows,
+                  f"{mock('/__mock/musicbrainz')['MediaContainer']['requests'] - mb_was} {again_rows}")
         finally:
             for a in extra:
                 mock(f"/__mock/add-artist?remove={a['ratingKey']}")
@@ -8405,6 +8443,8 @@ with sync_playwright() as pw:
         mock('/__mock/config?mbsearch=off')
         try:
             page.goto(APP_MB + '#/settings/mbreview')
+            page.wait_for_selector('.mb-review-again', timeout=60000)
+            page.click('.mb-review-again')
             page.wait_for_function("""() => { const s = document.querySelector('.mb-review-status');
                 return s && !s.querySelector('.spinner') && /couldn.t be checked/.test(s.textContent); }""", timeout=60000)
             said = page.locator('.mb-review-status').inner_text()

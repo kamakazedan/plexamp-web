@@ -652,6 +652,10 @@ async function musicbrainzFeatures(req, res, what) {
             .filter((t) => t.title)
         : null,
     }));
+  // (Albums a minute too, as many as 200 a request came to before 0.38.0.)
+  if (!allow(`mbai|${key}`, MB_ADVANCED_LIMITS.perMinute, items.length)) {
+    throw new HttpError(429, 'Too many albums asked about in a short time. Wait a minute and try again.', { retryAfter: againIn(`mbai|${key}`) });
+  }
   // (`strict`: the very album or nothing, for its year and genres to be fixed; `check`: by its very tracks too: see musicbrainz.js album.)
   const results = await musicbrainz.albums(items, {
     genres: body.genres === true,
