@@ -2989,6 +2989,21 @@ body.np-open #toasts {
   text-decoration: underline;
 }
 
+/* ...each list's heading: a spinner beside how many there are, while that
+   can change (still looking, or a Fix all, Add all or Undo being made). */
+.mb-review-head h2 .spinner {
+  display: inline-grid;
+  margin-left: 10px;
+  padding: 0;
+  vertical-align: -2px;
+}
+
+.mb-review-head h2 .spinner span {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
 /* Settings › MusicBrainz › Artists to merge: each artist Plex has, to
    open, and who MusicBrainz says it is. */
 .mb-merge-links {

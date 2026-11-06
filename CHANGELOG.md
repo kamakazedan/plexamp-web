@@ -3,6 +3,24 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.38.1 - 2026-11-06
+
+### Changed
+
+- **Years and genres to fix: a Fix all, Add all or Undo shows how it's
+  going in its list's heading**: the count goes down (for Undo, up) as
+  each album's done, with a spinner beside it, and the line at the top
+  stays on the check through your library, rather than being taken over.
+- **...Fix all and Add all appear once the check's done**: till then the
+  lists grow as albums are checked, with a spinner beside how many each
+  has, and the page says so. Each album's own button works meanwhile.
+- **...says more plainly what it's doing**: "Checking years and genres
+  on…" (it checks both at once), and, on a look another time, "Catching up
+  with what it already knows…" while it goes through the albums it had
+  done (answered at once), so it doesn't seem to start again. It says it
+  keeps going while the app's open, and that, closed, it picks up from
+  there next time (in this browser or another).
+
 ## 0.38.0 - 2026-11-06
 
 ### Changed

@@ -15,7 +15,7 @@
 // another time picks up where this one got to.
 import { app, on } from '../state.js';
 import { describeError } from '../router.js';
-import { h, icon, backHeader, row, sectionHeader, emptyState, toast, fmt, confirmAction, download, fileDate, spinner } from '../ui.js';
+import { h, icon, backHeader, row, emptyState, toast, fmt, confirmAction, download, fileDate, spinner } from '../ui.js';
 import { albumsOnMB, albumTracks, firstYear, mbFeatures, mbOwnServer, mbidOf, notThatRecording, kindsAgree, plexKind } from '../mb.js';
 import { mbWhere, toCsv } from '../missing.js';
 import { isAdmin } from '../editing.js';
@@ -73,13 +73,16 @@ export async function mbReviewView({ el, onDispose }) {
   let sc = scan?.key !== key || scan.phase === 'failed' ? newScan(key) : scan;
 
   const status = h('p.hint.pad.mb-review-status', { role: 'status' });
-  const leave = h('p.hint.pad.mb-review-leave', null, 'You can leave this page: it carries on, and picks up where it left off.');
+  // (While it's looking: what that means for the lists, and for leaving.)
+  const growing = h('p.hint.pad.mb-review-growing', null, 'The lists below grow as albums are checked. Fix all and Add all appear once it’s done.');
+  const leave = h('p.hint.pad.mb-review-leave', null, 'It keeps going while the app’s open. Close it, and it picks up from here next time.');
   const actions = h('div.pad.button-row.mb-review-actions');
   const years = h('div.mb-review-years');
   const genres = h('div.mb-review-genres');
   el.append(
     h('p.lede', null, 'Find albums with the wrong year or no genre, and fix them in Plex for everyone.'),
     status,
+    growing,
     leave,
     actions,
     years,
@@ -132,27 +135,46 @@ export async function mbReviewView({ el, onDispose }) {
     if (!changedPart('status', st)) return;
     status.classList.toggle('warn', !!st.warn);
     status.replaceChildren(...(st.busy ? [spinner(st.busy), h('span', null, ` ${st.text}`)] : [st.text]));
+    growing.hidden = sc.phase !== 'checking' || !st.going;
     leave.hidden = !st.going;
   }
 
-  // (`part`: 'status', where only that's changed: a Fix all's progress.)
+  // A list's heading: how many there are to fix, with a spinner while that
+  // can change (still looking, or a Fix all, Add all or Undo being made of
+  // it), and what's to be done to all of them.
+  const listHeader = (name, count, { changing, action }) =>
+    h(
+      'div.section-head.mb-review-head',
+      null,
+      h('h2', null, `${name} (`, h('span.mb-review-count', null, fmt.number(count)), ')', changing ? spinner(changing) : null),
+      action || null,
+    );
+
+  // (`part`: 'counts', where only those change, as a Fix all, Add all or
+  // Undo goes: each list's is painted at once, the rest every so often.)
   function render(part) {
     renderStatus();
-    if (part === 'status') return;
     const { pending, ys, gs, nothing } = sc.lists();
+    if (part === 'counts') {
+      years.querySelector('.mb-review-count')?.replaceChildren(fmt.number(ys.length));
+      genres.querySelector('.mb-review-count')?.replaceChildren(fmt.number(gs.length));
+      return;
+    }
     const yearsShown = ys.slice(0, SHOWN).map((x) => [x.m.ratingKey, x.m.title, x.m.parentTitle, yearLine(x)]);
     const genresShown = gs.slice(0, SHOWN).map((x) => [x.m.ratingKey, x.m.title, x.m.parentTitle, genreLine(x)]);
     const over = sc.finished();
-    if (changedPart('actions', [sc.lastAll?.list.length || 0, !!(ys.length || gs.length), over, !!sc.fixing])) {
+    const making = sc.fixing; // { kind: 'year' | 'genres', back }: a Fix all, Add all or (back) Undo being made
+    const undoing = !!making?.back;
+    if (changedPart('actions', [sc.lastAll?.list.length || 0, !!(ys.length || gs.length), over, !!making, undoing])) {
       actions.replaceChildren(
         ...(over ? [h('button.btn.btn-secondary.mb-review-again', { type: 'button', onclick: () => lookAgain() }, icon('refresh', 20), h('span', null, 'Look again'))] : []),
-        ...(sc.lastAll?.list.length
+        ...(sc.lastAll?.list.length || undoing
           ? [
               h(
                 'button.btn.btn-secondary.mb-undo-all',
-                { type: 'button', disabled: !!sc.fixing, onclick: () => sc.undoAll() },
+                { type: 'button', disabled: !!making, onclick: () => sc.undoAll() },
                 icon('refresh', 20),
-                h('span', null, `Undo the last ${fmt.count(sc.lastAll.list.length, 'fix', 'fixes')}`),
+                h('span', null, undoing ? 'Putting them back…' : `Undo the last ${fmt.count(sc.lastAll.list.length, 'fix', 'fixes')}`),
               ),
             ]
           : []),
@@ -161,40 +183,45 @@ export async function mbReviewView({ el, onDispose }) {
           : []),
       );
     }
-    const busy = !!sc.fixing;
-    if (changedPart('years', [ys.length, yearsShown, busy])) {
+    // (Fix all and Add all once it's done looking: till then, the lists
+    // grow, and there'd be more to come after.)
+    const looking = sc.phase === 'checking' && pending > 0;
+    const allButton = (kind, cls, label, doing) =>
+      looking ? null : h(`button.link-btn.${cls}`, { type: 'button', disabled: !!making, onclick: () => sc.fixAll(kind) }, making?.kind === kind && !making.back ? doing : label);
+    const changing = (kind) => (making?.kind === kind ? (making.back ? 'Putting them back' : 'Fixing') : looking ? 'Still looking' : null);
+    if (changedPart('years', [ys.length, yearsShown, !!making, making?.kind, undoing, looking])) {
       years.replaceChildren(
-        ...(ys.length
+        ...(ys.length || making?.kind === 'year'
           ? [
               h(
                 'section.block',
                 null,
-                sectionHeader(`Years (${fmt.number(ys.length)})`, null, h('button.link-btn.mb-fix-years', { type: 'button', disabled: busy, onclick: () => sc.fixAll('year') }, 'Fix all')),
+                listHeader('Years', ys.length, { changing: changing('year'), action: allButton('year', 'mb-fix-years', 'Fix all', 'Fixing…') }),
                 h(
                   'div.rows.mb-review-rows',
                   null,
                   ys.slice(0, SHOWN).map((x) => row({ title: albumLink(x.m), subtitle: [artistLink(x.m), ` · ${yearLine(x)}`], right: fixButton(`Use ${firstYear(x.g)}`, () => sc.fixYear(x)), cls: 'mb-year-row' })),
                 ),
-                ys.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(ys.length - SHOWN)} more: Fix all and the download include them.`) : null,
+                ys.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(ys.length - SHOWN)} more: ${looking ? 'the download includes them' : 'Fix all and the download include them'}.`) : null,
               ),
             ]
           : []),
       );
     }
-    if (changedPart('genres', [gs.length, genresShown, nothing, pending > 0, busy])) {
+    if (changedPart('genres', [gs.length, genresShown, nothing, !!making, making?.kind, undoing, looking])) {
       genres.replaceChildren(
-        ...(gs.length
+        ...(gs.length || making?.kind === 'genres'
           ? [
               h(
                 'section.block',
                 null,
-                sectionHeader(`Genres (${fmt.number(gs.length)})`, null, h('button.link-btn.mb-fix-genres', { type: 'button', disabled: busy, onclick: () => sc.fixAll('genres') }, 'Add all')),
+                listHeader('Genres', gs.length, { changing: changing('genres'), action: allButton('genres', 'mb-fix-genres', 'Add all', 'Adding…') }),
                 h(
                   'div.rows.mb-review-rows',
                   null,
                   gs.slice(0, SHOWN).map((x) => row({ title: albumLink(x.m), subtitle: [artistLink(x.m), ` · ${genreLine(x)}`], right: fixButton('Add', () => sc.fixGenres(x)), cls: 'mb-genre-row' })),
                 ),
-                gs.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(gs.length - SHOWN)} more: Add all and the download include them.`) : null,
+                gs.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(gs.length - SHOWN)} more: ${looking ? 'the download includes them' : 'Add all and the download include them'}.`) : null,
               ),
             ]
           : nothing
@@ -249,7 +276,9 @@ function startScan(key) {
     found: [], // for each album: what MusicBrainz has of it (see ask)
     fixed: new Map(), // album id -> what was done: { kind: 'year' | 'genres', before | added }
     lastAll: null, // { list, undo }: the last Fix all or Add all's
-    fixing: null, // { done, of }: a Fix all or Undo being made
+    fixing: null, // { kind: 'year' | 'genres', back }: a Fix all, Add all or (back) Undo being made
+    catchingUp: false, // most of those asked about for the first time were answered at once (looked through before: see ask)
+    asked: null, // for each album: asked about yet (see ask)
     trouble: null, // what went wrong asking last (see say)
     failed: null, // why the albums couldn't be read
     stopped: false,
@@ -293,15 +322,18 @@ function startScan(key) {
 
   // What the status line says: { text, busy (a spinner's label), warn,
   // going (still looking, so the page can be left) }.
+  // (A Fix all, Add all or Undo says how it's going in its list's heading:
+  // this is the look through the library's.)
   sc.statusNow = () => {
-    if (sc.fixing) return { text: `${sc.fixing.what}… ${fmt.number(sc.fixing.done)} of ${fmt.number(sc.fixing.of)}`, going: false };
     if (sc.phase === 'failed') return { text: `Your albums couldn’t be read. ${sc.failed}`, warn: true };
     if (sc.phase === 'albums') return { busy: 'Reading', text: `Reading your albums from ${sc.sectionTitle}…${sc.total ? ` ${fmt.number(sc.read)} of ${fmt.number(sc.total)}` : ''}`, going: true };
     if (sc.phase === 'artists') return { busy: 'Reading', text: `Reading their artists…${sc.total ? ` ${fmt.number(sc.read)} of ${fmt.number(sc.total)}` : ''}`, going: true };
     if (!sc.albums.length) return { text: 'There are no albums in this library.' };
     const pending = sc.found.filter((g) => g === 'pending').length;
     if (pending && sc.trouble) return { text: sc.trouble, warn: true, going: true };
-    if (pending) return { busy: 'Looking', text: `Checking your albums on ${mbWhere()}… ${fmt.number(sc.albums.length - pending)} of ${fmt.number(sc.albums.length)}`, going: true };
+    const sofar = `${fmt.number(sc.albums.length - pending)} of ${fmt.number(sc.albums.length)} albums`;
+    if (pending && sc.catchingUp) return { busy: 'Looking', text: `Catching up with what it already knows… ${sofar}`, going: true };
+    if (pending) return { busy: 'Looking', text: `Checking years and genres on ${mbWhere()}… ${sofar}`, going: true };
     // (On a MusicBrainz of your own, those with nothing to fix aren't
     // checked by their tracks: found, not matched exactly.)
     const found = sc.found.filter(known).length;
@@ -359,6 +391,12 @@ function startScan(key) {
           (await Promise.all(would.map(({ j, g }) => (otherKind.has(j) ? true : notThatRecording(albums[j], g, { server: sc.s }))))).flatMap((no, n) => (no ? [would[n].j] : [])),
         );
         part.forEach((j, k) => (found[j] = otherKind.has(j) || otherRecording.has(j) ? null : (got[k] ?? null)));
+        // (Most of those asked about for the first time answered at once:
+        // the player had them, from a look before, say, and this one's
+        // catching up with what it knows.)
+        const first = part.filter((j) => !sc.asked[j]);
+        for (const j of first) sc.asked[j] = 1;
+        if (first.length) sc.catchingUp = first.filter((j) => found[j] !== 'pending').length * 2 >= first.length;
         sc.changed();
       }
     }
@@ -446,6 +484,7 @@ function startScan(key) {
     );
     if (sc.stopped) return;
     sc.found = sc.albums.map(() => 'pending');
+    sc.asked = new Uint8Array(sc.albums.length);
     sc.phase = 'checking';
     sc.changed();
     again();
@@ -517,7 +556,7 @@ function startScan(key) {
     const done = [];
     sc.lastAll = null;
     let failed = 0;
-    sc.fixing = { what: 'Fixing in Plex', done: 0, of: list.length };
+    sc.fixing = { kind: what };
     sc.changed();
     for (const x of list) {
       try {
@@ -526,11 +565,10 @@ function startScan(key) {
       } catch {
         failed += 1;
       }
-      sc.fixing.done = done.length + failed;
-      sc.changed(sc.fixing.done % 20 ? 'status' : undefined);
+      sc.changed((done.length + failed) % 20 ? 'counts' : undefined);
     }
     sc.fixing = null;
-    sc.lastAll = { list: done, undo };
+    sc.lastAll = { list: done, undo, kind: what };
     sc.changed();
     toast(`${fmt.count(done.length, 'album', 'albums')} fixed in Plex${failed ? `, ${fmt.number(failed)} couldn’t be` : ''}`, {
       action: done.length ? 'Undo' : null,
@@ -547,7 +585,7 @@ function startScan(key) {
     const { list, undo } = was;
     let back = 0;
     let failed = 0;
-    sc.fixing = { what: 'Putting them back in Plex', done: 0, of: list.length };
+    sc.fixing = { kind: was.kind, back: true };
     sc.changed();
     for (const m of list) {
       try {
@@ -556,8 +594,7 @@ function startScan(key) {
       } catch {
         failed += 1;
       }
-      sc.fixing.done = back + failed;
-      sc.changed(sc.fixing.done % 20 ? 'status' : undefined);
+      sc.changed((back + failed) % 20 ? 'counts' : undefined);
     }
     sc.fixing = null;
     toast(`${fmt.count(back, 'album', 'albums')} as they were in Plex${failed ? `, ${fmt.number(failed)} couldn’t be` : ''}`);
