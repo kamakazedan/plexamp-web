@@ -75,6 +75,18 @@ ONLY = set(sys.argv[2:]) or None
 os.makedirs(OUT, exist_ok=True)
 
 MOBILE = dict(viewport={'width': 412, 'height': 915}, device_scale_factor=2, is_mobile=True, has_touch=True)
+# Settings › MusicBrainz › Years and genres to fix as it changes: its status
+# line, whether the lists grow meanwhile and leaving's said, a spinner by a
+# list's count, and Fix all or Add all (into window.__mbSaid, each change).
+MB_WATCH = """() => { window.__mbSaid = []; new MutationObserver(() => {
+    const t = document.querySelector('.mb-review-status')?.textContent?.trim();
+    if (!t) return;
+    const shown = (sel) => { const e = document.querySelector(sel); return !!e && !e.hidden; };
+    const x = { t, growing: shown('.mb-review-growing'), leave: shown('.mb-review-leave'), spin: !!document.querySelector('.mb-review-head .spinner'),
+      all: !!document.querySelector('.mb-fix-years, .mb-fix-genres') };
+    const last = window.__mbSaid[window.__mbSaid.length - 1];
+    if (!last || JSON.stringify(last) !== JSON.stringify(x)) window.__mbSaid.push(x);
+  }).observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden'] }); return true; }"""
 # Failed connections are part of what's being tested (blocked WebSockets,
 # unreachable servers), so the browser's own reports of them are expected.
 EXPECTED_NOISE = ('WebSocket connection to', 'Failed to load resource', 'EventSource', 'net::ERR', 'CORS policy')
@@ -8187,17 +8199,21 @@ with sync_playwright() as pw:
         mock(f'/__mock/config?nogenre={tidal}')
         try:
             # (What the status line says on the way, each time it changes.)
-            js(page, """() => { window.__mbSaid = []; new MutationObserver(() => { const t = document.querySelector('.mb-review-status')?.textContent?.trim();
-                if (t && window.__mbSaid[window.__mbSaid.length - 1] !== t) window.__mbSaid.push(t); }).observe(document.body, { subtree: true, childList: true, characterData: true }); return true; }""")
+            js(page, MB_WATCH)
             page.goto(APP_MB + '#/settings/mbreview')
             page.wait_for_selector('.mb-year-row:has-text("Hearthstone")', timeout=30000)
             page.wait_for_selector('.mb-genre-row:has-text("Tidal Lines")', timeout=30000)
             shot(page, 'mb-04-review')
-            said_on_the_way = js(page, '() => window.__mbSaid')
-            check('mb: years and genres: each step says how far it\'s got (reading the albums, their artists, then checking them), and that the page can be left',
+            page.wait_for_selector('.mb-fix-years', timeout=30000)
+            seen = js(page, '() => window.__mbSaid')
+            said_on_the_way = [x['t'] for x in seen]
+            looking = [x for x in seen if x['t'].startswith(('Checking years and genres', 'Catching up with what it already knows'))]
+            check('mb: years and genres: each step says how far it\'s got (reading the albums, their artists, then checking years and genres), that the lists grow meanwhile, and what leaving does',
                   any(t.startswith('Reading your albums from') for t in said_on_the_way) and any(t.startswith('Reading their artists') for t in said_on_the_way)
-                  and any(re.match(r'^Checking your albums on the player’s own MusicBrainz server… [\d,]+ of [\d,]+$', t) for t in said_on_the_way)
-                  and 'picks up where it left off' in page.locator('.mb-review-leave').inner_text(), str(said_on_the_way))
+                  and any(re.match(r'^Checking years and genres on the player’s own MusicBrainz server… [\d,]+ of [\d,]+ albums$', t) for t in said_on_the_way)
+                  and all(x['growing'] and x['leave'] for x in looking) and 'picks up from here next time' in page.locator('.mb-review-leave').inner_text(), str(seen))
+            check('mb: ...while it\'s looking, each list\'s count has a spinner (it can change) and there\'s no Fix all nor Add all (they come once it\'s done)',
+                  any(x['spin'] for x in looking) and not any(x['all'] for x in looking) and not seen[-1]['spin'] and seen[-1]['all'], str(seen))
             heart = albums_of()['Hearthstone']
             hrefs = page.locator('.mb-year-row', has_text='Hearthstone').locator('a.mb-review-link').evaluate_all('(as) => as.map((a) => [a.textContent, a.getAttribute("href")])')
             check('mb: ...each album\'s title, and its artist\'s name, open their pages',
@@ -8209,7 +8225,7 @@ with sync_playwright() as pw:
             js(page, '() => (window.__mbSaid = [], true)')
             page.go_back()
             page.wait_for_selector('.mb-year-row:has-text("Hearthstone")', timeout=3000)
-            back_said = js(page, '() => window.__mbSaid')
+            back_said = [x['t'] for x in js(page, '() => window.__mbSaid')]
             check('mb: ...and back from it, the list is as it was, not read from Plex again',
                   album_opened and not any(t.startswith('Reading') for t in back_said), f'{page.url} {back_said}')
             year_line = page.locator('.mb-year-row', has_text='Hearthstone').inner_text()
@@ -8245,14 +8261,26 @@ with sync_playwright() as pw:
                 s.editAlbum = async (...a) => { await new Promise((r) => setTimeout(r, 400)); return s.__edit.apply(s, a); }; return true; })""")
             page.click('.mb-fix-years')
             page.locator('.sheet.open button', has_text='Fix them').click()
-            page.wait_for_function("() => /^Fixing in Plex/.test(document.querySelector('.mb-review-status')?.textContent || '')", timeout=5000)
+            page.wait_for_function("() => document.querySelector('.mb-fix-years')?.textContent === 'Fixing…'", timeout=5000)
             while_fixing = js(page, """() => [document.querySelector('.mb-fix-genres')?.disabled, document.querySelectorAll('.mb-review-again').length,
-                [...document.querySelectorAll('.mb-genre-row button')].every((b) => b.disabled)]""")
+                [...document.querySelectorAll('.mb-genre-row button')].every((b) => b.disabled), !!document.querySelector('.mb-review-years .mb-review-head .spinner'),
+                /^Checked /.test(document.querySelector('.mb-review-status')?.textContent || '')]""")
+            counts = []
+            for _ in range(60):
+                n = js(page, "() => document.querySelector('.mb-review-years .mb-review-count')?.textContent ?? null")
+                if not counts or counts[-1] != n:
+                    counts.append(n)
+                if len(edits()) >= before + fixing:
+                    break
+                page.wait_for_timeout(100)
             wait_for(lambda: len(edits()) >= before + fixing, 15, 0.3)
             js(page, "() => import('./js/state.js').then(({ app }) => { app.server.editAlbum = app.server.__edit; return true; })")
             page.wait_for_function("() => !document.querySelector('.mb-fix-genres')?.disabled", timeout=5000)
             check('mb: ...one Fix all at a time: while it\'s being made, Add all and each Add wait, and Look again isn\'t offered',
-                  while_fixing == [True, 0, True], str(while_fixing))
+                  while_fixing[:3] == [True, 0, True], str(while_fixing))
+            check('mb: ...and it says how it\'s going in its list\'s heading (how many are left, with a spinner), the status line staying on the look',
+                  while_fixing[3:] == [True, True] and len(counts) >= 2 and counts[0] == str(fixing) and all(int(a) > int(b) for a, b in zip(counts, counts[1:]) if a and b),
+                  f'{while_fixing} {counts}')
             all_fixed = edits()[before:]
             page.wait_for_selector('.mb-undo-all', timeout=5000)
             undo_button = page.locator('.mb-undo-all').inner_text()
@@ -8340,12 +8368,19 @@ with sync_playwright() as pw:
             wait_for(mb_settled, 20, 0.1)
             mb_was = mock('/__mock/musicbrainz')['MediaContainer']['requests']
             page.goto(APP_MB + '#/settings/mbreview')
+            page.add_init_script('window.addEventListener("DOMContentLoaded", () => (' + MB_WATCH + ')())')
+            # (One without a genre, as in the first look, so it's asked about
+            # in two parts, the status line said between them.)
+            mock(f'/__mock/config?nogenre={tidal}')
             page.reload()
             page.wait_for_selector('.mb-review-again', timeout=60000)
+            mock('/__mock/config?nogenre=')
             again_rows = page.locator('.mb-year-row .row-title').all_inner_texts()
-            check('mb: years and genres looked through again another time pick up where they left off: each album\'s answer as the player kept it, nothing asked of MusicBrainz again',
-                  mock('/__mock/musicbrainz')['MediaContainer']['requests'] == mb_was and 'Glass Rain' in again_rows and 'Hollow Bell' in again_rows,
-                  f"{mock('/__mock/musicbrainz')['MediaContainer']['requests'] - mb_was} {again_rows}")
+            again_said = [x['t'] for x in js(page, '() => window.__mbSaid || []')]
+            check('mb: years and genres looked through again another time pick up where they left off (and say so): each album\'s answer as the player kept it, nothing asked of MusicBrainz again',
+                  mock('/__mock/musicbrainz')['MediaContainer']['requests'] == mb_was and 'Glass Rain' in again_rows and 'Hollow Bell' in again_rows
+                  and any(t.startswith('Catching up with what it already knows… ') for t in again_said),
+                  f"{mock('/__mock/musicbrainz')['MediaContainer']['requests'] - mb_was} {again_rows} {again_said}")
         finally:
             for a in extra:
                 mock(f"/__mock/add-artist?remove={a['ratingKey']}")
