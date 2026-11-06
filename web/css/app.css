@@ -2977,6 +2977,18 @@ body.np-open #toasts {
   opacity: 0.85;
 }
 
+/* Settings › MusicBrainz › Years and genres to fix: an album's title, and
+   its artist's name, open their pages. */
+.mb-review-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.mb-review-link:hover,
+.mb-review-link:focus-visible {
+  text-decoration: underline;
+}
+
 /* Settings › MusicBrainz › Artists to merge: each artist Plex has, to
    open, and who MusicBrainz says it is. */
 .mb-merge-links {

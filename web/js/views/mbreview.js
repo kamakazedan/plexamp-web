@@ -1,14 +1,19 @@
 // Settings › MusicBrainz › Years and genres to fix, for the server's owner:
 // the library's albums looked up on MusicBrainz (by the player, in the
 // background: on musicbrainz.org, once a second, so a big library takes a
-// while, and the player carries on with it if this page is left), each the
+// while; on a MusicBrainz of the player's own, several at a time), each the
 // very album or none at all, then those whose year in Plex is after the
 // year they first came out (a remaster's or reissue's, say), and those
-// without a genre that MusicBrainz has genres for. Each is fixed in Plex, one at a time or all at once, locked so
-// Plex's next refresh leaves it (with Undo); Plex never writes to the files,
-// so the list downloads too, with each album's MusicBrainz release group,
-// for MusicBrainz Picard or beets to fix them.
-import { app } from '../state.js';
+// without a genre that MusicBrainz has genres for. Each is fixed in Plex,
+// one at a time or all at once, locked so Plex's next refresh leaves it
+// (with Undo); Plex never writes to the files, so the list downloads too,
+// with each album's MusicBrainz release group, for MusicBrainz Picard or
+// beets to fix them.
+// The look through the library carries on while the app's open, whatever
+// page is on screen (an album or artist from the list looked at, say), and
+// the player keeps each album's answer for a month, so a look through it
+// another time picks up where this one got to.
+import { app, on } from '../state.js';
 import { describeError } from '../router.js';
 import { h, icon, backHeader, row, sectionHeader, emptyState, toast, fmt, confirmAction, download, fileDate, spinner } from '../ui.js';
 import { albumsOnMB, albumTracks, firstYear, mbFeatures, mbOwnServer, mbidOf, notThatRecording, kindsAgree, plexKind } from '../mb.js';
@@ -16,15 +21,41 @@ import { mbWhere, toCsv } from '../missing.js';
 import { isAdmin } from '../editing.js';
 import { norm } from '../missinglist.js';
 
-const PAGE = 500; // albums read from Plex at a time
-const ASK = 200; // ...and asked about at a time
+const PAGE = 1000; // albums (and artists) read from Plex at a time
+const ASK = 1000; // ...and asked about at a time
 const AGAIN_MS = 5000; // how often what's still being looked up is asked about again
-const AGAIN_AT_MOST = 400; // ...those first in line, at most, each time
+const AGAIN_SOON_MS = 3000; // ...or, where most were answered at once (a library looked through before), this soon
+const AGAIN_AT_MOST = 1000; // ...those first in line, at most, each time
 const SHOWN = 300; // of each list, on the page (Fix all, Add all and the download take in the rest)
 
 const genresOf = (m) => (Array.isArray(m.Genre) ? m.Genre.map((t) => t?.tag).filter(Boolean) : []);
 const plexYear = (m) => Number(m.year) || Number(String(m.originallyAvailableAt || '').slice(0, 4)) || null;
 const mbLink = (g) => `https://musicbrainz.org/release-group/${g.id}`;
+
+// The library being looked through: one at a time, kept while the app's
+// open (see the header); let go when another server or library is chosen
+// (signing out, or switching user, loads the app afresh).
+let scan = null;
+const pages = new Set(); // the copies of the page open (kept in a tab's history too): each told of a new look
+const scanKey = () => (app.server && app.source ? `${app.source.serverId || app.source.uri}|${app.source.sectionKey}|${app.server.token}` : null);
+on('source', (change) => {
+  if (!scan) return;
+  const src = change?.source;
+  if (src && src.serverId === scan.serverId && src.sectionKey === scan.sec && app.server) scan.s = app.server;
+  else stopScan();
+});
+on('signout', () => stopScan());
+function stopScan() {
+  scan?.stop();
+  scan = null;
+}
+// A new look, for `key`: every copy of the page goes with it.
+function newScan(key) {
+  stopScan();
+  scan = startScan(key);
+  for (const page of pages) page(scan);
+  return scan;
+}
 
 export async function mbReviewView({ el, onDispose }) {
   el.append(backHeader('Years and genres to fix', { fallback: '/settings/musicbrainz' }));
@@ -36,274 +67,32 @@ export async function mbReviewView({ el, onDispose }) {
     el.append(emptyState('Only the server’s owner can change albums in Plex.'));
     return;
   }
-  const s = app.server;
-  const sec = app.source.sectionKey;
-  let gone = false;
-  let timer = null;
-  onDispose(() => {
-    gone = true;
-    clearTimeout(timer);
-  });
+  const key = scanKey();
+  if (!key) return;
+  // (One whose albums couldn't be read is started again.)
+  let sc = scan?.key !== key || scan.phase === 'failed' ? newScan(key) : scan;
 
-  const status = h('p.hint.pad.mb-review-status', { role: 'status' }, spinner('Reading'), h('span', null, ` Reading your albums from ${app.source.sectionTitle}…`));
+  const status = h('p.hint.pad.mb-review-status', { role: 'status' });
+  const leave = h('p.hint.pad.mb-review-leave', null, 'You can leave this page: it carries on, and picks up where it left off.');
   const actions = h('div.pad.button-row.mb-review-actions');
   const years = h('div.mb-review-years');
   const genres = h('div.mb-review-genres');
   el.append(
     h('p.lede', null, 'Find albums with the wrong year or no genre, and fix them in Plex for everyone.'),
     status,
+    leave,
     actions,
     years,
     genres,
     h('p.hint.pad', null, 'Your files aren’t changed. To fix their tags too, download the list for MusicBrainz Picard or beets.'),
   );
 
-  // Every album in the library: what Plex has of it (with Plex's
-  // MusicBrainz id for it, where it has one: the very album, found without
-  // a search).
-  const albums = [];
-  try {
-    for (let start = 0; !gone; start += PAGE) {
-      const { items, total } = await s.list(sec, 9, { start, size: PAGE, sort: 'artist.titleSort', filters: { includeGuids: 1 } });
-      albums.push(...items.filter((m) => m.type === 'album' && m.title && m.parentTitle));
-      status.lastChild.textContent = ` Reading your albums from ${app.source.sectionTitle}… ${fmt.number(albums.length)} of ${fmt.number(total)}`;
-      if (!items.length || start + PAGE >= total) break;
-    }
-  } catch (err) {
-    status.replaceChildren(`Your albums couldn’t be read. ${describeError(err)}`);
-    status.classList.add('warn');
-    return;
-  }
-  if (gone) return;
-  if (!albums.length) {
-    status.replaceChildren('There are no albums in this library.');
-    return;
-  }
-
-  // Their artists' MusicBrainz ids, where Plex has them: an album's found
-  // by its artist's id, without a search (which a MusicBrainz server of
-  // your own may not have working), and never by another artist's name.
-  const artistIds = new Map();
-  try {
-    for (let start = 0; !gone; start += PAGE) {
-      const { items, total } = await s.list(sec, 8, { start, size: PAGE, sort: 'titleSort', filters: { includeGuids: 1 } });
-      for (const a of items) if (a?.ratingKey && mbidOf(a)) artistIds.set(String(a.ratingKey), mbidOf(a));
-      if (!items.length || start + PAGE >= total) break;
-    }
-  } catch {
-    /* by their names, then */
-  }
-  if (gone) return;
-
-  // The library's genres, by name as norm has it: a genre MusicBrainz has
-  // goes on as the library has it ("Hip-Hop", not a "Hip Hop" beside it).
-  const libraryGenres = new Map(
-    (await s.tags(sec, 'genre', 9).catch(() => []))
-      .map((t) => t?.title)
-      .filter(Boolean)
-      .map((t) => [norm(t), t]),
-  );
-  const asLibrary = (genre) => libraryGenres.get(norm(genre)) || genre;
-
-  // What MusicBrainz has of each, the very album or nothing (null: nothing,
-  // or which album it is can't be told; 'pending': being looked up): by
-  // Plex's MusicBrainz id for it, where its title agrees, or else, for a
-  // studio album, by its artist and its exact title (see releases.js
-  // exactAlbum), and the year Plex has (which tells albums of one title
-  // apart), with its genres for those without any.
-  // ('unchecked': only a search could find it, and searching the player's
-  // MusicBrainz finds no one.)
-  const found = albums.map(() => 'pending');
-  const fixed = new Map(); // album id -> what was done: 'year' | 'genres' (and what it was before)
-  // (On a MusicBrainz of the player's own, those that would be fixed are
-  // checked by their very tracks too: see mb.js albumsOnMB, `check`.)
-  const check = mbOwnServer();
-  const itemOf = (j) => ({
-    artist: albums[j].parentTitle,
-    title: albums[j].title,
-    year: plexYear(albums[j]),
-    artistId: artistIds.get(String(albums[j].parentRatingKey)),
-    albumId: mbidOf(albums[j]),
-    tracks: Number(albums[j].leafCount) || 0,
-  });
-  async function ask(indexes) {
-    for (const withGenres of [true, false]) {
-      const these = indexes.filter((j) => !genresOf(albums[j]).length === withGenres);
-      for (let i = 0; i < these.length && !gone; i += ASK) {
-        const part = these.slice(i, i + ASK);
-        const got = await albumsOnMB(part.map(itemOf), { genres: withGenres, background: true, strict: true, check });
-        // ...by their tracks, as Plex has them (those that can't be read
-        // aren't fixed).
-        const toCheck = check ? part.map((j, k) => ({ j, k, g: got[k] })).filter(({ j, g }) => g && typeof g === 'object' && g.toCheck && differs(albums[j], g)) : [];
-        if (toCheck.length && !gone) {
-          const lists = await Promise.all(toCheck.map(({ j }) => albumTracks(albums[j], { server: s }).catch(() => null)));
-          const asking = toCheck.map((x, n) => ({ ...x, list: lists[n] })).filter((x) => x.list?.length);
-          const byTracks = asking.length ? await albumsOnMB(asking.map(({ j, list }) => ({ ...itemOf(j), trackList: list })), { genres: withGenres, background: true, strict: true, check }) : [];
-          for (const { k } of toCheck) got[k] = null;
-          asking.forEach(({ k }, n) => (got[k] = byTracks[n] ?? null));
-        }
-        // Of those that would be fixed: not one found by its title whose
-        // kind Plex has as another (a live album as a studio one, a single
-        // as an album: Plex's release types, read for those), nor a short
-        // one whose tracks say it's another recording (a remix single's:
-        // see mb.js notThatRecording).
-        const would = part.map((j, k) => ({ j, g: got[k] ?? null })).filter(({ j, g }) => g && typeof g === 'object' && differs(albums[j], g));
-        const byTitle = would.filter(({ j, g }) => g.id !== mbidOf(albums[j]));
-        const types = byTitle.length ? await s.albumTypes(byTitle.map(({ j }) => albums[j].ratingKey)).catch(() => null) : [];
-        const otherKind = new Set(byTitle.filter(({ g }, n) => !types || !kindsAgree(types[n] ? plexKind(types[n]) : null, g)).map(({ j }) => j));
-        const otherRecording = new Set(
-          (await Promise.all(would.map(({ j, g }) => (otherKind.has(j) ? true : notThatRecording(albums[j], g, { server: s }))))).flatMap((no, n) => (no ? [would[n].j] : [])),
-        );
-        part.forEach((j, k) => (found[j] = otherKind.has(j) || otherRecording.has(j) ? null : (got[k] ?? null)));
-      }
-    }
-  }
-
-  // What would be fixed: a first year before the one Plex has (never after:
-  // an album can't come out after it did, so that's another album of that
-  // title), or genres for an album without any.
-  const earlier = (m, g) => !!(firstYear(g) && plexYear(m) && firstYear(g) < plexYear(m));
-  const differs = (m, g) => earlier(m, g) || !!(g.genres?.length && !genresOf(m).length);
-
-  // What differs, as far as it's known.
-  const yearRows = () =>
-    albums
-      .map((m, i) => ({ m, g: found[i] }))
-      .filter(({ m, g }) => g && typeof g === 'object' && earlier(m, g) && fixed.get(String(m.ratingKey))?.kind !== 'year');
-  const genreRows = () =>
-    albums
-      .map((m, i) => ({ m, g: found[i] }))
-      .filter(({ m, g }) => g && typeof g === 'object' && g.genres?.length && !genresOf(m).length && fixed.get(String(m.ratingKey))?.kind !== 'genres');
-
-  async function fixYear({ m, g }, { quiet = false } = {}) {
-    const year = firstYear(g);
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(g.date) ? g.date : `${year}-01-01`;
-    const before = { year: plexYear(m), date: String(m.originallyAvailableAt || '').slice(0, 10) };
-    await s.editAlbum(sec, m.ratingKey, { year, date });
-    fixed.set(String(m.ratingKey), { kind: 'year', before });
-    Object.assign(m, { year, originallyAvailableAt: date });
-    if (!quiet) toast(`${m.title}: ${year} in Plex now`, { action: 'Undo', timeout: 8000, onAction: () => undoYear(m) });
-  }
-
-  // (As it was, unlocked again, so Plex's next refresh has it as Plex has
-  // it; a day it hadn't, left out again.)
-  async function undoYear(m, { quiet = false } = {}) {
-    const was = fixed.get(String(m.ratingKey));
-    if (was?.kind !== 'year') return;
-    try {
-      await s.editAlbum(sec, m.ratingKey, { year: was.before.year, date: was.before.date, unlock: true });
-      Object.assign(m, { year: was.before.year, originallyAvailableAt: was.before.date });
-      fixed.delete(String(m.ratingKey));
-    } catch (err) {
-      if (quiet) throw err;
-      toast(`Couldn’t put it back. ${describeError(err)}`);
-    }
-    if (!quiet) render();
-  }
-
-  async function fixGenres({ m, g }, { quiet = false } = {}) {
-    const adding = [...new Set(g.genres.map(asLibrary))];
-    await s.editAlbum(sec, m.ratingKey, { genres: [...genresOf(m), ...adding] });
-    fixed.set(String(m.ratingKey), { kind: 'genres', added: adding });
-    m.Genre = [...(m.Genre || []), ...adding.map((tag) => ({ tag }))];
-    if (!quiet) toast(`${m.title}: ${adding.join(', ')} in Plex now`, { action: 'Undo', timeout: 8000, onAction: () => undoGenres(m) });
-  }
-
-  async function undoGenres(m, { quiet = false } = {}) {
-    const was = fixed.get(String(m.ratingKey));
-    if (was?.kind !== 'genres') return;
-    try {
-      await s.editAlbum(sec, m.ratingKey, { removeGenres: was.added, unlock: true });
-      m.Genre = (m.Genre || []).filter((t) => !was.added.includes(t.tag));
-      fixed.delete(String(m.ratingKey));
-    } catch (err) {
-      if (quiet) throw err;
-      toast(`Couldn’t put it back. ${describeError(err)}`);
-    }
-    if (!quiet) render();
-  }
-
-  // All of them, one after another (and Undo, all of those: in a toast, and
-  // on the page until it's used). Carried on with if the page is left.
-  let lastAll = null; // { list, undo }: the last Fix all or Add all's
-  async function fixAll(list, fix, undo, what) {
-    const sure = await confirmAction({
-      title: `Fix ${fmt.count(list.length, 'album', 'albums')} in Plex?`,
-      message: `Changes each album’s ${what} in Plex, for everyone. You can undo it straight after.`,
-      confirm: 'Fix them',
-      danger: false,
-    });
-    if (!sure) return;
-    const done = [];
-    lastAll = null;
-    let failed = 0;
-    for (const x of list) {
-      try {
-        await fix(x, { quiet: true });
-        done.push(x.m);
-      } catch {
-        failed += 1;
-      }
-      status.replaceChildren(`Fixing in Plex… ${fmt.number(done.length + failed)} of ${fmt.number(list.length)}`);
-      if ((done.length + failed) % 20 === 0) render();
-    }
-    lastAll = { list: done, undo };
-    render();
-    toast(`${fmt.count(done.length, 'album', 'albums')} fixed in Plex${failed ? `, ${fmt.number(failed)} couldn’t be` : ''}`, {
-      action: done.length ? 'Undo' : null,
-      timeout: 15000,
-      onAction: () => undoAll(),
-    });
-  }
-
-  async function undoAll() {
-    const was = lastAll;
-    lastAll = null;
-    if (!was?.list.length) return;
-    const { list, undo } = was;
-    let back = 0;
-    let failed = 0;
-    for (const m of list) {
-      try {
-        await undo(m, { quiet: true });
-        back += 1;
-      } catch {
-        failed += 1;
-      }
-      status.replaceChildren(`Putting them back in Plex… ${fmt.number(back + failed)} of ${fmt.number(list.length)}`);
-    }
-    toast(`${fmt.count(back, 'album', 'albums')} as they were in Plex${failed ? `, ${fmt.number(failed)} couldn’t be` : ''}`);
-    render();
-  }
-
-  const yearLine = (x) => `${x.m.parentTitle} · ${plexYear(x.m)} in Plex, ${firstYear(x.g)} on MusicBrainz`;
-  const genreLine = ({ m, g }) => `${m.parentTitle} · ${[...new Set(g.genres.map(asLibrary))].join(', ')}`;
-  const fixButton = (label, onClick) =>
-    h(
-      'button.btn.btn-secondary.btn-small',
-      {
-        type: 'button',
-        onclick: async (e) => {
-          const button = e.currentTarget;
-          button.disabled = true;
-          try {
-            await onClick();
-          } catch (err) {
-            toast(`Couldn’t change it in Plex. ${describeError(err)}`);
-            button.disabled = false;
-          }
-          render();
-        },
-      },
-      label,
-    );
-
   // What's shown, as it was last painted: each part is painted again only
   // when what it shows has changed (it's asked again every few seconds
   // while albums are looked up, for hours on musicbrainz.org), so what has
   // focus keeps it, and the page stays where it's scrolled to. (Fix all and
   // Add all take the lists as they are when they're used.)
-  const painted = { actions: '', years: '', genres: '' };
+  const painted = { status: '', actions: '', years: '', genres: '' };
   const changedPart = (part, shape) => {
     const now = JSON.stringify(shape);
     if (painted[part] === now) return false;
@@ -311,86 +100,80 @@ export async function mbReviewView({ el, onDispose }) {
     return true;
   };
 
-  function render() {
-    if (gone) return;
-    const pending = found.filter((g) => g === 'pending').length;
-    const ys = yearRows();
-    const gs = genreRows();
-    status.classList.remove('warn');
-    // (On a MusicBrainz of your own, those with nothing to fix aren't
-    // checked by their tracks: found, not matched exactly.)
-    const known = found.filter((g) => g && typeof g === 'object').length;
-    const matched = check ? 'found on MusicBrainz' : 'matched exactly on MusicBrainz';
-    const unchecked = found.filter((g) => g === 'unchecked').length;
-    const cantSearch = unchecked
-      ? ` ${fmt.count(unchecked, 'album', 'albums')} couldn’t be checked: searching your MusicBrainz server finds no one (its search indexes may not be built).`
-      : '';
-    status.replaceChildren(
-      ...(pending
-        ? [spinner('Looking'), h('span', null, ` Checking your albums on ${mbWhere()}… ${fmt.number(albums.length - pending)} of ${fmt.number(albums.length)}`)]
-        : [
-            known
-              ? `Checked ${fmt.count(albums.length, 'album', 'albums')}: ${known === albums.length ? 'all' : fmt.number(known)} ${matched}.${cantSearch}`
-              : unchecked
-                ? cantSearch.trim()
-                : `None of your ${fmt.count(albums.length, 'album', 'albums')} ${check ? 'were found' : 'matched exactly'} on MusicBrainz, so there’s nothing to compare.`,
-          ]),
+  // An album's title, and its artist's name, to open their pages from.
+  const albumLink = (m) => h('a.mb-review-link', { href: `#/album/${encodeURIComponent(m.ratingKey)}` }, m.title);
+  const artistLink = (m) => (m.parentRatingKey ? h('a.mb-review-link', { href: `#/artist/${encodeURIComponent(m.parentRatingKey)}` }, m.parentTitle) : m.parentTitle);
+  const yearLine = (x) => `${plexYear(x.m)} in Plex, ${firstYear(x.g)} on MusicBrainz`;
+  const genreLine = ({ g }) => [...new Set(g.genres.map(sc.asLibrary))].join(', ');
+  const fixButton = (label, onClick) =>
+    h(
+      'button.btn.btn-secondary.btn-small',
+      {
+        type: 'button',
+        disabled: !!sc.fixing,
+        onclick: async (e) => {
+          const button = e.currentTarget;
+          if (sc.fixing) return;
+          button.disabled = true;
+          try {
+            await onClick();
+          } catch (err) {
+            toast(`Couldn’t change it in Plex. ${describeError(err)}`);
+            button.disabled = false;
+          }
+          sc.changed();
+        },
+      },
+      label,
     );
-    if (!pending && (unchecked || !known)) status.classList.add('warn');
-    const yearsShown = ys.slice(0, SHOWN).map((x) => [x.m.ratingKey, yearLine(x)]);
-    const genresShown = gs.slice(0, SHOWN).map((x) => [x.m.ratingKey, genreLine(x)]);
-    const nothing = !pending && !ys.length && found.some((g) => g && typeof g === 'object');
-    if (changedPart('actions', [lastAll?.list.length || 0, !!(ys.length || gs.length)])) {
+
+  function renderStatus() {
+    const st = sc.statusNow();
+    if (!changedPart('status', st)) return;
+    status.classList.toggle('warn', !!st.warn);
+    status.replaceChildren(...(st.busy ? [spinner(st.busy), h('span', null, ` ${st.text}`)] : [st.text]));
+    leave.hidden = !st.going;
+  }
+
+  // (`part`: 'status', where only that's changed: a Fix all's progress.)
+  function render(part) {
+    renderStatus();
+    if (part === 'status') return;
+    const { pending, ys, gs, nothing } = sc.lists();
+    const yearsShown = ys.slice(0, SHOWN).map((x) => [x.m.ratingKey, x.m.title, x.m.parentTitle, yearLine(x)]);
+    const genresShown = gs.slice(0, SHOWN).map((x) => [x.m.ratingKey, x.m.title, x.m.parentTitle, genreLine(x)]);
+    const over = sc.finished();
+    if (changedPart('actions', [sc.lastAll?.list.length || 0, !!(ys.length || gs.length), over, !!sc.fixing])) {
       actions.replaceChildren(
-        ...(lastAll?.list.length
+        ...(over ? [h('button.btn.btn-secondary.mb-review-again', { type: 'button', onclick: () => lookAgain() }, icon('refresh', 20), h('span', null, 'Look again'))] : []),
+        ...(sc.lastAll?.list.length
           ? [
               h(
                 'button.btn.btn-secondary.mb-undo-all',
-                { type: 'button', onclick: () => undoAll() },
+                { type: 'button', disabled: !!sc.fixing, onclick: () => sc.undoAll() },
                 icon('refresh', 20),
-                h('span', null, `Undo the last ${fmt.count(lastAll.list.length, 'fix', 'fixes')}`),
+                h('span', null, `Undo the last ${fmt.count(sc.lastAll.list.length, 'fix', 'fixes')}`),
               ),
             ]
           : []),
         ...(ys.length || gs.length
-          ? [
-              h(
-                'button.btn.btn-secondary',
-                {
-                  type: 'button',
-                  onclick: () => {
-                    const head = ['Artist', 'Album', 'Year in Plex', 'First year on MusicBrainz', 'Genres in Plex', 'Genres on MusicBrainz', 'MusicBrainz release group', 'Link'];
-                    const all = albums.map((m, i) => ({ m, g: found[i] })).filter(({ g }) => g && typeof g === 'object');
-                    const rows = all
-                      .filter(({ m, g }) => differs(m, g))
-                      .map(({ m, g }) => [m.parentTitle, m.title, plexYear(m) || '', firstYear(g) || '', genresOf(m).join('; '), (g.genres || []).join('; '), g.id, mbLink(g)]);
-                    download(toCsv(head, rows), `musicbrainz-fixes-${fileDate()}.csv`, 'text/csv;charset=utf-8');
-                    toast('Downloaded, to open in a spreadsheet');
-                  },
-                },
-                icon('arrowDown', 20),
-                h('span', null, 'Download (CSV)'),
-              ),
-            ]
+          ? [h('button.btn.btn-secondary', { type: 'button', onclick: () => sc.downloadList() }, icon('arrowDown', 20), h('span', null, 'Download (CSV)'))]
           : []),
       );
     }
-    if (changedPart('years', [ys.length, yearsShown])) {
+    const busy = !!sc.fixing;
+    if (changedPart('years', [ys.length, yearsShown, busy])) {
       years.replaceChildren(
         ...(ys.length
           ? [
               h(
                 'section.block',
                 null,
-                sectionHeader(
-                  `Years (${fmt.number(ys.length)})`,
-                  null,
-                  h('button.link-btn.mb-fix-years', { type: 'button', onclick: () => fixAll(yearRows(), fixYear, undoYear, 'year') }, 'Fix all'),
-                ),
+                sectionHeader(`Years (${fmt.number(ys.length)})`, null, h('button.link-btn.mb-fix-years', { type: 'button', disabled: busy, onclick: () => sc.fixAll('year') }, 'Fix all')),
                 h(
                   'div.rows.mb-review-rows',
                   null,
-                  ys.slice(0, SHOWN).map((x) => row({ title: x.m.title, subtitle: yearLine(x), right: fixButton(`Use ${firstYear(x.g)}`, () => fixYear(x)), cls: 'mb-year-row' })),
+                  ys.slice(0, SHOWN).map((x) => row({ title: albumLink(x.m), subtitle: [artistLink(x.m), ` · ${yearLine(x)}`], right: fixButton(`Use ${firstYear(x.g)}`, () => sc.fixYear(x)), cls: 'mb-year-row' })),
                 ),
                 ys.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(ys.length - SHOWN)} more: Fix all and the download include them.`) : null,
               ),
@@ -398,18 +181,18 @@ export async function mbReviewView({ el, onDispose }) {
           : []),
       );
     }
-    if (changedPart('genres', [gs.length, genresShown, nothing])) {
+    if (changedPart('genres', [gs.length, genresShown, nothing, pending > 0, busy])) {
       genres.replaceChildren(
         ...(gs.length
           ? [
               h(
                 'section.block',
                 null,
-                sectionHeader(`Genres (${fmt.number(gs.length)})`, null, h('button.link-btn.mb-fix-genres', { type: 'button', onclick: () => fixAll(genreRows(), fixGenres, undoGenres, 'genres') }, 'Add all')),
+                sectionHeader(`Genres (${fmt.number(gs.length)})`, null, h('button.link-btn.mb-fix-genres', { type: 'button', disabled: busy, onclick: () => sc.fixAll('genres') }, 'Add all')),
                 h(
                   'div.rows.mb-review-rows',
                   null,
-                  gs.slice(0, SHOWN).map((x) => row({ title: x.m.title, subtitle: genreLine(x), right: fixButton('Add', () => fixGenres(x)), cls: 'mb-genre-row' })),
+                  gs.slice(0, SHOWN).map((x) => row({ title: albumLink(x.m), subtitle: [artistLink(x.m), ` · ${genreLine(x)}`], right: fixButton('Add', () => sc.fixGenres(x)), cls: 'mb-genre-row' })),
                 ),
                 gs.length > SHOWN ? h('p.hint.pad', null, `And ${fmt.number(gs.length - SHOWN)} more: Add all and the download include them.`) : null,
               ),
@@ -421,47 +204,375 @@ export async function mbReviewView({ el, onDispose }) {
     }
   }
 
-  // (Asked about again below where this couldn't: MusicBrainz not
-  // answering for a while, or too many asked too quickly.)
+  // Looked through again from the start (the library as it is now: albums
+  // added since, say), the answers the player kept coming back at once.
+  // (Not while a Fix all, Add all or Undo is being made.)
+  let unlisten = null;
+  function lookAgain() {
+    if (!sc.fixing) newScan(key);
+  }
+  function attach(next) {
+    if (next.key !== key) return;
+    unlisten?.();
+    sc = next;
+    for (const part of Object.keys(painted)) painted[part] = '';
+    unlisten = sc.listen(render);
+    render();
+  }
+  attach(sc);
+  pages.add(attach);
+  onDispose(() => {
+    pages.delete(attach);
+    unlisten?.();
+  });
+}
+
+// A look through the library (see the header): reading its albums and
+// their artists from Plex, then looking each up, as long as there are any
+// still being looked up (asked about again every few seconds: the player
+// looks them up in the background), and the fixes made from it, with
+// their Undo. `changed()` tells the page (whichever is open) to paint it.
+function startScan(key) {
+  const sc = {
+    key,
+    s: app.server,
+    serverId: app.source.serverId,
+    sec: app.source.sectionKey,
+    sectionTitle: app.source.sectionTitle,
+    check: mbOwnServer(), // (by their very tracks too: see mb.js albumsOnMB, `check`)
+    phase: 'albums', // 'albums' | 'artists' | 'checking' | 'failed' (their albums couldn't be read)
+    read: 0, // ...of the albums or the artists, so far
+    total: 0,
+    albums: [],
+    artistIds: new Map(),
+    libraryGenres: new Map(),
+    found: [], // for each album: what MusicBrainz has of it (see ask)
+    fixed: new Map(), // album id -> what was done: { kind: 'year' | 'genres', before | added }
+    lastAll: null, // { list, undo }: the last Fix all or Add all's
+    fixing: null, // { done, of }: a Fix all or Undo being made
+    trouble: null, // what went wrong asking last (see say)
+    failed: null, // why the albums couldn't be read
+    stopped: false,
+    timer: null,
+    listeners: new Set(),
+  };
+  sc.listen = (fn) => {
+    sc.listeners.add(fn);
+    return () => sc.listeners.delete(fn);
+  };
+  sc.changed = (part) => {
+    if (!sc.stopped) for (const fn of sc.listeners) fn(part);
+  };
+  sc.stop = () => {
+    sc.stopped = true;
+    clearTimeout(sc.timer);
+    sc.listeners.clear();
+  };
+  // A genre MusicBrainz has goes on as the library has it ("Hip-Hop", not
+  // a "Hip Hop" beside it).
+  sc.asLibrary = (genre) => sc.libraryGenres.get(norm(genre)) || genre;
+
+  // What would be fixed: a first year before the one Plex has (never after:
+  // an album can't come out after it did, so that's another album of that
+  // title), or genres for an album without any.
+  const earlier = (m, g) => !!(firstYear(g) && plexYear(m) && firstYear(g) < plexYear(m));
+  const differs = (m, g) => earlier(m, g) || !!(g.genres?.length && !genresOf(m).length);
+  const known = (g) => g && typeof g === 'object';
+
+  // What differs, as far as it's known.
+  const yearRows = () => sc.albums.map((m, i) => ({ m, g: sc.found[i] })).filter(({ m, g }) => known(g) && earlier(m, g) && sc.fixed.get(String(m.ratingKey))?.kind !== 'year');
+  const genreRows = () =>
+    sc.albums.map((m, i) => ({ m, g: sc.found[i] })).filter(({ m, g }) => known(g) && g.genres?.length && !genresOf(m).length && sc.fixed.get(String(m.ratingKey))?.kind !== 'genres');
+  // Done: looked through to the end (or their albums couldn't be read).
+  sc.finished = () => sc.phase === 'failed' || (sc.phase === 'checking' && !sc.fixing && !sc.found.includes('pending'));
+  sc.lists = () => {
+    const pending = sc.phase === 'checking' ? sc.found.filter((g) => g === 'pending').length : sc.albums.length || 1;
+    const ys = yearRows();
+    return { pending, ys, gs: genreRows(), nothing: !pending && !ys.length && sc.found.some(known) };
+  };
+
+  // What the status line says: { text, busy (a spinner's label), warn,
+  // going (still looking, so the page can be left) }.
+  sc.statusNow = () => {
+    if (sc.fixing) return { text: `${sc.fixing.what}… ${fmt.number(sc.fixing.done)} of ${fmt.number(sc.fixing.of)}`, going: false };
+    if (sc.phase === 'failed') return { text: `Your albums couldn’t be read. ${sc.failed}`, warn: true };
+    if (sc.phase === 'albums') return { busy: 'Reading', text: `Reading your albums from ${sc.sectionTitle}…${sc.total ? ` ${fmt.number(sc.read)} of ${fmt.number(sc.total)}` : ''}`, going: true };
+    if (sc.phase === 'artists') return { busy: 'Reading', text: `Reading their artists…${sc.total ? ` ${fmt.number(sc.read)} of ${fmt.number(sc.total)}` : ''}`, going: true };
+    if (!sc.albums.length) return { text: 'There are no albums in this library.' };
+    const pending = sc.found.filter((g) => g === 'pending').length;
+    if (pending && sc.trouble) return { text: sc.trouble, warn: true, going: true };
+    if (pending) return { busy: 'Looking', text: `Checking your albums on ${mbWhere()}… ${fmt.number(sc.albums.length - pending)} of ${fmt.number(sc.albums.length)}`, going: true };
+    // (On a MusicBrainz of your own, those with nothing to fix aren't
+    // checked by their tracks: found, not matched exactly.)
+    const found = sc.found.filter(known).length;
+    const matched = sc.check ? 'found on MusicBrainz' : 'matched exactly on MusicBrainz';
+    const unchecked = sc.found.filter((g) => g === 'unchecked').length;
+    const cantSearch = unchecked ? ` ${fmt.count(unchecked, 'album', 'albums')} couldn’t be checked: searching your MusicBrainz server finds no one (its search indexes may not be built).` : '';
+    if (found) return { text: `Checked ${fmt.count(sc.albums.length, 'album', 'albums')}: ${found === sc.albums.length ? 'all' : fmt.number(found)} ${matched}.${cantSearch}`, warn: !!unchecked };
+    if (unchecked) return { text: cantSearch.trim(), warn: true };
+    return { text: `None of your ${fmt.count(sc.albums.length, 'album', 'albums')} ${sc.check ? 'were found' : 'matched exactly'} on MusicBrainz, so there’s nothing to compare.`, warn: true };
+  };
+
+  // What MusicBrainz has of each, the very album or nothing (null: nothing,
+  // or which album it is can't be told; 'pending': being looked up): by
+  // Plex's MusicBrainz id for it, where its title agrees, or else, for a
+  // studio album, by its artist and its exact title (see releases.js
+  // exactAlbum), and the year Plex has (which tells albums of one title
+  // apart), with its genres for those without any.
+  // ('unchecked': only a search could find it, and searching the player's
+  // MusicBrainz finds no one.)
+  const itemOf = (j) => ({
+    artist: sc.albums[j].parentTitle,
+    title: sc.albums[j].title,
+    year: plexYear(sc.albums[j]),
+    artistId: sc.artistIds.get(String(sc.albums[j].parentRatingKey)),
+    albumId: mbidOf(sc.albums[j]),
+    tracks: Number(sc.albums[j].leafCount) || 0,
+  });
+  async function ask(indexes) {
+    const { albums, found, check } = sc;
+    for (const withGenres of [true, false]) {
+      const these = indexes.filter((j) => !genresOf(albums[j]).length === withGenres);
+      for (let i = 0; i < these.length && !sc.stopped; i += ASK) {
+        const part = these.slice(i, i + ASK);
+        const got = await albumsOnMB(part.map(itemOf), { genres: withGenres, background: true, strict: true, check });
+        // ...by their tracks, as Plex has them (those that can't be read
+        // aren't fixed).
+        const toCheck = check ? part.map((j, k) => ({ j, k, g: got[k] })).filter(({ j, g }) => known(g) && g.toCheck && differs(albums[j], g)) : [];
+        if (toCheck.length && !sc.stopped) {
+          const lists = await Promise.all(toCheck.map(({ j }) => albumTracks(albums[j], { server: sc.s }).catch(() => null)));
+          const asking = toCheck.map((x, n) => ({ ...x, list: lists[n] })).filter((x) => x.list?.length);
+          const byTracks = asking.length ? await albumsOnMB(asking.map(({ j, list }) => ({ ...itemOf(j), trackList: list })), { genres: withGenres, background: true, strict: true, check }) : [];
+          for (const { k } of toCheck) got[k] = null;
+          asking.forEach(({ k }, n) => (got[k] = byTracks[n] ?? null));
+        }
+        // Of those that would be fixed: not one found by its title whose
+        // kind Plex has as another (a live album as a studio one, a single
+        // as an album: Plex's release types, read for those), nor a short
+        // one whose tracks say it's another recording (a remix single's:
+        // see mb.js notThatRecording).
+        const would = part.map((j, k) => ({ j, g: got[k] ?? null })).filter(({ j, g }) => known(g) && differs(albums[j], g));
+        const byTitle = would.filter(({ j, g }) => g.id !== mbidOf(albums[j]));
+        const types = byTitle.length ? await sc.s.albumTypes(byTitle.map(({ j }) => albums[j].ratingKey)).catch(() => null) : [];
+        const otherKind = new Set(byTitle.filter(({ g }, n) => !types || !kindsAgree(types[n] ? plexKind(types[n]) : null, g)).map(({ j }) => j));
+        const otherRecording = new Set(
+          (await Promise.all(would.map(({ j, g }) => (otherKind.has(j) ? true : notThatRecording(albums[j], g, { server: sc.s }))))).flatMap((no, n) => (no ? [would[n].j] : [])),
+        );
+        part.forEach((j, k) => (found[j] = otherKind.has(j) || otherRecording.has(j) ? null : (got[k] ?? null)));
+        sc.changed();
+      }
+    }
+  }
+
   // (After MusicBrainz didn't answer, or was busy: asked again only after as
   // long as the player says, so it isn't asked again and again meanwhile.)
   const waitAfter = (err) => Math.max(AGAIN_MS, (Number(err?.retryAfter) || 0) * 1000, err ? 30000 : 0);
-  let trouble = null;
-  try {
-    await ask(albums.map((_, i) => i));
-  } catch (err) {
-    trouble = err;
-  }
-  render();
   const inTime = (ms) => {
-    const s = Math.round(ms / 1000);
-    return s < 90 ? `in ${fmt.count(s, 'second', 'seconds')}` : `in ${fmt.count(Math.round(s / 60), 'minute', 'minutes')}`;
+    const secs = Math.round(ms / 1000);
+    return secs < 90 ? `in ${fmt.count(secs, 'second', 'seconds')}` : `in ${fmt.count(Math.round(secs / 60), 'minute', 'minutes')}`;
   };
-  // (This page carries on by itself, so not "Try again…".)
+  // (This carries on by itself, so not "Try again…".)
   const say = (err) => {
-    if (!err) return;
+    if (!err) return null;
     const said = String(err.message || describeError(err));
     const what = said.replace(/\s*[^.]*\btry again\b[^.]*\.\s*$/i, '') || said;
-    status.replaceChildren(`${what} Carrying on ${inTime(waitAfter(err))}.`);
-    status.classList.add('warn');
+    return `${what} Carrying on ${inTime(waitAfter(err))}.`;
   };
-  say(trouble);
-  // Those still being looked up, asked about again now and then (the first
-  // in line first: the player looks them up in order).
-  const again = async () => {
-    timer = null;
-    if (gone) return;
-    const waiting = found.map((g, i) => (g === 'pending' ? i : -1)).filter((i) => i >= 0);
+
+  // Those still being looked up, asked about, the first in line first (the
+  // player looks them up in order): soon again where most of them were
+  // known (a library looked through before: see the header), or else in a
+  // few seconds, as the player gets through them. (Never straight away: the
+  // player takes 30,000 albums a minute from each account.)
+  async function again() {
+    sc.timer = null;
+    if (sc.stopped) return;
+    const waiting = sc.found.flatMap((g, i) => (g === 'pending' ? [i] : [])).slice(0, AGAIN_AT_MOST);
     if (!waiting.length) return;
     let err = null;
     try {
-      await ask(waiting.slice(0, AGAIN_AT_MOST));
+      await ask(waiting);
     } catch (e) {
       err = e;
     }
-    render();
-    say(err);
-    if (!gone && found.includes('pending')) timer = setTimeout(again, waitAfter(err));
+    if (sc.stopped) return;
+    sc.trouble = say(err);
+    sc.changed();
+    if (!sc.found.includes('pending')) return;
+    const answered = waiting.filter((j) => sc.found[j] !== 'pending').length;
+    sc.timer = setTimeout(again, err ? waitAfter(err) : answered * 2 >= waiting.length ? AGAIN_SOON_MS : AGAIN_MS);
+  }
+
+  // Every album in the library: what Plex has of it (with Plex's
+  // MusicBrainz id for it, where it has one: the very album, found without
+  // a search), and their artists' MusicBrainz ids, where Plex has them (an
+  // album's found by its artist's id, without a search, which a MusicBrainz
+  // server of your own may not have working, and never by another artist's
+  // name).
+  (async () => {
+    try {
+      for (let start = 0; !sc.stopped; start += PAGE) {
+        const { items, total } = await sc.s.list(sc.sec, 9, { start, size: PAGE, sort: 'artist.titleSort', filters: { includeGuids: 1 } });
+        sc.albums.push(...items.filter((m) => m.type === 'album' && m.title && m.parentTitle));
+        Object.assign(sc, { read: Math.min(start + items.length, total), total });
+        sc.changed();
+        if (!items.length || start + PAGE >= total) break;
+      }
+    } catch (err) {
+      Object.assign(sc, { phase: 'failed', failed: describeError(err) });
+      sc.changed();
+      return;
+    }
+    if (sc.stopped) return;
+    Object.assign(sc, { phase: 'artists', read: 0, total: 0 });
+    sc.changed();
+    try {
+      for (let start = 0; !sc.stopped; start += PAGE) {
+        const { items, total } = await sc.s.list(sc.sec, 8, { start, size: PAGE, sort: 'titleSort', filters: { includeGuids: 1 } });
+        for (const a of items) if (a?.ratingKey && mbidOf(a)) sc.artistIds.set(String(a.ratingKey), mbidOf(a));
+        Object.assign(sc, { read: Math.min(start + items.length, total), total });
+        sc.changed();
+        if (!items.length || start + PAGE >= total) break;
+      }
+    } catch {
+      /* by their names, then */
+    }
+    if (sc.stopped) return;
+    sc.libraryGenres = new Map(
+      (await sc.s.tags(sc.sec, 'genre', 9).catch(() => []))
+        .map((t) => t?.title)
+        .filter(Boolean)
+        .map((t) => [norm(t), t]),
+    );
+    if (sc.stopped) return;
+    sc.found = sc.albums.map(() => 'pending');
+    sc.phase = 'checking';
+    sc.changed();
+    again();
+  })();
+
+  async function fixYear({ m, g }, { quiet = false } = {}) {
+    const year = firstYear(g);
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(g.date) ? g.date : `${year}-01-01`;
+    const before = { year: plexYear(m), date: String(m.originallyAvailableAt || '').slice(0, 10) };
+    await sc.s.editAlbum(sc.sec, m.ratingKey, { year, date });
+    sc.fixed.set(String(m.ratingKey), { kind: 'year', before });
+    Object.assign(m, { year, originallyAvailableAt: date });
+    if (!quiet) toast(`${m.title}: ${year} in Plex now`, { action: 'Undo', timeout: 8000, onAction: () => undoYear(m) });
+  }
+
+  // (As it was, unlocked again, so Plex's next refresh has it as Plex has
+  // it; a day it hadn't, left out again.)
+  async function undoYear(m, { quiet = false } = {}) {
+    const was = sc.fixed.get(String(m.ratingKey));
+    if (was?.kind !== 'year') return;
+    try {
+      await sc.s.editAlbum(sc.sec, m.ratingKey, { year: was.before.year, date: was.before.date, unlock: true });
+      Object.assign(m, { year: was.before.year, originallyAvailableAt: was.before.date });
+      sc.fixed.delete(String(m.ratingKey));
+    } catch (err) {
+      if (quiet) throw err;
+      toast(`Couldn’t put it back. ${describeError(err)}`);
+    }
+    if (!quiet) sc.changed();
+  }
+
+  async function fixGenres({ m, g }, { quiet = false } = {}) {
+    const adding = [...new Set(g.genres.map(sc.asLibrary))];
+    await sc.s.editAlbum(sc.sec, m.ratingKey, { genres: [...genresOf(m), ...adding] });
+    sc.fixed.set(String(m.ratingKey), { kind: 'genres', added: adding });
+    m.Genre = [...(m.Genre || []), ...adding.map((tag) => ({ tag }))];
+    if (!quiet) toast(`${m.title}: ${adding.join(', ')} in Plex now`, { action: 'Undo', timeout: 8000, onAction: () => undoGenres(m) });
+  }
+
+  async function undoGenres(m, { quiet = false } = {}) {
+    const was = sc.fixed.get(String(m.ratingKey));
+    if (was?.kind !== 'genres') return;
+    try {
+      await sc.s.editAlbum(sc.sec, m.ratingKey, { removeGenres: was.added, unlock: true });
+      m.Genre = (m.Genre || []).filter((t) => !was.added.includes(t.tag));
+      sc.fixed.delete(String(m.ratingKey));
+    } catch (err) {
+      if (quiet) throw err;
+      toast(`Couldn’t put it back. ${describeError(err)}`);
+    }
+    if (!quiet) sc.changed();
+  }
+  sc.fixYear = fixYear;
+  sc.fixGenres = fixGenres;
+
+  // All of them, one after another (and Undo, all of those: in a toast, and
+  // on the page until it's used). Carried on with if the page is left.
+  // (One at a time: another, or an Undo, waits till it's done.)
+  sc.fixAll = async (what) => {
+    if (sc.fixing) return;
+    const [list, fix, undo, thing] = what === 'year' ? [yearRows(), fixYear, undoYear, 'year'] : [genreRows(), fixGenres, undoGenres, 'genres'];
+    const sure = await confirmAction({
+      title: `Fix ${fmt.count(list.length, 'album', 'albums')} in Plex?`,
+      message: `Changes each album’s ${thing} in Plex, for everyone. You can undo it straight after.`,
+      confirm: 'Fix them',
+      danger: false,
+    });
+    if (!sure || sc.fixing) return;
+    const done = [];
+    sc.lastAll = null;
+    let failed = 0;
+    sc.fixing = { what: 'Fixing in Plex', done: 0, of: list.length };
+    sc.changed();
+    for (const x of list) {
+      try {
+        await fix(x, { quiet: true });
+        done.push(x.m);
+      } catch {
+        failed += 1;
+      }
+      sc.fixing.done = done.length + failed;
+      sc.changed(sc.fixing.done % 20 ? 'status' : undefined);
+    }
+    sc.fixing = null;
+    sc.lastAll = { list: done, undo };
+    sc.changed();
+    toast(`${fmt.count(done.length, 'album', 'albums')} fixed in Plex${failed ? `, ${fmt.number(failed)} couldn’t be` : ''}`, {
+      action: done.length ? 'Undo' : null,
+      timeout: 15000,
+      onAction: () => sc.undoAll(),
+    });
   };
-  if (found.includes('pending')) timer = setTimeout(again, waitAfter(trouble));
+
+  sc.undoAll = async () => {
+    if (sc.fixing) return;
+    const was = sc.lastAll;
+    sc.lastAll = null;
+    if (!was?.list.length) return;
+    const { list, undo } = was;
+    let back = 0;
+    let failed = 0;
+    sc.fixing = { what: 'Putting them back in Plex', done: 0, of: list.length };
+    sc.changed();
+    for (const m of list) {
+      try {
+        await undo(m, { quiet: true });
+        back += 1;
+      } catch {
+        failed += 1;
+      }
+      sc.fixing.done = back + failed;
+      sc.changed(sc.fixing.done % 20 ? 'status' : undefined);
+    }
+    sc.fixing = null;
+    toast(`${fmt.count(back, 'album', 'albums')} as they were in Plex${failed ? `, ${fmt.number(failed)} couldn’t be` : ''}`);
+    sc.changed();
+  };
+
+  sc.downloadList = () => {
+    const head = ['Artist', 'Album', 'Year in Plex', 'First year on MusicBrainz', 'Genres in Plex', 'Genres on MusicBrainz', 'MusicBrainz release group', 'Link'];
+    const rows = sc.albums
+      .map((m, i) => ({ m, g: sc.found[i] }))
+      .filter(({ m, g }) => known(g) && differs(m, g))
+      .map(({ m, g }) => [m.parentTitle, m.title, plexYear(m) || '', firstYear(g) || '', genresOf(m).join('; '), (g.genres || []).join('; '), g.id, mbLink(g)]);
+    download(toCsv(head, rows), `musicbrainz-fixes-${fileDate()}.csv`, 'text/csv;charset=utf-8');
+    toast('Downloaded, to open in a spreadsheet');
+  };
+
+  return sc;
 }

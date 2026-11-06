@@ -928,6 +928,12 @@ def mb_artists():
     return out
 
 
+def mb_group_genres(gid):
+    """A release group's genres, as MusicBrainz has them: [{ name, count }] (see MB_GROUP_GENRES)."""
+    title = next((al['title'] for al in albums if mb_id('group|' + al['parentTitle'] + '|' + al['title']) == gid), None)
+    return [{'name': g, 'count': n} for g, n in MB_GROUP_GENRES.get(title, [])]
+
+
 def mb_group_by_id(gid):
     """A release group, by its id: (artist's name, group), or (None, None)."""
     for a in artists:
@@ -1823,14 +1829,17 @@ class Handler(BaseHTTPRequestHandler):
             groups = other if other is not None else mb_groups(who) if who else []
             start = int(q.get('offset', ['0'])[0])
             size = int(q.get('limit', ['25'])[0])
-            return self.send_json_plain({'release-group-count': len(groups), 'release-groups': groups[start:start + size]})
+            listed = groups[start:start + size]
+            # (With inc=genres, each with its genres, as MusicBrainz has it.)
+            if 'genres' in re.split(r'[ +]', q.get('inc', [''])[0]):
+                listed = [dict(g, genres=mb_group_genres(g['id'])) for g in listed]
+            return self.send_json_plain({'release-group-count': len(groups), 'release-groups': listed})
         if p.startswith('/ws/2/release-group/'):
             gid = parts_of(p)[-1]
             _, group = mb_group_by_id(gid)
             if not group:
                 return self.not_found()
-            title = next((al['title'] for al in albums if mb_id('group|' + al['parentTitle'] + '|' + al['title']) == gid), None)
-            return self.send_json_plain(dict(group, genres=[{'name': g, 'count': n} for g, n in MB_GROUP_GENRES.get(title, [])]))
+            return self.send_json_plain(dict(group, genres=mb_group_genres(gid)))
         # (A server of the player's own: an album's releases, and a
         # release's tracks, to compare its tracks with: see
         # musicbrainz.js checkedAlbum.)
