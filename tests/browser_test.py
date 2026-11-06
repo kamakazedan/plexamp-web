@@ -8237,12 +8237,22 @@ with sync_playwright() as pw:
             check('mb: genres to fix: Add gives an album without any MusicBrainz\'s, locked, and Undo takes them off again',
                   added.get('genre[0].tag.tag') == 'Ambient' and added.get('genre[1].tag.tag') == 'Downtempo' and added.get('genre.locked') == '1'
                   and urllib.parse.unquote(taken.get('genre[].tag.tag-', '')) == 'Ambient,Downtempo', f'{added} {taken}')
-            # Fix all, and Undo for all of them.
+            # Fix all, and Undo for all of them. (Each change to Plex slowed
+            # here, to see the page while it's being made.)
             before = len(edits())
             fixing = len(years_listed)
+            js(page, """() => import('./js/state.js').then(({ app }) => { const s = app.server; s.__edit = s.editAlbum;
+                s.editAlbum = async (...a) => { await new Promise((r) => setTimeout(r, 400)); return s.__edit.apply(s, a); }; return true; })""")
             page.click('.mb-fix-years')
             page.locator('.sheet.open button', has_text='Fix them').click()
+            page.wait_for_function("() => /^Fixing in Plex/.test(document.querySelector('.mb-review-status')?.textContent || '')", timeout=5000)
+            while_fixing = js(page, """() => [document.querySelector('.mb-fix-genres')?.disabled, document.querySelectorAll('.mb-review-again').length,
+                [...document.querySelectorAll('.mb-genre-row button')].every((b) => b.disabled)]""")
             wait_for(lambda: len(edits()) >= before + fixing, 15, 0.3)
+            js(page, "() => import('./js/state.js').then(({ app }) => { app.server.editAlbum = app.server.__edit; return true; })")
+            page.wait_for_function("() => !document.querySelector('.mb-fix-genres')?.disabled", timeout=5000)
+            check('mb: ...one Fix all at a time: while it\'s being made, Add all and each Add wait, and Look again isn\'t offered',
+                  while_fixing == [True, 0, True], str(while_fixing))
             all_fixed = edits()[before:]
             page.wait_for_selector('.mb-undo-all', timeout=5000)
             undo_button = page.locator('.mb-undo-all').inner_text()

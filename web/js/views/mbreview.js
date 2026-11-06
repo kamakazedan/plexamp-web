@@ -24,6 +24,7 @@ import { norm } from '../missinglist.js';
 const PAGE = 1000; // albums (and artists) read from Plex at a time
 const ASK = 1000; // ...and asked about at a time
 const AGAIN_MS = 5000; // how often what's still being looked up is asked about again
+const AGAIN_SOON_MS = 3000; // ...or, where most were answered at once (a library looked through before), this soon
 const AGAIN_AT_MOST = 1000; // ...those first in line, at most, each time
 const SHOWN = 300; // of each list, on the page (Fix all, Add all and the download take in the rest)
 
@@ -35,6 +36,7 @@ const mbLink = (g) => `https://musicbrainz.org/release-group/${g.id}`;
 // open (see the header); let go when another server or library is chosen
 // (signing out, or switching user, loads the app afresh).
 let scan = null;
+const pages = new Set(); // the copies of the page open (kept in a tab's history too): each told of a new look
 const scanKey = () => (app.server && app.source ? `${app.source.serverId || app.source.uri}|${app.source.sectionKey}|${app.server.token}` : null);
 on('source', (change) => {
   if (!scan) return;
@@ -46,6 +48,13 @@ on('signout', () => stopScan());
 function stopScan() {
   scan?.stop();
   scan = null;
+}
+// A new look, for `key`: every copy of the page goes with it.
+function newScan(key) {
+  stopScan();
+  scan = startScan(key);
+  for (const page of pages) page(scan);
+  return scan;
 }
 
 export async function mbReviewView({ el, onDispose }) {
@@ -61,11 +70,7 @@ export async function mbReviewView({ el, onDispose }) {
   const key = scanKey();
   if (!key) return;
   // (One whose albums couldn't be read is started again.)
-  if (scan?.key !== key || scan.phase === 'failed') {
-    stopScan();
-    scan = startScan(key);
-  }
-  let sc = scan;
+  let sc = scan?.key !== key || scan.phase === 'failed' ? newScan(key) : scan;
 
   const status = h('p.hint.pad.mb-review-status', { role: 'status' });
   const leave = h('p.hint.pad.mb-review-leave', null, 'You can leave this page: it carries on, and picks up where it left off.');
@@ -105,8 +110,10 @@ export async function mbReviewView({ el, onDispose }) {
       'button.btn.btn-secondary.btn-small',
       {
         type: 'button',
+        disabled: !!sc.fixing,
         onclick: async (e) => {
           const button = e.currentTarget;
+          if (sc.fixing) return;
           button.disabled = true;
           try {
             await onClick();
@@ -136,14 +143,14 @@ export async function mbReviewView({ el, onDispose }) {
     const yearsShown = ys.slice(0, SHOWN).map((x) => [x.m.ratingKey, x.m.title, x.m.parentTitle, yearLine(x)]);
     const genresShown = gs.slice(0, SHOWN).map((x) => [x.m.ratingKey, x.m.title, x.m.parentTitle, genreLine(x)]);
     const over = sc.finished();
-    if (changedPart('actions', [sc.lastAll?.list.length || 0, !!(ys.length || gs.length), over])) {
+    if (changedPart('actions', [sc.lastAll?.list.length || 0, !!(ys.length || gs.length), over, !!sc.fixing])) {
       actions.replaceChildren(
         ...(over ? [h('button.btn.btn-secondary.mb-review-again', { type: 'button', onclick: () => lookAgain() }, icon('refresh', 20), h('span', null, 'Look again'))] : []),
         ...(sc.lastAll?.list.length
           ? [
               h(
                 'button.btn.btn-secondary.mb-undo-all',
-                { type: 'button', onclick: () => sc.undoAll() },
+                { type: 'button', disabled: !!sc.fixing, onclick: () => sc.undoAll() },
                 icon('refresh', 20),
                 h('span', null, `Undo the last ${fmt.count(sc.lastAll.list.length, 'fix', 'fixes')}`),
               ),
@@ -154,14 +161,15 @@ export async function mbReviewView({ el, onDispose }) {
           : []),
       );
     }
-    if (changedPart('years', [ys.length, yearsShown])) {
+    const busy = !!sc.fixing;
+    if (changedPart('years', [ys.length, yearsShown, busy])) {
       years.replaceChildren(
         ...(ys.length
           ? [
               h(
                 'section.block',
                 null,
-                sectionHeader(`Years (${fmt.number(ys.length)})`, null, h('button.link-btn.mb-fix-years', { type: 'button', onclick: () => sc.fixAll('year') }, 'Fix all')),
+                sectionHeader(`Years (${fmt.number(ys.length)})`, null, h('button.link-btn.mb-fix-years', { type: 'button', disabled: busy, onclick: () => sc.fixAll('year') }, 'Fix all')),
                 h(
                   'div.rows.mb-review-rows',
                   null,
@@ -173,14 +181,14 @@ export async function mbReviewView({ el, onDispose }) {
           : []),
       );
     }
-    if (changedPart('genres', [gs.length, genresShown, nothing, pending > 0])) {
+    if (changedPart('genres', [gs.length, genresShown, nothing, pending > 0, busy])) {
       genres.replaceChildren(
         ...(gs.length
           ? [
               h(
                 'section.block',
                 null,
-                sectionHeader(`Genres (${fmt.number(gs.length)})`, null, h('button.link-btn.mb-fix-genres', { type: 'button', onclick: () => sc.fixAll('genres') }, 'Add all')),
+                sectionHeader(`Genres (${fmt.number(gs.length)})`, null, h('button.link-btn.mb-fix-genres', { type: 'button', disabled: busy, onclick: () => sc.fixAll('genres') }, 'Add all')),
                 h(
                   'div.rows.mb-review-rows',
                   null,
@@ -198,13 +206,13 @@ export async function mbReviewView({ el, onDispose }) {
 
   // Looked through again from the start (the library as it is now: albums
   // added since, say), the answers the player kept coming back at once.
+  // (Not while a Fix all, Add all or Undo is being made.)
   let unlisten = null;
   function lookAgain() {
-    stopScan();
-    scan = startScan(key);
-    attach(scan);
+    if (!sc.fixing) newScan(key);
   }
   function attach(next) {
+    if (next.key !== key) return;
     unlisten?.();
     sc = next;
     for (const part of Object.keys(painted)) painted[part] = '';
@@ -212,7 +220,11 @@ export async function mbReviewView({ el, onDispose }) {
     render();
   }
   attach(sc);
-  onDispose(() => unlisten?.());
+  pages.add(attach);
+  onDispose(() => {
+    pages.delete(attach);
+    unlisten?.();
+  });
 }
 
 // A look through the library (see the header): reading its albums and
@@ -368,9 +380,10 @@ function startScan(key) {
   };
 
   // Those still being looked up, asked about, the first in line first (the
-  // player looks them up in order): straight away again where most of them
-  // were known (a library looked through before: see the header), or else
-  // in a few seconds, as the player gets through them.
+  // player looks them up in order): soon again where most of them were
+  // known (a library looked through before: see the header), or else in a
+  // few seconds, as the player gets through them. (Never straight away: the
+  // player takes 30,000 albums a minute from each account.)
   async function again() {
     sc.timer = null;
     if (sc.stopped) return;
@@ -387,7 +400,7 @@ function startScan(key) {
     sc.changed();
     if (!sc.found.includes('pending')) return;
     const answered = waiting.filter((j) => sc.found[j] !== 'pending').length;
-    sc.timer = setTimeout(again, err ? waitAfter(err) : answered * 2 >= waiting.length ? 0 : AGAIN_MS);
+    sc.timer = setTimeout(again, err ? waitAfter(err) : answered * 2 >= waiting.length ? AGAIN_SOON_MS : AGAIN_MS);
   }
 
   // Every album in the library: what Plex has of it (with Plex's
@@ -490,7 +503,9 @@ function startScan(key) {
 
   // All of them, one after another (and Undo, all of those: in a toast, and
   // on the page until it's used). Carried on with if the page is left.
+  // (One at a time: another, or an Undo, waits till it's done.)
   sc.fixAll = async (what) => {
+    if (sc.fixing) return;
     const [list, fix, undo, thing] = what === 'year' ? [yearRows(), fixYear, undoYear, 'year'] : [genreRows(), fixGenres, undoGenres, 'genres'];
     const sure = await confirmAction({
       title: `Fix ${fmt.count(list.length, 'album', 'albums')} in Plex?`,
@@ -498,11 +513,12 @@ function startScan(key) {
       confirm: 'Fix them',
       danger: false,
     });
-    if (!sure) return;
+    if (!sure || sc.fixing) return;
     const done = [];
     sc.lastAll = null;
     let failed = 0;
     sc.fixing = { what: 'Fixing in Plex', done: 0, of: list.length };
+    sc.changed();
     for (const x of list) {
       try {
         await fix(x, { quiet: true });
@@ -524,6 +540,7 @@ function startScan(key) {
   };
 
   sc.undoAll = async () => {
+    if (sc.fixing) return;
     const was = sc.lastAll;
     sc.lastAll = null;
     if (!was?.list.length) return;
@@ -531,6 +548,7 @@ function startScan(key) {
     let back = 0;
     let failed = 0;
     sc.fixing = { what: 'Putting them back in Plex', done: 0, of: list.length };
+    sc.changed();
     for (const m of list) {
       try {
         await undo(m, { quiet: true });

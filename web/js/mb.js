@@ -62,7 +62,10 @@ export const MISSING_KINDS = ['albums', 'singles', 'compilations', 'soundtracks'
 const PER_MINUTE = 90;
 const BACKGROUND_PER_MINUTE = 60;
 const asked = []; // when the last ones were asked (performance.now()), oldest first
-let notBefore = 0;
+// (After a "too many" from the player, for what it was asking: its albums
+// a minute are counted apart, so an artist's page isn't held up by a look
+// through the library.)
+const notBefore = new Map(); // what was asked ('albums', 'artist') -> when it may be asked again
 // (Its watch on `signal` goes with it: a long look through the library
 // waits many times on one signal.)
 const sleep = (ms, signal) =>
@@ -80,13 +83,13 @@ const sleep = (ms, signal) =>
     signal?.addEventListener('abort', stop, { once: true });
   });
 const busy = (wait) => Object.assign(new Error('MusicBrainz is busy just now.'), { status: 429, mb: true, retryAfter: Math.max(1, Math.ceil(wait / 1000)) });
-async function myTurn(signal, { background = false, now = false } = {}) {
+async function myTurn(path, signal, { background = false, now = false } = {}) {
   const most = background ? BACKGROUND_PER_MINUTE : PER_MINUTE;
   for (;;) {
     const t = performance.now();
     while (asked.length && t - asked[0] >= 60000) asked.shift();
     // (Till fewer than `most` were asked in the last minute.)
-    const wait = Math.max(notBefore - t, asked.length >= most ? asked[asked.length - most] + 60000 - t : 0);
+    const wait = Math.max((notBefore.get(path) || 0) - t, asked.length >= most ? asked[asked.length - most] + 60000 - t : 0);
     if (wait <= 0) {
       asked.push(t);
       return;
@@ -101,7 +104,7 @@ async function myTurn(signal, { background = false, now = false } = {}) {
 const MB_TIMEOUT = 40000;
 async function call(path, body, { signal, background = false, now = false } = {}) {
   for (let tries = 0; ; tries += 1) {
-    await myTurn(signal, { background, now });
+    await myTurn(path, signal, { background, now });
     let res;
     try {
       res = await serviceFetch(`api/musicbrainz/${path}`, { method: 'POST', body, signal, timeout: MB_TIMEOUT, server: true });
@@ -111,7 +114,7 @@ async function call(path, body, { signal, background = false, now = false } = {}
     }
     if (res.status === 429) {
       const secs = Number(res.headers.get('retry-after')) || 30;
-      notBefore = Math.max(notBefore, performance.now() + Math.min(300, Math.max(1, secs)) * 1000);
+      notBefore.set(path, Math.max(notBefore.get(path) || 0, performance.now() + Math.min(300, Math.max(1, secs)) * 1000));
       if (tries < 2 && !now) continue;
     }
     const { data } = res;

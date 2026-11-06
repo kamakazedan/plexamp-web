@@ -1431,6 +1431,24 @@ test('MusicBrainz: a server of your own is asked four things at once at most (fr
   assert.equal(most, 1);
 });
 
+test('MusicBrainz: musicbrainz.org is never asked twice within a second, however busy the service is a moment (from 0.38.0)', async () => {
+  const starts = [];
+  const fetchImpl = async () => {
+    starts.push(Date.now());
+    return jsonAnswer({ artists: [] });
+  };
+  const pub = new MusicBrainz({ base: 'https://musicbrainz.org', fetchImpl });
+  const asks = [1, 2, 3].map((i) => pub.ask('/ws/2/artist', { query: `x${i}` }));
+  // (The service held up for 1.3 seconds while the second waits its turn:
+  // writing what's kept, say.)
+  setTimeout(() => {
+    const t = Date.now();
+    while (Date.now() - t < 1300);
+  }, 600);
+  await Promise.all(asks);
+  assert.ok(starts.slice(1).every((t, i) => t - starts[i] >= MB_LIMITS.gapMs - 5), starts.map((t) => t - starts[0]).join(','));
+});
+
 test('MusicBrainz features: on a server of your own, albums are looked up several at once (from 0.38.0), each artist\'s by one worker, and those checked by their tracks first', async () => {
   const artists = [61, 62, 63, 64, 65].map(MB_ID);
   const groups = Object.fromEntries(
@@ -1493,6 +1511,12 @@ test('MusicBrainz features: each album\'s answer is kept by itself (from 0.38.0)
     assert.deepEqual(await mb.albums(items, { genres: true, who: 'user|sam' }), ['pending', 'pending']);
     const got = await mb.albums(items, { genres: true, waitMs: 3000, who: 'user|sam' });
     assert.deepEqual([got[0]?.title, got[0]?.genres, got[1]], ['Ágætis byrjun', ['Post-Rock', 'Dream Pop'], null]);
+    // None found without asking (a title or a year anyone can make up, of an
+    // artist known) isn't kept: only once looked up in its turn.
+    const size = kept.answers.size;
+    assert.deepEqual(await mb.albums([{ artist: 'Sigur Rós', title: 'Made Up' }, { artist: 'Sigur Rós', title: 'Ágætis byrjun', year: 1999 }], { genres: true }), [null, got[0]]);
+    assert.equal(kept.answers.size, size + 1, 'an album found is kept; none, not');
+    kept.dropAnswer([...kept.answers.keys()].pop());
     // What MusicBrainz said of the artist let go (a library of tens of
     // thousands of albums asks about more than that keeps): the albums'
     // answers are still there.

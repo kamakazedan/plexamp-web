@@ -114,6 +114,7 @@ export class MusicBrainz {
     this.running = 0; // ...under way now
     this.turns = []; // ...and those waiting for one to end, first in line first (see inTurn)
     this.nextAt = 0; // when the next request may go (see asked)
+    this.lastStart = 0; // ...and when the last one went
     this.waiting = 0; // requests someone's waiting on (the background waits for them)
     // The advanced features (see advanced()): what's kept of them, and
     // what's waiting to be looked up in the background.
@@ -161,13 +162,18 @@ export class MusicBrainz {
       // turned away until it said to come back.)
       if (Date.now() < this.quietUntil) throw this.busy(this.quietUntil - Date.now());
       // (Its start is set as it's next in line, so those under way at once
-      // still start gapMs apart.)
+      // still start gapMs apart; and never sooner than that after the last
+      // one went, however late it woke: the service busy a moment, writing
+      // what's kept, say, doesn't bunch them up.)
       const at = Math.max(Date.now(), this.nextAt);
       this.nextAt = at + this.gapMs;
       if (at > Date.now()) await new Promise((r) => setTimeout(r, at - Date.now()));
+      while (Date.now() < this.lastStart + this.gapMs) await new Promise((r) => setTimeout(r, this.lastStart + this.gapMs - Date.now()));
       if (signal?.aborted) throw new Gone();
       if (Date.now() < this.quietUntil) throw this.busy(this.quietUntil - Date.now());
       const started = Date.now();
+      this.lastStart = started;
+      this.nextAt = Math.max(this.nextAt, started + this.gapMs);
       const url = `${this.base}${path}?${new URLSearchParams({ ...params, fmt: 'json' })}`;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), MB_LIMITS.timeoutMs);
@@ -830,7 +836,9 @@ export class MusicBrainz {
       const kept = key ? this.adv.answer(key) : undefined;
       if (kept !== undefined) return kept;
       const v = this.knownAlbum(it.artist, it.title, how(it));
-      if (v !== undefined) return key ? this.adv.setAnswer(key, v) : v;
+      // (Kept where it's an album: none, for a title or a year anyone can
+      // make up, is kept only once looked up, in its turn: see worker.)
+      if (v !== undefined) return key && v ? this.adv.setAnswer(key, v) : v;
       return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
     };
     let out = items.map(answer);
@@ -1138,6 +1146,7 @@ export class MBKept {
   // MusicBrainz said of artists and release groups, so a library of tens of
   // thousands looked through again is answered at once, from where it got
   // to, however much else was looked up since.
+  // (The least lately read go first, where there are more than are kept.)
   answer(key) {
     const hit = this.answers.get(key);
     if (!hit) return undefined;
@@ -1145,6 +1154,8 @@ export class MBKept {
       this.dropAnswer(key);
       return undefined;
     }
+    this.answers.delete(key);
+    this.answers.set(key, hit);
     return hit.v;
   }
 
