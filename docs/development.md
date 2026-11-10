@@ -10,9 +10,21 @@ python3 dev/mock-ollama.py         # a fake Ollama on :11434 (switches for tests
 python3 -m http.server 8080 -d web
 ```
 
-Open http://127.0.0.1:8080, choose **Use a server address and token instead**, and connect to `http://127.0.0.1:32400` with the token `t`. The mock serves an invented library with generated artwork and short test tones, live notifications over a WebSocket and an event stream, three made-up Plex accounts (`t`, `t2` and `t3`) for Play Together and shared playlists, a Plex player called Living Room on port 32500 for Play on, a small MusicBrainz, converted streams as a real server's (HLS of silent MP3, which `/__mock/hls` can stop part-way or cut short), and test switches (such as refusing WebSockets the way a proxy would) described at the top of the file. `python3 dev/mock-plex.py 32401 --big 3000` adds 3,000 albums, for trying long lists. `--open` makes it a server that lets the player in without signing in (taking everyone for its owner, or with `--honour`, only sign-ins it doesn't know), and `--tv-down` has its plex.tv stop answering, for offline mode (both can be switched at `/__mock/config` too). The mocks listen on 127.0.0.1 only: `--host 0.0.0.0` (the address to listen on) where the app runs in a container of its own, as CI's does. For AI features, choose **Settings › AI › My own Ollama server** and enter `http://127.0.0.1:11434`.
+Open http://127.0.0.1:8080, choose **Use a server address and token instead**, and connect to `http://127.0.0.1:32400` with the token `t`.
 
-Served like this, without the container, there's no `/api/`, so Play Together, Play on with Plex players, shared playlists and the shared AI model are off. The full set runs in the container; for testing, `PLEX_TV_URL` points its service at the mock instead of plex.tv, `MUSICBRAINZ_URL` at the mock's MusicBrainz, and `SPOTIFY_URL` (with `SPOTIFY_LINK_IMPORT=true`) at the mock's Spotify playlist pages instead of open.spotify.com. To play converted tracks outside the container in browsers without built-in HLS, run `sh dev/fetch-hls.sh` once (it needs npm).
+The mock is a made-up Plex server, with:
+
+- a library with generated artwork and short test tones (`--big 3000` adds 3,000 albums, for long lists);
+- live notifications over a WebSocket and an event stream;
+- three Plex accounts (`t`, `t2` and `t3`) for Play Together and shared playlists;
+- a Plex player called Living Room on port 32500, for Play on;
+- a small MusicBrainz, and Spotify playlist pages;
+- converted streams as a real server's (`/__mock/hls` can stop one part-way);
+- test switches (refusing WebSockets as a proxy would, say), described at the top of the file.
+
+`--open` makes it a server that lets the player in without signing in, and `--tv-down` has its plex.tv stop answering, for offline mode. The mocks listen on 127.0.0.1 only: `--host 0.0.0.0` where the app runs in a container of its own. For AI features, choose **Settings › AI › My own Ollama server** and enter `http://127.0.0.1:11434`.
+
+Served like this, without the container, there's no `/api/`: Play Together, Play on, shared playlists and the shared AI model are off. In the container, for testing, `PLEX_TV_URL` points the service at the mock instead of plex.tv, `MUSICBRAINZ_URL` at its MusicBrainz, and `SPOTIFY_URL` (with `SPOTIFY_LINK_IMPORT=true`) at its Spotify pages. To play converted tracks outside the container in browsers without built-in HLS, run `sh dev/fetch-hls.sh` once (it needs npm).
 
 To use your own Plex server, enter its address and your [X-Plex-Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/), or sign in with Plex.
 
@@ -29,9 +41,8 @@ sh docker/test-container.sh plexamp-web:test     # proxies, sign-in checks, logg
 sh tests/run-browser-tests.sh plexamp-web:test   # headless Chromium (needs Playwright)
 ```
 
-Most browser tests turn loudness levelling and Load ahead off as they sign in, as the app had them before 0.20.0. `APP_DEFAULTS=1 sh tests/run-browser-tests.sh plexamp-web:test` runs them all with the app's own settings instead: worth a run before a release.
-
-The version in `web/js/plex.js` (`APP_INFO`) must match the newest entry in [CHANGELOG.md](../CHANGELOG.md).
+- Most browser tests turn loudness levelling and Load ahead off as they sign in. `APP_DEFAULTS=1 sh tests/run-browser-tests.sh plexamp-web:test` runs them with the app's own settings: worth a run before a release.
+- The version in `web/js/plex.js` (`APP_INFO`) must match the newest entry in [CHANGELOG.md](../CHANGELOG.md).
 
 ## How the code is laid out
 
@@ -53,6 +64,7 @@ web/
   js/sharing.js          shared playlists: keeping your copies the same as everyone's
   js/sorting.js          sorting playlists and collections with the fewest moves
   js/membership.js       Appears in: the albums a song is on, and the playlists and collections it's in (or an artist's music is)
+  js/originals.js        Popular tracks: each song's original copy, of those the library has
   js/hubs.js             Plex's rows for an artist's page: their releases by kind, and what they appear on
   js/releases.js         what kind of release an album is: the same file as server/releases.js
   js/mb.js               the MusicBrainz features (MUSICBRAINZ_ADVANCED)

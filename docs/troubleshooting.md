@@ -1,62 +1,81 @@
 # Troubleshooting
 
-Start with [debug mode](configuration.md#debug-mode): most set-up problems show up in the container log with it on.
+Start with [debug mode](configuration.md#debug-mode): most problems show up in the container log with it on.
 
 ## Connecting
 
-- **"Can't reach your Plex server"**: check the server is online and Remote Access is on in Plex, or set `PLEX_SERVER_URL`. **Settings › Connection › Test connection** says which route is in use, how long the server took to answer, and, through the container, whether it's the container or the server behind it that didn't answer.
-- **Every route but the container's "Didn't answer this browser"**, and servers shared with you can't be reached, though their addresses open in a tab: that was 0.16.0, which tested routes without your sign-in, and Plex servers don't answer a browser then. Update to 0.17.0 or later.
-- **The connection isn't local at home** (**Settings › Connection** says Remote, Plex relay or Through this container): the browser can't use the server's local address, and **Test connection** shows which routes answered. Usually the router won't look up `*.plex.direct` addresses that point into the home network (DNS rebinding protection), the browser keeps a page from the internet out of the home network (Chrome asks first: allow it, and the app can go straight there), or Plex runs in Docker and gives out an address only Docker can reach. With `PLEX_SERVER_URL` set, the app goes through the container instead (see [configuration.md](configuration.md#reaching-your-plex-server)).
-- **The log says your Plex server "lets this container in without signing in"**: the container's address is in Plex's list of networks allowed without signing in (**Settings › Network** in Plex), as offline mode needs (see [configuration.md](configuration.md#offline-mode)). Then each request from anyone but you is checked with your server first, and goes through only if the server knows them as themselves. If you didn't mean it to be on the list, take it out.
-- **Friends are refused through the player**, and the log says the server "took someone else's Plex sign-in, from this container, for yours", or that it "can't be asked whether it knows someone else's sign-in as theirs": your Plex server takes everything from the player's address for yours, whoever's signed in (or doesn't show even you its settings and who's playing, so it can't be asked who they are), so only you can use it through the player while the player's on its list of networks allowed without signing in. Take it out (there's no offline mode then), or let friends reach the server another way (straight to it, or over the internet).
-- **Nothing gets through the player to your server but your own sign-in, and the log says "PLEX_SERVER_URL's name … has more than one address, or has just changed address"**: nginx takes turns between those addresses (or still has the old one, for up to 30 seconds), so the player can't ask your server how it will take each request. Use one fixed address in `PLEX_SERVER_URL` (the server's own, as `http://192.168.1.10:32400`). After a change of address it passes in a minute.
-- **Nothing gets through the player to your server but your own sign-in, and the debug log says the server "answered 403 to a request without a sign-in"** (or another answer than 401): `PLEX_SERVER_URL` is something in front of your server that turns such requests away, not the server itself, so the player can't tell whether the server lets it in. Use the server's own address.
-- **A phone at home can't reach the player while your internet's down**: with the Wi-Fi not reaching the internet, Android can send everything over mobile data instead, which can't reach your home network. Turn mobile data off for a while (or, when the phone asks, choose to stay on the Wi-Fi without internet), and the player answers again.
-- **"plex.tv isn't answering this player"** on the sign-in page: the container can't reach plex.tv, so nobody can sign in with Plex just now. Those signed in already carry on (see [Offline mode](configuration.md#offline-mode)), and with `OFFLINE_PWD` set, the player's offline password can be used.
-- **nginx won't start, saying `"resolver" directive is duplicate`** (on Proxmox VE, with other sites in the container's nginx): with `PLEX_SERVER_URL` a name, the player sets nginx's resolver for the whole of nginx, so its requests and the player's own checks share what it looks up; another site setting its own at that level clashes. Move that one into its own `server` block, or use an address in `PLEX_SERVER_URL`.
-- **The log says it "couldn't check the Plex server at PLEX_SERVER_URL"**, and nothing works through the container: its certificate can't be checked (a self-signed one, or one for another name), so the container can't tell whether the server would let anyone in, and lets nobody through. Use the server's `http://` address, or its network address with Plex's own certificate (`https://192.168.1.10:32400`).
-- **"Too many sign-ins checked from your network"**: the container checks sign-ins it hasn't seen in the last 15 minutes with plex.tv, 30 a minute from each address. Everyone behind one reverse proxy shares its address, so many people opening the player at once can see this: wait a minute.
-- **Live updates say they're checking every minute**: a proxy is blocking both WebSockets and the event stream. Everything still works; changes just take up to a minute to appear.
+| What you see | What to do |
+| --- | --- |
+| **"Can't reach your Plex server"** | Check the server's on and Remote Access is on in Plex, or set `PLEX_SERVER_URL`. **Settings › Connection › Test connection** shows which route answered, and how fast. |
+| **Not local at home** (Settings › Connection says Remote, Plex relay or Through this container) | The browser can't use the server's local address. Usually: the router blocks `*.plex.direct` addresses (DNS rebinding protection), Chrome is asking to allow local access (allow it), or Plex in Docker gives out an address only Docker can reach. `PLEX_SERVER_URL` gives a route through the player. |
+| **A phone at home can't reach the player while your internet's down** | Android sends everything over mobile data when Wi-Fi has no internet. Turn mobile data off for a while, or choose to stay on the Wi-Fi when the phone asks. |
+| **"plex.tv isn't answering this player"** on the sign-in page | Nobody can sign in with Plex just now. Those signed in carry on (see [Offline mode](configuration.md#offline-mode)), and with `OFFLINE_PWD` set, the offline password works. |
+| **"Too many sign-ins checked from your network"** | Many people opened the player at once from one address (everyone behind one reverse proxy shares one). Wait a minute. |
+| **Live updates say they check every minute** | A proxy blocks both WebSockets and the event stream. Everything works; changes just take up to a minute to show. |
+
+### Through the player (`PLEX_SERVER_URL`)
+
+| What the log says | What to do |
+| --- | --- |
+| **"couldn't check the Plex server at PLEX_SERVER_URL"** | Its certificate can't be checked (self-signed, or for another name), so nothing goes through. Use `http://`, or its address with Plex's own certificate (`https://192.168.1.10:32400`). |
+| **"lets this container in without signing in"** | The player's address is on Plex's list of networks allowed without signing in, as offline mode needs. Each request from anyone but you is then checked with your server first. Not meant? Take it off the list. |
+| **"took someone else's Plex sign-in, from this container, for yours"** | Your server takes everything from the player's address as yours, so only you get through while it's on that list. Take it off (no offline mode then), or let friends reach the server another way. |
+| **"PLEX_SERVER_URL's name … has more than one address"** | Only you get through. Use the server's one fixed address (`http://192.168.1.10:32400`). After a change of address, it passes in a minute. |
+| **"answered 403 to a request without a sign-in"** | `PLEX_SERVER_URL` points at something in front of your server, not the server. Use the server's own address. |
+| **nginx won't start: `"resolver" directive is duplicate`** (Proxmox VE, with other sites in its nginx) | Another site sets nginx's resolver for all of nginx. Move it into its own `server` block, or use an address in `PLEX_SERVER_URL`. |
 
 ## Listening
 
-- **Some tracks won't play**: check **Settings › Connection › Browser formats**. Formats the browser can't play need your server to convert them.
-- **"Can't play … Skipping." part-way through tracks the server converts** (a Streaming quality below Original, or a format the browser can't play): before 0.18.1, one dropped connection (some office proxies drop them now and then) or a stream the server stopped was enough. Update. A stream that fails is now tried again, then started again from where it got to (at most a moment's gap), and a track is only skipped if its stream keeps failing at the same place. If it still happens, turn on [debug mode](configuration.md#debug-mode): the container's log says which part of the stream failed, what the server answered (`HTTP 404`: the server stopped the stream; `no answer`: the connection dropped), and what the player did. Blocked WebSockets don't affect playback: only live updates use them.
-- **The sound cuts out and play/pause flickers, often in a track's last 30 seconds**: playback is waiting for data, on a connection that can't keep up (playing from home at work, say: your home upload speed is the limit). The last 30 seconds are when the next track starts loading for a crossfade or a gapless change; since 0.18.3 it waits until the track playing has loaded to its end, and a crossfade waits until the next track has something to play. **Settings › Playback › Load ahead** (from 0.19.0) loads the next tracks in full well before they're due. A lower **Streaming quality** needs less (320 kbps is about a third of a CD-quality FLAC). With [debug mode](configuration.md#debug-mode) on, the container's log says each time playback waited, for how long and how much was buffered.
-- **Stutters now and then, at no point in particular**: turn on [debug mode](configuration.md#debug-mode), and note when one happens. A line such as `waited 0.15 s for “Song” at 61.4 s` at that time says playback ran out of data: `as it comes from the server` there points at the connection (see above), `from memory` at the computer, which had the whole track. No line at all says the player didn't wait: the sound broke up after it (Bluetooth headphones in a busy office, say), or the computer was too busy (`held up for` lines say when the page was).
-- **Playback stops when the phone locks**: add the player to your home screen, and check the browser isn't held back by battery-saving settings.
-- **Smart crossfade waits for the very end of tracks**: it needs Plex's loudness analysis (see [features.md](features.md#good-to-know)).
-- **The browser uses a lot of memory**: open an issue saying which browser, how big your library is and what you were doing; in Firefox, the numbers from `about:memory` (Measure) help most.
+| What you see | What to do |
+| --- | --- |
+| **Some tracks won't play** | Check **Settings › Connection › Browser formats**. Formats the browser can't play need your server to convert them. |
+| **The sound cuts out, often near a track's end** | The connection can't keep up (playing from home at work, say: your home upload is the limit). Turn on **Settings › Playback › Load ahead**, or choose a lower **Streaming quality** (320 kbps is about a third of a CD-quality FLAC). |
+| **A stutter now and then** | Turn on debug mode and note when it happens. A line like `waited 0.15 s for “Song”` means playback ran out of data: `as it comes from the server` points at the connection, `from memory` at the computer. No line means the player didn't wait: it's after the player (Bluetooth headphones, say). |
+| **"Can't play … Skipping." in converted tracks** | A stream that fails is tried again, and started again where it got to. If it keeps happening, the debug log says which part failed and what the server answered. |
+| **Playback stops when the phone locks** | Add the player to your home screen, and check the browser isn't held back by battery saving. |
+| **Smart crossfade waits for the very end** | It needs Plex's loudness analysis (see [features.md](features.md#good-to-know)). |
+| **The browser uses a lot of memory** | Open an issue with the browser, your library's size and what you were doing (in Firefox, `about:memory` helps). |
 
-- **Settings don't follow you to another device**: they're kept for your Plex account by the player, so both need the same player address, signed in to the same Plex account. Check **Settings › Account › On all your devices** is on. The container's log says when it starts if they're off for everyone (`settings that follow each account are off: …`): `SYNC_SETTINGS=false`, or something about the `/data` folder. Streaming quality, connection settings, the player name, sharing with your devices, playback speed, Load ahead and your own AI server are each device's own on purpose.
-- **Missing tracks aren't on another device, or your friends' aren't on yours**: the player keeps them for each Plex account, so both need the same player address, signed in to the same Plex account; friends' are for the server's owner (plex.tv says who that is), and appear once their browser has sent them (an import with Put what isn't here on Missing tracks, or an AI playlist made with Show missing tracks on), on 0.25.0 or later: before, a friend had to turn on Keep them for your Plex account. Opening Missing tracks reads them again. The container's log says when it starts if they're off for everyone (`missing tracks that follow each account are off: …`): `SYNC_MISSING_TRACKS=false`, or something about the `/data` folder. What was asked for an AI playlist, and Spotify playlists' names, are only ever on the device that asked, on purpose.
+## Settings and lists
+
+| What you see | What to do |
+| --- | --- |
+| **Settings don't follow you** | Both devices need the same player address and Plex account, with **Settings › Account › On all your devices** on. The log says at start-up if they're off for everyone (`SYNC_SETTINGS=false`, or a problem with `/data`). Some settings are each device's own on purpose: see [features.md](features.md#settings-in-the-app). |
+| **Missing tracks aren't on another device** | Same player address and Plex account on both. Friends' show for the server's owner once their browser has sent them. The log says at start-up if they're off for everyone. |
+| **The log says it "couldn't read" a file in `/data`** | The file was damaged (a disk problem, say). The player starts without it, and keeps the damaged one beside it, as `<name>.unreadable-…`. |
 
 ## With friends
 
-- **Play Together shows no friends**: friends come from plex.tv, so they need to be your Plex friends, sharing your library. "Can't play from …" means they don't have access to this server. With `PLEX_SERVER_URL` set, Play Together, your devices and shared playlists are for people who can use that server: anyone else gets "You can't play from that Plex server".
-- **A friend can't join**: they must open the same player address, sign in with Plex, and have your music library shared with them.
-- **A friend doesn't see a playlist you shared**: they find it on the Playlists tab, under Shared with you, signed in with Plex on the same player address. "Can't play from …" in the share list means your server isn't shared with them in Plex.
-- **No Share with friends… in a playlist's menu**: shared playlists are off. The container's log says why when it starts (`shared playlists are off: …`): `PLAYLIST_SHARING=false`, or something about the `/data` folder, such as other files in it (give shared playlists a volume of their own).
-- **Shared playlists went after an update**: the container had no volume at `/data` (its log says so when it starts). Add one, as in `docker-compose.yml`. Everyone still has their copy, as an ordinary playlist: share it again.
-- **The log says it "couldn't read" a file in `/data`, "so it's kept aside"**: the file was damaged (a disk problem, say), so the player starts without what it held, rather than writing over it, and keeps it as it was beside the new one (`shares.json.unreadable-` and when, say). From 0.37.0 each is written in full before it takes the old one's place, so a power cut can't leave one half written (but `musicbrainz.json`, which only saves asking MusicBrainz again: its answers are asked for again).
+| What you see | What to do |
+| --- | --- |
+| **Play Together shows no friends** | They need to be your Plex friends, with your library shared with them. "Can't play from …" means they don't have access to this server. |
+| **A friend can't join, or doesn't see a shared playlist** | They need the same player address, signed in with Plex, with your music library shared with them. Shared playlists are on their Playlists tab, under Shared with you. |
+| **No Share with friends… in a playlist's menu** | Shared playlists are off. The log says why at start-up (`PLAYLIST_SHARING=false`, or a problem with `/data`, such as other files in it). |
+| **Shared playlists went after an update** | The container had no volume at `/data`. Add one, as in `docker-compose.yml`. Everyone still has their copy: share it again. |
 
 ## Play on
 
-- **No Plex players are listed**: Play on with Plex players needs `PLEX_SERVER_URL`, and only the server's owner sees them. The player must be signed in to your Plex account, switched on, and on the same network as the container, and Plex has to know its address there (a player only Plex's relay can reach, or one inside another Docker network, doesn't show).
-- **A Plex player is listed but doesn't respond**: check it's still on the same network and allows remote control, and turn on debug mode to see what it answered.
+| What you see | What to do |
+| --- | --- |
+| **No Plex players listed** | It needs `PLEX_SERVER_URL`, and only the server's owner sees them. The player must be on, signed in to your Plex account, and on the same network as the container. |
+| **A Plex player doesn't respond** | Check it's still on that network and allows remote control. The debug log says what it answered. |
 
-## AI
+## AI and MusicBrainz
 
-- **"Ollama is running, but doesn't allow …"** with your own server: its `OLLAMA_ORIGINS` doesn't list the player's address. **How to allow this site**, in Settings › AI, has the commands (see [ai.md](ai.md#your-own-ollama-on-one-device)); Ollama has to be restarted after. **"No answer from Ollama"**: check it's running, and that this device can reach it.
-- **Years and genres to fix takes hours**: each artist's albums are looked up on MusicBrainz (and, on a server of your own, each album that would be fixed, by its tracks), once a second at most on musicbrainz.org (its rule: a few hours for a library of 25,000 albums), and on a server of your own four at once, ten a second at most. It keeps going while the app's open, on any page. Close the app (or the browser) and it stops, once the player's looked up the albums it had been asked about; the next look, in this browser or another, picks up where that got to (from 0.38.0): it reads your albums from Plex again, then catches up with what it already knows, which is quick, before checking the rest.
-- **Years and genres to fix says albums "couldn't be checked: searching your MusicBrainz server finds no one"**: your MusicBrainz mirror's search indexes aren't built (or are empty). Albums whose artist Plex has matched (with a MusicBrainz id) are found anyway; for the rest, build the mirror's search indexes (musicbrainz-docker: see its README on indexing).
-- **"The AI service couldn't confirm your Plex sign-in"**: sign out and in again. With `PLEX_SERVER_URL` set, only people with access to that server can use the shared model; anyone else can use an Ollama of their own (**Settings › AI › My own Ollama server**).
-- **AI answers are slow**: the first request loads the model, which can take a minute on modest hardware, and several after Ollama has just started. The model then stays loaded for 15 minutes.
-- **"The AI model was still loading after 5 minutes"**: it carries on loading, so try again in a minute or two. If it happens often (a big model, or a slow disk), give it longer in **Settings › AI › Wait for the model**.
-- **"Not all could be checked on MusicBrainz"**: musicbrainz.org limits how often each internet address asks, and says it's busy when that's used up (by something else on your network too). The container needs to reach `musicbrainz.org`. With your own MusicBrainz, "Searching it needs its search indexes" means just that: build or download them.
+| What you see | What to do |
+| --- | --- |
+| **"Ollama is running, but doesn't allow …"** (your own Ollama) | Its `OLLAMA_ORIGINS` doesn't list the player's address. **How to allow this site**, in Settings › AI, has the commands. Restart Ollama after. |
+| **"No answer from Ollama"** | Check it's running, and that this device can reach it. |
+| **"The AI service couldn't confirm your Plex sign-in"** | Sign out and in again. With `PLEX_SERVER_URL` set, only people who can use that server can use the shared model; anyone can use their own Ollama. |
+| **AI answers are slow, or "still loading after 5 minutes"** | The first request loads the model (minutes, on modest hardware). It then stays loaded for 15 minutes. For a big model, raise **Settings › AI › Wait for the model**. |
+| **Years and genres to fix takes hours** | musicbrainz.org allows one request a second (a few hours for 25,000 albums). A mirror of your own is much quicker. In debug mode, the log says how quickly MusicBrainz is answering, once a minute. The check stops when the app's closed, and catches up quickly next time. |
+| **"Searching your MusicBrainz server finds no one"** | Your mirror's search indexes aren't built. Albums Plex has MusicBrainz ids for are still found; build the indexes for the rest (see musicbrainz-docker's README). |
+| **"Not all could be checked on MusicBrainz"** | musicbrainz.org limits each internet address, and said it's busy. Or, with your own mirror, "Searching it needs its search indexes": build them. |
 
 ## Proxmox VE
 
-- **`update-plexamp-web` isn't found** in a container installed with 0.10.0 or 0.11.0: run `pct exec <ID> -- /usr/local/bin/update-plexamp-web` once, and the short form works from then on.
-- **An update stops, or you want to see what it does**: `pct exec <ID> -- update-plexamp-web --verbose` shows every step, the tools' own output, and the line it stopped at (from 0.16.1 or earlier: `pct exec <ID> -- env PW_VERBOSE=1 update-plexamp-web`). The first install takes `PW_VERBOSE=1` before `bash -c` too.
-- **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`.
+| What you see | What to do |
+| --- | --- |
+| **`update-plexamp-web` isn't found** (installed with 0.10.0 or 0.11.0) | Run `pct exec <ID> -- /usr/local/bin/update-plexamp-web` once. |
+| **An update stops** | `pct exec <ID> -- update-plexamp-web --verbose` shows every step, and where it stopped. |
+| **Where's the log?** | `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. |

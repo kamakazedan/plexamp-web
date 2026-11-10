@@ -1408,7 +1408,24 @@ with sync_playwright() as pw:
         # Searching for an artist: their popular tracks first, and tracks
         # before albums.
         gh_id = next(a['ratingKey'] for a in mock('/library/sections/1/all?type=8&X-Plex-Token=t')['MediaContainer']['Metadata'] if a['title'] == 'Glass Harbour')
-        popular = [m['title'] for m in mock(f'/library/sections/1/all?type=10&artist.id={gh_id}&sort=ratingCount:desc&ratingCount%3E%3E=0&X-Plex-Container-Size=10&X-Plex-Token=t')['MediaContainer']['Metadata']]
+
+        # (Each song once, the most popular first, as the app lists them: a
+        # copy whose title says which version it is only where there's no
+        # other. See originals.js: this artist's titles say nothing else in
+        # their asides, so what's before them is the song.)
+        def popular_songs(rows, n):
+            aside = re.compile(r'[(\[]|\s[-–—:]\s')
+            song = lambda t: re.sub(r'[^a-z0-9]+', ' ', re.sub(r'\([^)]*\)|\[[^\]]*\]', ' ', re.split(r'\s+[-–—:]\s+', t)[0].lower())).strip()
+            order, pick = [], {}
+            for m in rows:
+                k = song(m['title'])
+                if k not in pick:
+                    order.append(k)
+                    pick[k] = m['title']
+                elif aside.search(pick[k]) and not aside.search(m['title']):
+                    pick[k] = m['title']
+            return [pick[k] for k in order[:n]]
+        popular = popular_songs(mock(f'/library/sections/1/all?type=10&artist.id={gh_id}&sort=ratingCount:desc&ratingCount%3E%3E=0&X-Plex-Container-Size=300&X-Plex-Token=t')['MediaContainer']['Metadata'], 10)
         page.fill('.search-box input', 'glass harbour')
         wait_for(lambda: page.locator('.search-tracks .track').count() > 0, 8)
         shown = page.locator('.search-tracks .track .track-title').all_inner_texts()
@@ -1879,6 +1896,57 @@ with sync_playwright() as pw:
                   f'{more_by} {group("Singles & EPs")} {group("Albums")}')
         finally:
             mock(f"/__mock/add-artist?remove={only_eps['ratingKey']}")
+
+        # Popular tracks: each song's original copy, wherever the library has
+        # several, whatever Plex's order (the same popularity for each copy,
+        # as Plex's is the song's): the studio album's, not a compilation's, a
+        # live album's or one from an album of new recordings of the hits (its
+        # tracks other lengths); and without the studio album, the
+        # compilation's (its recordings the originals), not the new ones.
+        songs = ['Morning Song', 'Tidewater', 'Copperline', 'Late Bloom']
+        copies = lambda name, albums: mock(
+            f'/__mock/add-artist?name={urllib.parse.quote(name)}&albums={urllib.parse.quote(albums)}&tracks={urllib.parse.quote("|".join(songs))}'
+            '&compilation=Golden%20Hour&live=Live%20in%20Lyon&lengths=Studio%20Sessions:35&rated=1'
+            '&extra=First%20Light:Quiet%20Hours|Paper%20Moon')['MediaContainer']['Metadata'][0]
+        vela = copies('Vela Moss', 'Studio Sessions:2012,Golden Hour:2019,Live in Lyon:2014,First Light:2001')
+        rowan = copies('Rowan Tide', 'Studio Sessions:2012,Golden Hour:2019,Live in Lyon:2014')
+
+        def popular_rows(artist):
+            page.goto('about:blank')
+            page.goto(APP + f"#/artist/{artist['ratingKey']}")
+            page.wait_for_selector('.view section.block:has-text("Popular tracks") .track', timeout=15000)
+            box = page.locator('.view section.block:has-text("Popular tracks")')
+            if box.locator('button', has_text='Show more').count():
+                box.locator('button', has_text='Show more').click()
+            return box.locator('.track').evaluate_all("rs => rs.map((r) => [r.querySelector('.track-title').textContent, r.querySelector('.track-sub')?.textContent || ''])")
+
+        try:
+            with_album = popular_rows(vela)
+            without = popular_rows(rowan)
+            check('library: Popular tracks play each song\'s original: the studio album\'s copy, not a compilation\'s, a live album\'s or one from an album of new recordings (most popular first, each once)',
+                  [t for t, _ in with_album[:4]] == songs and all(a == 'First Light' for _, a in with_album[:4]), str(with_album))
+            check('library: ...and without the studio album, the compilation\'s (its recordings the originals), not the new recordings\' nor the live album\'s',
+                  [t for t, _ in without] == songs and all(a == 'Golden Hour' for _, a in without), str(without))
+            picked = js(page, """() => import('./js/originals.js').then(({ originalCopies }) => {
+                const row = (id, title, album, albumTitle, year, ms) => ({ ratingKey: id, title, parentRatingKey: album, parentTitle: albumTitle, parentYear: year, duration: ms, ratingCount: 5 });
+                const kinds = new Map([['1', 'albums'], ['2', 'albums'], ['3', 'singles'], ['4', 'compilations']]);
+                return [
+                  // A deluxe edition, and a single's radio edit (another length): the album's, the first edition.
+                  originalCopies([row('a', 'Hit', '2', 'Fever (Deluxe Edition)', 2001, 200000), row('b', 'Hit', '3', 'Hit', 2001, 180000), row('c', 'Hit', '1', 'Fever', 2001, 200000)], kinds),
+                  // "(Live)" and "- Radio Edit" in a title: the plain one, even on a compilation.
+                  originalCopies([row('d', 'Hit (Live)', '1', 'Fever', 2001, 200000), row('e', 'Hit - Radio Edit', '3', 'Hit', 2001, 180000), row('f', 'Hit', '4', 'Best Of', 2010, 200000)], kinds),
+                  // Parts are songs of their own; who's featured, or which film it's from, doesn't make another, and a session's is another take.
+                  originalCopies([row('g', 'Tides (Part 1)', '1', 'Fever', 2001, 300000), row('h', 'Tides - Part 2', '1', 'Fever', 2001, 260000), row('i', 'Hit (feat. Ana)', '4', 'Best Of', 2010, 200000),
+                                  row('j', 'Hit (From "Some Film")', '4', 'Best Of', 2010, 200000), row('l', 'Hit (BBC Session)', '1', 'Fever', 2001, 200000), row('k', 'Hit', '1', 'Fever', 2001, 200000)], kinds),
+                ].map((list) => list.map(({ row, alike }) => [row.ratingKey, ...alike.map((m) => m.ratingKey)]));
+            })""")
+            check('library: ...an album\'s other editions (the same recording: the best-sounding of them plays) and a single\'s other edit don\'t make it new recordings, and a title that says it\'s live or an edit goes last',
+                  picked[:2] == [[['c', 'a']], [['f']]], str(picked))
+            check('library: ...parts of a song are songs of their own, but the same song with someone featured, from a film or a session, is one (a session\'s another take)',
+                  picked[2:] == [[['g'], ['h'], ['k']]], str(picked))
+        finally:
+            for a in (vela, rowan):
+                mock(f"/__mock/add-artist?remove={a['ratingKey']}")
 
         # Skip live tracks and demos (Settings › Playback), without the
         # MusicBrainz features: off to begin with; on, a shuffle of an

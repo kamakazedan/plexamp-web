@@ -14,33 +14,40 @@ docker run -d --name plexamp-web -p 8080:80 -v plexamp-web-data:/data \
   --restart unless-stopped ghcr.io/kamakazedan/plexamp-web:latest
 ```
 
-Open `http://<your-docker-host>:8080`, choose **Sign in with Plex**, then pick your server and music library. The settings are in [configuration.md](configuration.md).
+Open `http://<your-docker-host>:8080`, choose **Sign in with Plex**, then pick your server and music library. Settings: [configuration.md](configuration.md).
 
-The volume at `/data` keeps [shared playlists](features.md#shared-playlists), each account's settings and Missing tracks, and what the MusicBrainz features looked up, when the container is replaced (by an update, say). Without it everything else works, and the log says what would be lost.
-
-The image is built by GitHub Actions for amd64 and arm64 (a Raspberry Pi 4 or CM4 works well), tested (amd64 in full, arm64 started and checked under emulation), and only then published, as that very build. `latest` is the newest version that passed every test; each version is also tagged with its number (such as `0.15.0`), to stay on one. If pulling fails because the package is private, make it public in the package settings on GitHub, or run `docker login ghcr.io` first.
+- **The `/data` volume** keeps shared playlists, account settings, Missing tracks and MusicBrainz answers when the container is replaced (by an update, say). Everything else works without it, and the log says what would be lost.
+- **The image** is built for amd64 and arm64 (a Raspberry Pi 4 or CM4 works well). It's published only once it has passed every test.
+- **Tags**: `latest` is the newest tested version. Each version has its own tag too (`0.39.0`), to stay on one.
+- **"Denied" pulling the image**: make the package public in its settings on GitHub, or run `docker login ghcr.io` first.
 
 ## Compose and Portainer
 
-[docker-compose.yml](../docker-compose.yml) in this repository is a complete setup, with every setting listed at the top. Fill in the ones you want, then:
+[docker-compose.yml](../docker-compose.yml) is a complete setup, with every setting in it. Fill in the ones you want, then:
 
 ```sh
 docker compose up -d
 ```
 
-In Portainer, add a stack and paste the file in (or point the stack at this repository). To build the image from a copy of this repository instead of pulling it, replace its `image:` line with `build: .`.
+In Portainer, add a stack and paste the file in (or point the stack at this repository). To build from a copy of this repository instead, replace the `image:` line with `build: .`.
 
 ## Proxmox VE
 
-On your Proxmox VE node's shell, as root:
+In your Proxmox VE node's shell, as root:
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/stable/proxmox/plexamp-web.sh)"
 ```
 
-Like the [Proxmox VE community scripts](https://github.com/community-scripts/ProxmoxVE), it makes a small unprivileged Debian container (LXC) and installs the player in it, without Docker: nginx and Node.js from Debian (with Debian's other packages upgraded, for their security fixes), the app from this repository, and hls.js from npm, checked against the checksum this repository keeps for it. Press Enter for its defaults (the next free ID, 1 core, 512 MB, 4 GB, DHCP on `vmbr0`), or `n` to choose each one, including your Plex and Ollama addresses. It shows what it's about to make and, when it's done, the address to open. It needs Proxmox VE 8 or later, and internet access for the container while it installs. As with any script from the internet that runs as root, [read it](../proxmox/plexamp-web.sh) first.
+It makes a small unprivileged Debian container (LXC) and installs the player in it, without Docker, like the [Proxmox VE community scripts](https://github.com/community-scripts/ProxmoxVE).
 
-The script, and the app it installs, come from the repository's `stable` branch: the newest commit that passed every test, as the Docker image is. The app is one commit, downloaded once, and installed with that commit's own installer. Settings can be given beforehand, and with `YES=1` it asks nothing:
+- Press Enter for the defaults (the next free ID, 1 core, 512 MB, 4 GB, DHCP on `vmbr0`), or `n` to choose each one, your Plex and Ollama addresses included.
+- When it's done, it shows the address to open.
+- It needs Proxmox VE 8 or later, and internet access for the container while it installs.
+- It installs from the `stable` branch: the newest commit that passed every test.
+- As with any script from the internet that runs as root, [read it](../proxmox/plexamp-web.sh) first.
+
+To set everything beforehand, without questions:
 
 ```sh
 CTID=120 PLEX_SERVER_URL=http://192.168.1.10:32400 YES=1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kamakazedan/plexamp-web/stable/proxmox/plexamp-web.sh)"
@@ -53,26 +60,41 @@ CTID=120 PLEX_SERVER_URL=http://192.168.1.10:32400 YES=1 bash -c "$(curl -fsSL h
 | `STORAGE` | `local-lvm`, or `local-zfs` | Where its disk goes. |
 | `CORES`, `RAM_MB`, `DISK_GB` | `1`, `512`, `4` | Its size. |
 | `BRIDGE` | `vmbr0` | Its network bridge. |
-| `IP` and `GATEWAY` | `dhcp` | Or a fixed address, such as `IP=192.168.1.50/24 GATEWAY=192.168.1.1`. |
+| `IP`, `GATEWAY` | `dhcp` | Or a fixed address: `IP=192.168.1.50/24 GATEWAY=192.168.1.1`. |
 | `PLEX_SERVER_URL`, `OLLAMA_URL`, `OLLAMA_MODEL`, `MUSICBRAINZ_URL` | not set | As in [configuration.md](configuration.md). |
 | `TEMPLATE_STORAGE` | `local` | Where the Debian template is kept. |
-| `PW_VERBOSE` | not set | `1` shows every step in detail, with the tools' own output, the install inside the container included. |
+| `YES` | not set | `1`: ask nothing, use the defaults and what's set. |
+| `PW_VERBOSE` | not set | `1`: show every step in detail. |
 
-Then, on the node (or inside the container, without `pct exec <ID> --`):
+Then, on the node:
 
-- **Settings**: `pct exec <ID> -- plexamp-web-settings` opens them in an editor, with the same names as the Docker image's, and restarts the player with them. They're kept in `/etc/plexamp-web/plexamp-web.env`, readable by root only, and shared playlists (with each account's settings and Missing tracks, and what the MusicBrainz features looked up) in `/var/lib/plexamp-web`.
-- **Updates**: `pct exec <ID> -- update-plexamp-web` installs the newest tested version, keeping your settings, and upgrades the container's Debian packages, for their security fixes (keeping their config files as they are), saying how many. If the new version doesn't start (a setting it won't take, say), the version from before is put back and started again, and it says what was wrong. With `--verbose` it shows every step as it goes: which commit it installs, what it downloads (and the checksum hls.js matched), apt's own output, what it puts where, and the services restarting, with what they logged. An `update-plexamp-web` from 0.16.1 or earlier doesn't know `--verbose` yet, but passes this on: `pct exec <ID> -- env PW_VERBOSE=1 update-plexamp-web`.
-- **Logs**: `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f`. With `DEBUG=true`, nginx's requests are in `journalctl -t nginx -f`. To keep a day's log in a file: `pct exec <ID> -- journalctl -u plexamp-web --since today -o short-iso --no-pager > plexamp-web.log` (on the Proxmox host); what browsers sent alone: add `| grep 'plexamp-web browser'`.
+| To | Run |
+| --- | --- |
+| Change settings (opens an editor, then restarts the player) | `pct exec <ID> -- plexamp-web-settings` |
+| Update | `pct exec <ID> -- update-plexamp-web` |
+| Update, showing every step | `pct exec <ID> -- update-plexamp-web --verbose` |
+| Follow the log | `pct exec <ID> -- journalctl -u plexamp-web -u plexamp-web-config -f` |
+| Save today's log to a file | `pct exec <ID> -- journalctl -u plexamp-web --since today -o short-iso --no-pager > plexamp-web.log` |
+
+- Settings are kept in `/etc/plexamp-web/plexamp-web.env` (root only), with the same names as the Docker image's. Data is in `/var/lib/plexamp-web`.
+- An update keeps your settings, and upgrades the container's Debian packages for their security fixes. If the new version doesn't start, the old one is put back, and it says why.
+- With `DEBUG=true`, nginx's requests are in `pct exec <ID> -- journalctl -t nginx -f`.
 
 ## Updating
 
-- **Docker**: `docker pull ghcr.io/kamakazedan/plexamp-web:latest`, then recreate the container with the same settings and volume (`docker compose pull` then `docker compose up -d` does both). In Portainer: for a stack, **Update the stack** with **Re-pull image and redeploy** on; for a container, **Recreate** with **Re-pull image** on.
-- **Proxmox VE**: `pct exec <ID> -- update-plexamp-web` (add `--verbose` to follow every step).
+- **Docker**: `docker pull ghcr.io/kamakazedan/plexamp-web:latest`, then recreate the container with the same settings and volume.
+- **Compose**: `docker compose pull`, then `docker compose up -d`.
+- **Portainer**: for a stack, **Update the stack** with **Re-pull image and redeploy** on; for a container, **Recreate** with **Re-pull image** on.
+- **Proxmox VE**: `pct exec <ID> -- update-plexamp-web`.
 
-What's new is in [CHANGELOG.md](../CHANGELOG.md), and in the app under **Settings › About**. If the container doesn't start after an update, its log says which setting to change, and how: a setting renamed, say (as offline mode's were in 0.31.0), one whose name it doesn't know (a misspelt one: it says what it's called), or one that does nothing as another it needs isn't set. On Proxmox VE, the update puts the version from before back, and says the same.
+What's new is in [CHANGELOG.md](../CHANGELOG.md), and in the app under **Settings › About**. If the container doesn't start after an update, its log says which setting to change, and how.
 
 ## From outside your home: HTTPS
 
-The container serves plain HTTP, which on a home network is the same as Plex's own `http://` addresses. To use the player from outside, put it behind a reverse proxy with HTTPS (Nginx Proxy Manager, Caddy, Traefik, a Cloudflare tunnel and the like), so tokens never cross the internet unencrypted. Turn on the proxy's WebSockets support, if it has a switch for it: live updates use them when they can (see [configuration.md](configuration.md#live-updates)).
+The player serves plain HTTP, like Plex's own `http://` addresses on a home network. To use it from outside:
 
-Behind HTTPS, the browser can't use a Plex server's plain `http://` addresses, so set `PLEX_SERVER_URL`: the player then reaches Plex through the container. Set it too if the player can be reached from the internet: it keeps the container's service (the shared AI model, MusicBrainz checks and features, Play Together, your devices, shared playlists, settings and Missing tracks that follow each account, and Spotify link import) to people who can use your Plex server, and Play on to its owner (see [SECURITY.md](../SECURITY.md#remaining-risks)). Signing out also makes the browser forget the artwork it kept, which browsers only do over HTTPS.
+1. Put it behind a reverse proxy with HTTPS (Nginx Proxy Manager, Caddy, Traefik, a Cloudflare tunnel and the like), so sign-ins never cross the internet unencrypted.
+2. Turn on the proxy's WebSockets support, if it has a switch for it (see [Live updates](configuration.md#live-updates)).
+3. Set `PLEX_SERVER_URL`. Behind HTTPS, browsers can't use Plex's plain `http://` addresses, so they go through the player. It also keeps the player's shared features (the AI model, Play Together, shared playlists and the rest) to people who can use your Plex server.
+
+Signing out also makes the browser forget the artwork it kept, which browsers only do over HTTPS.

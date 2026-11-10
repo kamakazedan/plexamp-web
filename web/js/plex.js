@@ -3,9 +3,11 @@
 // sent without custom headers. That keeps browser requests "simple" and
 // avoids CORS preflights against the server.
 import { debugLog, safeUrl } from './debug.js';
+import { plexKind } from './releases.js';
+import { originalCopies } from './originals.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.38.1' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.39.0' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -491,6 +493,14 @@ const TYPES_ONLY = {
   excludeFields: 'summary',
 };
 const LIST_PAGE = 500; // a list's entries asked for at a time (see readPages)
+// An artist's tracks as popularTracks reads them, every copy of each song:
+// what choosing between copies needs (originals.js), and no more, where Plex
+// can leave the rest out; POPULAR_COPIES of them at most.
+const COPIES_ONLY = {
+  includeFields: 'ratingKey,type,title,parentRatingKey,parentTitle,parentYear,grandparentRatingKey,ratingCount,duration,size,totalSize,offset',
+  excludeElements: LIGHT.excludeElements,
+};
+const POPULAR_COPIES = 300;
 
 // Every entry of a list (a playlist's, a collection's), a page at a time:
 // `read(start, size, ids)` gives a page as playlistItems and collectionItems
@@ -772,14 +782,41 @@ export class PlexServer {
     return out;
   }
 
-  // Same filters python-plexapi uses for an artist's popular tracks.
-  async popularTracks(section, artistId, limit = 20) {
-    const { items } = await this.list(section, 10, {
-      sort: 'ratingCount:desc',
-      size: limit,
-      filters: { 'artist.id': artistId, group: 'title', 'ratingCount>>': 0 },
-    });
-    return items;
+  // An artist's popular tracks (Plex's popularity, from Last.fm), `limit`
+  // songs at most, each as its original copy where the library has several
+  // (an album's, a compilation's, a live album's, an album of new recordings
+  // of their hits...: see originals.js). Plex's own pick of one of each
+  // (group=title) can be any copy, so every copy is read (only what's needed
+  // to choose: POPULAR_COPIES at most, the most popular first), with what
+  // kind each album is (albumTypes), and then the chosen ones' details, for
+  // playing them. Kept a while.
+  popularTracks(section, artistId, limit = 20) {
+    if (!/^\d+$/.test(String(artistId))) return Promise.resolve([]);
+    return this.memo(
+      `popularcopies:${section}:${artistId}:${limit}`,
+      async () => {
+        const { items } = await this.list(section, 10, {
+          sort: 'ratingCount:desc',
+          size: Math.min(POPULAR_COPIES, Math.max(60, limit * 15)),
+          filters: { 'artist.id': artistId, 'ratingCount>>': 0, ...COPIES_ONLY },
+        });
+        const ids = [...new Set(items.map((m) => String(m.parentRatingKey ?? '')).filter((id) => /^\d+$/.test(id)))];
+        const types = await this.albumTypes(ids).catch(() => ids.map(() => null));
+        const kinds = new Map(ids.map((id, i) => [id, types[i] ? plexKind(types[i]) : null]));
+        const chosen = originalCopies(items, kinds, limit);
+        // Their details (a server that sent each one whole: as they are),
+        // and of each, the best-sounding of its copies on the album's
+        // editions (a hi-res one, say).
+        const rows = chosen.flatMap(({ row, alike }) => [row, ...alike]);
+        const whole = rows.every((m) => asArray(m.Media).length);
+        const full = whole ? rows : await this.tracksDetail(rows.map((m) => m.ratingKey));
+        const byId = new Map(rows.map((m, i) => [String(m.ratingKey), full[i] || m]));
+        return chosen.map(({ row, alike }) =>
+          [row, ...alike].map((m) => byId.get(String(m.ratingKey))).reduce((best, m) => (audioQuality(normTrack(m)) > audioQuality(normTrack(best)) ? m : best)),
+        );
+      },
+      10 * 60000,
+    );
   }
 
   // Sonically similar items (tracks for a track, artists for an artist).

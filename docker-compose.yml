@@ -1,79 +1,7 @@
 # plexamp-web with Docker Compose, or as a Portainer stack.
 #
-# Every setting is optional: empty means off, or the default. In detail:
-# docs/configuration.md.
-#
-#   PLEX_SERVER_URL     Your Plex server's address on your network, such as
-#                       http://192.168.1.10:32400. Browsers that can't reach
-#                       Plex directly go through this container instead.
-#   WEBSOCKETS          Empty or "auto" (the default): live updates use
-#                       WebSockets, and where they don't get through (some
-#                       proxies and firewalls block them), whatever does: an
-#                       event stream, or checking every minute. "on":
-#                       WebSockets only. "off": never. (DISABLE_WEBSOCKETS:
-#                       "true", from before, still means off.)
-#   OLLAMA_URL          An Ollama server whose model everyone using the player
-#                       shares, such as http://192.168.1.20:11434, or
-#                       http://host.docker.internal:11434 for Ollama on this
-#                       machine (extra_hosts below makes that name work).
-#   OLLAMA_MODEL        The one model it uses, such as llama3.1:8b.
-#   OLLAMA_AUTH         "plex": people signed in with Plex (with
-#                       PLEX_SERVER_URL set, only those who can use your
-#                       server). "off": anyone who can open the player.
-#   MUSICBRAINZ_URL     Checks that an AI playlist's suggestions are real
-#                       songs. Unset, nothing goes to MusicBrainz. With
-#                       https://musicbrainz.org the suggested names go there
-#                       (no account needed); your own mirror, such as
-#                       http://192.168.1.30:5000, keeps them on your network.
-#   MUSICBRAINZ_ADVANCED "true" turns on the MusicBrainz features, with
-#                       MUSICBRAINZ_URL: the albums an artist's page is
-#                       missing, original release years, artists found by
-#                       their other names, MusicBrainz's kind for albums Plex
-#                       hasn't typed (for Skip live tracks and demos), and
-#                       for the server's owner, the years and genres to fix
-#                       in Plex. Nothing else needs them. They look your
-#                       whole library up, so a mirror of your own is best.
-#   PLAY_TOGETHER       "false" turns off listening in sync with Plex friends.
-#   CASTING             "false" turns off Play on (other Plex players on your
-#                       network, for your server's owner: needs PLEX_SERVER_URL).
-#   PLAYLIST_SHARING    "false" turns off sharing playlists with Plex friends.
-#   SYNC_SETTINGS       "false" turns off keeping each Plex account's settings
-#                       here, so they follow it to every browser it signs in on.
-#   SYNC_MISSING_TRACKS "false" turns off syncing Missing tracks: when someone
-#                       imports a playlist (or an AI playlist suggests music)
-#                       that your server doesn't have all of, what's missing
-#                       goes to the server owner's Missing tracks, so they can
-#                       see what's missing from their server. Each account's
-#                       follows it to every browser too.
-#   SPOTIFY_FILE_IMPORT Search › From Spotify makes playlists from Spotify's
-#                       download of your data, read in the browser. On unless
-#                       it's "false".
-#   SPOTIFY_LINK_IMPORT "true": Search › From Spotify makes a playlist from a
-#                       public Spotify playlist's link, with the tracks you
-#                       have. Off unless set: it reads Spotify's public
-#                       page for the playlist (the first 100 tracks), which
-#                       Spotify's terms don't allow, and which can stop
-#                       working. (SPOTIFY_IMPORT, its old name, still works.)
-#   OFFLINE_PWD         Offline mode, with PLEX_SERVER_URL: while plex.tv isn't
-#                       answering (your internet's down, say), the player can
-#                       be signed in to with this password, as your Plex
-#                       server's owner, till plex.tv is back. Needs your
-#                       server to let the player in without signing in: see
-#                       docs/configuration.md. 12 to 200 letters, digits and
-#                       . _ ~ + / = : , @ - (openssl rand -base64 24 makes
-#                       one; a # or $ would be read otherwise). Keep it out
-#                       of this file, which is often shared or committed: in
-#                       a file of its own beside it (env_file, below).
-#   OFFLINE_NETWORKS    Where the offline password can be used from:
-#                       "private" (the default: your own networks), "any",
-#                       or addresses and networks, such as 192.168.1.0/24.
-#   DEBUG               "true" writes extra detail to the log, with tokens and
-#                       keys removed. Turn it off when you're done.
-#
-# Shared playlists, each account's settings and Missing tracks, what the
-# MusicBrainz features look up, and your own sign-ins' fingerprints (for
-# offline mode), are kept in /data: the volume below, or a
-# folder of your own (./plexamp-web-data:/data). To build from this folder instead of using
+# Every setting is optional: empty means its default (or off). Each one in
+# detail: docs/configuration.md. To build from this folder instead of using
 # the published image, replace the image line with:  build: .
 
 services:
@@ -83,27 +11,50 @@ services:
     ports:
       - "8080:80"
     environment:
+      # Your Plex server's address on your network. Recommended.
+      # e.g. http://192.168.1.10:32400
       PLEX_SERVER_URL: ""
+      # Live updates: auto (default), on (WebSockets only) or off.
       WEBSOCKETS: ""
+      # AI playlists and the AI DJ: an Ollama server everyone shares, and its
+      # model. e.g. http://192.168.1.20:11434 and llama3.1:8b
+      # (Ollama on this machine: http://host.docker.internal:11434)
       OLLAMA_URL: ""
       OLLAMA_MODEL: ""
+      # Who can use it: plex (people signed in with Plex) or off (anyone).
       OLLAMA_AUTH: "plex"
-      # MUSICBRAINZ_URL: "https://musicbrainz.org"
-      # MUSICBRAINZ_ADVANCED: "true"
-      PLAY_TOGETHER: "true"
-      CASTING: "true"
-      PLAYLIST_SHARING: "true"
-      SYNC_SETTINGS: "true"
-      SYNC_MISSING_TRACKS: "true"
+      # Check AI suggestions on MusicBrainz: https://musicbrainz.org, or your
+      # own mirror, e.g. http://192.168.1.30:5000. Empty: never.
+      MUSICBRAINZ_URL: ""
+      # true: the MusicBrainz features (missing albums, original years, years
+      # and genres to fix). Best with your own mirror.
+      MUSICBRAINZ_ADVANCED: ""
+      # false turns each one off.
+      PLAY_TOGETHER: "true"        # listening in sync with Plex friends
+      CASTING: "true"              # Play on Plex players (server owner)
+      PLAYLIST_SHARING: "true"     # sharing playlists with Plex friends
+      SYNC_SETTINGS: "true"        # app settings follow each Plex account
+      SYNC_MISSING_TRACKS: "true"  # Missing tracks follow each account
+      # Playlists from Spotify's download of your data. Empty: on.
       SPOTIFY_FILE_IMPORT: ""
+      # true: a playlist from a public Spotify link (first 100 tracks; against
+      # Spotify's terms). Empty: off.
       SPOTIFY_LINK_IMPORT: ""
+      # Where the offline password (OFFLINE_PWD, below) works from: private
+      # (default), any, or networks, e.g. 192.168.1.0/24.
       # OFFLINE_NETWORKS: "private"
+      # true: extra detail in the log, tokens removed. Turn it off after.
       DEBUG: ""
-    # Secrets (OFFLINE_PWD, OLLAMA_API_KEY) in a file of their own beside
-    # this one, readable by you alone (chmod 600), one per line, such as
-    # OFFLINE_PWD=..., and never in environment: above (which would win).
+    # Secrets go in a file of their own beside this one, readable by you alone
+    # (chmod 600), one per line, and never in environment: above (which would
+    # win). For example:
+    #   OFFLINE_PWD=...     sign in as the server's owner while plex.tv is down
+    #                       (read "Offline mode" in docs/configuration.md first;
+    #                       openssl rand -base64 24 makes one)
+    #   OLLAMA_API_KEY=...  for an Ollama behind a proxy that asks for one
     # env_file: plexamp-web.env
     volumes:
+      # Shared playlists, account settings, Missing tracks, MusicBrainz answers.
       - plexamp-web-data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"

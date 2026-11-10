@@ -69,7 +69,8 @@ testing, these endpoints need no token:
         smartcollection=1|0: a smart collection (Electronic picks) listed,
         whose items carry no tag for it, or not
     /__mock/add-artist?name=...[&eps=N][&noalbum=1][&albums=T:Y,...][&mb=0]
-                       [&format=Single][&live=T|T][&tracks=T|T][&first=YYYY-MM-DD][&firsttracks=T:SECS|T:SECS]
+                       [&format=Single][&live=T|T][&compilation=T|T][&tracks=T|T][&extra=T:S|S]
+                       [&lengths=T:SECS,...][&rated=1][&first=YYYY-MM-DD][&firsttracks=T:SECS|T:SECS]
                        [&guids=1|release]
                                   adds an artist with an album and a track of
                                   their own (and N EPs, a track on each;
@@ -78,8 +79,13 @@ testing, these endpoints need no token:
                                   as a second artist of a name Plex made
                                   from files tagged otherwise; format: of
                                   that kind; live: those of these titles
-                                  live albums; tracks: with tracks of these
-                                  titles; first: MusicBrainz has them first
+                                  live albums; compilation: those
+                                  compilations; tracks: with tracks of these
+                                  titles; extra: and that album these too;
+                                  lengths: that album's tracks that many
+                                  seconds long; rated: each song as popular
+                                  on every album, the first most; first:
+                                  MusicBrainz has them first
                                   out then; firsttracks: their first release
                                   has these tracks, not the library's),
                                   without a MusicBrainz id
@@ -2259,7 +2265,17 @@ class Handler(BaseHTTPRequestHandler):
                 a['Guid'] = [{'id': 'mbid://' + mb_id('artist|' + q.get('mbid', [name])[0])}]
             fmt_asked = q.get('format', [''])[0] or None
             live_asked = {t for t in q.get('live', [''])[0].split('|') if t}
+            compilations_asked = {t for t in q.get('compilation', [''])[0].split('|') if t}
             titles_asked = [t for t in q.get('tracks', [''])[0].split('|') if t]
+            # (extra=T:S|S: album T has these tracks too; lengths=T:SECS,...:
+            # album T's tracks are SECS long; rated=1: each song's as popular
+            # on every album it's on, the first one most.)
+            extra_asked = {}
+            if ':' in q.get('extra', [''])[0]:
+                at, songs = q['extra'][0].split(':', 1)
+                extra_asked[at] = [t for t in songs.split('|') if t]
+            lengths_asked = {t.rsplit(':', 1)[0]: int(t.rsplit(':', 1)[1]) for t in q.get('lengths', [''])[0].split(',') if ':' in t}
+            rated = q.get('rated', [''])[0] in ('1', 'true')
             first_asked = q.get('first', [''])[0]
             # (firsttracks=T:SECS|...: the first release's tracks, not the library's.)
             first_tracks = [(t.rsplit(':', 1)[0], int(t.rsplit(':', 1)[1])) for t in q.get('firsttracks', [''])[0].split('|') if ':' in t]
@@ -2276,11 +2292,11 @@ class Handler(BaseHTTPRequestHandler):
                 made = [(t.rsplit(':', 1)[0], fmt_asked or 'Album', int(t.rsplit(':', 1)[1])) for t in q['albums'][0].split(',') if ':' in t]
             for n, (title, fmt, year) in enumerate(made):
                 ak = key()
-                names = titles_asked or [f'{name} Song' if fmt == 'Album' else f'{title} Song']
+                names = (titles_asked or [f'{name} Song' if fmt == 'Album' else f'{title} Song']) + extra_asked.get(title, [])
                 al = dict(albums[0], ratingKey=ak, key=f'/library/metadata/{ak}/children', title=title, titleSort=title.lower(),
                           parentRatingKey=k, parentTitle=name, parentThumb=a['thumb'], thumb=f'/library/metadata/{ak}/thumb/1', leafCount=len(names),
                           year=year or 2020 + n, originallyAvailableAt=f'{year or 2020 + n}-05-01', Format=[{'tag': fmt}],
-                          Subformat=[{'tag': 'Live'}] if title in live_asked else [])
+                          Subformat=[{'tag': 'Live'}] if title in live_asked else [{'tag': 'Compilation'}] if title in compilations_asked else [])
                 al.pop('Guid', None)
                 if with_ids:
                     gid = mb_id('group|' + name + '|' + title)
@@ -2297,8 +2313,15 @@ class Handler(BaseHTTPRequestHandler):
                     tk = key()
                     tr = dict(tracks[0], ratingKey=tk, key=f'/library/metadata/{tk}', guid=track_guid(tk), title=track_title,
                               index=ti + 1, parentIndex=1, parentRatingKey=ak, parentTitle=al['title'], parentThumb=al['thumb'], grandparentRatingKey=k,
-                              grandparentTitle=name, grandparentThumb=a['thumb'])
+                              grandparentTitle=name, grandparentThumb=a['thumb'], parentYear=al['year'])
                     tr.pop('originalTitle', None)
+                    if title in lengths_asked:
+                        secs = lengths_asked[title] * 1000
+                        tr['duration'] = secs
+                        tr['Media'] = [dict(tr['Media'][0], duration=secs, Part=[dict(tr['Media'][0]['Part'][0], duration=secs)])]
+                    if rated:
+                        songs = titles_asked + [t for x in extra_asked.values() for t in x]
+                        tr['ratingCount'] = 900000 - 10000 * (songs.index(track_title) if track_title in songs else len(songs))
                     items[tk] = tr
                     tracks.append(tr)
             return self.send_json({'size': 1, 'Metadata': [public(a)]})

@@ -856,7 +856,7 @@ test('MusicBrainz: musicbrainz.org once a second, your own server ten times a se
   await assert.rejects(noIndexes.check([{ kind: 'artist', artist: 'X' }]), (e) => e instanceof MusicBrainzError && e.status === 502 && /search indexes/.test(e.message));
 });
 
-test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most, slower when it\'s slow, and left alone as long as it asks when it says it\'s busy', async () => {
+test('MusicBrainz: a server of your own isn\'t overloaded: twenty a second at most (from 0.39.0), musicbrainz.org slower when it\'s slow, and either left alone as long as it asks when it says it\'s busy', async () => {
   // Retry-After: seconds, or a date; within reason.
   const now = Date.parse('2026-10-30T12:00:00Z');
   assert.equal(retryAfterMs('120', now), 120000);
@@ -865,7 +865,7 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   assert.equal(retryAfterMs('0', now), MB_LIMITS.busyMs);
   assert.equal(retryAfterMs('2', now), 5000);
   assert.equal(retryAfterMs('86400', now), MB_LIMITS.busyMaxMs);
-  // Ten a second at most, one at a time.
+  // Twenty a second at most.
   const starts = [];
   const quick = async () => {
     starts.push(Date.now());
@@ -874,13 +874,14 @@ test('MusicBrainz: a server of your own isn\'t overloaded: ten a second at most,
   const own = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: quick });
   await Promise.all([1, 2, 3, 4].map((i) => own.ask('/ws/2/artist', { query: `a${i}` })));
   assert.ok(starts.slice(1).every((t, i) => t - starts[i] >= MB_LIMITS.ownGapMs - 5), starts.map((t) => t - starts[0]).join(','));
-  // An answer slower than slowMs: as long again before the next.
+  // musicbrainz.org's answer slower than slowMs: as long again before the
+  // next. (A server of your own is asked fewer at once instead: see below.)
   const was = { ...MB_LIMITS };
   Object.assign(MB_LIMITS, { slowMs: 60, slowWaitMaxMs: 1000 });
   try {
     const times = [];
     const slow = new MusicBrainz({
-      base: 'http://mb.local:5000',
+      base: 'https://musicbrainz.org',
       gapMs: 0,
       fetchImpl: async () => {
         times.push(Date.now());
@@ -1406,7 +1407,7 @@ test('MusicBrainz features: an artist\'s release groups (100 to a page), each wi
   assert.deepEqual(old.asked.map((x) => x.path), [`/ws/2/release-group/${MB_ID(101)}`]);
 });
 
-test('MusicBrainz: a server of your own is asked four things at once at most (from 0.38.0), still ten a second at most; musicbrainz.org one at a time', async () => {
+test('MusicBrainz: a server of your own is asked four things at once to begin with (from 0.38.0), still twenty a second at most; musicbrainz.org one at a time', async () => {
   let under = 0;
   let most = 0;
   const starts = [];
@@ -1429,6 +1430,59 @@ test('MusicBrainz: a server of your own is asked four things at once at most (fr
   const pub = new MusicBrainz({ base: 'https://musicbrainz.org', fetchImpl, gapMs: 0 });
   await Promise.all([1, 2, 3].map((i) => pub.ask('/ws/2/artist', { query: `p${i}` })));
   assert.equal(most, 1);
+});
+
+test('MusicBrainz: a server of your own is asked more at once while it answers quickly, eight at most, fewer while it\'s slow, and half as many after it doesn\'t answer (from 0.39.0)', async () => {
+  const was = { ...MB_LIMITS };
+  Object.assign(MB_LIMITS, { ownWindow: 4, ownQuickMs: 40, ownSlowMs: 80 });
+  try {
+    let under = 0;
+    let most = 0;
+    let wait = 10;
+    let fail = false;
+    const fetchImpl = async () => {
+      under += 1;
+      most = Math.max(most, under);
+      await new Promise((r) => setTimeout(r, wait));
+      under -= 1;
+      if (fail) throw new Error('ECONNRESET');
+      return jsonAnswer({ artists: [] });
+    };
+    const lines = [];
+    const own = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0, log: { debug: (l) => lines.push(l), warn() {}, info() {}, error() {} } });
+    const many = (n, tag) => Promise.all(Array.from({ length: n }, (_, i) => own.ask('/ws/2/artist', { query: `${tag}${i}` })));
+    // Quick answers, with plenty to ask: one more at once each time, up to eight.
+    await many(120, 'q');
+    assert.equal(own.atOnce, MB_LIMITS.ownAtOnceMost);
+    assert.ok(most > MB_LIMITS.ownAtOnce && most <= MB_LIMITS.ownAtOnceMost, `${most} at once`);
+    // Slow ones: fewer, one at a time at least.
+    wait = 120;
+    await many(40, 's');
+    assert.ok(own.atOnce < MB_LIMITS.ownAtOnceMost, `${own.atOnce} at once`);
+    while (own.atOnce > 1) await many(own.atOnce * MB_LIMITS.ownWindow, 't');
+    assert.equal(own.atOnce, 1);
+    // Quick again, but only a little to ask at a time: not more for that.
+    wait = 5;
+    own.setAtOnce(4);
+    for (let i = 0; i < 12; i += 1) await own.ask('/ws/2/artist', { query: `o${i}` });
+    assert.equal(own.atOnce, 4);
+    // No answer: half as many.
+    fail = true;
+    await assert.rejects(own.ask('/ws/2/artist', { query: 'gone' }), (e) => e instanceof MusicBrainzError);
+    assert.equal(own.atOnce, 2);
+    // musicbrainz.org: one at a time, however quick.
+    const pub = new MusicBrainz({ base: 'https://musicbrainz.org', fetchImpl, gapMs: 0 });
+    fail = false;
+    await Promise.all(Array.from({ length: 10 }, (_, i) => pub.ask('/ws/2/artist', { query: `p${i}` })));
+    assert.equal(pub.atOnce, 1);
+    // In debug mode, a line once a minute (here, its minute made up).
+    own.lastMinute.since -= 61000;
+    fail = false;
+    await own.ask('/ws/2/artist', { query: 'log' });
+    assert.ok(lines.some((l) => /^musicbrainz: \d+ answers in the last minute, half within [\d.]+ s, the slowest [\d.]+ s, and 1 not answered \(or busy\); \d asked at once at most now$/.test(l)), lines.join('\n'));
+  } finally {
+    Object.assign(MB_LIMITS, was);
+  }
 });
 
 test('MusicBrainz: musicbrainz.org is never asked twice within a second, however busy the service is a moment (from 0.38.0)', async () => {
@@ -1481,7 +1535,7 @@ test('MusicBrainz features: on a server of your own, albums are looked up severa
   assert.ok((await mb.albums(items, { check: true })).every((v) => v === 'pending'));
   const got = await mb.albums(items, { check: true, waitMs: 5000 });
   assert.ok(got.every((g) => g?.toCheck === true), JSON.stringify(got));
-  assert.ok(most > 1 && most <= MB_LIMITS.ownAtOnce, `${most} at once`);
+  assert.ok(most > 1 && most <= MB_LIMITS.ownAtOnceMost, `${most} at once`);
   for (const id of artists.slice(0, 3)) {
     assert.equal(asked.filter((x) => x === `/ws/2/artist/${id}?`).length, 1, 'each artist asked about once');
     assert.equal(asked.filter((x) => x === `/ws/2/release-group?${id}`).length, 1, '...and their release groups once');

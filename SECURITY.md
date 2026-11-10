@@ -1,9 +1,9 @@
 # Security
 
-plexamp-web was written by Claude, an AI model made by Anthropic, and the reviews below were done by Claude too. Treat them as careful self-reviews, not an independent audit, and review the code before you make the player reachable from the internet.
+Claude, an AI model made by Anthropic, wrote plexamp-web, and did the reviews below too. Treat them as careful self-reviews, not an independent audit, and review the code before you make the player reachable from the internet.
 
 - [Reporting a problem](#reporting-a-problem)
-- [What the player handles, and where it goes](#what-the-player-handles-and-where-it-goes)
+- [At a glance](#at-a-glance)
 - [Safeguards](#safeguards), feature by feature
 - [What debug mode logs](#what-debug-mode-logs)
 - [Remaining risks](#remaining-risks)
@@ -11,204 +11,219 @@ plexamp-web was written by Claude, an AI model made by Anthropic, and the review
 
 ## Reporting a problem
 
-If the repository's **Security** tab offers **Report a vulnerability**, use that: only the owner sees it. Otherwise open an issue, without tokens, or logs that contain them. Only the newest version is looked after: update first (see [docs/setup.md](docs/setup.md#updating)), and say which version you're on (**Settings › About**).
+Use **Report a vulnerability** in the repository's **Security** tab if it's there: only the owner sees it. Otherwise open an issue, without tokens or logs that contain them. Only the newest version is looked after: update first, and say which version you're on (**Settings › About**).
 
-## What the player handles, and where it goes
+## At a glance
 
-- **Your Plex sign-in.** After you sign in, the browser keeps your Plex token (and, for servers shared with you, that server's access token) in its local storage. The token goes only to plex.tv, to your Plex server (directly or through the container's `/pms/` proxy), and to the container's own service, which checks who you are for Play Together, Play on, your devices, shared playlists and the shared AI model. A server's access token goes to the service only for the server it's set up for (`PLEX_SERVER_URL`), which it's checked against (since 0.37.0: before, the token for whichever server you were on went with the shared AI model's, MusicBrainz's and Spotify's requests, and on to that server). With Play on, the service also sends it with each command to the Plex player, one of your own devices, as Plex's own apps do.
-- **Your library and listening.** Requests go from your browser to your Plex server. Plays are reported to Plex if **Sync recent plays** is on. Search keeps how many artists, albums, tracks and so on each library has (just the numbers) in the browser, to show them at once, until you sign out. A play or rating that couldn't reach your server, as the connection had gone, is kept in the browser till it can (Plex's id for the track, and for a rating its title, to say if Plex refuses it; for each server; two weeks at most), then sent once that very server answers at its address (since 0.37.0: not whatever answers there), and only ever with the sign-in that made it: signing out, or switching user, clears it unsent.
-- **Missing tracks.** With **Show missing tracks** on (Settings › AI), the songs and artists AI playlists suggest that your library doesn't have, and the tracks Spotify imports don't find, are kept in the browser on that device, for each Plex server, with what each was suggested for (or the Spotify playlist it was in), until you clear them or sign out. With the container's service (`SYNC_MISSING_TRACKS`, on unless it's turned off), the container keeps each Plex account's list for it, so every device it signs in on has it, and the Plex server's owner sees everyone's, with whose each is, so they can see what's missing from their server and add it. Friends are told so where theirs are listed. What anyone asked an AI for, and Spotify playlists' names, are never sent: they stay on the device that asked. See [Missing tracks](#missing-tracks). Downloading, copying or sharing the list leaves out what was asked for, and whose each is.
-- **MusicBrainz checks**, only if the container is given a MusicBrainz to ask (`MUSICBRAINZ_URL`). Then the names an AI playlist suggests that your library doesn't have go to the container, which looks them up there. See [MusicBrainz checks](#musicbrainz-checks).
-- **The MusicBrainz features**, only if the container turns them on too (`MUSICBRAINZ_ADVANCED=true`): then your library's artists' names go to the container, which looks them up on that MusicBrainz (and for the server's owner, changes the albums they choose in Plex, and merges the artists they choose there). See [The MusicBrainz features](#the-musicbrainz-features).
-- **Spotify imports**: from Spotify's download of your data on unless the container turns it off, and from a link off unless it turns it on. From Spotify's download of your data (`SPOTIFY_FILE_IMPORT`), only the files named `Playlist1.json` (`Playlist2.json`…) and `YourLibrary.json` are opened, in the browser: any other file chosen, the ZIP included, is turned away by its name without being read, as the other files hold your personal details. Only playlist names and each track's title, artist and album are kept from them, nothing goes to Spotify, and the tracks are looked for on your Plex server as any search is. From a link (`SPOTIFY_LINK_IMPORT`): the link goes to the container, which reads that playlist from Spotify's public page for it; only the playlist's id goes to Spotify. Either way, the tracks not found go on Missing tracks (see above), unless that's turned off for the import. See [Spotify imports](#spotify-imports).
-- **Playlist files.** A playlist you export, or a backup of all of yours, is a file on your device with each track's title, artist, album, number and length, and Plex's ids for it. Nothing about the server: no addresses, file paths or tokens. Importing one reads it in the browser only, and every field is checked and kept to plain text and numbers.
-- **Shared playlists** are kept by the container's service: titles, tracks (by their ids on the server), and the Plex names and ids of who shares them with whom. No tokens. See [Shared playlists](#shared-playlists).
-- **Pictures you upload** for a playlist or collection are redrawn smaller in the browser first, so what a photo carries besides the picture (where it was taken, the camera) doesn't go with it, and go to your Plex server only.
-- **The container** has no database. It writes only its start-up configuration, and shared playlists, each account's settings and its Missing tracks (and with the MusicBrainz features, what MusicBrainz said of your artists, and with `PLEX_SERVER_URL`, the fingerprints of the server owner's sign-ins: see [Your own sign-ins, by their fingerprints](#your-own-sign-ins-by-their-fingerprints)), in files in `/data` that only its service can read. Play Together sessions, what your devices are playing, and offline-password sessions, are in memory only. The service never stores tokens: it keeps short-lived SHA-256 hashes of them as cache keys, so it doesn't ask plex.tv on every request, and, for the owner's, those fingerprints.
-- **No outside code or tracking.** No analytics, no third-party scripts, and hls.js is bundled into the image. The browser contacts only plex.tv (sign-in, your server list, profile pictures), your Plex server, and Ollama if you set up your own. The container contacts only plex.tv, your Plex server, the shared Ollama and the MusicBrainz you set, if you set them, and Spotify (`open.spotify.com`, and `spotify.link` for short links) if you turn on `SPOTIFY_LINK_IMPORT` (or `SPOTIFY_IMPORT`).
-- **Signing out** clears everything kept for you on that device: your sign-in, the queue, plays and ratings not yet sent (the sign-out sheet says so, when there are any), lists such as missing tracks (what the container keeps for your account stays with it), the settings that are yours rather than the device's (anything for the AI, the player's name, Home layouts), and the tab's own record of the pages you'd opened, with what you'd typed in their search boxes (since 0.20.0 that's kept there only, not with the browser's history of the tab too, which no page can clear). The page then loads afresh, so nothing of yours is left in it, other tabs signed in sign out too, and the browser is asked to forget the artwork it kept from the player (over HTTPS; see [Remaining risks](#remaining-risks)).
-- **Switching user in a Plex Home** (**Settings › Account › Switch user**, offered only when you're signed in with Plex and plex.tv says your account is in a Plex Home with others) treats the next person as someone else entirely. The Home's admin, and the owner of the server the app is on (as plex.tv's list of servers says, by their id), are offered only if they have a PIN, and where it can't be told who owns it (before a server's chosen, or while plex.tv doesn't say), nobody is but managed users, who can't own a server, and those with a PIN (from 0.37.0: before, anyone in the Home could switch to an admin without one with a tap, and be them). Switching asks plex.tv again, just before, and refuses them too. It clears all that signing out does (the queue, searches, Missing tracks kept on the device). Your settings, the device's own included (streaming quality, the player's name, your own AI server), are kept aside on the device for you, by your Plex account's id, and come back when you switch back (from 0.34.0): the next person gets theirs, kept from when they last switched away from the device, or the settings to begin with, so nothing of yours goes to them and nothing of theirs comes from you. Anyone using the browser could read what's kept aside there (what you've told the AI about your taste, in its notes, among it), so your own AI server's key isn't kept: you enter it again. Signing out takes everyone's kept settings off the device. A PIN (theirs, where they have one) goes from the browser to plex.tv only: it's never sent to the container, never kept, the browser (and password managers) are told it's a code not to keep, and debug mode's redaction takes out `pin` wherever it is, as it does tokens. plex.tv answers with that person's own token, and the server and library are theirs to use only with their own access to the server, so ratings, plays and playlists are theirs, and so is what the container keeps for an account. The page loads afresh as them, at Home, and other tabs follow, at Home too; from the moment someone else is signed in (or nobody is), an open tab of the last person's keeps nothing more on the device, anything one of them kept in the moment before is cleared before the next person's first page, and the same goes for signing out. It's part of the app, with nothing to set.
+- **Your Plex sign-in** is kept in the browser. It goes only to plex.tv, your Plex server (directly or through the player's `/pms/`), and the player's own service, which checks who you are.
+- **Your library**: requests go from your browser to your Plex server.
+- **Plays and ratings made while the connection's down** wait in the browser (two weeks at most), then go only to that very server, with the sign-in that made them. Signing out clears them.
+- **What the container keeps**, in `/data`, readable by its service only: shared playlists, each account's settings and Missing tracks, MusicBrainz's answers, and fingerprints of the server owner's sign-ins. No database, and never a token.
+- **In memory only**: Play Together sessions, what your devices are playing, and offline-password sessions.
+- **No tracking**: no analytics or third-party scripts. hls.js is bundled into the image.
+- **Who the browser talks to**: plex.tv, your Plex server, and an Ollama of your own if you set one up.
+- **Who the container talks to**: plex.tv, your Plex server, and, only if you set them up, the shared Ollama, MusicBrainz, and Spotify (for link imports).
+- **Signing out** clears everything kept for you on that device.
+
+What each feature sends:
+
+| Feature | What goes | Where |
+| --- | --- | --- |
+| Missing tracks | Each missing track's title and artist. Never what was asked for, or Spotify playlists' names. | The player (`SYNC_MISSING_TRACKS`) |
+| MusicBrainz checks | Suggested artists, and songs' titles with their artist | MusicBrainz, from the player |
+| MusicBrainz features | Artists' names, or Plex's MusicBrainz ids for them (a mirror of your own: albums' MusicBrainz ids too). Never titles. | MusicBrainz, from the player |
+| Spotify, from your data | Nothing: the files are read in the browser | |
+| Spotify, from a link | The playlist's id | Spotify, from the player |
+| Playlist files | Nothing: the file stays on your device | |
+| Pictures you upload | The picture, redrawn smaller first (so a photo's location and camera don't go with it) | Your Plex server |
 
 ## Safeguards
 
-### The Plex proxy
+### The Plex proxy (`/pms/`)
 
-- Requests without a token are refused, except the playlist and segment files inside a stream Plex is converting (players fetch those by the stream's session id, which the app makes random so it can't be guessed), and only at paths with Plex's own shape.
-- If your Plex server lets the container in without signing in (Plex's "List of IP addresses and networks that are allowed without auth": see [Offline mode](docs/configuration.md#offline-mode)), it can take any request from the container for its owner's, whoever sends it: they'd see and change everything as the owner. So since 0.30.0 the service asks the server, before each request, whether it lets the container in right now (asked without a sign-in, so there's nothing for the server to check with plex.tv, and never taken from before, as the owner can change that at any moment). Where it doesn't, the request goes on, as Plex checks every sign-in itself. Where it does, nothing goes through that the server would take for its owner's, unless it's theirs:
-  - **The owner's own sign-in**, as plex.tv says it is; while plex.tv isn't answering, one it said was theirs (see [Your own sign-ins, by their fingerprints](#your-own-sign-ins-by-their-fingerprints)). One plex.tv has said is theirs isn't counted against the limits below, so nobody else's requests can keep the owner out.
-  - **Anyone else's**, only once the server, asked with that very sign-in just before the request goes, has refused it what only its owner may see (its settings, and who's playing what), while it shows that, asked along with it, to a request it takes for its owner's (one without a sign-in): then it knows them as themselves, and they use it as themselves, with their own playlists and ratings. Both are asked again for each request, never taken from before, so a sign-in the server stops knowing (a share taken away, say, or the server can't check it with plex.tv) is refused from the next request on, and so is everyone else's if the server stops showing its owner that. A server that takes everyone from the container for its owner shows them those, so they're refused; and where a request without a sign-in isn't shown them both (one of them isn't there), the server can't be asked this, and only the owner gets through.
-  - **...and only with that one sign-in in the request**: nothing else in it that Plex might read as another and take for its owner's, not knowing it. No other `X-Plex-Token` header, none in the query string that isn't the same, or that's written with %-escapes, and "token" nowhere else in the request, in any case or %-escaped, as nginx counts it (so a friend's search for "token" is refused there too). nginx passes Plex no `Authorization` or `Content-Type` header either way.
-  - **Not a stream**, for anyone but the owner: the server's notifications, a WebSocket or an event stream at any path. They stay open for hours, and what the notifications say is the owner's.
-  - **A session of the offline password's** (see [Offline mode](#offline-mode)): its requests go to the server without its sign-in, so the server takes them as it takes the service's own without one, for its owner's. That's what the password is for.
-
-  The service asks the server the way nginx sends it the requests: through nginx itself, by a socket of nginx's in a folder that only the service, nginx and root can go into, so it goes to the same address, from the same one, with the same headers. The server judges by where a request comes from whether to let it in without signing in, so a question that went another way (over IPv6, say, where nginx goes over IPv4) could be answered for another address than the request's. For the same reason, where `PLEX_SERVER_URL` is a name with more than one address (nginx takes turns between them), or one that's just changed address (nginx keeps what it was told for 30 seconds), the server can't be asked about each request, and only the owner gets through, for a minute after too. (A name is looked up by one resolver of nginx's, for all of it, and looked up by the service, from the same name server, every few seconds.) Anything that can't be told (the server or plex.tv not answering as needed, or the server answering a request without a sign-in with anything but its own refusal) is refused, never let through: while it can't be told whether the server lets the container in, or whether it knows someone's sign-in as theirs (it isn't answering as needed, say), only the owner gets through, as plex.tv says (since 0.16.0), and nobody else; and until the server's known (its certificate checked, where the service checks it: see below), nobody at all. Each address can have the server asked about sign-ins it hasn't been asked about lately a limited number of times a minute, so made-up ones can't have it asked without end. Without the container's service (Node.js), there's no `/pms/` at all, as nothing would check what goes through it.
-- **Nothing of where a request came from reaches Plex but its connection, from the container** (since 0.30.0): no `X-Forwarded-For`, `X-Real-IP`, `Forwarded` or the like, neither the browser's address nor anything a browser sends. Plex judges by a request's address whether to let it in without signing in, and some Plex versions read the address from `X-Forwarded-For`, so a request from an address on its list (a friend on the same VPN, say) could have been let in as the owner while the container wasn't. Now every request reaches Plex from the container's own address, as the service's questions do. (So Plex sees everyone using the player as the container, and can't tell who's far away: its limits for remote streams don't apply to them.)
-- Cookies aren't passed on either way, only WebSocket upgrades are, and nothing from Plex is kept by the browser except artwork (its address names the picture, and it's marked private).
-- At an `https://` name, nginx checks Plex's certificate as a browser would. At an `https://` network address it can't (see [Remaining risks](#remaining-risks)); the service checks there, straight at that address, that it's a valid Plex certificate, and the very server nginx reaches, before anything goes through.
+- **A token is required**, except for the files of a stream Plex is converting, which are fetched by the stream's random session id, at paths with Plex's own shape.
+- **If your Plex server lets the player in without signing in** (Plex's list of networks allowed without auth, as [offline mode](docs/configuration.md#offline-mode) needs), it would take any request from the player as its owner's. So the service checks each request first, asking the server whether it lets the player in right now. If it does, only these get through:
+  - **the owner's own sign-in**, as plex.tv says (while plex.tv is down, by its [fingerprint](#your-own-sign-ins-by-their-fingerprints)). The owner's are never held back by others' limits;
+  - **anyone else's**, only if the server, asked with that sign-in just before, refuses it what only the owner may see (its settings, and who's playing what). Then the server knows them as themselves. Asked again for every request;
+  - **with one sign-in only**: no second token anywhere in the request, and "token" nowhere else in it, in any case or %-escaped;
+  - **no streams** (the server's notifications), for anyone but the owner;
+  - **offline-password sessions**: their requests go without a sign-in, as the owner's. That's what the password is for.
+- **What can't be checked is refused**: while the server or plex.tv isn't answering as needed, only the owner gets through; until the server's certificate is checked, nobody.
+- **One route to the server**: the service asks through nginx itself, so its question and the request reach the server the same way, from the same address. A `PLEX_SERVER_URL` name with several addresses, or one that's just changed, lets only the owner through.
+- **Made-up sign-ins** can only have the server asked about them a few times a minute from an address.
+- **Nothing of where a request came from** reaches Plex (no `X-Forwarded-For` or the like): Plex sees everything as the player's own address, as some Plex versions judge by that header.
+- **No cookies** either way, no `Authorization` or `Content-Type` header to Plex, only WebSocket upgrades passed on, and nothing from Plex kept by the browser but artwork.
+- **HTTPS**: at a name, nginx checks Plex's certificate as a browser would. At an address it can't, so the service checks it's a valid Plex certificate, from that very server.
+- **Without Node.js** (the service), there's no `/pms/` at all.
 
 ### Your own sign-ins, by their fingerprints
 
-So that your devices carry on through the player while plex.tv isn't answering, the service keeps a fingerprint of each sign-in plex.tv said was the server's owner's: its SHA-256 hash, which can't be turned back into the sign-in. At most 50, each for 30 days after it was last used, in `owners.json` in `DATA_DIR`, which only the service can read (in memory only, where that can't be used). One goes as soon as plex.tv says that sign-in is no good, or isn't the owner's. They're used only while plex.tv isn't answering the container, and only for requests to `/pms/`.
+So your devices carry on while plex.tv is down, the service keeps the SHA-256 hash of each sign-in plex.tv said was the server owner's, which can't be turned back into the sign-in.
+
+- At most 50, each for 30 days after its last use, in `owners.json`, readable by the service only.
+- One goes as soon as plex.tv says it's no good, or not the owner's.
+- Used only while plex.tv isn't answering, and only for `/pms/`.
 
 ### Offline mode
 
-Off unless `OFFLINE_PWD` is set, with `PLEX_SERVER_URL`. It's for when plex.tv can't be reached, so nobody can sign in with Plex: then the player can be signed in to with the password, and plays the Plex server as the server lets the container in without signing in, which is as its owner, with their playlists, ratings and history, and the changes made as them. So the password is the owner's to give, to whoever they'd let use their Plex account.
+Off unless `OFFLINE_PWD` is set. The password signs in **as the server's owner**, so it's theirs to give, only to whoever they'd let use their Plex account.
 
-- **Only while plex.tv isn't answering**: the password isn't even tried until plex.tv hasn't answered the container for 20 seconds, and only where the Plex server lets the container in without signing in (else nothing could be played). While plex.tv answers, it's turned down without being looked at.
-- **Only from your own networks**, unless `OFFLINE_NETWORKS` says otherwise, by the address the container sees (behind another proxy, that proxy's: and in Docker, browsers that reach the container over IPv6 can come from its network's gateway, a private address).
-- **A few tries**: five a minute from an address, and after 30 wrong ones from it in an hour, none at all from there for the rest of the hour, whoever's there. After 30 wrong passwords in an hour from anywhere, none from wherever a wrong one came, and after 200, from anywhere at all (the log says so); but where the password has signed in from in the last 14 days (your own devices, say), only that address's own wrong ones count, so nobody else's can keep it out there. (Behind a reverse proxy, that address is everyone's.) The password is compared in constant time, and never logged, nor in `config.js`: it's in the service's own settings, which only it can read, as `OLLAMA_API_KEY` is. It can only have characters that settings files keep as they are (letters, digits and `. _ ~ + / = : , @ -`): a `#` or a `$` can cut a password short or change it in some of them.
-- **Sessions** are random sign-ins (`pwoff-` and 48 hex digits), in the service's memory only, so a restart ends them. Each lasts 14 days at most, and they all end once plex.tv has been answering again for two minutes: then the app signs out, clearing what it kept on the device, and the sign-in page says why. A session's sign-in never leaves the container: it's never sent to plex.tv, nor to the Plex server (nginx sends its requests on without it, and the server takes them as it takes the container's own without one, for its owner's), and it's refused wherever a Plex account is needed (Play Together, your devices, shared playlists, the settings and Missing tracks that follow an account), so the app doesn't use those. Nor the server's notification stream, or Plex's own sign-ins (`/security/token`), which would outlast the session, and only with that one sign-in in a request.
+- **Only while plex.tv is down** (20 seconds without an answer), and only where the server lets the player in. Otherwise it isn't even looked at.
+- **Only from your own networks**, unless `OFFLINE_NETWORKS` says otherwise. Behind another proxy, that proxy's address is what's seen.
+- **Few tries**: five a minute from an address; none from it for the rest of the hour after 30 wrong ones from it. After 30 wrong ones from anywhere, none from any address a wrong one came from, and after 200, from anywhere, but where the password signed in from in the last 14 days, only that address's own count.
+- **Never shown**: compared in constant time, never logged, not in `config.js`. Only characters settings files keep as they are.
+- **Sessions** are random, in memory only, 14 days at most, and all end two minutes after plex.tv is back. A session's sign-in never leaves the container, and is refused wherever a Plex account is needed (Play Together, your devices, shared playlists, synced settings).
 
 ### Routes to your server
 
-- The browser reaches your server at the addresses plex.tv gives for it, or through the container's `/pms/` proxy. Each route is asked who it is, and only counts if it's that very server (by its id), so whatever else answers at an address isn't used.
-- The question carries the server's token, as everything the app then sends that way does: a Plex server only lets a page on another address read its answer when the request has one. So it goes only where the token stays private: to `https://` addresses, whose certificate the browser checks (Plex makes each server's `plex.direct` certificate for that server alone); to plain `http://` addresses only on your home network, only for a server of your own, and only when the player itself is opened over plain HTTP (a page over HTTPS can't use them), where it's unencrypted as in Plex's own apps; and to the player's own address. Over the internet, plain `http://` addresses are never used. Your account's own token never goes to someone else's server: that's what the server's own access token is for.
-- **An address you type** (Settings › Source › Enter a server address) is first asked who it is with nothing of yours, not even the player's name, and is used only where plex.tv has it for one of your servers (from 0.37.0: before, your Plex sign-in went to whatever was typed, often over plain http). Then it's tried as that server's routes are, by the rules above, and only counts if it's that very server that answers.
+- **Only that very server**: each route is asked who it is, and only counts if it's your server, by its id.
+- **Your token stays private**: it goes to `https://` addresses (certificates checked), to plain `http://` addresses only on your home network for a server of your own (and only with the player itself on plain HTTP), and to the player. Never plain `http://` over the internet.
+- **Your account's token** never goes to someone else's server: the server's own access token does.
+- **An address you type** (Settings › Source) is first asked who it is with nothing of yours, and used only where plex.tv has it as one of your servers.
 
 ### Play Together
 
-- Only your own Plex friends can be invited, and joining checks with plex.tv, with the joiner's own token, that they can play from the session's library. A session's link is useless to anyone who wasn't invited.
-- Everyone plays from the Plex server with their own token. Tokens are never shared between people, and the service doesn't keep them.
-- Tracks someone adds are reduced to the fields the app needs, and their file and artwork paths must have Plex's own shape, so nobody can point other people's players at another website, or another part of the server. Each player checks this again before playing.
-- People in a session see each other's Plex display names and profile pictures, never email addresses or tokens.
-- Sessions are in memory and end on their own: after 30 minutes with nobody listening, or after 24 hours. A player holds at most 100, one per person. Requests are limited per person.
+- Only your own Plex friends can be invited, and plex.tv confirms each can play from the session's library.
+- Everyone plays with their own token. Tokens are never shared, and the service doesn't keep them.
+- Tracks added are cut down to what's needed to play them, with Plex-shaped paths, checked again by each player.
+- People in a session see each other's Plex names and pictures, never email addresses or tokens.
+- Sessions are in memory, end after 30 minutes with nobody listening (or 24 hours), 100 at most.
 
 ### Play on
 
-Browsers can't send commands to a Plex player on your network, so the service passes them on. That means it makes requests into your home network, so it's tightly limited:
+The service passes commands to Plex players on your network, so it's tightly limited:
 
-- **Only your server's owner, and only with `PLEX_SERVER_URL` set** (since 0.16.0; before, without it, anyone signed in to Plex could use it, with players on their own account). The players it can reach are on the server's network, and they're the owner's.
-- **Only your own players, on your network.** The service connects only to devices on the signed-in account (from plex.tv) that say they're players, only at home-network addresses (10.x, 172.16 to 172.31, 192.168.x, 100.64 to 100.127 for Tailscale, and IPv6 unique-local addresses), and only on the ports Plex players use (32500 to 32510, 3005 and 32433). Never at internet, loopback or link-local addresses. Players' addresses stay in the container; the browser only gets their names.
-- **Only commands it builds itself**, from a fixed list, with every value checked. It follows no redirects, waits at most 5 seconds, reads at most 64 KB of an answer, and passes back only the player's state.
-- **A temporary token for playback.** The player plays from your Plex server with a temporary token the server makes for it, which only works on that server.
-- **AirPlay and Google Cast** are the browser's own. Before the browser hands a track to a speaker, the app switches its address to a temporary token from your Plex server, for that server and account only; until it has one, nothing is sent (since 0.16.0: before, the account's own token could go).
+- **Only the server's owner, with `PLEX_SERVER_URL` set.**
+- **Only their own players**: devices on their account (from plex.tv), at home-network addresses only (10.x, 172.16–31.x, 192.168.x, 100.64–127.x, unique-local IPv6), on Plex players' ports only (32500–32510, 3005, 32433). Players' addresses never reach the browser.
+- **Only commands it builds**, from a fixed list, with every value checked. No redirects, 5 seconds at most, 64 KB of answer at most.
+- **A temporary token** from your server for playback, which only works on that server.
+- **AirPlay and Google Cast** get a temporary token for that server and account; until there is one, nothing is sent.
 
 ### Your devices
 
-- **What it holds**, in memory only: for each Plex account and server, the devices open (a name such as "Chrome on Android", or the player name you chose, and a random id), which one plays, its queue around the current track (up to 600 tracks), where it is, and commands waiting for it. A device that's gone quiet is forgotten after a minute, the rest a day after your devices were last used.
-- **Only your own devices.** Each request carries the device's own Plex token, checked with plex.tv, on a server that account can play from. What one account's devices share is never shown to another account.
-- **No tokens between devices**, and what one device sends another is checked: tracks reduced to the fields the app needs, Plex-shaped paths, commands from a fixed list, requests limited per account, bodies to 512 KB.
+- In memory only: for each account and server, the devices open (their names and random ids), which one plays, its queue (600 tracks at most), and commands waiting.
+- Each request is checked with plex.tv. One account's devices are never shown to another.
+- No tokens between devices. Tracks, paths and commands are checked; requests are limited per account; bodies to 512 KB.
 
 ### The shared AI model
 
-- Every request's Plex sign-in is checked: with `PLEX_SERVER_URL` set, only people who can use your Plex server get through.
-- Only chats are passed on, with the fields the app uses, each checked, and always on the model in `OLLAMA_MODEL`. Since 0.16.0 the service also decides what sets how much memory the model takes on the AI server (how much context, and how long it stays loaded), and keeps answer formats small.
-- The AI server's other models, its version, its settings and its address are never shown. Since 0.16.0 that includes Ollama's own error messages (whether it turns a chat down or stops partway through one), which can say where it is and what's on it: they go to the container's log, and the app gets a plain message.
-- The model's own name is shown only to the people it's for (Settings › AI asks the service for it): since 0.28.0 it isn't in the app's `config.js`, which anyone who can reach the player can read before signing in.
-- `OLLAMA_API_KEY` goes to Ollama only, never to browsers or the log.
-- **An Ollama of your own** (**Settings › AI › My own Ollama server**, for anyone the shared model isn't for, or who'd rather use theirs) is reached from the browser directly, never through the container, so the container's AI server isn't involved. Its address and key stay in that browser (a device's own settings, never kept for your account), and signing out clears them. The shared model's settings can't be chosen or seen there either way.
-- Requests are rate-limited per person and per address, and a few chats run at a time.
+- Every request's Plex sign-in is checked: with `PLEX_SERVER_URL` set, only people who can use your server get through.
+- Only chats go to Ollama, with the fields the app uses, each checked, always on `OLLAMA_MODEL`. The service sets how much memory the model takes.
+- The AI server's address, other models, version, settings and own error messages are never shown: errors go to the container's log. The model's name is told only to those it's for.
+- `OLLAMA_API_KEY` goes to Ollama only.
+- An Ollama of your own is reached from the browser directly, never through the container. Its address and key stay on that device.
+- Limited per person and per address, a few chats at a time.
 
-### MusicBrainz checks
+### MusicBrainz
 
-- **Off unless you set it up** (`MUSICBRAINZ_URL`: musicbrainz.org, or your own mirror, so names needn't leave your network at all). Then each device can turn it off, and it only happens with Show missing tracks on.
-- **Only names**: artists, and songs' titles with their artist, that an AI playlist suggested and your library doesn't have. No tokens, nothing about your Plex account, server or the rest of your library. Browsers send them to the container, never to MusicBrainz, so MusicBrainz sees the container's address, and a User-Agent naming this app and its version, as it asks apps to send.
+- **Off unless set up** (`MUSICBRAINZ_URL`). The features need `MUSICBRAINZ_ADVANCED=true` too. Each person can turn each off.
+- **Only names and MusicBrainz ids go** (see [At a glance](#at-a-glance)), from the container, with a User-Agent naming the app and its version, as MusicBrainz asks. No tokens, nothing about your account or server.
 - **For people who can use your Plex server**, as the shared AI model is.
-- **Searches it builds itself**, with each name quoted, and answers reduced to "known", "an album" or "not known". Answers are read up to a limit (8 MB), and a redirect is never followed, so what's asked goes to that MusicBrainz alone (the features' too).
-- **Limited**: 10 names a request, 30 requests a minute each, a few at a time. musicbrainz.org is asked at most once a second for everyone (its rule). Answers are kept in memory for a week.
-
-### The MusicBrainz features
-
-- **Off unless the container's host turns them on** (`MUSICBRAINZ_ADVANCED=true`, with `MUSICBRAINZ_URL`), as they ask MusicBrainz about the whole library; then each person can turn each one off.
-- **To musicbrainz.org, only artists' names go** (or an artist's MusicBrainz id, where Plex has one for them), and, for an album without a genre whose artist's release groups were looked up before 0.38.0, its release group's MusicBrainz id, to ask its genres (they come with the artist's release groups now): those of the artists whose pages, albums or tracks the app is working with (an artist page, what it picks for you, an import's artists it didn't find, and for the server's owner, every album's artist, and those Artists to merge lists). Albums' titles, and Plex's MusicBrainz ids for them, are matched in the container against what MusicBrainz says of their artist. **To a MusicBrainz server of your own** (a mirror, which keeps it all on your network), albums' MusicBrainz ids go too, for the owner's Years and genres to fix and an album's page: Plex's for an album, and those of its release groups and releases, to compare its tracks with MusicBrainz's releases of it. Albums' and tracks' titles are never sent: they're compared in the container. No tokens, nothing about your Plex account or server; MusicBrainz sees the container's address, and a User-Agent naming this app and its version.
-- **What it keeps**, in `/data/musicbrainz.json` (readable by the service alone), for a month: what MusicBrainz said of each artist (their MusicBrainz id, other names and genres) and of their release groups (titles, kinds, first dates and genres), and the names it had no artist for, by name (which can be artists from anyone's imports that the library hasn't); and from 0.38.0, each album's answer as the app was given it (its release group, as above), by its artist's name, its title, the year Plex has and the MusicBrainz ids Plex has for them. Nothing about who asked. It's MusicBrainz's public data, checked as it's read back, and written ten seconds after the first answer since the container started, then at most every five minutes.
-- **Never Various Artists**: compilations' artist, by any of its usual names, nor MusicBrainz's other special-purpose artists ([unknown], [anonymous], [traditional] and the rest), by their ids or as Anonymous and Traditional, as no one's discography.
-- **For people who can use your Plex server**, as the shared AI model is, and limited: 120 requests a minute each, 1,000 albums a request and 30,000 a minute. What isn't known yet is looked up in the background (a few at a time on a server of your own, one at a time on musicbrainz.org), behind anything someone's waiting on, 5,000 at most waiting (2,000 of any one account's); musicbrainz.org at most once a second for everyone. When MusicBrainz doesn't answer, nothing new is asked of it for a minute (what's kept is still answered), so no one waits on it again and again.
-- **Changes to Plex are the server's owner's**: the years and genres to fix are shown only to the owner, and each change goes from their browser to their Plex server with their own sign-in, as any change they make in Plex (Plex itself refuses them to anyone else). Artists to merge, also the owner's alone, only lists what Plex has (from 0.35.0: it no longer merges). Nothing else of the features writes anywhere: Plex never writes to your files.
+- **Searches it builds itself**, each name quoted. Answers read up to 8 MB; redirects never followed.
+- **Limited**: 10 names a check and 30 checks a minute each; the features 120 requests a minute each, 1,000 albums a request and 30,000 a minute. musicbrainz.org is asked once a second at most, for everyone. A mirror of your own: up to 8 at once while it keeps up, 20 a second at most. One that says it's busy is left alone as long as it asks.
+- **Kept**: checks' answers in memory for a week; the features' in `/data/musicbrainz.json` for a month (MusicBrainz's public data, and each album's answer, by artist, title and year: nothing about who asked).
+- **Never Various Artists**, or MusicBrainz's other special-purpose artists ([unknown], [anonymous] and the rest).
+- **Changes to Plex are the owner's**: years and genres are fixed from the owner's browser, with their own sign-in. Artists to merge only lists. Plex never writes to your files.
 
 ### Spotify imports
 
-From Spotify's download of your data (Search › From Spotify):
+From Spotify's download of your data:
 
-- **Only the playlist files are opened.** Spotify's download is a ZIP with a file for each kind of data, most of them personal (your email, date of birth, address, phone number, payment card, and what you've searched for and listened to). The app asks for only the files named `Playlist1.json` (`Playlist2.json` and so on) and `YourLibrary.json`, and checks each file's name before opening it: any other, the ZIP itself included, is turned away unread, and the app says which.
-- **Read in the browser, and kept small**: each file is read on the device (at most 25 MB a file, 1,000 playlists, 20,000 tracks a playlist and 100,000 in all), and only each playlist's name and each track's title, artist and album are kept, as plain text. Descriptions, follower counts, dates and Spotify's ids aren't. Nothing from the files goes to Spotify, and to the container's service only the title and artist of each track that isn't found, for Missing tracks, without the playlist's name (unless that's turned off for the import): the titles, artists and albums go to your Plex server (through the container's `/pms/` proxy when that's the route), to find the tracks, as any search does. (Since 0.22.0 the proxy's sign-in check is given only the request's token, not the rest of its address, so the service doesn't see what's searched for, from here or anywhere else in the app.)
+- **Only the playlist files are opened**: `Playlist1.json` (`Playlist2.json`…) and `YourLibrary.json`. Any other file, the ZIP included, is turned away by its name, unread: the others hold personal details (email, address, payment card, listening history).
+- **Read in the browser**, at most 25 MB a file, 1,000 playlists, 20,000 tracks a playlist and 100,000 in all. Only playlist names and tracks' titles, artists and albums are kept.
+- **Nothing goes to Spotify.** The titles go to your Plex server, as any search does. Tracks not found go to Missing tracks, without the playlist's name.
 
-From a link:
+From a link (off unless `SPOTIFY_LINK_IMPORT=true`):
 
-- **Off unless you turn it on** (`SPOTIFY_LINK_IMPORT=true`, or `SPOTIFY_IMPORT=true` as before 0.22.0). Spotify's API only gives a playlist's tracks to the account that owns it, so the container reads the page Spotify shows anyone for the playlist (its embed player) instead. Spotify's terms don't allow reading it like that, which is why it's off to begin with.
-- **Only the playlist's id goes to Spotify**, from the container: the link is checked to be an `open.spotify.com` playlist link, a `spotify:playlist:` URI or a `spotify.link` short link, and the page is always fetched from Spotify's own address with that id in it, so a link can't make the container fetch anything else. A short link is followed to Spotify's address only. No tokens, cookies or anything about you or your library go to Spotify, and your browser never contacts it.
-- **For people who can use your Plex server**, as the shared AI model is (anyone signed in to Plex without `PLEX_SERVER_URL`).
-- **What's read is bounded**: a 15-second limit, at most 5 MB of page, redirects followed only within Spotify's address, and only the playlist's name, its maker's name and each track's title, artists, album and length come out of it, as plain text and numbers. Pages are kept in memory for 10 minutes.
-- **Limited**: 10 playlists a minute each, 60 a minute for everyone, 4 at once.
+- **Only the playlist's id goes to Spotify**, from the container. The link must be a Spotify playlist link; the page is always fetched from Spotify's own address. Your browser never contacts Spotify.
+- **Bounded**: 15 seconds, 5 MB of page, redirects only within Spotify, and only names, titles and lengths come out of it, as plain text.
+- **For people who can use your Plex server.** 10 playlists a minute each, 60 for everyone.
+- Spotify's terms don't allow reading its pages like this: that's why it's off to begin with.
 
 ### Missing tracks
 
-- **What it keeps**, in `/data/missing.json` (on Proxmox, `/var/lib/plexamp-web`), readable by the service alone, for each Plex server and each account by its Plex id: the artists and titles its AI playlists suggested and its Spotify imports had that the server's music doesn't, which library, how often and when, and whether MusicBrainz knows them. A Spotify one's playlists are counted by a short hash of each one's name, never the name: twelve bits of it, which one name in 4,096 shares, so a name can't be worked out from what's kept (a list of 100,000 names leaves about 24 for each), though someone who can read the file could still check a single likely guess against it. (Before 0.25.0 it was the whole hash, which picked one name out of millions; those are cut down the first time 0.25.0 reads them, on the player and in each browser.) Never what anyone asked an AI for, a sign-in or anyone's name. `SYNC_MISSING_TRACKS=false` keeps nothing.
-- **Everyone's is kept as they use it**, a friend's as the server's owner's (from 0.25.0: before, a friend chose): what a friend's Spotify imports and AI playlists didn't find is what the server's owner needs to know. Their Missing tracks page, Show missing tracks and each import's Put what isn't here on Missing tracks say that whoever runs the server sees them. A friend's browser that had a list of its own before sends it to their account the first time it meets it.
-- **What's sent is a change, never the list**, made in the browser and again by the service with the same rules (`missinglist.js`, one file for both), each checked as it comes in: plain text of limited length, known kinds, at most 50 changes a request and 1,000 tracks a change. Each counts once however often it's sent (the service remembers each list's latest 2,000 changes, for 60 days; nothing's kept for an account that has no list, and one just cleared counts as a list while it remembers its changes). Limits: 500 accounts, lists on 10 servers each, the latest 500 from AI playlists and 1,000 from Spotify on each list, and 100,000 in all: past that, the list that doesn't fit stays on the device (nothing's taken from it), and the app says so.
-- **Only for Plex accounts that can use the server** a list is for (and with `PLEX_SERVER_URL` set, that server too), checked with plex.tv, as shared playlists are.
-- **Everyone's, only for the server's owner**, as plex.tv says: the service puts others' lists together for them (how often in all, and whose, by name for those who are the owner's Plex friends, as plex.tv has them for the owner's own sign-in, and otherwise as a number). Only the owner can change everyone's, and only to take some off or clear it. Their MusicBrainz checks are of their own list: a friend's are checked as the friend chooses. Friends see only their own, and nothing of anyone else's, not even whether there is any.
-- **Each browser's own list stays its account's**: one signed in over someone else's (without signing out) never sends what it had to the new account, and signing out clears it there.
+- **Kept** in `/data/missing.json`, readable by the service only: for each server and account (by Plex id), the missing tracks' artists and titles, their library, how often and when, and whether MusicBrainz knows them.
+- **Spotify playlists are counted by a short hash** of each name (12 bits: one name in 4,096 shares it), never the name. Someone with the file could only check a single guess against it.
+- **Never kept**: what anyone asked an AI for, a sign-in, anyone's name.
+- **Only changes are sent**, never the whole list, checked as they come in, within limits (500 accounts, 10 servers each, 100,000 tracks in all).
+- **Friends see only their own.** The server's owner sees everyone's, with whose each is, and friends are told so.
+- `SYNC_MISSING_TRACKS=false` keeps nothing.
 
 ### Shared playlists
 
-- **What it keeps**, in `/data/shares.json` (on Proxmox, `/var/lib/plexamp-web`), readable by the service alone: each shared playlist's title and tracks, the Plex account id and display name of whoever shared it and of each friend it's shared with, whether each can edit it, and which playlist is each one's copy. No tokens or email addresses.
-- **No one's sign-in is used for anyone else.** Each person's browser changes their own copy in Plex, with their own token.
-- **Only your own Plex friends, on the same server**, checked with plex.tv. Someone it isn't shared with can't tell it exists, and the people it's shared with see whose it is, nothing about one another. Only its owner can change who it's shared with, and someone who can only view it can't change it for anyone.
-- **Checked on the way in**: track ids must be numbers, titles are one line, and there are limits on tracks (5,000), people (30), playlists each person shares (50) and in all (2,000). A file that's been tampered with is checked as it's read.
-- **Its folder is the service's own**, and only one that holds nothing but shared playlists. Nothing there is followed or changed through a link.
-- **Tracks you can't see aren't taken out for everyone**, and only the difference is made to your copy, by one of your devices at a time.
+- **Kept** in `/data/shares.json`, readable by the service only: titles, tracks (by id), and the Plex names and ids of who shares with whom. No tokens or email addresses.
+- **Everyone's own sign-in**: each person's browser changes their own copy.
+- **Only your own Plex friends, on the same server**, checked with plex.tv. Someone it isn't shared with can't tell it exists.
+- **Checked**: numeric track ids, one-line titles, and limits (5,000 tracks, 30 people, 50 playlists each, 2,000 in all).
+
+### Switching user, in a Plex Home
+
+- **The Home's admin and the server's owner** are only offered if they have a PIN. Where who owns the server can't be told, only managed users and those with a PIN are. plex.tv is asked again just before switching.
+- **It clears what signing out clears.** Your settings are kept aside on the device, by your account's id, for when you switch back. Your own AI server's key isn't: you enter it again.
+- **The PIN** goes from the browser to plex.tv only: never to the container, never kept, and taken out of debug logs.
+- From the moment someone else is signed in, an open tab of the last person's keeps nothing more on the device.
 
 ### Editing playlists and collections
 
-Changes go to your Plex server with your own token, so Plex decides what you may change: your own playlists, and collections only if you own the server (the app only offers collections to the server's owner). Taking a track out of a playlist only takes it out of the playlist, never out of Plex. Pictures are redrawn in the browser as a JPEG of at most 1200 pixels before they go.
+Changes go to your Plex server with your own token, so Plex decides what you may change. Taking a track out of a playlist never deletes it from Plex. Pictures are redrawn as a JPEG of 1200 pixels at most before they go.
 
 ### The service
 
-- It listens on a Unix socket only nginx can reach, and answers only plain paths (since 0.16.0: a path with a backslash, `.`/`..` or encoded slashes in it isn't answered, so a path nginx kept from it can't become one it answers). Its sign-in checks for `/pms/` and the AI model's requests are only answered when they come the way nginx sends them.
-- With `PLEX_SERVER_URL` set it's for the people who can use that server: Play Together, your devices and shared playlists too, since 0.16.0 (on that server, or another of theirs), as the shared AI model and MusicBrainz checks were already.
-- New sign-ins are checked with plex.tv a few a minute from each address (an IPv6 address by its network; sign-ins seen lately, or that plex.tv has taken in the last day, don't count), at most 16 questions at once with a limited number waiting, and each token only once however many requests ask. plex.tv's answers are read up to a limit, and redirects aren't followed, so a token goes to plex.tv and nowhere else.
-- It starts as root to make its socket, then gives up root and root's groups, and won't carry on as root if the user it should become isn't there.
-- Request bodies are taken only as JSON, said so in the request, which another site's page can't have a browser send without asking first (and it isn't let): so it can't have a visitor's browser start a chat with the shared model (with `OLLAMA_AUTH=off`), say, or write lines to the debug log.
-- Its files in the data folder are written whole (on the disk) before they take the old ones' places, so a power cut can't leave one half written (but what the MusicBrainz features looked up, kept only so as not to ask again, which isn't waited for); one it can't read is kept aside, as it was, never written over.
+- **Reachable only through nginx**, on a Unix socket, answering plain paths only.
+- **With `PLEX_SERVER_URL` set**, it's for people who can use that server: Play Together, your devices, shared playlists, the AI model and MusicBrainz.
+- **Sign-ins are checked with plex.tv** a few a minute from each address, each token once however many requests ask. plex.tv's answers are capped, and redirects refused.
+- **It gives up root** once its socket's made.
+- **Only JSON** request bodies, said so in the request, so another site's page can't make a visitor's browser send it anything.
+- **Its files are written whole** before they replace the old ones. One it can't read is kept aside, never written over.
 
 ### The container and its image
 
-- Built on nginx's stable branch, with Alpine's own security fixes since, rebuilt each release. The nginx access log is off (Plex tokens travel in addresses); in debug mode it shows paths only. nginx's version isn't shown, and the content security policy allows scripts and styles from the player only.
-- Every setting is checked at start-up, as a whole value (one line, the characters it can have), before it goes into nginx's configuration or the app's `config.js`; a value that doesn't fit stops the container with a message, without printing passwords.
-- `docker-compose.yml` sets `no-new-privileges`. Nothing whose name starts with a dot is served.
+- Built on nginx's stable branch with Alpine's security fixes, rebuilt each release. nginx's access log is off (tokens travel in addresses); in debug mode it shows paths only.
+- A strict content security policy: scripts and styles from the player only. nginx's version isn't shown. No file starting with a dot is served.
+- Every setting is checked at start-up as a whole value, before it goes into nginx's configuration or `config.js`. A bad one stops the container, without printing passwords.
+- `docker-compose.yml` sets `no-new-privileges`.
 
 ### The Proxmox install
 
-- Everything you type, or set beforehand, must match a strict pattern (the whole value: one line, no quotes or shell characters) before it goes into a command or settings file. The settings file is written on the node and copied into the container, readable by root only.
-- The container is unprivileged, and the service runs as `www-data`, which can't gain privileges or capabilities.
-- Only what the Docker image has is installed: nginx and Node.js from Debian, the app from this repository, and hls.js from npm, checked against the npm registry's checksum.
-- The app comes from the `stable` branch, which CI moves only to commits that passed every test. The one-line install starts from there too, and falls back to `main` only while there's no `stable` branch, never because a download failed. The script runs nothing unless all of it was downloaded.
+- Everything typed or set must match a strict pattern before it goes into a command or file. The settings file is readable by root only.
+- An unprivileged container; the service runs as `www-data`, which can't gain privileges.
+- nginx and Node.js from Debian, the app from this repository, hls.js checked against its checksum.
+- Installs from the `stable` branch (commits that passed every test), and runs nothing unless all of it was downloaded.
 
 ### Building and publishing
 
-CI's jobs get only the permissions they need (only the one that moves `stable` can change the repository), actions are pinned to commits, and the shellcheck it downloads is checked against its checksum.
+CI's jobs get only the permissions they need, actions are pinned to commits, the image published is the very one tested, and the shellcheck it downloads is checked against its checksum.
 
 ## What debug mode logs
 
-`DEBUG=true` writes much more to the container log: settings (secrets only as "set"), connection checks, request paths and status codes, the service's activity, and problems from browsers (a limited number of lines a minute). Tokens, keys and PINs are replaced with `[redacted]` everywhere (in addresses, inside other addresses, in headers and in JSON), but the log shows server addresses, people's names and tracks' names. Share it with care, and turn debug mode off when you're done.
+`DEBUG=true` adds settings (secrets only as "set"), connection checks, request paths and status codes, the service's activity, and problems from browsers (a limited number of lines a minute).
+
+- Tokens, keys and PINs are `[redacted]` everywhere: in addresses, in headers and in JSON.
+- The log does show server addresses, people's names and track names. Share it with care, and turn debug mode off when you're done.
 
 ## Remaining risks
 
 These come with how the player works:
 
-- **Tokens live in the browser.** Like Plex's own web app, the player keeps your token in the browser's local storage. Anyone with the browser profile, or a script injected into the page, could read it. The page uses no third-party scripts, builds everything without HTML strings, and has a strict content security policy, which makes injection hard.
-- **The browser's history of a tab keeps the addresses of the pages opened in it** (an album's or a playlist's number on the server, say: what's searched for isn't in them), and no page can take them out. Since 0.29.0, each is marked as the person's who opened it (with a mark made for them on that device, gone when they sign out or switch user), and going Back to someone else's shows Home instead, and puts Home's address in its place; a tab the browser brings back (Reopen closed tab) with someone else's page in it starts at Home, without what they'd typed. Until someone goes back over them, the addresses are still in the browser's own history list.
-- **Tracks loaded ahead, and those played that are kept** (**Settings › Playback › Load ahead** and **Keep played tracks**) are kept by the browser while they're wanted, up to 512 MB: not saved by the app, nor in the browser's cache, and let go when they're further back than that, the queue moves on, or you sign out. A browser short of memory can set large files aside in its own temporary storage until then.
-- **Tokens are in media addresses.** Plex needs the token in artwork and audio addresses. They go only to your Plex server and are never sent as a referrer, but they show in the browser's developer tools, and in its cache, which keeps artwork for a day. Signing out asks the browser to forget what it kept from the player, but browsers only do that over HTTPS, and artwork loaded from your Plex server directly is kept as that server says.
-- **The container serves plain HTTP.** On your home network that's the same as Plex's own `http://` addresses. If you use the player from outside, put it behind an HTTPS reverse proxy (see [docs/setup.md](docs/setup.md#from-outside-your-home-https)): without it, tokens cross the network unencrypted. And a player opened over plain HTTP from elsewhere (over a VPN, say) first uses the route to your server it used last, a plain `http://` one on your home network too, with your token, until plex.tv says you're elsewhere: whatever has that address where you are would get it. Over HTTPS, plain `http://` routes are never used.
-- **At an `https://` network address, the proxy can't check the Plex server's certificate name.** A Plex server's certificate is for its `plex.direct` name, never its address, so nginx encrypts the connection but can't check who it's talking to: as with `http://`, that hop relies on your home network. The service does check the certificate is a valid Plex one there.
-- **Without `PLEX_SERVER_URL`, the service is for anyone signed in to Plex**, and Plex accounts are free: the shared AI model, MusicBrainz checks, Play Together, your devices, shared playlists, account settings and Missing tracks (those three kept on the container's disk, within limits). If the player can be reached from the internet, set `PLEX_SERVER_URL`.
-- **AirPlay and Cast from the browser's own controls** (not the player's Play on) can hand a speaker the track's address, with your token, before the app switches it to the temporary one, which it does as soon as the browser says it's connected. Use Play on.
-- **Shared playlists are kept as plain JSON**: whoever can read the container's `/data` volume can see which playlists are shared, with what, and between whom. `PLAYLIST_SHARING=false` keeps nothing.
-- **Each account's settings are kept as plain JSON** there too (`settings.json`): how the app looks and plays for each Plex account, by its Plex id, and its Home screen layout. Only the settings that follow an account are kept, each as the kind of value it is (a yes or no, a number, one of a few words, the Home layout), within limits: never a sign-in, a device's name or connection, or anything for an AI server, even if a browser sends them. Only for Plex accounts that can use the server the app is on, and with `PLEX_SERVER_URL` set, that server. `SYNC_SETTINGS=false` keeps nothing, and anyone can turn it off for their own account in **Settings › Account**.
-- **Each account's Missing tracks are kept as plain JSON** there too (`missing.json`): whoever can read the container's `/data` volume can see what each Plex account kept there had its AI playlists suggest and its Spotify imports bring that a server doesn't, by its Plex id (not what was asked for, or playlists' names). The server's owner sees friends' in the app anyway, and friends are told so where theirs are listed. `SYNC_MISSING_TRACKS=false` keeps nothing.
-- **nginx and the service run as the same user** (in the Docker image `nginx`, on Proxmox `www-data`, Debian's), so a flaw in one could reach the other's files: the service's socket, shared playlists, account settings, Missing tracks, what the MusicBrainz features looked up, and the fingerprints of the server owner's sign-ins.
-- **hls.js** is checked against the npm registry's checksum, as it's downloaded. npm doesn't let a version be published twice.
-- **Debug mode accepts log lines from anyone who can open the player** (a limited number a minute), so it can fill the log with noise while it's on.
-- **Wide connection rules.** The content security policy has to allow connections, images and audio from any address, because Plex servers and Ollama can be anywhere.
-- **Spotify imports from a link read a page, not an API** (when `SPOTIFY_LINK_IMPORT` is on). Spotify's terms don't allow it, so it's for whoever runs the player to decide, and when Spotify changes the page the import stops working (or, at worst, reads names wrongly: they're only ever plain text). Spotify sees the container's address asking for the playlists people import.
-- **A Plex server that lets the container in without signing in takes its requests for its owner's.** The player checks each one with the server just before it goes (see [The Plex proxy](#the-plex-proxy)), but what changes on the server in the moment between (a share taken away just then) is only seen from the next request. And anything else that can send requests from the container's address (on Docker, often the address of the machine it runs on) is let in as the owner too: add only the player's own address to Plex's list, as [Offline mode](docs/configuration.md#offline-mode) says.
-- **`PLEX_SERVER_URL` has to reach the Plex server itself.** Something in front of it that refuses requests without a sign-in itself, with a 401 as Plex does, would be taken for the server's own refusal, while the server behind it might let that in-between in without signing in. Anything else it answers such a request with (a 403, say) is taken as "can't be told", and only the owner gets through.
-- **Behind a reverse proxy, everyone is one address to the container**, so the limits on sign-ins checked a minute are shared: made-up sign-ins sent through it can use those up for a minute, and those plex.tv hasn't taken through it in the last day (a friend's new device, say, or anyone's after the container restarts) wait meanwhile. The owner's own aren't held up once plex.tv has said they're theirs, but a device of the owner's signing in for the first time is, till then.
-- **While plex.tv isn't answering, a sign-in of the owner's that's been signed out since** (on plex.tv, from another device) still gets through the player, by its fingerprint, until plex.tv answers again: there's nothing to ask meanwhile. Plex itself may still take it too.
-- **The offline password is the server owner's account while plex.tv isn't answering.** Use a long random one, keep `OFFLINE_NETWORKS` to your own networks, and where the player is behind a reverse proxy (so the container sees only the proxy's address), limit who can reach it there.
-- **Whoever runs the container is trusted.** They control the code your browser runs, and the service sees your token when it checks who you are, and what you play while your devices share playback. That's true of any web app you open.
+- **Tokens live in the browser**, as in Plex's own web app. Anyone with the browser profile, or a script injected into the page, could read one. The page uses no third-party scripts and a strict content security policy.
+- **Tokens are in media addresses**: Plex needs them in artwork and audio addresses. They show in the browser's developer tools and cache (artwork, for a day). Signing out asks the browser to forget them, which only works over HTTPS.
+- **The container serves plain HTTP.** From outside your home, put it behind HTTPS (see [setup.md](docs/setup.md#from-outside-your-home-https)), or tokens cross the network unencrypted.
+- **At an `https://` address**, the proxy can't check the certificate's name (a Plex certificate is for its `plex.direct` name): that hop relies on your home network, as `http://` does.
+- **Without `PLEX_SERVER_URL`, the service is for anyone signed in to Plex**, and Plex accounts are free. If the player can be reached from the internet, set it.
+- **A Plex server that lets the player in** takes its requests as the owner's. The player checks each one just before it goes, but a change on the server in that moment (a share taken away) only counts from the next request. Anything else sending from the player's address is let in as the owner too: add only the player's own address to Plex's list.
+- **`PLEX_SERVER_URL` must be the server itself.** Something in front of it that answers 401 itself would be taken for the server's own refusal.
+- **Behind a reverse proxy**, everyone is one address, so they share the limits on sign-in checks.
+- **While plex.tv is down**, a sign-in of the owner's that was signed out meanwhile still works, by its fingerprint, until plex.tv answers again.
+- **The offline password is the owner's account** while plex.tv is down: use a long random one, and keep `OFFLINE_NETWORKS` to your own networks.
+- **The browser's history** keeps the addresses of pages opened (an album's id, say; not what was searched). Back to someone else's page shows Home instead.
+- **Tracks loaded ahead or kept** are held in the browser's memory (512 MB at most), not saved, and let go when no longer wanted. A browser short of memory can set large ones aside in its own temporary storage.
+- **The browser's own AirPlay and Cast controls** (not Play on) can hand a speaker a track's address with your token, before the app switches it to a temporary one. Use Play on.
+- **Plain JSON in `/data`**: whoever can read the volume sees shared playlists, account settings and Missing tracks. Each has a setting that keeps nothing.
+- **nginx and the service run as the same user**, so a flaw in one could reach the other's files.
+- **Debug mode accepts log lines from anyone** who can open the player (limited per minute), so it can fill the log while it's on.
+- **Wide connection rules**: the content security policy allows connections, images and audio from any address, as Plex servers and Ollama can be anywhere.
+- **Spotify link imports read a page, not an API**: against Spotify's terms, and may read names wrongly when Spotify changes it (only ever as plain text).
+- **Whoever runs the container is trusted**: they control the code your browser runs, and the service sees your token when it checks who you are. That's true of any web app.
 
 ## Reviews
 

@@ -3,6 +3,30 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.39.0 - 2026-11-10
+
+### Changed
+
+- **Popular tracks play each song's original.** Where you have several
+  copies of a song, it's the studio album's copy, else a single's, else a
+  compilation's. Never a live, remix, demo or session copy, or one from an
+  album of new recordings of the hits (an orchestral or acoustic
+  re-recording, told by its tracks' lengths), unless that's the only copy.
+  Of several, the earliest album's, in its best-sounding edition. Before,
+  it was whichever copy Plex picked. Artist radio, the DJs and AI playlists
+  use the same pick.
+- **Your own MusicBrainz server is asked more at once while it keeps up**:
+  4 to begin with, one more (8 at most) while it answers within a second,
+  one fewer while answers take over 2 seconds, and half as many after one
+  doesn't come. 20 a second at most (10 before). A slow answer no longer
+  holds every lookup up for as long again; musicbrainz.org is asked as
+  before. In debug mode, a line a minute says how MusicBrainz is answering.
+- **The documentation is shorter, with examples.** The README has an example
+  of the settings and a one-line table of them all; configuration.md has
+  each in detail, with a Compose example and a settings file example; and
+  docker-compose.yml and the Proxmox settings file say what each setting
+  does in a line. features.md no longer says loudness levelling isn't built.
+
 ## 0.38.1 - 2026-11-06
 
 ### Changed

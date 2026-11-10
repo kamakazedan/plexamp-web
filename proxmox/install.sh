@@ -250,51 +250,51 @@ done
 if [ -f "$ENV_FILE" ]; then detail "Settings: $ENV_FILE, kept as they are"; else detail "Settings: $ENV_FILE, with the defaults"; fi
 if [ ! -f "$ENV_FILE" ]; then
     cat >"$ENV_FILE" <<'ENV'
-# plexamp-web settings, the same as the Docker image's (see
-# docs/configuration.md). Change them with: plexamp-web-settings
+# plexamp-web settings (each one in docs/configuration.md). Change them with:
+# plexamp-web-settings
+# Your Plex server's address on your network, e.g. http://192.168.1.10:32400.
 PLEX_SERVER_URL=
-# Live updates: auto (WebSockets, or where they don't get through, an event
-# stream or polling), on (WebSockets only) or off (never WebSockets).
+# Live updates: auto (default), on (WebSockets only) or off.
 WEBSOCKETS=auto
+# AI playlists and the AI DJ: your Ollama server, e.g.
+# http://192.168.1.20:11434, and its model, e.g. llama3.1:8b (empty: the
+# first one installed).
 OLLAMA_URL=
 OLLAMA_MODEL=
+# Only for an Ollama behind a proxy that asks for a key.
 OLLAMA_API_KEY=
+# Who can use the AI: plex (people signed in with Plex) or off (anyone).
 OLLAMA_AUTH=plex
+# false turns each one off: Play Together, Play on with Plex players, and
+# sharing playlists with Plex friends.
 PLAY_TOGETHER=true
 CASTING=true
 PLAYLIST_SHARING=true
-# Each Plex account's settings kept by the player, so they follow it to every
-# browser it signs in on (false: each browser keeps its own).
+# App settings follow each Plex account to every browser (false: each keeps
+# its own).
 SYNC_SETTINGS=true
-# When someone imports a playlist (or an AI playlist suggests music) your Plex
-# server doesn't have all of, what's missing is synced into the server owner's
-# Missing tracks, so they can see what's missing from their server; each
-# account's follows it to every browser too (false: each browser keeps its own).
+# Missing tracks follow each account, and the server owner sees everyone's.
 SYNC_MISSING_TRACKS=true
-# MusicBrainz, to check the suggestions in AI playlists: https://musicbrainz.org
-# (the public service) or your own mirror. Empty: no checks.
+# Check AI suggestions on MusicBrainz: https://musicbrainz.org, or your own
+# mirror, e.g. http://192.168.1.30:5000. Empty: never.
 MUSICBRAINZ_URL=
-# true: the MusicBrainz features, with MUSICBRAINZ_URL (missing albums on
-# artist pages, original release years, artists' other names, MusicBrainz's
-# kind for albums Plex hasn't typed for Skip live tracks and demos: see
-# docs/features.md). Nothing else needs them. They look your whole library
-# up, so a mirror of your own is best.
+# true: the MusicBrainz features (missing albums, original years, years and
+# genres to fix). Best with your own mirror.
 MUSICBRAINZ_ADVANCED=
-# false: no playlists from Spotify's download of your data in Search › From
-# Spotify (read in the browser: see docs/configuration.md). Empty: they're on.
+# Playlists from Spotify's download of your data. Empty: on.
 SPOTIFY_FILE_IMPORT=
-# true: Search › From Spotify makes a playlist from a Spotify playlist's link,
-# read from Spotify's public page for it (see docs/configuration.md).
+# true: a playlist from a public Spotify link (first 100 tracks; against
+# Spotify's terms). Empty: off.
 SPOTIFY_LINK_IMPORT=
-# Offline mode, with PLEX_SERVER_URL: while plex.tv isn't answering, this
-# player can be signed in to with this password, as your Plex server lets it
-# in without signing in, which is as you, its owner (see
-# docs/configuration.md): 12 to 200 letters, digits and . _ ~ + / = : , @ -
-# (openssl rand -base64 24 makes one). Empty: no offline mode.
+# Offline mode: sign in with this password while plex.tv is down, as your
+# Plex server's owner (read "Offline mode" in docs/configuration.md first).
+# 12 to 200 letters, digits and . _ ~ + / = : , @ - (openssl rand -base64 24
+# makes one). Empty: off.
 OFFLINE_PWD=
-# Where the offline password can be used from: private (your own networks),
-# any, or addresses and networks (192.168.1.0/24, say), separated by commas.
+# Where the offline password works from: private (your own networks), any,
+# or networks, e.g. 192.168.1.0/24.
 OFFLINE_NETWORKS=private
+# true: extra detail in the log, tokens removed. Turn it off when you're done.
 DEBUG=
 ENV
 fi

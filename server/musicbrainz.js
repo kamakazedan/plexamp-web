@@ -21,12 +21,24 @@ import { readDataFile, writeDataFile } from './datafile.js';
 
 export const MB_LIMITS = {
   gapMs: 1100, // between requests to musicbrainz.org (one at a time)
-  ownGapMs: 100, // ...and to a MusicBrainz of your own: ten a second at most,
-  ownAtOnce: 4, // ...ownAtOnce of them under way at once at most
-  // An answer that took longer than slowMs: the next request waits as long
-  // again (slowWaitMaxMs at most), so a server that's struggling gets its
-  // breath back. One that says it has too much to do ("too many requests",
-  // 429, or "busy", 503): nothing asked of it for as long as it says
+  // A MusicBrainz of your own: twenty requests a second at most, ownAtOnce
+  // of them under way at once to begin with, and then more (ownAtOnceMost
+  // at most: a mirror answers ten at once, as it's set up, so some are left
+  // for whatever else asks it), one more after each ownWindow answers while
+  // they were as many as it was asked at once and half of them came back
+  // within ownQuickMs; one fewer after each ownWindow while half of them took
+  // longer than ownSlowMs; half as many after one it didn't answer (see
+  // paced).
+  ownGapMs: 50,
+  ownAtOnce: 4,
+  ownAtOnceMost: 8,
+  ownWindow: 20,
+  ownQuickMs: 1000,
+  ownSlowMs: 2000,
+  // musicbrainz.org's answer took longer than slowMs: the next request waits
+  // as long again (slowWaitMaxMs at most), so it gets its breath back. Any
+  // MusicBrainz that says it has too much to do ("too many requests", 429,
+  // or "busy", 503): nothing asked of it for as long as it says
   // (Retry-After), or busyMs, busyMaxMs at most.
   slowMs: 2000,
   slowWaitMaxMs: 10000,
@@ -110,8 +122,10 @@ export class MusicBrainz {
     this.log = log;
     this.now = now;
     this.kept = new Map(); // key -> { answer, at }
-    this.atOnce = this.public ? 1 : MB_LIMITS.ownAtOnce; // requests under way at once, at most
+    this.atOnce = this.public ? 1 : MB_LIMITS.ownAtOnce; // requests under way at once, at most (a server of your own: as it keeps up, see paced)
     this.running = 0; // ...under way now
+    this.recentAnswers = []; // a server of your own: how its latest answers went, { ms, full } (see paced)
+    this.lastMinute = { since: Date.now(), times: [], missed: 0 }; // how long its answers took, this last minute, for the log (debug mode)
     this.turns = []; // ...and those waiting for one to end, first in line first (see inTurn)
     this.nextAt = 0; // when the next request may go (see asked)
     this.lastStart = 0; // ...and when the last one went
@@ -188,7 +202,7 @@ export class MusicBrainz {
           signal: ctrl.signal,
         });
         const took = Date.now() - started;
-        if (took > MB_LIMITS.slowMs) this.nextAt = Math.max(this.nextAt, Date.now() + Math.min(MB_LIMITS.slowWaitMaxMs, took));
+        if (this.public && took > MB_LIMITS.slowMs) this.nextAt = Math.max(this.nextAt, Date.now() + Math.min(MB_LIMITS.slowWaitMaxMs, took));
         // (musicbrainz.org says it's busy with a 503; a server of your own,
         // with a 429, or a 503 that says when to come back, or one to
         // anything but a search, as a rate limit in front of it does. A
@@ -199,9 +213,11 @@ export class MusicBrainz {
           const ms = retryAfterMs(retry);
           this.unwell(ms);
           this.quietUntil = Math.max(this.quietUntil, Date.now() + ms);
+          this.paced(took, { missed: true });
           throw this.busy(ms);
         }
         if (res.status >= 500) this.unwell();
+        this.paced(took, { missed: res.status >= 500 });
         // (A server of your own needs its search indexes for these.)
         if (!res.ok) throw Object.assign(new MusicBrainzError(502, this.public ? `MusicBrainz answered ${res.status}.` : `The player’s MusicBrainz server answered ${res.status}. Searching it needs its search indexes.`), { answered: res.status });
         return JSON.parse(await readCapped(res, MB_LIMITS.answerBytes));
@@ -209,8 +225,9 @@ export class MusicBrainz {
         if (err instanceof MusicBrainzError) throw err;
         if (signal?.aborted) throw new Gone();
         this.unwell();
-        // (No answer in time: as for a slow one, its breath back.)
+        // (No answer in time: its breath back.)
         this.nextAt = Math.max(this.nextAt, Date.now() + MB_LIMITS.slowWaitMaxMs);
+        this.paced(Date.now() - started, { missed: true });
         throw new MusicBrainzError(502, this.public ? 'MusicBrainz couldn’t be reached from this player.' : 'The player’s MusicBrainz server couldn’t be reached.');
       } finally {
         clearTimeout(timer);
@@ -228,11 +245,74 @@ export class MusicBrainz {
     try {
       return await fn();
     } finally {
-      // (Its turn handed on as it is: what's under way stays the same.)
-      const next = this.turns.shift();
+      // (Its turn handed on as it is, where as many may be under way as
+      // are: what's under way stays the same. Where fewer may be now, it
+      // isn't.)
+      const next = this.running <= this.atOnce ? this.turns.shift() : null;
       if (next) next();
       else this.running -= 1;
     }
+  }
+
+  // More may be under way at once now: those waiting their turn go.
+  moreTurns() {
+    while (this.running < this.atOnce && this.turns.length) {
+      this.running += 1;
+      this.turns.shift()();
+    }
+  }
+
+  // How an answer went (`ms`: how long it took; `missed`: it wasn't one, as
+  // the server didn't answer, or answered with an error or that it's busy).
+  // A server of your own is asked more at once while it keeps up, and fewer
+  // while it doesn't, as MB_LIMITS says: never more than ownAtOnceMost, and
+  // one at a time at least. (Asked more only while it was asked as many as
+  // it may be at once: a quick answer while there's little to ask says
+  // nothing of how it'd do with more.) In debug mode, once a minute, the log
+  // says how its answers went.
+  paced(ms, { missed = false } = {}) {
+    this.noteAnswer(ms, missed);
+    if (this.public) return;
+    if (missed) {
+      this.recentAnswers = [];
+      this.setAtOnce(Math.floor(this.atOnce / 2));
+      return;
+    }
+    this.recentAnswers.push({ ms, full: this.running >= this.atOnce });
+    if (this.recentAnswers.length < MB_LIMITS.ownWindow) return;
+    const times = this.recentAnswers.map((w) => w.ms).sort((a, b) => a - b);
+    const half = times[Math.floor(times.length / 2)];
+    const full = this.recentAnswers.filter((w) => w.full).length * 2 >= this.recentAnswers.length;
+    this.recentAnswers = [];
+    if (half <= MB_LIMITS.ownQuickMs && full) this.setAtOnce(this.atOnce + 1);
+    else if (half > MB_LIMITS.ownSlowMs) this.setAtOnce(this.atOnce - 1);
+  }
+
+  setAtOnce(n) {
+    const to = Math.max(1, Math.min(MB_LIMITS.ownAtOnceMost, n));
+    if (to === this.atOnce) return;
+    this.atOnce = to;
+    this.moreTurns();
+    // (The background's workers too, where there's more to look up.)
+    if (this.adv) this.work();
+  }
+
+  noteAnswer(ms, missed) {
+    const m = this.lastMinute;
+    if (missed) m.missed += 1;
+    else if (m.times.length < 5000) m.times.push(ms);
+    if (Date.now() - m.since < 60000) return;
+    if (m.times.length || m.missed) {
+      const times = m.times.sort((a, b) => a - b);
+      const s = (v) => `${(v / 1000).toFixed(v < 10000 ? 1 : 0)} s`;
+      const minutes = Math.round((Date.now() - m.since) / 60000);
+      this.log?.debug(
+        `musicbrainz: ${times.length} answer${times.length === 1 ? '' : 's'} in the last ${minutes > 1 ? `${minutes} minutes` : 'minute'}` +
+          `${times.length ? `, half within ${s(times[Math.floor(times.length / 2)])}, the slowest ${s(times[times.length - 1])}` : ''}` +
+          `${m.missed ? `, and ${m.missed} not answered (or busy)` : ''}; ${this.atOnce} asked at once at most now`,
+      );
+    }
+    this.lastMinute = { since: Date.now(), times: [], missed: 0 };
   }
 
   remembered(key) {
