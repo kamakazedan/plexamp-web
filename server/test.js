@@ -1680,6 +1680,102 @@ test('MusicBrainz features: albums not known yet are looked up in the background
   }
 });
 
+// A fetch that never answers until it's given up on (as a request a
+// MusicBrainz takes too long over).
+const neverAnswers = (init) =>
+  new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
+
+test('MusicBrainz: a server of your own that answers others meanwhile isn\'t taken as not answering when one of them takes too long (from 0.39.1)', async () => {
+  const was = [MB_LIMITS.ownTimeoutMs, MB_LIMITS.timeoutMs];
+  MB_LIMITS.ownTimeoutMs = 150;
+  MB_LIMITS.timeoutMs = 150;
+  try {
+    const fetchImpl = async (url, init) => (new URL(url).pathname.endsWith('/slow') ? neverAnswers(init) : (await sleep(20), jsonAnswer({ ok: 1 })));
+    const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 });
+    const atOnce = mb.atOnce;
+    // (In the background: it's given longer than one someone's waiting on. Here, both 150 ms.)
+    const slow = mb.ask('/ws/2/slow', {}, null, { background: true });
+    const quick = [1, 2, 3].map(() => mb.ask('/ws/2/quick', {}, null, { background: true }));
+    await Promise.all(quick);
+    await assert.rejects(slow, (e) => e instanceof MusicBrainzError && /didn’t answer in time/.test(e.message));
+    assert.equal(mb.down(), false, 'not taken as not answering');
+    assert.equal(mb.atOnce, atOnce, 'nor asked fewer at once');
+    // ...but one it's asked alone, that it doesn't answer: it isn't answering.
+    await assert.rejects(mb.ask('/ws/2/slow', {}, null, { background: true }), (e) => e instanceof MusicBrainzError);
+    assert.equal(mb.down(), true);
+    assert.ok(mb.atOnce < atOnce);
+    // musicbrainz.org, as ever: no answer in time is a rest for it.
+    const org = new MusicBrainz({ fetchImpl, gapMs: 0 });
+    await assert.rejects(org.ask('/ws/2/slow', {}, null, { background: true }), (e) => e instanceof MusicBrainzError);
+    assert.equal(org.down(), true);
+  } finally {
+    [MB_LIMITS.ownTimeoutMs, MB_LIMITS.timeoutMs] = was;
+  }
+  assert.ok(MB_LIMITS.ownTimeoutMs >= 4 * MB_LIMITS.timeoutMs, 'a server of your own has longer in the background');
+});
+
+test('MusicBrainz features: an album MusicBrainz doesn\'t answer for is tried again after the rest, a few times, then said to be unanswered, never holding the rest up (from 0.39.1)', async () => {
+  const was = { ...MB_ADVANCED_LIMITS };
+  const wasLimits = { ...MB_LIMITS };
+  Object.assign(MB_ADVANCED_LIMITS, { restMs: 60, downMs: 100, pendingMs: 20 });
+  Object.assign(MB_LIMITS, { ownTimeoutMs: 120, slowWaitMaxMs: 50 });
+  try {
+    const { asked, fetchImpl: answers } = fakeMusicBrainz();
+    // ("Slow Artist": a search MusicBrainz never answers.)
+    const fetchImpl = (url, init) => (/Slow Artist/.test(new URL(url).searchParams.get('query') || '') ? (asked.push({ slow: true }), neverAnswers(init)) : answers(url, init));
+    const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+    const slow = { artist: 'Slow Artist', title: 'Huge Box Set' };
+    const rest = [
+      { artist: 'Sigur Rós', title: 'Takk...' },
+      { artist: 'Sigur Rós', title: 'Ágætis byrjun' },
+      { artist: 'Mumiy Troll', title: 'Morskaya' },
+    ];
+    const started = Date.now();
+    assert.deepEqual(await mb.albums([slow, ...rest], { who: 'user|1' }), ['pending', 'pending', 'pending', 'pending']);
+    // The rest, answered while it's waited on (not after it).
+    const got = await mb.albums(rest, { waitMs: 2000, who: 'user|1' });
+    assert.deepEqual(got.map((g) => g?.title ?? g), ['Takk...', 'Ágætis byrjun', null]);
+    assert.ok(Date.now() - started < MB_LIMITS.ownTimeoutMs, `${Date.now() - started} ms`);
+    // It: tried `tries` times, then unanswered (and not asked again, asked about again)...
+    let out = 'pending';
+    for (let i = 0; i < 40 && out === 'pending'; i++) {
+      await sleep(50);
+      [out] = await mb.albums([slow], { who: 'user|1' });
+    }
+    assert.equal(out, 'unanswered');
+    const tries = asked.filter((a) => a.slow).length;
+    assert.equal(tries, MB_ADVANCED_LIMITS.tries);
+    await sleep(200);
+    assert.deepEqual(await mb.albums([slow], { who: 'user|1' }), ['unanswered']);
+    assert.equal(asked.filter((a) => a.slow).length, tries);
+    // ...until it's asked for again on purpose (a new look through the library).
+    assert.deepEqual(await mb.albums([{ ...slow, retry: true }], { who: 'user|1' }), ['pending']);
+    await sleep(50);
+    assert.equal(asked.filter((a) => a.slow).length, tries + 1);
+    // (Its tries over again, before the limits are as they were.)
+    for (let i = 0; i < 40 && out !== 'unanswered'; i++) {
+      await sleep(50);
+      [out] = await mb.albums([slow], { who: 'user|1' });
+    }
+    out = 'pending';
+    for (let i = 0; i < 40 && out === 'pending'; i++) {
+      await sleep(50);
+      [out] = await mb.albums([slow], { who: 'user|1' });
+    }
+    assert.equal(out, 'unanswered');
+    assert.equal(mb.todo.size + mb.todoFirst.size, 0);
+    // MusicBrainz busy is MusicBrainz, not the album: not one of its tries.
+    const busy = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: answers, gapMs: 0 }).advanced(new MBKept());
+    busy.quietUntil = Date.now() + 150;
+    assert.deepEqual(await busy.albums([rest[0]]), ['pending']);
+    const later = await busy.albums([rest[0]], { waitMs: 2000 });
+    assert.equal(later[0]?.title, 'Takk...');
+  } finally {
+    Object.assign(MB_ADVANCED_LIMITS, was);
+    Object.assign(MB_LIMITS, wasLimits);
+  }
+});
+
 test('MusicBrainz features: albums waited for are looked at again alone, and an artist\'s titles are worked out once for their list, with the same answers', async () => {
   // (Slower than the request waits: what isn't known stays pending.)
   const fetchImpl = async () => (await sleep(1500), jsonAnswer({ artists: [] }));

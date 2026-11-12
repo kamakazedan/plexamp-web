@@ -4367,8 +4367,9 @@ body.bare #toasts {
   color: #fff;
 }
 
-.thumb.on {
-  background: rgba(255, 255, 255, 0.16);
+/* (Liked or disliked: the thumb filled in, as a rated star is.) */
+.thumb.on path {
+  fill: currentColor;
 }
 
 .np-fav {

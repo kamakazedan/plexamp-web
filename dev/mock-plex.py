@@ -57,6 +57,9 @@ testing, these endpoints need no token:
         genres away (as an album Plex has none for), nogenre= puts them back;
         mbsearch=off: the MusicBrainz's searches find no one at all (as a
         mirror without its search indexes built), lookups by id as ever;
+        mbslow=TEXT: what's asked of the MusicBrainz with TEXT in it (its
+        address or search, any case) isn't answered for a minute (as a big
+        album for a busy mirror), mbslow= answers it all again;
         hubs=on|titles|off: an artist's rows (/hubs/metadata/ID), with
         identifiers that say what's in them, only titles that do, or none
         (as an older server); types=off: albums' details without their
@@ -883,7 +886,7 @@ MB_EXTRA = {
     'songs': [('Glass Harbour', 'Lantern Song'), ('Real Missing Band', 'Somewhere Real')],
     'albums': [('Glass Harbour', 'Sea Glass')],
 }
-MB_SEEN = {'requests': 0, 'agents': [], 'last': '', 'asked': []}  # asked: each request's path and query (the latest 500)
+MB_SEEN = {'requests': 0, 'agents': [], 'last': '', 'asked': [], 'slow': 0}  # asked: each request's path and query (the latest 500); slow: those left unanswered (mbslow)
 
 # What the mock MusicBrainz says of the library's artists, for the app's
 # MusicBrainz features: other names, genres, release groups (the library's
@@ -1203,7 +1206,7 @@ def hls_playlist(seconds):
 # ---------------------------------------------------------------- notifications
 
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'honour': '--honour' in sys.argv, 'tv': 'down' if '--tv-down' in sys.argv else 'up',
-        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on'}
+        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on', 'mbslow': ''}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 MERGES = []  # artists merged (PUT /library/metadata/ID/merge?ids=...)
 MERGED = {}  # ratingKey -> an artist merged into another, gone from the library (for undo_merges)
@@ -1801,6 +1804,11 @@ class Handler(BaseHTTPRequestHandler):
         MB_SEEN['agents'] = sorted(set(MB_SEEN['agents']) | {self.headers.get('User-Agent', '')})
         MB_SEEN['last'] = query or p
         MB_SEEN['asked'] = (MB_SEEN['asked'] + [self.path])[-500:]
+        # (Too big for a busy mirror to answer in time: nothing for a minute.)
+        if MOCK['mbslow'] and MOCK['mbslow'] in unquote(self.path.replace('+', ' ')).lower():
+            MB_SEEN['slow'] += 1
+            time.sleep(60)
+            return
         artists_ = {a['title'].lower() for a in artists} | {a.lower() for a in MB_EXTRA['artists']}
         # (A search, as a MusicBrainz without its search indexes answers
         # one: no one at all. And what the player asks to see whether
@@ -2209,6 +2217,8 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['types'] = 'off' if q['types'][0] in ('0', 'off', 'false') else 'on'
             if 'mbsearch' in q:  # off: the MusicBrainz's search finds no one (search indexes not built); lookups by id work
                 MOCK['mbsearch'] = 'off' if q['mbsearch'][0] in ('0', 'off', 'false') else 'on'
+            if 'mbslow' in q:  # TEXT: what's asked with it in it isn't answered for a minute
+                MOCK['mbslow'] = q['mbslow'][0].strip().lower()
             if 'children' in q:  # all: an artist's /children has all their albums, as an older server's
                 MOCK['children'] = 'all' if q['children'][0] == 'all' else 'albums'
             if 'stall' in q:
@@ -2342,6 +2352,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/__mock/musicbrainz':
             if q.get('reset', ['0'])[0] == '1':
                 MB_SEEN['asked'] = []
+                MB_SEEN['slow'] = 0
             return self.send_json(dict(MB_SEEN))
         if p == '/__mock/seen':
             if q.get('reset'):

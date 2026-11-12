@@ -191,10 +191,12 @@ const ALBUMS_BYTES = 240 * 1024; // ...and its size, at most (the player takes 2
 // Plex has of it, for `strict`), as far as the player
 // knows them: each { id, title, primary, secondary, date, genres? }, null
 // (not on MusicBrainz, or which it is can't be told), 'pending' (being
-// looked up: ask again later) or 'unchecked' (only a search could find it,
+// looked up: ask again later), 'unchecked' (only a search could find it,
 // and searching the player's MusicBrainz finds no one: the list's
-// `searchBroken`). `wait`: how long the player may wait for those it
-// doesn't know yet (ms). `strict`: the very album or nothing, for its year
+// `searchBroken`) or 'unanswered' (MusicBrainz didn't answer for it, each
+// time the player asked: `retry` on an item asks it again). The list's
+// `notAnswering`: MusicBrainz isn't answering anything just now. `wait`:
+// how long the player may wait for those it doesn't know yet (ms). `strict`: the very album or nothing, for its year
 // or genres to be shown or fixed (Plex's id for it, where its title agrees,
 // or else, for a studio album, its exact title: see releases.js
 // exactAlbum). `check`, on a MusicBrainz of the player's own (mbOwnServer):
@@ -212,6 +214,7 @@ export async function albumsOnMB(items, { genres = false, wait = 0, signal, back
     ...(MBID.test(String(it.albumId)) ? { albumId: it.albumId } : {}),
     ...(Number(it.tracks) > 0 ? { tracks: Math.floor(Number(it.tracks)) } : {}),
     ...(check && Array.isArray(it.trackList) ? { trackList: it.trackList.slice(0, 200).map((t) => ({ title: String(t?.title || '').slice(0, 200), ms: Math.max(0, Math.round(Number(t?.ms) || 0)) })) } : {}),
+    ...(it.retry ? { retry: true } : {}),
   }));
   const how = { genres, wait, ...(strict ? { strict: true } : {}), ...(check ? { check: true } : {}) };
   // A request at a time of ALBUMS_ASKED at most, and of no more than
@@ -222,14 +225,14 @@ export async function albumsOnMB(items, { genres = false, wait = 0, signal, back
     try {
       const r = await call('albums', { items: part, ...how }, { signal, background, now });
       const results = Array.isArray(r.results) ? r.results : [];
-      return { results: part.map((_, j) => results[j] ?? null), searchBroken: r.searchBroken === true };
+      return { results: part.map((_, j) => results[j] ?? null), searchBroken: r.searchBroken === true, notAnswering: r.notAnswering === true };
     } catch (err) {
       if (err?.status !== 413) throw err;
-      if (part.length === 1) return { results: [null], searchBroken: false };
+      if (part.length === 1) return { results: [null], searchBroken: false, notAnswering: false };
       const half = Math.ceil(part.length / 2);
       const a = await ask(part.slice(0, half));
       const b = await ask(part.slice(half));
-      return { results: [...a.results, ...b.results], searchBroken: a.searchBroken || b.searchBroken };
+      return { results: [...a.results, ...b.results], searchBroken: a.searchBroken || b.searchBroken, notAnswering: a.notAnswering || b.notAnswering };
     }
   };
   const size = new TextEncoder();
@@ -246,6 +249,7 @@ export async function albumsOnMB(items, { genres = false, wait = 0, signal, back
     const r = await ask(part);
     out.push(...r.results);
     if (r.searchBroken) out.searchBroken = true;
+    if (r.notAnswering) out.notAnswering = true;
   }
   return out;
 }

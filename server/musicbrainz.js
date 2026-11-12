@@ -55,6 +55,10 @@ export const MB_LIMITS = {
   perUser: 2, // requests from the app under way, for each person
   checks: 4, // and for everyone (each waits for the others' turns)
   timeoutMs: 15000,
+  // ...on a MusicBrainz of your own, for what's looked up in the background,
+  // where no one's waiting on it (an album with hundreds of releases, or a
+  // box set's tracks, can take a busy mirror longer than timeoutMs).
+  ownTimeoutMs: 60000,
   answerBytes: 8 * 1024 * 1024, // an answer read, at most (a box set's tracks are a few hundred KB)
 };
 
@@ -129,6 +133,7 @@ export class MusicBrainz {
     this.turns = []; // ...and those waiting for one to end, first in line first (see inTurn)
     this.nextAt = 0; // when the next request may go (see asked)
     this.lastStart = 0; // ...and when the last one went
+    this.lastAnswerAt = 0; // ...and when it last answered anything
     this.waiting = 0; // requests someone's waiting on (the background waits for them)
     // The advanced features (see advanced()): what's kept of them, and
     // what's waiting to be looked up in the background.
@@ -146,6 +151,9 @@ export class MusicBrainz {
     this.artistsInHand = new Set(); // ...and whose albums (one worker to an artist: see nextTodo)
     this.downUntil = 0; // MusicBrainz didn't answer: the features don't ask it again until then
     this.quietUntil = 0; // MusicBrainz said it's busy: nothing at all is asked of it until then
+    this.unanswered = new Map(); // key -> when: albums it didn't answer for, each time it was asked (see worker)
+    this.wakeTimer = null; // ...and when one waiting to be tried again is due (see wake)
+    this.wakeDue = 0;
   }
 
   // One request to MusicBrainz, atOnce under way at most (one at a time to
@@ -160,7 +168,7 @@ export class MusicBrainz {
           if (signal?.aborted) throw new Gone();
           await new Promise((r) => setTimeout(r, 200));
         }
-        return this.asked(path, params, signal);
+        return this.asked(path, params, signal, { background: true });
       })();
     }
     this.waiting += 1;
@@ -169,7 +177,9 @@ export class MusicBrainz {
     });
   }
 
-  asked(path, params, signal) {
+  // (`background`: no one's waiting on it, so a server of your own has
+  // longer to answer: see MB_LIMITS ownTimeoutMs.)
+  asked(path, params, signal, { background = false } = {}) {
     const run = async () => {
       if (signal?.aborted) throw new Gone();
       // (Busy: whatever's asking, and whatever was waiting its turn, is
@@ -190,7 +200,12 @@ export class MusicBrainz {
       this.nextAt = Math.max(this.nextAt, started + this.gapMs);
       const url = `${this.base}${path}?${new URLSearchParams({ ...params, fmt: 'json' })}`;
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), MB_LIMITS.timeoutMs);
+      const waitMs = background && !this.public ? MB_LIMITS.ownTimeoutMs : MB_LIMITS.timeoutMs;
+      let late = false;
+      const timer = setTimeout(() => {
+        late = true;
+        ctrl.abort();
+      }, waitMs);
       const stop = () => ctrl.abort();
       signal?.addEventListener('abort', stop, { once: true });
       try {
@@ -201,6 +216,7 @@ export class MusicBrainz {
           redirect: 'error',
           signal: ctrl.signal,
         });
+        this.lastAnswerAt = Date.now();
         const took = Date.now() - started;
         if (this.public && took > MB_LIMITS.slowMs) this.nextAt = Math.max(this.nextAt, Date.now() + Math.min(MB_LIMITS.slowWaitMaxMs, took));
         // (musicbrainz.org says it's busy with a 503; a server of your own,
@@ -224,10 +240,19 @@ export class MusicBrainz {
       } catch (err) {
         if (err instanceof MusicBrainzError) throw err;
         if (signal?.aborted) throw new Gone();
-        this.unwell();
-        // (No answer in time: its breath back.)
-        this.nextAt = Math.max(this.nextAt, Date.now() + MB_LIMITS.slowWaitMaxMs);
-        this.paced(Date.now() - started, { missed: true });
+        // (No answer in time from a server of your own that answered others
+        // meanwhile: it's up, and this one's a big one for it. Only this one
+        // fails, and it's tried again in its turn: see worker. Otherwise it
+        // isn't answering: a rest for its breath back, and for a minute,
+        // nothing new asked of it.)
+        const alone = this.public || !late || this.lastAnswerAt <= started;
+        if (alone) {
+          this.unwell();
+          this.nextAt = Math.max(this.nextAt, Date.now() + MB_LIMITS.slowWaitMaxMs);
+        }
+        this.paced(Date.now() - started, { missed: alone });
+        if (late) this.log?.debug(`musicbrainz: no answer within ${Math.round(waitMs / 1000)} s to ${path}${alone ? '' : ' (it answered others meanwhile)'}`);
+        if (late) throw new MusicBrainzError(502, this.public ? 'MusicBrainz didn’t answer in time.' : 'The player’s MusicBrainz server didn’t answer in time.');
         throw new MusicBrainzError(502, this.public ? 'MusicBrainz couldn’t be reached from this player.' : 'The player’s MusicBrainz server couldn’t be reached.');
       } finally {
         clearTimeout(timer);
@@ -421,8 +446,10 @@ export class MusicBrainz {
   busy(ms) {
     const mins = Math.max(1, Math.round(ms / 60000));
     const when = mins === 1 ? 'in a minute' : `in ${mins} minutes`;
+    // (`resting`: it's MusicBrainz, not whatever was asked of it: see worker.)
     return Object.assign(new MusicBrainzError(503, this.public ? `MusicBrainz is busy right now. Try again ${when}.` : `The player’s MusicBrainz server is busy. Try again ${when}.`), {
       retryAfter: Math.max(1, Math.ceil(ms / 1000)),
+      resting: true,
     });
   }
 
@@ -462,7 +489,7 @@ export class MusicBrainz {
 
   resting() {
     if (Date.now() < this.quietUntil) throw this.busy(this.quietUntil - Date.now());
-    if (this.down()) throw Object.assign(new MusicBrainzError(503, 'MusicBrainz isn’t answering this player just now. Try again in a minute.'), { retryAfter: Math.max(1, Math.ceil((this.downUntil - Date.now()) / 1000)) });
+    if (this.down()) throw Object.assign(new MusicBrainzError(503, 'MusicBrainz isn’t answering this player just now. Try again in a minute.'), { retryAfter: Math.max(1, Math.ceil((this.downUntil - Date.now()) / 1000)), resting: true });
   }
 
   // An artist, by name (or one of their other names), or by their
@@ -825,11 +852,47 @@ export class MusicBrainz {
   // What's to be looked up next, by a worker: [key, it], or null where
   // nothing waiting is free to be. Those checked by their tracks first; of
   // the rest, none of an artist another worker has in hand (their release
-  // groups are asked about once: see releaseGroups).
+  // groups are asked about once: see releaseGroups). Not one waiting to be
+  // tried again (see worker) before it's due: the workers are woken for it.
   nextTodo() {
-    for (const entry of this.todoFirst) if (!this.inHand.has(entry[0])) return entry;
-    for (const entry of this.todo) if (!this.inHand.has(entry[0]) && !this.artistsInHand.has(artistOf(entry[1]))) return entry;
+    const now = Date.now();
+    let soonest = 0;
+    const due = (it) => {
+      if (!(it.notBefore > now)) return true;
+      if (!soonest || it.notBefore < soonest) soonest = it.notBefore;
+      return false;
+    };
+    for (const entry of this.todoFirst) if (!this.inHand.has(entry[0]) && due(entry[1])) return entry;
+    for (const entry of this.todo) if (!this.inHand.has(entry[0]) && !this.artistsInHand.has(artistOf(entry[1])) && due(entry[1])) return entry;
+    if (soonest) this.wake(soonest);
     return null;
+  }
+
+  // The workers set going again at `at`, when one waiting to be tried again
+  // is due.
+  wake(at) {
+    if (this.wakeTimer && this.wakeDue <= at) return;
+    clearTimeout(this.wakeTimer);
+    this.wakeDue = at;
+    this.wakeTimer = setTimeout(
+      () => {
+        this.wakeTimer = null;
+        this.wakeDue = 0;
+        this.work();
+      },
+      Math.max(0, at - Date.now()) + 10,
+    );
+    this.wakeTimer.unref?.();
+  }
+
+  // An album MusicBrainz didn't answer for, each time it was asked (see
+  // worker), as yet (it's 'unanswered' to the app: see albums).
+  gaveUp(key) {
+    const at = this.unanswered.get(key);
+    if (!at) return false;
+    if (Date.now() - at <= MB_ADVANCED_LIMITS.unansweredMs) return true;
+    this.unanswered.delete(key);
+    return false;
   }
 
   // Workers for what's waiting: atOnce of them at most (musicbrainz.org:
@@ -865,7 +928,6 @@ export class MusicBrainz {
       if (holds) this.artistsInHand.add(artist);
       // (Others, for what's waiting of other artists, where there's room.)
       this.work();
-      let rest = false;
       try {
         const answer = await this.album(it.artist, it.title, { genres: it.genres, year: it.year, id: it.id, albumId: it.albumId, strict: it.strict, tracks: it.tracks, check: it.check, trackList: it.trackList, background: true });
         this.adv.setAnswer(key, answer);
@@ -875,50 +937,73 @@ export class MusicBrainz {
         // straight away (the app's told it's unchecked; asked about again,
         // it's queued again, and searching's checked again by then).
         if (err?.searchBroken) this.done(key);
-        else {
-          // MusicBrainz busy or out of reach: a rest, and again (`tries`
-          // times at most, each to the back of the queue).
+        else if (err?.resting) {
+          // MusicBrainz busy, or not answering anything: again once it's
+          // been left as long as it said (or a minute), as many times as
+          // that takes (it's MusicBrainz, not this album).
+          it.notBefore = Math.max(this.downUntil, this.quietUntil, Date.now() + 1000);
+          const queue = this.todoFirst.has(key) ? this.todoFirst : this.todo;
+          queue.delete(key);
+          queue.set(key, it);
+          this.wake(it.notBefore);
+        } else {
+          // No answer for it (too big for MusicBrainz to answer in time,
+          // say, or MusicBrainz out of reach): tried again after a rest,
+          // at the back of the queue, while the rest are looked up
+          // (MusicBrainz not answering anything: nothing is meanwhile; see
+          // down); `tries` times at most, and after that, the app's told
+          // MusicBrainz didn't answer for it (see albums), rather than its
+          // being asked again and again, holding the rest up.
           it.tries += 1;
           const queue = this.todoFirst.has(key) ? this.todoFirst : this.todo;
           if (it.tries < MB_ADVANCED_LIMITS.tries) {
+            it.notBefore = Date.now() + MB_ADVANCED_LIMITS.restMs;
             queue.delete(key);
             queue.set(key, it);
+            this.wake(it.notBefore);
           } else {
             this.done(key);
-            this.log?.debug(`musicbrainz: gave up on "${it.title}" by ${it.artist}: ${err.message}`);
+            this.unanswered.delete(key);
+            this.unanswered.set(key, Date.now());
+            while (this.unanswered.size > MB_ADVANCED_LIMITS.unansweredKept) this.unanswered.delete(this.unanswered.keys().next().value);
+            this.log?.debug(`musicbrainz: gave up on "${it.title}" by ${it.artist}, asked ${it.tries} times: ${err?.message || err}`);
           }
-          rest = true;
         }
       } finally {
         this.inHand.delete(key);
         if (holds) this.artistsInHand.delete(artist);
       }
-      if (rest) await new Promise((r) => setTimeout(r, MB_ADVANCED_LIMITS.restMs));
     }
   }
 
   // For the app: each album's release group as far as it's known ('pending'
   // where it isn't yet: looked up in the background, for `who`), waiting
-  // up to `waitMs` for those, and 'unchecked' where only a search could
-  // find it while searching finds no one (see searchCheck). (Items: {
-  // artist, title, year, artistId, albumId, tracks, trackList }: the
-  // artist's and the album's MusicBrainz ids, where Plex has them, so no
-  // search is needed, how many tracks Plex has of it, and with `check`,
-  // those tracks.) `strict` and `check`: as album has them.
+  // up to `waitMs` for those, 'unchecked' where only a search could find it
+  // while searching finds no one (see searchCheck), and 'unanswered' where
+  // MusicBrainz didn't answer for it, each time it was asked (see worker:
+  // for MB_ADVANCED_LIMITS.unansweredMs, unless it's asked for again with
+  // `retry`, a new look through the library). (Items: { artist, title,
+  // year, artistId, albumId, tracks, trackList, retry }: the artist's and
+  // the album's MusicBrainz ids, where Plex has them, so no search is
+  // needed, how many tracks Plex has of it, and with `check`, those
+  // tracks.) `strict` and `check`: as album has them.
   // While it waits, only those still pending are looked at again.
   async albums(items, { genres = false, waitMs = 0, signal, who = '', strict = false, check = false } = {}) {
     const bySearch = (it) => !MBID.test(String(it.artistId)) || this.had(`artistid|${it.artistId}`) === null;
     const how = (it) => ({ genres, year: it.year, id: it.artistId, albumId: it.albumId, strict, tracks: it.tracks, check, trackList: it.trackList || null });
+    const keyOf = (it) => (this.adv && norm(it.artist) && albumKey(it.title) ? this.wanted(it.artist, it.title, how(it)).key : null);
+    for (const it of items) if (it.retry) this.unanswered.delete(keyOf(it));
     // (What was answered before is kept by itself, so a library looked
     // through again is answered at once: see MBKept.answer.)
     const answer = (it) => {
-      const key = this.adv && norm(it.artist) && albumKey(it.title) ? this.wanted(it.artist, it.title, how(it)).key : null;
+      const key = keyOf(it);
       const kept = key ? this.adv.answer(key) : undefined;
       if (kept !== undefined) return kept;
       const v = this.knownAlbum(it.artist, it.title, how(it));
       // (Kept where it's an album: none, for a title or a year anyone can
       // make up, is kept only once looked up, in its turn: see worker.)
       if (v !== undefined) return key && v ? this.adv.setAnswer(key, v) : v;
+      if (key && this.gaveUp(key)) return 'unanswered';
       return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
     };
     let out = items.map(answer);
@@ -957,8 +1042,10 @@ export const MB_ADVANCED_LIMITS = {
   tracksKept: 3000, // ...and releases' tracks
   namesakes: 3, // other artists of an artist's name, looked at for their page
   artistMs: 30000, // how long one artist's lookups may take for the app
-  restMs: 30000, // after MusicBrainz doesn't answer, in the background
-  tries: 3, // ...and what's looked up there is tried this many times at most
+  restMs: 30000, // an album MusicBrainz didn't answer for, in the background, is tried again after this long
+  tries: 3, // ...this many times at most
+  unansweredMs: 6 * 3600000, // ...and after that, it's said to the app that it didn't answer for it, for this long (or until a new look)
+  unansweredKept: 5000, // ...of so many albums at most
   pendingMs: 200, // how often what a request from the app waits for is looked at again
 };
 

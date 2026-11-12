@@ -277,8 +277,8 @@ function startScan(key) {
     fixed: new Map(), // album id -> what was done: { kind: 'year' | 'genres', before | added }
     lastAll: null, // { list, undo }: the last Fix all or Add all's
     fixing: null, // { kind: 'year' | 'genres', back }: a Fix all, Add all or (back) Undo being made
-    catchingUp: false, // most of those asked about for the first time were answered at once (looked through before: see ask)
-    asked: null, // for each album: asked about yet (see ask)
+    catchingUp: false, // most of those asked about for the first time were answered at once (looked through before: see again)
+    asked: null, // for each album: asked about yet (see again)
     trouble: null, // what went wrong asking last (see say)
     failed: null, // why the albums couldn't be read
     stopped: false,
@@ -340,8 +340,12 @@ function startScan(key) {
     const matched = sc.check ? 'found on MusicBrainz' : 'matched exactly on MusicBrainz';
     const unchecked = sc.found.filter((g) => g === 'unchecked').length;
     const cantSearch = unchecked ? ` ${fmt.count(unchecked, 'album', 'albums')} couldn’t be checked: searching your MusicBrainz server finds no one (its search indexes may not be built).` : '';
-    if (found) return { text: `Checked ${fmt.count(sc.albums.length, 'album', 'albums')}: ${found === sc.albums.length ? 'all' : fmt.number(found)} ${matched}.${cantSearch}`, warn: !!unchecked };
-    if (unchecked) return { text: cantSearch.trim(), warn: true };
+    // (Each time they were asked about: tried again with Look again.)
+    const unanswered = sc.found.filter((g) => g === 'unanswered').length;
+    const them = unanswered === 1 ? 'it' : 'them';
+    const noAnswer = unanswered ? ` ${fmt.count(unanswered, 'album', 'albums')} couldn’t be checked: ${sc.check ? 'your MusicBrainz server' : 'MusicBrainz'} didn’t answer for ${them}. Look again to try ${them} again.` : '';
+    if (found) return { text: `Checked ${fmt.count(sc.albums.length, 'album', 'albums')}: ${found === sc.albums.length ? 'all' : fmt.number(found)} ${matched}.${cantSearch}${noAnswer}`, warn: !!(unchecked || unanswered) };
+    if (unchecked || unanswered) return { text: `${cantSearch}${noAnswer}`.trim(), warn: true };
     return { text: `None of your ${fmt.count(sc.albums.length, 'album', 'albums')} ${sc.check ? 'were found' : 'matched exactly'} on MusicBrainz, so there’s nothing to compare.`, warn: true };
   };
 
@@ -352,7 +356,8 @@ function startScan(key) {
   // exactAlbum), and the year Plex has (which tells albums of one title
   // apart), with its genres for those without any.
   // ('unchecked': only a search could find it, and searching the player's
-  // MusicBrainz finds no one.)
+  // MusicBrainz finds no one. 'unanswered': MusicBrainz didn't answer for
+  // it, each time the player asked: asked again in the next look.)
   const itemOf = (j) => ({
     artist: sc.albums[j].parentTitle,
     title: sc.albums[j].title,
@@ -361,20 +366,27 @@ function startScan(key) {
     albumId: mbidOf(sc.albums[j]),
     tracks: Number(sc.albums[j].leafCount) || 0,
   });
-  async function ask(indexes) {
+  // (`fresh`: those asked about for the first time in this look, where
+  // one MusicBrainz didn't answer for before is asked again. Says whether
+  // MusicBrainz isn't answering anything just now: `quiet`.)
+  async function ask(indexes, fresh = new Set()) {
     const { albums, found, check } = sc;
+    const item = (j, more = {}) => ({ ...itemOf(j), ...more, ...(fresh.has(j) ? { retry: true } : {}) });
+    let quiet = false;
     for (const withGenres of [true, false]) {
       const these = indexes.filter((j) => !genresOf(albums[j]).length === withGenres);
       for (let i = 0; i < these.length && !sc.stopped; i += ASK) {
         const part = these.slice(i, i + ASK);
-        const got = await albumsOnMB(part.map(itemOf), { genres: withGenres, background: true, strict: true, check });
+        const got = await albumsOnMB(part.map((j) => item(j)), { genres: withGenres, background: true, strict: true, check });
+        if (got.notAnswering) quiet = true;
         // ...by their tracks, as Plex has them (those that can't be read
         // aren't fixed).
         const toCheck = check ? part.map((j, k) => ({ j, k, g: got[k] })).filter(({ j, g }) => known(g) && g.toCheck && differs(albums[j], g)) : [];
         if (toCheck.length && !sc.stopped) {
           const lists = await Promise.all(toCheck.map(({ j }) => albumTracks(albums[j], { server: sc.s }).catch(() => null)));
           const asking = toCheck.map((x, n) => ({ ...x, list: lists[n] })).filter((x) => x.list?.length);
-          const byTracks = asking.length ? await albumsOnMB(asking.map(({ j, list }) => ({ ...itemOf(j), trackList: list })), { genres: withGenres, background: true, strict: true, check }) : [];
+          const byTracks = asking.length ? await albumsOnMB(asking.map(({ j, list }) => item(j, { trackList: list })), { genres: withGenres, background: true, strict: true, check }) : [];
+          if (byTracks.notAnswering) quiet = true;
           for (const { k } of toCheck) got[k] = null;
           asking.forEach(({ k }, n) => (got[k] = byTracks[n] ?? null));
         }
@@ -391,15 +403,14 @@ function startScan(key) {
           (await Promise.all(would.map(({ j, g }) => (otherKind.has(j) ? true : notThatRecording(albums[j], g, { server: sc.s }))))).flatMap((no, n) => (no ? [would[n].j] : [])),
         );
         part.forEach((j, k) => (found[j] = otherKind.has(j) || otherRecording.has(j) ? null : (got[k] ?? null)));
-        // (Most of those asked about for the first time answered at once:
-        // the player had them, from a look before, say, and this one's
-        // catching up with what it knows.)
-        const first = part.filter((j) => !sc.asked[j]);
-        for (const j of first) sc.asked[j] = 1;
-        if (first.length) sc.catchingUp = first.filter((j) => found[j] !== 'pending').length * 2 >= first.length;
+        // (Catching up: most of those asked about for the first time
+        // answered at once, the player having them from a look before, say.)
+        const firstHere = part.filter((j) => fresh.has(j));
+        if (firstHere.length) sc.catchingUp = firstHere.filter((j) => found[j] !== 'pending').length * 2 >= firstHere.length;
         sc.changed();
       }
     }
+    return { quiet };
   }
 
   // (After MusicBrainz didn't answer, or was busy: asked again only after as
@@ -427,14 +438,19 @@ function startScan(key) {
     if (sc.stopped) return;
     const waiting = sc.found.flatMap((g, i) => (g === 'pending' ? [i] : [])).slice(0, AGAIN_AT_MOST);
     if (!waiting.length) return;
+    const fresh = new Set(waiting.filter((j) => !sc.asked[j]));
+    for (const j of fresh) sc.asked[j] = 1;
+    // (All of them asked about already: it's looking those left up.)
+    if (!fresh.size) sc.catchingUp = false;
     let err = null;
+    let quiet = false;
     try {
-      await ask(waiting);
+      ({ quiet } = await ask(waiting, fresh));
     } catch (e) {
       err = e;
     }
     if (sc.stopped) return;
-    sc.trouble = say(err);
+    sc.trouble = err ? say(err) : quiet ? `${sc.check ? 'Your MusicBrainz server' : 'MusicBrainz'} isn’t answering just now. Carrying on when it does.` : null;
     sc.changed();
     if (!sc.found.includes('pending')) return;
     const answered = waiting.filter((j) => sc.found[j] !== 'pending').length;

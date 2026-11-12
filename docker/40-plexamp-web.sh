@@ -1184,6 +1184,7 @@ if [ "$SERVICE" = true ] && [ "${SERVICE_START:-true}" != false ]; then
     # up (CVE-2024-22017), and Node.js lets it.
     for_tests=""
     [ -z "${PW_SERVICE_OFFLINE_TIMING:-}" ] || for_tests="$for_tests PW_SERVICE_OFFLINE_TIMING"
+    [ -z "${PW_SERVICE_MB_TIMING:-}" ] || for_tests="$for_tests PW_SERVICE_MB_TIMING"
     [ -z "${PW_SERVICE_PMS_PROBE:-}" ] || for_tests="$for_tests PW_SERVICE_PMS_PROBE"
     [ -z "${PW_SERVICE_CAST_LOOPBACK:-}" ] || for_tests="$for_tests PW_SERVICE_CAST_LOOPBACK"
     [ -z "$for_tests" ] || say "set for tests, and passed on to the service:$for_tests (see server/index.js). Take them out otherwise." >&2
@@ -1201,6 +1202,7 @@ if [ "$SERVICE" = true ] && [ "${SERVICE_START:-true}" != false ]; then
         while :; do
             env -i PATH="$PATH" ${TZ:+"TZ=$TZ"} ${NODE_EXTRA_CA_CERTS:+"NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS"} UV_USE_IO_URING=0 \
                 ${PW_SERVICE_OFFLINE_TIMING:+"PW_SERVICE_OFFLINE_TIMING=$PW_SERVICE_OFFLINE_TIMING"} \
+                ${PW_SERVICE_MB_TIMING:+"PW_SERVICE_MB_TIMING=$PW_SERVICE_MB_TIMING"} \
                 ${PW_SERVICE_PMS_PROBE:+"PW_SERVICE_PMS_PROBE=$PW_SERVICE_PMS_PROBE"} \
                 ${PW_SERVICE_CAST_LOOPBACK:+"PW_SERVICE_CAST_LOOPBACK=$PW_SERVICE_CAST_LOOPBACK"} \
                 "$NODE_BIN" ${NODE_SIGNAL_FLAG:+"$NODE_SIGNAL_FLAG"} "$SERVICE_DIR/index.js" "$RUN_DIR/service.json" </dev/null

@@ -83,8 +83,10 @@ docker run -d --name pwb-web3 --network "$NET" -p 127.0.0.1:8083:80 -e "$TV" \
     -e OLLAMA_URL=http://pwb-ollama2:11435 -e OLLAMA_MODEL=llama3.1:8b "$IMAGE" >/dev/null
 docker run -d --name pwb-web4 --network "$NET" -p 127.0.0.1:8084:80 -e PLEX_TV_URL=http://pwb-plex-big:32401 -e SYNC_SETTINGS=false \
     -e PLEX_SERVER_URL=http://pwb-plex-big:32401 "$IMAGE" >/dev/null
+# (The MusicBrainz features' rests shortened, for the tests: see server/index.js.)
 docker run -d --name pwb-web5 --network "$NET" -p 127.0.0.1:8086:80 -e "$TV" -e SYNC_SETTINGS=false -e SYNC_MISSING_TRACKS=false \
-    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e MUSICBRAINZ_ADVANCED=true "$IMAGE" >/dev/null
+    -e PLEX_SERVER_URL=http://pwb-plex:32400 -e MUSICBRAINZ_URL=http://pwb-plex:32400 -e MUSICBRAINZ_ADVANCED=true \
+    -e PW_SERVICE_MB_TIMING=1000,1500,2000,500 "$IMAGE" >/dev/null
 # (Offline mode's times shortened, for the tests: see server/index.js.)
 docker run -d --name pwb-web6 --network "$NET" -p 127.0.0.1:8087:80 -e PLEX_TV_URL=http://pwb-plex-open:32402 \
     -e PLEX_SERVER_URL=http://pwb-plex-open:32402 -e OFFLINE_PWD=offline-pwd-for-tests -e PW_SERVICE_OFFLINE_TIMING=1500,4000,500,500 "$IMAGE" >/dev/null

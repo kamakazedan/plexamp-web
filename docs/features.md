@@ -175,6 +175,7 @@ With `MUSICBRAINZ_ADVANCED=true` (and a `MUSICBRAINZ_URL`: see [configuration.md
 - **What's sent**: artists' names, or the MusicBrainz ids Plex has for them. A mirror of your own is also asked about albums, by their MusicBrainz ids. Album and track titles are never sent: they're compared in the player.
 - **What's kept**: MusicBrainz's answers, in `/data`, for a month.
 - **How fast**: musicbrainz.org allows one request a second, so a big library takes hours the first time. A mirror of your own is asked up to 8 things at once while it answers within a second (4 to begin with), fewer while its answers take over 2 seconds, and 20 a second at most. A MusicBrainz that says it's busy is left alone for as long as it asks.
+- **No answer**: a mirror of your own has a minute to answer (a big album can take a busy one a while), and one slow answer doesn't hold up the rest. An album it doesn't answer for is tried 3 times, then listed as couldn't be checked.
 - **A mirror without search indexes**: spotted and said so. Albums are still found by the MusicBrainz ids Plex has; the rest wait till its indexes are built.
 
 What they do:
@@ -195,6 +196,7 @@ For the server's owner: **Settings › MusicBrainz › Years and genres to fix**
 - **Fixing**: **Use 1977** and **Add** (or **Fix all** and **Add all**) change the album in Plex, locked so Plex's refresh leaves it, with **Undo** just after. Genres use your library's own names ("Hip-Hop").
 - **The check**: it reads your albums, then their artists, then checks years and genres together. The lists grow as it goes, with a spinner beside each count, and **Fix all** and **Add all** appear once it's done. During a Fix all, the count in the list's heading goes down as each album is fixed.
 - **Leaving**: it keeps going while the app's open, on any page. Close it and it stops. Next time, in any browser, it catches up quickly with what the player already knows (answers are kept a month), then carries on. **Look again** reads your library afresh.
+- **Couldn't be checked**: albums MusicBrainz didn't answer for, after 3 tries, are counted at the end. **Look again** tries them again.
 - **Your files**: Plex never writes to them, so download the list (CSV, with each album's MusicBrainz id) for [MusicBrainz Picard](https://picard.musicbrainz.org) or [beets](https://beets.io).
 
 ### Artists to merge

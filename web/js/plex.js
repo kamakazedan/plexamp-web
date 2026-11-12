@@ -7,7 +7,7 @@ import { plexKind } from './releases.js';
 import { originalCopies } from './originals.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.39.0' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.39.1' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';

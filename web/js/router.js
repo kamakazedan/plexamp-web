@@ -30,6 +30,7 @@ const CACHE_LIMIT = 16;
 const KEEP_RECENT = 4; // the page on screen and the three before it, whatever their size
 const KEPT_ELEMENTS = 60000; // the others, together, up to about this many elements
 const MAX_REPUSH = 10; // pages put back in the history when returning to a tab
+const LANDING_MS = 3000; // a step back through the history that hasn't landed by then had nowhere to go
 const NAV_KEY = 'pw.nav';
 
 let stacks = {}; // tab -> { entries: [{ k, hash }], top }
@@ -42,6 +43,10 @@ let fresh = false; // stacks were reset (new library, signed out): the next page
 let seq = 0;
 let waiters = [];
 let popHook = null; // a tab switch waiting for history.go() to land
+let landingOn = null; // ...the tab it's switching to
+let moving = null; // a step back through the history of the app's own (Back, a tab's first page) not landed yet: its fallback timer
+let whenLanded = null; // a tab, page or Back asked for while one of those is on its way: done once it's landed (see waitLanding)
+let tabAfterOverlays = null; // a tab pressed with sheets or Now Playing open: switched to once they've closed
 let onChange = () => {};
 
 const newKey = () => `${Date.now().toString(36)}.${seq++}`;
@@ -263,6 +268,7 @@ export function startRouter({ mainEl, changed }) {
 // (a list sorted differently, or with a filter fewer), so what it wanted
 // back (keepState: what's typed in its search box, say) carries over.
 export function navigate(path, { replace = false, keep = false } = {}) {
+  if (waitLanding(() => navigate(path, { replace, keep }))) return;
   if (overlays.length) {
     // Close sheets/overlays first, then navigate from the page underneath.
     closeOverlays().then(() => navigate(path, { replace, keep }));
@@ -331,33 +337,72 @@ export function replaceQuery(path) {
 // The page's own back arrow: back within this tab, or to `fallback` if this
 // is the first page here.
 export function back(fallback = '/') {
+  if (waitLanding(() => back(fallback))) return;
   if (overlays.length) {
     popOverlay();
     return;
   }
-  if ((stacks[activeTab]?.top ?? 0) > 0) history.back();
+  if ((stacks[activeTab]?.top ?? 0) > 0) stepBack(-1);
   else navigate(fallback, { replace: true });
 }
 
 // A tab in the tab bar: switch to it, or, if it's the one you're in, go
 // back to its first page (or scroll to the top there).
 export function goTab(tab) {
+  // (Pressed again while switching to it: the same press.)
+  if (popHook && tab === landingOn) {
+    whenLanded = null;
+    return;
+  }
+  if (waitLanding(() => goTab(tab))) return;
   if (overlays.length) {
-    closeOverlays().then(() => goTab(tab));
+    // (Pressed again while they close: once, the last tab pressed.)
+    tabAfterOverlays = tab;
+    closeOverlays().then(() => {
+      if (tabAfterOverlays !== tab) return;
+      tabAfterOverlays = null;
+      goTab(tab);
+    });
     return;
   }
   if (tab === activeTab && stacks[tab]) {
     const top = stacks[tab].top;
     if (top <= 0) window.scrollTo({ top: 0, behavior: 'smooth' });
-    else history.go(-top);
+    else stepBack(-top);
     return;
   }
   if (currentKey) scrolls.set(currentKey, window.scrollY);
   switchTab(tab);
 }
 
-// history.go() is asynchronous: carry on when it lands (or after a moment,
-// if the browser had nothing to go back to).
+// The browser steps back through the history in its own time, and the
+// stacks are as they were until it's there: a tab, page or Back asked for
+// meanwhile waits till it's landed (the last one asked for), or two steps
+// back would go from the same place, as far again, out of the app (a tab
+// pressed twice while the page was busy, say). True: it's waiting.
+function waitLanding(fn) {
+  if (!popHook && !moving) return false;
+  whenLanded = fn;
+  return true;
+}
+
+function landed() {
+  clearTimeout(moving);
+  moving = null;
+  const next = whenLanded;
+  whenLanded = null;
+  next?.();
+}
+
+// Back `delta` pages in the tab, as the browser's Back does (onPop paints
+// where it lands).
+function stepBack(delta) {
+  moving = setTimeout(landed, LANDING_MS);
+  history.go(delta);
+}
+
+// history.go() is asynchronous: carry on when it lands (or after a while,
+// if the browser had nothing to go back to: long enough for a busy page's).
 function goBy(delta, then) {
   let done = false;
   const finish = () => {
@@ -365,9 +410,11 @@ function goBy(delta, then) {
     done = true;
     clearTimeout(timer);
     popHook = null;
+    landingOn = null;
     then();
+    landed();
   };
-  const timer = setTimeout(finish, 1000);
+  const timer = setTimeout(finish, LANDING_MS);
   popHook = finish;
   history.go(delta);
 }
@@ -405,8 +452,10 @@ function switchTab(tab, { push = null } = {}) {
     const top = topOf(tab);
     if (top) render(top.k, true);
   };
-  if (drop) goBy(-drop, land);
-  else land();
+  if (drop) {
+    landingOn = tab;
+    goBy(-drop, land);
+  } else land();
 }
 
 function onPop(e) {
@@ -460,6 +509,8 @@ function onPop(e) {
   const w = waiters;
   waiters = [];
   w.forEach((fn) => fn());
+  // (A step back of the app's own has landed: what was asked for meanwhile now.)
+  if (moving) landed();
 }
 
 // ---------- the page cache ----------
@@ -574,21 +625,43 @@ export function pushOverlay(close) {
 }
 
 // Called by an overlay's own close button: step back through history so the
-// entry it pushed is consumed.
-export function popOverlay() {
-  if (!overlays.length) return Promise.resolve();
-  return new Promise((resolve) => {
-    waiters.push(resolve);
-    history.back();
+// entry it pushed is consumed. (One step at a time: pressed again while it's
+// on its way, it's the same press; see waitLanding.)
+let overlayStep = null;
+function stepOverlays(n) {
+  if (overlayStep) return overlayStep;
+  overlayStep = new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      overlayStep = null;
+      resolve();
+    };
+    // (Nowhere to step back to, where the browser didn't keep their
+    // place: closed here instead, so they still close.)
+    const timer = setTimeout(() => {
+      const depth = Math.max(0, overlays.length - n);
+      while (overlays.length > depth) overlays.pop()();
+      finish();
+    }, LANDING_MS);
+    waiters.push(finish);
+    history.go(-n);
   });
+  return overlayStep;
 }
 
+export function popOverlay() {
+  if (!overlays.length) return Promise.resolve();
+  return stepOverlays(1);
+}
+
+// ...all of them (after one on its way, what's left).
 export function closeOverlays() {
   if (!overlays.length) return Promise.resolve();
-  return new Promise((resolve) => {
-    waiters.push(resolve);
-    history.go(-overlays.length);
-  });
+  if (overlayStep) return overlayStep.then(() => closeOverlays());
+  return stepOverlays(overlays.length);
 }
 
 export function overlayDepth() {

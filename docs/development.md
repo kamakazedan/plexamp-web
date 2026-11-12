@@ -20,7 +20,7 @@ The mock is a made-up Plex server, with:
 - a Plex player called Living Room on port 32500, for Play on;
 - a small MusicBrainz, and Spotify playlist pages;
 - converted streams as a real server's (`/__mock/hls` can stop one part-way);
-- test switches (refusing WebSockets as a proxy would, say), described at the top of the file.
+- test switches (refusing WebSockets as a proxy would, or MusicBrainz leaving some requests unanswered: `mbslow`), described at the top of the file.
 
 `--open` makes it a server that lets the player in without signing in, and `--tv-down` has its plex.tv stop answering, for offline mode. The mocks listen on 127.0.0.1 only: `--host 0.0.0.0` where the app runs in a container of its own. For AI features, choose **Settings › AI › My own Ollama server** and enter `http://127.0.0.1:11434`.
 

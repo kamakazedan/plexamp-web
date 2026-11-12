@@ -96,6 +96,12 @@ function loadConfig() {
     // how often plex.tv is asked again while it isn't answering, and pinged
     // (see PLEX_TV_TIMING).
     offlineTiming: env.PW_SERVICE_OFFLINE_TIMING || '',
+    // ...and the MusicBrainz features': how long an album MusicBrainz didn't
+    // answer for rests before it's tried again, how long MusicBrainz isn't
+    // asked anything new after it doesn't answer, how long a server of your
+    // own has to answer in the background, and the rest it's given after it
+    // doesn't (see MB_ADVANCED_LIMITS and MB_LIMITS).
+    mbTiming: env.PW_SERVICE_MB_TIMING || '',
     plexTvUrl: env.PW_SERVICE_PLEX_TV_URL || cfg.plexTvUrl || 'https://plex.tv',
     user: cfg.user || env.PW_SERVICE_USER || 'nginx',
     // Debug mode: nginx sends its error log here (syslog over UDP on
@@ -126,6 +132,13 @@ if (config.offlineTiming) {
   if (up >= 0) OFFLINE_LIMITS.endsUpForMs = up;
   if (retry >= 0) PLEX_TV_TIMING.retryMs = retry;
   if (ping >= 0) PLEX_TV_TIMING.pingMs = ping;
+}
+if (config.mbTiming) {
+  const [rest, down, own, breath] = config.mbTiming.split(',').map(Number);
+  if (rest >= 0) MB_ADVANCED_LIMITS.restMs = rest;
+  if (down >= 0) MB_ADVANCED_LIMITS.downMs = down;
+  if (own >= 0) MB_LIMITS.ownTimeoutMs = own;
+  if (breath >= 0) MB_LIMITS.slowWaitMaxMs = breath;
 }
 let offline;
 try {
@@ -587,15 +600,18 @@ async function musicbrainzRoute(req, res, parts) {
 //     theirs ([{ id, name, note, groups }]: see MusicBrainz.namesakes), and
 //     `moreNamesakes` (true) where MusicBrainz has more of the name than
 //     those.
-//   POST /api/musicbrainz/albums { items: [{ artist, title, year, artistId
-//     }], genres, wait } -> { results: [{ id, title, primary, secondary,
-//     date, genres? } | null | 'pending' | 'unchecked'], searchBroken? }:
-//     albums' release groups as far as they're known (`year`, the year Plex
-//     has, telling albums of one title apart; `artistId`, the artist's
-//     MusicBrainz id where Plex has it); what isn't is looked up in the
-//     background (waited for `wait` ms at most), to ask about again.
-//     'unchecked', and `searchBroken`: searching MusicBrainz finds no one
-//     just now, and only a search could find that one.
+//   POST /api/musicbrainz/albums { items: [{ artist, title, year, artistId,
+//     retry }], genres, wait } -> { results: [{ id, title, primary,
+//     secondary, date, genres? } | null | 'pending' | 'unchecked' |
+//     'unanswered'], searchBroken?, notAnswering? }: albums' release groups
+//     as far as they're known (`year`, the year Plex has, telling albums of
+//     one title apart; `artistId`, the artist's MusicBrainz id where Plex
+//     has it); what isn't is looked up in the background (waited for `wait`
+//     ms at most), to ask about again. 'unchecked', and `searchBroken`:
+//     searching MusicBrainz finds no one just now, and only a search could
+//     find that one. 'unanswered': MusicBrainz didn't answer for it, each
+//     time it was asked (`retry`: ask it again). `notAnswering`: MusicBrainz
+//     isn't answering anything just now.
 // While MusicBrainz isn't answering (after a request to it that wasn't),
 // only what's known is answered, for a minute.
 // Only names go to MusicBrainz: an artist's (and an album's title, and Plex's
@@ -651,6 +667,8 @@ async function musicbrainzFeatures(req, res, what) {
             .map((t) => ({ title: name(t?.title), ms: Number.isSafeInteger(Number(t?.ms)) && Number(t.ms) > 0 ? Math.min(Number(t.ms), 86400000) : 0 }))
             .filter((t) => t.title)
         : null,
+      // (A new look through the library: one MusicBrainz didn't answer for before is asked about again.)
+      retry: it?.retry === true,
     }));
   // (Albums a minute too, as many as 200 a request came to before 0.38.0.)
   if (!allow(`mbai|${key}`, MB_ADVANCED_LIMITS.perMinute, items.length)) {
@@ -665,7 +683,8 @@ async function musicbrainzFeatures(req, res, what) {
     signal: ctrl.signal,
     who: key,
   });
-  return send(res, 200, { results, ...(musicbrainz.searchBroken() ? { searchBroken: true } : {}) });
+  // (`notAnswering`: MusicBrainz isn't answering just now, so nothing new is looked up till it is.)
+  return send(res, 200, { results, ...(musicbrainz.searchBroken() ? { searchBroken: true } : {}), ...(musicbrainz.down() ? { notAnswering: true } : {}) });
 }
 
 // Search › From Spotify by link (SPOTIFY_LINK_IMPORT): a public playlist's name and

@@ -1308,6 +1308,39 @@ with sync_playwright() as pw:
         check('nav: a link into another tab opens there', tab() == 'settings' and where() == '#/settings/source', f'{where()} in {tab()}')
         header_back()
         check('nav: ...and back goes to that tab\'s first page', where() == '#/settings', where())
+
+        # A tab pressed again before the first press has landed (the
+        # browser steps back through its history in its own time, slowly
+        # while the page is busy): the same press. Before 0.39.1, each
+        # stepped back as far, out of the app, to whatever was open before
+        # it. (Pages of another site before the app, to step back to.)
+        quick = ctx.new_page()
+        for n in range(3):
+            quick.goto(f'{MOCK}/identity?n={n}')
+        quick.goto(APP + '#/')
+        quick.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
+        on_app = lambda: quick.url.startswith(APP)
+        # (Both presses at once, as the slowest browser would have them.)
+        press = lambda *tabs: quick.evaluate("(tabs) => import('./js/router.js').then((m) => tabs.forEach((t) => m.goTab(t)))", list(tabs))
+        quick.click('#tabs .tab[data-tab=settings]')
+        quick.wait_for_selector('.settings-rows')
+        quick.click('.settings-rows a[href="#/settings/source"]')
+        quick.wait_for_selector('.source-body')
+        press('home', 'home')
+        quick.wait_for_timeout(2000)
+        check('nav: Home pressed twice from another tab\'s page, before the first press lands: Home, in the app', on_app() and quick.url.endswith('#/'), quick.url)
+        quick.locator('section[data-section=recentlyAdded] .card').first.click()
+        quick.wait_for_selector('.hero-album')
+        press('home', 'home')
+        quick.wait_for_timeout(2000)
+        check('nav: ...and from a page in Home: Home\'s first page, in the app', on_app() and quick.url.endswith('#/'), quick.url)
+        # (Settings comes back where it was left: Source.)
+        quick.click('#tabs .tab[data-tab=settings]')
+        quick.wait_for_selector('.source-body')
+        press('home', 'search')
+        quick.wait_for_timeout(2000)
+        check('nav: ...and another tab pressed meanwhile is the one it goes to', on_app() and '#/search' in quick.url, quick.url)
+        quick.close()
         ctx.close()
 
     # ---------- library: search, narrowing lists, and adding lists to the queue ----------
@@ -6007,6 +6040,15 @@ with sync_playwright() as pw:
         page.wait_for_selector('.np.open')
         page.wait_for_timeout(500)
         check('settings: thumbs rating', page.locator('.np-stars[data-mode=thumbs] .thumb').count() == 2)
+        # A liked track's thumb up is filled in, solid white (a disliked
+        # one's thumb down, the same), as a rated star is (from 0.39.1).
+        fills = lambda: js(page, "() => [...document.querySelectorAll('.np-stars .thumb')].map((b) => getComputedStyle(b.querySelector('path')).fill)")
+        unrated = fills()
+        page.click('.np-stars .thumb[aria-label="Thumbs up"]')
+        liked = wait_for(lambda: fills() == ['none', 'rgb(255, 255, 255)'], 5)
+        page.click('.np-stars .thumb[aria-label="Thumbs up"]')
+        wait_for(lambda: page.locator('.np-stars .thumb.on').count() == 0, 5)
+        check('settings: ...a liked track\'s thumb up is solid white, and neither is unrated', unrated == ['none', 'none'] and liked, f'{unrated} {fills()}')
         check('settings: volume control hidden', page.locator('.np .volume').first.is_hidden())
         check('settings: album year hidden', '(' not in page.locator('.np-album').inner_text(), page.locator('.np-album').inner_text())
         back = page.locator('.np-jump[aria-label="Back 15 seconds"]')
@@ -8449,6 +8491,30 @@ with sync_playwright() as pw:
                   mock('/__mock/musicbrainz')['MediaContainer']['requests'] == mb_was and 'Glass Rain' in again_rows and 'Hollow Bell' in again_rows
                   and any(t.startswith('Catching up with what it already knows… ') for t in again_said),
                   f"{mock('/__mock/musicbrainz')['MediaContainer']['requests'] - mb_was} {again_rows} {again_said}")
+            # An album MusicBrainz doesn't answer for (too big for a busy
+            # mirror, say): asked about a few times, then said so, and the
+            # look finishes, where before it was asked again and again, the
+            # rest waiting. Look again asks it again. (Its rests shortened
+            # for the tests: PW_SERVICE_MB_TIMING.)
+            extra.append(mock('/__mock/add-artist?name=Slow%20Signal&albums=Deep%20Water:2020')['MediaContainer']['Metadata'][0])
+            mock('/__mock/config?mbslow=slow%20signal')
+            slow_before = mock('/__mock/musicbrainz')['MediaContainer']['slow']
+            try:
+                page.reload()
+                page.wait_for_selector('.mb-review-again', timeout=90000)
+                told = page.locator('.mb-review-status').inner_text()
+                slow_asked = mock('/__mock/musicbrainz')['MediaContainer']['slow'] - slow_before
+                check('mb: an album MusicBrainz doesn\'t answer for is asked about a few times, then the look finishes, saying so',
+                      'Checked ' in told and '1 album couldn’t be checked: your MusicBrainz server didn’t answer for it. Look again to try it again.' in told and slow_asked == 3,
+                      f'{told!r} {slow_asked}')
+                mock('/__mock/config?mbslow=')
+                page.click('.mb-review-again')
+                page.wait_for_timeout(500)
+                page.wait_for_selector('.mb-review-again', timeout=60000)
+                told = page.locator('.mb-review-status').inner_text()
+                check('mb: ...and Look again asks it again, once MusicBrainz answers', 'Checked ' in told and 'couldn’t be checked' not in told, told)
+            finally:
+                mock('/__mock/config?mbslow=')
         finally:
             for a in extra:
                 mock(f"/__mock/add-artist?remove={a['ratingKey']}")

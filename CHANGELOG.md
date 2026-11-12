@@ -3,6 +3,37 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.39.1 - 2026-11-12
+
+### Fixed
+
+- **A tab pressed twice no longer leaves the app.** Pressed again before
+  the first press had landed (more likely while the page was busy, as
+  during Years and genres to fix), the browser stepped back twice as far,
+  out of the app to whatever was open before it, which looked like the tab
+  crashing. Now a second press of the same tab is the same press, and
+  another tab, or Back, waits till the first has landed.
+- **Years and genres to fix finishes, rather than slowing to an album a
+  minute near the end.** An album your MusicBrainz server didn't answer
+  for was asked about again and again, each time stopping every lookup for
+  a minute, so the last few hundred took hours. Now each is tried 3 times,
+  a while apart, while the rest carry on, then counted at the end as
+  couldn't be checked; **Look again** tries them again.
+- **...a server of your own has a minute to answer** in the background
+  (15 seconds before), as a big album can take a busy mirror a while, and
+  one slow answer, while it's answering others, is just that: it isn't
+  taken as the server not answering.
+- **...says "Checking years and genres" once it's looking albums up**,
+  rather than "Catching up with what it already knows" to the end, and
+  says when your MusicBrainz server isn't answering at all. In debug mode,
+  the log names each request that wasn't answered in time.
+
+### Changed
+
+- **A liked track's thumb up is solid white** in Now Playing (a disliked
+  track's thumb down too), as in track lists, rather than outlined on a
+  lighter square.
+
 ## 0.39.0 - 2026-11-10
 
 ### Changed
