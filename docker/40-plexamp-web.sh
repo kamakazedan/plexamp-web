@@ -978,6 +978,10 @@ location /api/ {
     proxy_buffering off;
     proxy_read_timeout 60s;
     client_max_body_size 512k;
+    # (Kept in memory, the largest it takes: a look through the library's
+    # albums asks about a thousand at a time, more than nginx keeps to begin
+    # with, and it'd write each to a file, and say so in the log.)
+    client_body_buffer_size 512k;
 }
 CONF
     # The user the service runs as once it's started (it stops being root):
@@ -1255,6 +1259,11 @@ if [ "$DEBUG_ON" = true ]; then
         fi
         if [ -n "${OLLAMA_URL:-}" ]; then
             check "Ollama (OLLAMA_URL)" "${OLLAMA_URL%/}/api/version"
+        fi
+        # (A small list it has, as the service asks: musicbrainz.org asks
+        # for a name to be given.)
+        if [ -n "$MB_URL" ]; then
+            check "MusicBrainz (MUSICBRAINZ_URL)" "$MB_URL/ws/2/genre/all?limit=1&fmt=json" -U "plexamp-web (start-up check; https://github.com/kamakazedan/plexamp-web)"
         fi
         if [ "$TOGETHER" = true ] || [ "$AI_AUTH" = plex ]; then
             check "plex.tv (for Play Together and sign-in checks)" "${PLEX_TV%/}/api/v2/ping?X-Plex-Client-Identifier=plexamp-web-check"

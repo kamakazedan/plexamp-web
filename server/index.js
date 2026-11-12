@@ -611,7 +611,8 @@ async function musicbrainzRoute(req, res, parts) {
 //     searching MusicBrainz finds no one just now, and only a search could
 //     find that one. 'unanswered': MusicBrainz didn't answer for it, each
 //     time it was asked (`retry`: ask it again). `notAnswering`: MusicBrainz
-//     isn't answering anything just now.
+//     isn't answering anything just now (`unreachable`: it can't be
+//     connected to at all).
 // While MusicBrainz isn't answering (after a request to it that wasn't),
 // only what's known is answered, for a minute.
 // Only names go to MusicBrainz: an artist's (and an album's title, and Plex's
@@ -683,8 +684,10 @@ async function musicbrainzFeatures(req, res, what) {
     signal: ctrl.signal,
     who: key,
   });
-  // (`notAnswering`: MusicBrainz isn't answering just now, so nothing new is looked up till it is.)
-  return send(res, 200, { results, ...(musicbrainz.searchBroken() ? { searchBroken: true } : {}), ...(musicbrainz.down() ? { notAnswering: true } : {}) });
+  // (`notAnswering`: MusicBrainz isn't answering just now, so nothing new
+  // is looked up till it is; `unreachable`: it can't even be connected to.)
+  const quiet = musicbrainz.down() ? { notAnswering: true, ...(musicbrainz.unreachable ? { unreachable: true } : {}) } : {};
+  return send(res, 200, { results, ...(musicbrainz.searchBroken() ? { searchBroken: true } : {}), ...quiet });
 }
 
 // Search › From Spotify by link (SPOTIFY_LINK_IMPORT): a public playlist's name and

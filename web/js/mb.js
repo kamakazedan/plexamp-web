@@ -195,7 +195,8 @@ const ALBUMS_BYTES = 240 * 1024; // ...and its size, at most (the player takes 2
 // and searching the player's MusicBrainz finds no one: the list's
 // `searchBroken`) or 'unanswered' (MusicBrainz didn't answer for it, each
 // time the player asked: `retry` on an item asks it again). The list's
-// `notAnswering`: MusicBrainz isn't answering anything just now. `wait`:
+// `notAnswering`: MusicBrainz isn't answering anything just now (and
+// `unreachable`: it can't be connected to at all). `wait`:
 // how long the player may wait for those it doesn't know yet (ms). `strict`: the very album or nothing, for its year
 // or genres to be shown or fixed (Plex's id for it, where its title agrees,
 // or else, for a studio album, its exact title: see releases.js
@@ -225,14 +226,14 @@ export async function albumsOnMB(items, { genres = false, wait = 0, signal, back
     try {
       const r = await call('albums', { items: part, ...how }, { signal, background, now });
       const results = Array.isArray(r.results) ? r.results : [];
-      return { results: part.map((_, j) => results[j] ?? null), searchBroken: r.searchBroken === true, notAnswering: r.notAnswering === true };
+      return { results: part.map((_, j) => results[j] ?? null), searchBroken: r.searchBroken === true, notAnswering: r.notAnswering === true, unreachable: r.unreachable === true };
     } catch (err) {
       if (err?.status !== 413) throw err;
-      if (part.length === 1) return { results: [null], searchBroken: false, notAnswering: false };
+      if (part.length === 1) return { results: [null], searchBroken: false, notAnswering: false, unreachable: false };
       const half = Math.ceil(part.length / 2);
       const a = await ask(part.slice(0, half));
       const b = await ask(part.slice(half));
-      return { results: [...a.results, ...b.results], searchBroken: a.searchBroken || b.searchBroken, notAnswering: a.notAnswering || b.notAnswering };
+      return { results: [...a.results, ...b.results], searchBroken: a.searchBroken || b.searchBroken, notAnswering: a.notAnswering || b.notAnswering, unreachable: a.unreachable || b.unreachable };
     }
   };
   const size = new TextEncoder();
@@ -250,6 +251,7 @@ export async function albumsOnMB(items, { genres = false, wait = 0, signal, back
     out.push(...r.results);
     if (r.searchBroken) out.searchBroken = true;
     if (r.notAnswering) out.notAnswering = true;
+    if (r.unreachable) out.unreachable = true;
   }
   return out;
 }

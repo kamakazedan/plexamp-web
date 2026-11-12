@@ -10,7 +10,7 @@ import { OwnerSignIns, OWNER_LIMITS } from './owners.js';
 import { Offline, OFFLINE_LIMITS, parseFrom, isOfflineToken } from './offline.js';
 import { cleanChat, SharedModel, AIRequestError, AI_LIMITS, errorText } from './ai.js';
 import { plainPath, clientIp } from './paths.js';
-import { MusicBrainz, MusicBrainzError, isPublic, MBKept, MB_ADVANCED_LIMITS, MB_LIMITS, retryAfterMs } from './musicbrainz.js';
+import { MusicBrainz, MusicBrainzError, isPublic, MBKept, MB_ADVANCED_LIMITS, MB_LIMITS, retryAfterMs, whyNoAnswer } from './musicbrainz.js';
 import { albumKey, matchGroup, kindOf, plexKind, firstYear, norm as normOfReleases, apartFromNamesakes, joinedParts, asides, exactKey, exactGroup, exactAlbum, titlesAgree, sameAlbumTitle, sameTitle, sameVersion, versionedTracks, shortRelease, kindsAgree } from './releases.js';
 import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS, LEASE_MS } from './shares.js';
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
@@ -1684,6 +1684,72 @@ test('MusicBrainz features: albums not known yet are looked up in the background
 // MusicBrainz takes too long over).
 const neverAnswers = (init) =>
   new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
+
+// A fetch that fails as Node's does, its reason in the error's cause.
+const failsWith = (code) => async () => {
+  throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(code), { code }) });
+};
+
+test('MusicBrainz: the log says why a request got no answer, and a server that can\'t be connected to at all is told apart (from 0.39.2)', async () => {
+  const lines = [];
+  const log = { debug: (l) => lines.push(l), warn() {}, info() {}, error() {} };
+  const refused = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: failsWith('ECONNREFUSED'), gapMs: 0, log });
+  await assert.rejects(refused.ask('/ws/2/artist/x', {}, null, { background: true }), (e) => e instanceof MusicBrainzError && e.resting === true && /couldn’t be reached/.test(e.message));
+  assert.equal(refused.unreachable, true);
+  assert.equal(refused.down(), true);
+  assert.ok(lines.some((l) => l.includes('/ws/2/artist/x') && /connection refused/.test(l) && /ECONNREFUSED/.test(l)), lines.join('\n'));
+  // Connected, then dropped: what was asked, maybe, so one of its tries.
+  const dropped = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: failsWith('UND_ERR_SOCKET'), gapMs: 0, log });
+  await assert.rejects(dropped.ask('/ws/2/release/y', {}, null, { background: true }), (e) => e instanceof MusicBrainzError && !e.resting && /didn’t answer/.test(e.message));
+  assert.equal(dropped.unreachable, false);
+  assert.ok(lines.some((l) => l.includes('/ws/2/release/y') && /dropped/.test(l)), lines.join('\n'));
+  // Busy, and an error answer: said too.
+  const busy = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async () => jsonAnswer({}, 429, { 'Retry-After': '5' }), gapMs: 0, log });
+  await assert.rejects(busy.ask('/ws/2/release-group/z', {}), (e) => e.resting === true);
+  assert.ok(lines.some((l) => l.includes('/ws/2/release-group/z answered 429, busy: left alone for 5 s')), lines.join('\n'));
+  // Answering again: reachable.
+  let fail = true;
+  const back = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl: async (...a) => (fail ? failsWith('EHOSTUNREACH')(...a) : jsonAnswer({ ok: 1 })), gapMs: 0, log });
+  await assert.rejects(back.ask('/ws/2/a', {}, null, { background: true }));
+  assert.equal(back.unreachable, true);
+  fail = false;
+  back.downUntil = 0;
+  back.nextAt = 0;
+  assert.deepEqual(await back.ask('/ws/2/a', {}, null, { background: true }), { ok: 1 });
+  assert.equal(back.unreachable, false);
+  assert.match(whyNoAnswer(new TypeError('fetch failed', { cause: new Error('unexpected redirect') })), /redirect/);
+});
+
+test('MusicBrainz features: a server that can\'t be connected to doesn\'t count against an album: it\'s asked about again once it can be (from 0.39.2)', async () => {
+  const was = { ...MB_ADVANCED_LIMITS };
+  Object.assign(MB_ADVANCED_LIMITS, { restMs: 30, downMs: 60, pendingMs: 20 });
+  const wasLimits = { ...MB_LIMITS };
+  Object.assign(MB_LIMITS, { slowWaitMaxMs: 20 });
+  try {
+    const { fetchImpl: answers } = fakeMusicBrainz();
+    let refusing = true;
+    let refused = 0;
+    const fetchImpl = (url, init) => {
+      if (!refusing) return answers(url, init);
+      refused += 1;
+      return failsWith('ECONNREFUSED')();
+    };
+    const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+    const album = { artist: 'Sigur Rós', title: 'Takk...' };
+    assert.deepEqual(await mb.albums([album]), ['pending']);
+    // More than `tries` refusals (a second or so apart): still waiting for
+    // it, not given up.
+    for (let i = 0; i < 400 && refused <= MB_ADVANCED_LIMITS.tries + 1; i++) await sleep(20);
+    assert.ok(refused > MB_ADVANCED_LIMITS.tries + 1, `${refused}`);
+    assert.deepEqual(await mb.albums([album]), ['pending']);
+    refusing = false;
+    const got = await mb.albums([album], { waitMs: 2000 });
+    assert.equal(got[0]?.title, 'Takk...');
+  } finally {
+    Object.assign(MB_ADVANCED_LIMITS, was);
+    Object.assign(MB_LIMITS, wasLimits);
+  }
+});
 
 test('MusicBrainz: a server of your own that answers others meanwhile isn\'t taken as not answering when one of them takes too long (from 0.39.1)', async () => {
   const was = [MB_LIMITS.ownTimeoutMs, MB_LIMITS.timeoutMs];

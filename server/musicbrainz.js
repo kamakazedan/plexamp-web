@@ -96,6 +96,31 @@ const credited = (credit) => (Array.isArray(credit) ? credit : []).flatMap((c) =
 
 // musicbrainz.org itself (or one of its own names), as opposed to a server
 // of your own.
+// Why a request to MusicBrainz got no answer, in a few words for the log
+// (Node's fetch says, in its error's cause). And those that mean it can't
+// be connected to at all: nothing there, or no way to it (see asked).
+const NO_ANSWER = {
+  ECONNREFUSED: 'connection refused: nothing is listening at that address and port',
+  EHOSTUNREACH: 'no route to the host',
+  ENETUNREACH: 'the network is unreachable',
+  ENOTFOUND: 'its name isn’t known',
+  EAI_AGAIN: 'its name couldn’t be looked up',
+  ETIMEDOUT: 'it didn’t accept the connection in time',
+  UND_ERR_CONNECT_TIMEOUT: 'it didn’t accept the connection in time',
+  ECONNRESET: 'the connection was reset',
+  EPIPE: 'the connection was dropped',
+  UND_ERR_SOCKET: 'the connection was dropped before it answered',
+};
+const CANT_CONNECT = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
+export function whyNoAnswer(err) {
+  const cause = err?.cause;
+  const code = String(cause?.code || err?.code || '');
+  if (NO_ANSWER[code]) return `${NO_ANSWER[code]} (${code})`;
+  if (/redirect/i.test(String(cause?.message || ''))) return 'it answered with a redirect, which isn’t followed';
+  return [...new Set([err?.name, err?.message, code, cause?.message].filter(Boolean))].join(': ') || 'no reason given';
+}
+const cantConnect = (err) => CANT_CONNECT.has(String(err?.cause?.code || err?.code || ''));
+
 export const isPublic = (base) => {
   try {
     const host = new URL(base).hostname.toLowerCase();
@@ -134,6 +159,7 @@ export class MusicBrainz {
     this.nextAt = 0; // when the next request may go (see asked)
     this.lastStart = 0; // ...and when the last one went
     this.lastAnswerAt = 0; // ...and when it last answered anything
+    this.unreachable = false; // ...and whether, since, it couldn't be connected to at all (see whyNoAnswer)
     this.waiting = 0; // requests someone's waiting on (the background waits for them)
     // The advanced features (see advanced()): what's kept of them, and
     // what's waiting to be looked up in the background.
@@ -217,6 +243,7 @@ export class MusicBrainz {
           signal: ctrl.signal,
         });
         this.lastAnswerAt = Date.now();
+        this.unreachable = false;
         const took = Date.now() - started;
         if (this.public && took > MB_LIMITS.slowMs) this.nextAt = Math.max(this.nextAt, Date.now() + Math.min(MB_LIMITS.slowWaitMaxMs, took));
         // (musicbrainz.org says it's busy with a 503; a server of your own,
@@ -230,9 +257,13 @@ export class MusicBrainz {
           this.unwell(ms);
           this.quietUntil = Math.max(this.quietUntil, Date.now() + ms);
           this.paced(took, { missed: true });
+          this.log?.debug(`musicbrainz: ${path} answered ${res.status}, busy: left alone for ${Math.round(ms / 1000)} s`);
           throw this.busy(ms);
         }
-        if (res.status >= 500) this.unwell();
+        if (res.status >= 500) {
+          this.unwell();
+          this.log?.debug(`musicbrainz: ${path} answered ${res.status}`);
+        }
         this.paced(took, { missed: res.status >= 500 });
         // (A server of your own needs its search indexes for these.)
         if (!res.ok) throw Object.assign(new MusicBrainzError(502, this.public ? `MusicBrainz answered ${res.status}.` : `The player’s MusicBrainz server answered ${res.status}. Searching it needs its search indexes.`), { answered: res.status });
@@ -252,8 +283,15 @@ export class MusicBrainz {
         }
         this.paced(Date.now() - started, { missed: alone });
         if (late) this.log?.debug(`musicbrainz: no answer within ${Math.round(waitMs / 1000)} s to ${path}${alone ? '' : ' (it answered others meanwhile)'}`);
+        else this.log?.debug(`musicbrainz: no answer to ${path}: ${whyNoAnswer(err)}`);
         if (late) throw new MusicBrainzError(502, this.public ? 'MusicBrainz didn’t answer in time.' : 'The player’s MusicBrainz server didn’t answer in time.');
-        throw new MusicBrainzError(502, this.public ? 'MusicBrainz couldn’t be reached from this player.' : 'The player’s MusicBrainz server couldn’t be reached.');
+        // (Not connected to at all: MusicBrainz, not what was asked of it,
+        // so in the background it's not one of an album's tries: see worker.)
+        if (cantConnect(err)) {
+          this.unreachable = true;
+          throw Object.assign(new MusicBrainzError(502, this.public ? 'MusicBrainz couldn’t be reached from this player.' : 'The player’s MusicBrainz server couldn’t be reached.'), { resting: true });
+        }
+        throw new MusicBrainzError(502, this.public ? 'MusicBrainz didn’t answer this player.' : 'The player’s MusicBrainz server didn’t answer.');
       } finally {
         clearTimeout(timer);
         signal?.removeEventListener('abort', stop);
@@ -938,9 +976,10 @@ export class MusicBrainz {
         // it's queued again, and searching's checked again by then).
         if (err?.searchBroken) this.done(key);
         else if (err?.resting) {
-          // MusicBrainz busy, or not answering anything: again once it's
-          // been left as long as it said (or a minute), as many times as
-          // that takes (it's MusicBrainz, not this album).
+          // MusicBrainz busy, not answering anything, or not there to be
+          // connected to: again once it's been left as long as it said (or
+          // a minute), as many times as that takes (it's MusicBrainz, not
+          // this album).
           it.notBefore = Math.max(this.downUntil, this.quietUntil, Date.now() + 1000);
           const queue = this.todoFirst.has(key) ? this.todoFirst : this.todo;
           queue.delete(key);

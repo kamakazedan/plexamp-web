@@ -3,6 +3,25 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.39.2 - 2026-11-12
+
+### Fixed
+
+- **Years and genres to fix: a MusicBrainz server that can't be reached
+  doesn't count against the albums.** They wait, and are checked once it's
+  back, rather than being listed as couldn't be checked; the page says it
+  "can't be reached just now".
+- **...the album count stays in view** while the page says your MusicBrainz
+  server isn't answering.
+- **No more "a client request body is buffered to a temporary file"** in
+  the log: the page's requests to check albums are kept in memory.
+
+### Changed
+
+- **Debug mode says why each MusicBrainz lookup failed**: which lookup, and
+  the reason (connection refused, dropped, no answer in time, busy). At
+  start-up, it checks `MUSICBRAINZ_URL` answers, as it does Plex and Ollama.
+
 ## 0.39.1 - 2026-11-12
 
 ### Fixed

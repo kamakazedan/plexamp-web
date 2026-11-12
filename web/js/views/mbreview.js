@@ -330,8 +330,8 @@ function startScan(key) {
     if (sc.phase === 'artists') return { busy: 'Reading', text: `Reading their artists…${sc.total ? ` ${fmt.number(sc.read)} of ${fmt.number(sc.total)}` : ''}`, going: true };
     if (!sc.albums.length) return { text: 'There are no albums in this library.' };
     const pending = sc.found.filter((g) => g === 'pending').length;
-    if (pending && sc.trouble) return { text: sc.trouble, warn: true, going: true };
     const sofar = `${fmt.number(sc.albums.length - pending)} of ${fmt.number(sc.albums.length)} albums`;
+    if (pending && sc.trouble) return { text: `${sc.trouble} ${sofar} checked so far.`, warn: true, going: true };
     if (pending && sc.catchingUp) return { busy: 'Looking', text: `Catching up with what it already knows… ${sofar}`, going: true };
     if (pending) return { busy: 'Looking', text: `Checking years and genres on ${mbWhere()}… ${sofar}`, going: true };
     // (On a MusicBrainz of your own, those with nothing to fix aren't
@@ -373,12 +373,14 @@ function startScan(key) {
     const { albums, found, check } = sc;
     const item = (j, more = {}) => ({ ...itemOf(j), ...more, ...(fresh.has(j) ? { retry: true } : {}) });
     let quiet = false;
+    let unreachable = false;
     for (const withGenres of [true, false]) {
       const these = indexes.filter((j) => !genresOf(albums[j]).length === withGenres);
       for (let i = 0; i < these.length && !sc.stopped; i += ASK) {
         const part = these.slice(i, i + ASK);
         const got = await albumsOnMB(part.map((j) => item(j)), { genres: withGenres, background: true, strict: true, check });
         if (got.notAnswering) quiet = true;
+        if (got.unreachable) unreachable = true;
         // ...by their tracks, as Plex has them (those that can't be read
         // aren't fixed).
         const toCheck = check ? part.map((j, k) => ({ j, k, g: got[k] })).filter(({ j, g }) => known(g) && g.toCheck && differs(albums[j], g)) : [];
@@ -387,6 +389,7 @@ function startScan(key) {
           const asking = toCheck.map((x, n) => ({ ...x, list: lists[n] })).filter((x) => x.list?.length);
           const byTracks = asking.length ? await albumsOnMB(asking.map(({ j, list }) => item(j, { trackList: list })), { genres: withGenres, background: true, strict: true, check }) : [];
           if (byTracks.notAnswering) quiet = true;
+          if (byTracks.unreachable) unreachable = true;
           for (const { k } of toCheck) got[k] = null;
           asking.forEach(({ k }, n) => (got[k] = byTracks[n] ?? null));
         }
@@ -410,7 +413,7 @@ function startScan(key) {
         sc.changed();
       }
     }
-    return { quiet };
+    return { quiet, unreachable };
   }
 
   // (After MusicBrainz didn't answer, or was busy: asked again only after as
@@ -444,13 +447,15 @@ function startScan(key) {
     if (!fresh.size) sc.catchingUp = false;
     let err = null;
     let quiet = false;
+    let unreachable = false;
     try {
-      ({ quiet } = await ask(waiting, fresh));
+      ({ quiet, unreachable } = await ask(waiting, fresh));
     } catch (e) {
       err = e;
     }
     if (sc.stopped) return;
-    sc.trouble = err ? say(err) : quiet ? `${sc.check ? 'Your MusicBrainz server' : 'MusicBrainz'} isn’t answering just now. Carrying on when it does.` : null;
+    const server = sc.check ? 'Your MusicBrainz server' : 'MusicBrainz';
+    sc.trouble = err ? say(err) : unreachable ? `${server} can’t be reached just now. Carrying on when it can.` : quiet ? `${server} isn’t answering just now. Carrying on when it does.` : null;
     sc.changed();
     if (!sc.found.includes('pending')) return;
     const answered = waiting.filter((j) => sc.found[j] !== 'pending').length;

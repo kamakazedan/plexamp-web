@@ -8501,7 +8501,16 @@ with sync_playwright() as pw:
             slow_before = mock('/__mock/musicbrainz')['MediaContainer']['slow']
             try:
                 page.reload()
-                page.wait_for_selector('.mb-review-again', timeout=90000)
+                # (What the status line says meanwhile: a warning keeps the count in view.)
+                warned = set()
+                for _ in range(450):
+                    if page.locator('.mb-review-again').count():
+                        break
+                    said = page.locator('.mb-review-status').inner_text() if page.locator('.mb-review-status').count() else ''
+                    if 'isn’t answering' in said or 'can’t be reached' in said:
+                        warned.add(said)
+                    page.wait_for_timeout(200)
+                page.wait_for_selector('.mb-review-again', timeout=10000)
                 told = page.locator('.mb-review-status').inner_text()
                 slow_asked = mock('/__mock/musicbrainz')['MediaContainer']['slow'] - slow_before
                 check('mb: an album MusicBrainz doesn\'t answer for is asked about a few times, then the look finishes, saying so',
@@ -8513,6 +8522,8 @@ with sync_playwright() as pw:
                 page.wait_for_selector('.mb-review-again', timeout=60000)
                 told = page.locator('.mb-review-status').inner_text()
                 check('mb: ...and Look again asks it again, once MusicBrainz answers', 'Checked ' in told and 'couldn’t be checked' not in told, told)
+                check('mb: ...and while MusicBrainz isn\'t answering, the status line says so with how many albums are checked so far (from 0.39.2)',
+                      warned and all(re.search(r'\d+ of \d+ albums checked so far\.$', w) for w in warned), str(warned))
             finally:
                 mock('/__mock/config?mbslow=')
         finally:
