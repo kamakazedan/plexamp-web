@@ -130,11 +130,27 @@ export async function mbReviewView({ el, onDispose }) {
       label,
     );
 
+  // (The status line's spinner, and its words: kept while it's busy, only
+  // the words changing as it counts, so the spinner carries on turning.
+  // Made again each time, before 0.39.4, it started its turn again each
+  // time, and looked like it was jumping about.)
+  let turning = null;
+  let words = null;
   function renderStatus() {
     const st = sc.statusNow();
     if (!changedPart('status', st)) return;
     status.classList.toggle('warn', !!st.warn);
-    status.replaceChildren(...(st.busy ? [spinner(st.busy), h('span', null, ` ${st.text}`)] : [st.text]));
+    if (st.busy && turning?.parentNode === status) {
+      turning.setAttribute('aria-label', st.busy);
+      words.textContent = ` ${st.text}`;
+    } else if (st.busy) {
+      turning = spinner(st.busy);
+      words = h('span', null, ` ${st.text}`);
+      status.replaceChildren(turning, words);
+    } else {
+      turning = null;
+      status.replaceChildren(st.text);
+    }
     growing.hidden = sc.phase !== 'checking' || !st.going;
     leave.hidden = !st.going;
   }

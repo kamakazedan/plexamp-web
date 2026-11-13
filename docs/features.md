@@ -198,6 +198,7 @@ For the server's owner: **Settings › MusicBrainz › Years and genres to fix**
 - **The check**: it reads your albums, then their artists, then checks years and genres together. The lists grow as it goes, with a spinner beside each count, and **Fix all** and **Add all** appear once it's done. During a Fix all, the count in the list's heading goes down as each album is fixed.
 - **Leaving**: it keeps going while the app's open, on any page. Close it and it stops. Next time, in any browser, it catches up quickly with what the player already knows (answers are kept a month), then carries on. **Look again** reads your library afresh.
 - **Couldn't be checked**: albums MusicBrainz didn't answer for, after 3 tries, are counted at the end. **Look again** tries them again.
+- **Titles with no letters or numbers** ("★", "÷", "[Untitled]"), or artists' names ("!!!"): nothing to match them by, so they're never matched.
 - **Your files**: Plex never writes to them, so download the list (CSV, with each album's MusicBrainz id) for [MusicBrainz Picard](https://picard.musicbrainz.org) or [beets](https://beets.io).
 
 ### Artists to merge

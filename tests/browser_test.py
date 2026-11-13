@@ -8543,6 +8543,42 @@ with sync_playwright() as pw:
                       redirected > 0 and 'Checked ' in told and 'couldn’t be checked' not in told and 'isn’t answering' not in told, f'{told!r} {redirected}')
             finally:
                 mock('/__mock/config?mbmerged=0')
+            # An album with nothing to look it up by, a title of no letters
+            # or numbers ("★", "[Untitled]"): never looked up, so not found,
+            # and answered at once. Before 0.39.4, still being looked up for
+            # good: the look never ended. And the status line's spinner,
+            # while it's busy, kept as the words change (the library's read
+            # slowly here, so they change a few times): before, made again
+            # each time, it started its turn again each time.
+            extra.append(mock('/__mock/add-artist?name=Symbol%20Signal&albums=%E2%98%85:2016,%5BUntitled%5D:2018&guids=1')['MediaContainer']['Metadata'][0])
+            mock('/__mock/config?delay=1200')
+            try:
+                page.reload()
+                page.wait_for_selector('.mb-review-status .spinner', timeout=20000)
+                page.evaluate('''() => {
+                  const status = document.querySelector('.mb-review-status');
+                  const first = status.querySelector('.spinner');
+                  window.__spun = { replaced: 0, said: [status.textContent] };
+                  new MutationObserver(() => {
+                    const now = status.querySelector('.spinner');
+                    if (!now) return;
+                    if (now !== first) window.__spun.replaced += 1;
+                    window.__spun.said.push(status.textContent);
+                  }).observe(status, { childList: true, subtree: true, characterData: true });
+                }''')
+                try:
+                    page.wait_for_selector('.mb-review-again', timeout=60000)
+                    ended = True
+                except Exception:  # noqa: BLE001 - said in the check
+                    ended = False
+                told = page.locator('.mb-review-status').inner_text()
+                spun = page.evaluate('() => ({ replaced: window.__spun.replaced, said: [...new Set(window.__spun.said)] })')
+                check('mb: an album titled with no letters or numbers ("★", "[Untitled]") is answered at once, as not found, and the look ends (from 0.39.4)',
+                      ended and 'Checked ' in told and 'couldn’t be checked' not in told, told)
+                check('mb: the status line\'s spinner is kept while what it says changes, so it carries on turning (from 0.39.4)',
+                      spun['replaced'] == 0 and len(spun['said']) >= 3, str(spun))
+            finally:
+                mock('/__mock/config?delay=0')
         finally:
             for a in extra:
                 mock(f"/__mock/add-artist?remove={a['ratingKey']}")

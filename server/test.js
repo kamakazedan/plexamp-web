@@ -1751,6 +1751,32 @@ test('MusicBrainz features: an album or artist by an id Plex has that\'s been me
   assert.equal(artist?.id, NEW_ARTIST, 'its id as MusicBrainz has it now, for its release groups');
 });
 
+test('MusicBrainz features: an album with nothing to look it up by, an artist or a title of no letters or numbers, is answered at once, never left waiting (from 0.39.4)', async () => {
+  const { fetchImpl, asked } = fakeMusicBrainz();
+  const mb = new MusicBrainz({ base: 'http://mb.local:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+  // (Before 0.39.4, 'pending' for good: never looked up, and a look
+  // through the library never ended.)
+  const nothingToGoBy = [
+    { artist: 'Sigur Rós', title: '★', year: 2016, albumId: MB_ID(101), tracks: 7 },
+    { artist: 'Sigur Rós', title: '÷', year: 2017, tracks: 16 },
+    { artist: 'Sigur Rós', title: '[Untitled]', year: 2002, tracks: 8 },
+    { artist: '!!!', title: 'Myth Takes', year: 2007, artistId: MB_ID(9), tracks: 10 },
+  ];
+  for (const how of [{}, { strict: true }, { strict: true, check: true }, { genres: true, strict: true, check: true }]) {
+    const started = Date.now();
+    assert.deepEqual(await mb.albums(nothingToGoBy, { ...how, waitMs: 5000 }), [null, null, null, null], JSON.stringify(how));
+    assert.ok(Date.now() - started < 1000, `not waited for: ${JSON.stringify(how)}`);
+    // (Nor with their tracks, as the app asks again for one to be checked.)
+    assert.deepEqual(await mb.albums(nothingToGoBy.map((it) => ({ ...it, trackList: [{ title: 'One', ms: 1000 }] })), { ...how, waitMs: 5000 }), [null, null, null, null]);
+  }
+  assert.equal(mb.todo.size + mb.todoFirst.size, 0, 'none of them waiting to be looked up');
+  assert.equal(asked.length, 0, 'nothing asked of MusicBrainz for them');
+  // One of the artist's with a title to go by: looked up as ever.
+  assert.equal((await mb.albums([{ artist: 'Sigur Rós', title: 'Takk...' }], { waitMs: 3000 }))[0]?.title, 'Takk...');
+  // ...and theirs without one, now the artist's known, still none.
+  assert.deepEqual(await mb.albums(nothingToGoBy.slice(0, 3), { strict: true, check: true }), [null, null, null]);
+});
+
 test('MusicBrainz: the log says why a request got no answer, and a server that can\'t be connected to at all is told apart (from 0.39.2)', async () => {
   const lines = [];
   const log = { debug: (l) => lines.push(l), warn() {}, info() {}, error() {} };

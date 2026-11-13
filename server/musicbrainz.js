@@ -1087,7 +1087,12 @@ export class MusicBrainz {
       // (Kept where it's an album: none, for a title or a year anyone can
       // make up, is kept only once looked up, in its turn: see worker.)
       if (v !== undefined) return key && v ? this.adv.setAnswer(key, v) : v;
-      if (key && this.gaveUp(key)) return 'unanswered';
+      // (Nothing to look it up by, an artist or a title of no letters or
+      // numbers: "★", "÷", "[Untitled]", "!!!". It's never looked up (see
+      // later), so which album it is can't be told. Before 0.39.4, it was
+      // 'pending' for good, and a look through the library never ended.)
+      if (!key) return null;
+      if (this.gaveUp(key)) return 'unanswered';
       return this.searchBroken() && bySearch(it) ? 'unchecked' : 'pending';
     };
     let out = items.map(answer);

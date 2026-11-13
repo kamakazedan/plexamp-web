@@ -606,8 +606,16 @@ export function nowBars() {
 
 // ---------- states ----------
 
+// Each spinner turns in step with the clock (once in SPIN_MS, as app.css's
+// .spinner span does), so one made again in another's place, as a page's
+// count goes up, carries on about where that one was, rather than starting
+// its turn again.
+const SPIN_MS = 800;
 export function spinner(label = 'Loading') {
-  return h('div.spinner', { role: 'status', 'aria-label': label }, h('span'));
+  const turning = h('span');
+  const now = Number(document.timeline?.currentTime ?? performance.now()) || 0;
+  turning.style.animationDelay = `-${Math.round(now % SPIN_MS)}ms`;
+  return h('div.spinner', { role: 'status', 'aria-label': label }, turning);
 }
 
 export function emptyState(text, action) {

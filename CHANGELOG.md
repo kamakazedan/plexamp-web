@@ -3,6 +3,18 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.39.4 - 2026-11-13
+
+### Fixed
+
+- **Years and genres to fix no longer stops a few albums short.** An album
+  whose title has no letters or numbers ("★", "÷", "[Untitled]"), or whose
+  artist's name hasn't ("!!!"), has nothing to be matched by, so it's never
+  looked up. It was still said to be being looked up, for good, so the
+  check never finished. Now it's not matched, at once.
+- **The spinner keeps turning** while the check counts, rather than
+  starting its turn again each time the count goes up.
+
 ## 0.39.3 - 2026-11-13
 
 ### Fixed
