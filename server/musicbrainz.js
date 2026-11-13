@@ -59,6 +59,7 @@ export const MB_LIMITS = {
   // where no one's waiting on it (an album with hundreds of releases, or a
   // box set's tracks, can take a busy mirror longer than timeoutMs).
   ownTimeoutMs: 60000,
+  redirects: 3, // an id merged into another, redirected to the one it is now, followed this many times at most (see asked)
   answerBytes: 8 * 1024 * 1024, // an answer read, at most (a box set's tracks are a few hundred KB)
 };
 
@@ -236,12 +237,27 @@ export class MusicBrainz {
       signal?.addEventListener('abort', stop, { once: true });
       try {
         // (Never followed elsewhere: what's asked goes to this MusicBrainz,
-        // and the answer is its own.)
-        const res = await this.fetch(url, {
+        // and the answer is its own. An id merged into another is answered
+        // with a redirect to the one it's now, though: that's asked of this
+        // MusicBrainz in its place, by its path alone, whatever server the
+        // redirect names (a mirror's own name for itself, say), a few times
+        // at most. See followed.)
+        let res = await this.fetch(url, {
           headers: { Accept: 'application/json', 'User-Agent': this.agent },
-          redirect: 'error',
+          redirect: 'manual',
           signal: ctrl.signal,
         });
+        for (let hops = 0; res.status >= 300 && res.status < 400 && hops < MB_LIMITS.redirects; hops++) {
+          const next = this.followed(res.headers?.get?.('location'), url);
+          await res.body?.cancel?.().catch(() => {});
+          if (!next) break;
+          this.log?.debug(`musicbrainz: ${path} is now ${new URL(next).pathname}: asked there`);
+          res = await this.fetch(next, {
+            headers: { Accept: 'application/json', 'User-Agent': this.agent },
+            redirect: 'manual',
+            signal: ctrl.signal,
+          });
+        }
         this.lastAnswerAt = Date.now();
         this.unreachable = false;
         const took = Date.now() - started;
@@ -265,6 +281,11 @@ export class MusicBrainz {
           this.log?.debug(`musicbrainz: ${path} answered ${res.status}`);
         }
         this.paced(took, { missed: res.status >= 500 });
+        // (A redirect it wasn't followed for: somewhere else, or too many.)
+        if (res.status >= 300 && res.status < 400) {
+          this.log?.debug(`musicbrainz: ${path} answered ${res.status}, a redirect that isn’t followed (${res.headers?.get?.('location') ? 'elsewhere' : 'to nowhere'})`);
+          throw Object.assign(new MusicBrainzError(502, this.public ? 'MusicBrainz answered with a redirect elsewhere.' : 'The player’s MusicBrainz server answered with a redirect elsewhere.'), { answered: res.status });
+        }
         // (A server of your own needs its search indexes for these.)
         if (!res.ok) throw Object.assign(new MusicBrainzError(502, this.public ? `MusicBrainz answered ${res.status}.` : `The player’s MusicBrainz server answered ${res.status}. Searching it needs its search indexes.`), { answered: res.status });
         return JSON.parse(await readCapped(res, MB_LIMITS.answerBytes));
@@ -315,6 +336,26 @@ export class MusicBrainz {
       if (next) next();
       else this.running -= 1;
     }
+  }
+
+  // Where a redirect from this MusicBrainz says to ask instead: the same
+  // web service, on this MusicBrainz (its address, whatever server the
+  // redirect names), or null where it's anywhere else.
+  followed(location, from) {
+    if (!location) return null;
+    let to;
+    try {
+      to = new URL(location, from);
+    } catch {
+      return null;
+    }
+    // (Its path, after the address's own: a MusicBrainz behind a path of
+    // a proxy's names it in its redirects.)
+    const own = new URL(this.base).pathname.replace(/\/+$/, '');
+    const path = own && to.pathname.startsWith(`${own}/`) ? to.pathname.slice(own.length) : to.pathname;
+    if (!/^\/ws\/2\/[a-z-]+(\/[0-9a-f-]{36})?$/.test(path)) return null;
+    if (!to.searchParams.has('fmt')) to.searchParams.set('fmt', 'json');
+    return `${this.base}${path}${to.search}`;
   }
 
   // More may be under way at once now: those waiting their turn go.
@@ -565,12 +606,15 @@ export class MusicBrainz {
     try {
       full = await this.ask(`/ws/2/artist/${hit.id}`, { inc: 'aliases genres' }, signal, opts);
     } catch (err) {
-      if (!byId || err?.answered !== 404) throw err;
+      // (Not known by Plex's id, or only by way of a redirect elsewhere: by name, then.)
+      if (!byId || !(err?.answered === 404 || (err?.answered >= 300 && err?.answered < 400))) throw err;
       this.adv.set(key, null);
       return want ? this.artistInfo(name, { signal, background }) : null;
     }
     const names = [full.name, full['sort-name'], ...(Array.isArray(full.aliases) ? full.aliases : []).flatMap((a) => [a?.name, a?.['sort-name']])];
-    return this.adv.set(key, cleanArtist({ id: hit.id, name: full.name || hit.name, aliases: names, genres: topGenres(full.genres), note: typeof full.disambiguation === 'string' ? full.disambiguation : '' }));
+    // (Its id as MusicBrainz has it now: Plex's may be one merged into it since.)
+    const now = MBID.test(String(full.id)) ? full.id : hit.id;
+    return this.adv.set(key, cleanArtist({ id: now, name: full.name || hit.name, aliases: names, genres: topGenres(full.genres), note: typeof full.disambiguation === 'string' ? full.disambiguation : '' }));
   }
 
   // An artist's release groups, by their MusicBrainz id: [{ id, title,
@@ -772,7 +816,8 @@ export class MusicBrainz {
       try {
         data = await this.ask(`/ws/2/${kind}/${albumId}`, kind === 'release' ? { inc: 'release-groups' } : {}, signal, { background });
       } catch (err) {
-        if (err?.answered === 404 || err?.answered === 400) continue;
+        // (Not known by it, or only by way of a redirect elsewhere.)
+        if (err?.answered === 404 || err?.answered === 400 || (err?.answered >= 300 && err?.answered < 400)) continue;
         throw err;
       }
       const g = cleanGroup(kind === 'release' ? data?.['release-group'] : data);

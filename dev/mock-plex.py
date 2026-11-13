@@ -60,6 +60,9 @@ testing, these endpoints need no token:
         mbslow=TEXT: what's asked of the MusicBrainz with TEXT in it (its
         address or search, any case) isn't answered for a minute (as a big
         album for a busy mirror), mbslow= answers it all again;
+        mbmerged=1: the MusicBrainz's lookups by id are answered with a
+        redirect first, by its own name for itself (as a merged id's are),
+        mbmerged=0 not;
         hubs=on|titles|off: an artist's rows (/hubs/metadata/ID), with
         identifiers that say what's in them, only titles that do, or none
         (as an older server); types=off: albums' details without their
@@ -886,7 +889,7 @@ MB_EXTRA = {
     'songs': [('Glass Harbour', 'Lantern Song'), ('Real Missing Band', 'Somewhere Real')],
     'albums': [('Glass Harbour', 'Sea Glass')],
 }
-MB_SEEN = {'requests': 0, 'agents': [], 'last': '', 'asked': [], 'slow': 0}  # asked: each request's path and query (the latest 500); slow: those left unanswered (mbslow)
+MB_SEEN = {'requests': 0, 'agents': [], 'last': '', 'asked': [], 'slow': 0, 'redirected': 0}  # asked: each request's path and query (the latest 500); slow: those left unanswered (mbslow); redirected: lookups by id redirected (mbmerged)
 
 # What the mock MusicBrainz says of the library's artists, for the app's
 # MusicBrainz features: other names, genres, release groups (the library's
@@ -1206,7 +1209,7 @@ def hls_playlist(seconds):
 # ---------------------------------------------------------------- notifications
 
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'honour': '--honour' in sys.argv, 'tv': 'down' if '--tv-down' in sys.argv else 'up',
-        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on', 'mbslow': ''}
+        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on', 'mbslow': '', 'mbmerged': False}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 MERGES = []  # artists merged (PUT /library/metadata/ID/merge?ids=...)
 MERGED = {}  # ratingKey -> an artist merged into another, gone from the library (for undo_merges)
@@ -1809,6 +1812,16 @@ class Handler(BaseHTTPRequestHandler):
             MB_SEEN['slow'] += 1
             time.sleep(60)
             return
+        # (An id merged into another: a lookup by it is redirected, by the
+        # mirror's own name for itself, to the one it is now; here, the same
+        # one, marked as followed.)
+        if MOCK['mbmerged'] and re.match(r'^/ws/2/[a-z-]+/[0-9a-f-]{36}$', p) and 'merged' not in q:
+            MB_SEEN['redirected'] += 1
+            self.send_response(301)
+            self.send_header('Location', 'http://localhost:5000' + self.path + ('&' if '?' in self.path else '?') + 'merged=1')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         artists_ = {a['title'].lower() for a in artists} | {a.lower() for a in MB_EXTRA['artists']}
         # (A search, as a MusicBrainz without its search indexes answers
         # one: no one at all. And what the player asks to see whether
@@ -2219,6 +2232,8 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['mbsearch'] = 'off' if q['mbsearch'][0] in ('0', 'off', 'false') else 'on'
             if 'mbslow' in q:  # TEXT: what's asked with it in it isn't answered for a minute
                 MOCK['mbslow'] = q['mbslow'][0].strip().lower()
+            if 'mbmerged' in q:  # 1: lookups by id are redirected first, as a merged id's are
+                MOCK['mbmerged'] = q['mbmerged'][0] in ('1', 'on', 'true')
             if 'children' in q:  # all: an artist's /children has all their albums, as an older server's
                 MOCK['children'] = 'all' if q['children'][0] == 'all' else 'albums'
             if 'stall' in q:
@@ -2353,6 +2368,7 @@ class Handler(BaseHTTPRequestHandler):
             if q.get('reset', ['0'])[0] == '1':
                 MB_SEEN['asked'] = []
                 MB_SEEN['slow'] = 0
+                MB_SEEN['redirected'] = 0
             return self.send_json(dict(MB_SEEN))
         if p == '/__mock/seen':
             if q.get('reset'):

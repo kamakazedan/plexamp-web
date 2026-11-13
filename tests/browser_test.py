@@ -8526,6 +8526,23 @@ with sync_playwright() as pw:
                       warned and all(re.search(r'\d+ of \d+ albums checked so far\.$', w) for w in warned), str(warned))
             finally:
                 mock('/__mock/config?mbslow=')
+            # An id MusicBrainz has merged into another since, Plex's or its
+            # own: a lookup by it is answered with a redirect to the one it is
+            # now (by the mirror's own name for itself), asked of the player's
+            # MusicBrainz in its place. Before 0.39.3, refused, and taken for
+            # MusicBrainz not answering: every lookup held up a minute each time.
+            extra.append(mock('/__mock/add-artist?name=Merged%20Signal&albums=Old%20Id:2015&guids=1')['MediaContainer']['Metadata'][0])
+            mock('/__mock/config?mbmerged=1')
+            redirected_before = mock('/__mock/musicbrainz')['MediaContainer']['redirected']
+            try:
+                page.reload()
+                page.wait_for_selector('.mb-review-again', timeout=90000)
+                told = page.locator('.mb-review-status').inner_text()
+                redirected = mock('/__mock/musicbrainz')['MediaContainer']['redirected'] - redirected_before
+                check('mb: a lookup by an id MusicBrainz has merged into another is redirected, followed on the player\'s MusicBrainz, and the album checked (from 0.39.3)',
+                      redirected > 0 and 'Checked ' in told and 'couldn’t be checked' not in told and 'isn’t answering' not in told, f'{told!r} {redirected}')
+            finally:
+                mock('/__mock/config?mbmerged=0')
         finally:
             for a in extra:
                 mock(f"/__mock/add-artist?remove={a['ratingKey']}")

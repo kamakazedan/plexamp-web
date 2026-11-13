@@ -176,6 +176,7 @@ With `MUSICBRAINZ_ADVANCED=true` (and a `MUSICBRAINZ_URL`: see [configuration.md
 - **What's kept**: MusicBrainz's answers, in `/data`, for a month.
 - **How fast**: musicbrainz.org allows one request a second, so a big library takes hours the first time. A mirror of your own is asked up to 8 things at once while it answers within a second (4 to begin with), fewer while its answers take over 2 seconds, and 20 a second at most. A MusicBrainz that says it's busy is left alone for as long as it asks.
 - **No answer**: a mirror of your own has a minute to answer (a big album can take a busy one a while), and one slow answer doesn't hold up the rest. An album it doesn't answer for is tried 3 times, then listed as couldn't be checked.
+- **Merged ids**: where MusicBrainz has merged an artist or album Plex has the id of into another, the player asks for the one it is now, on the same MusicBrainz only.
 - **A mirror without search indexes**: spotted and said so. Albums are still found by the MusicBrainz ids Plex has; the rest wait till its indexes are built.
 
 What they do:

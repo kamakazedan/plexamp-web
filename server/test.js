@@ -1690,6 +1690,67 @@ const failsWith = (code) => async () => {
   throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(code), { code }) });
 };
 
+test('MusicBrainz: an id merged into another is followed to the one it is now, on the same MusicBrainz, and never anywhere else (from 0.39.3)', async () => {
+  const OLD = '25650162-2dbc-4309-947e-5a1d35c1a8c5';
+  const NEW = '11111111-2222-4333-8444-555555555555';
+  const LOOP = '22222222-3333-4444-8555-666666666666';
+  const asked = [];
+  const lines = [];
+  const log = { debug: (l) => lines.push(l), warn() {}, info() {}, error() {} };
+  // (As a mirror redirects: by its own name for itself, which isn't the player's for it.)
+  const redirect = (to) => new Response(null, { status: 301, headers: { Location: to } });
+  const fetchImpl = async (url, init) => {
+    asked.push(url);
+    assert.equal(init.redirect, 'manual', 'redirects are the player\'s to follow');
+    const u = new URL(url);
+    if (u.pathname === `/ws/2/release/${OLD}`) return redirect(`http://localhost:5000/ws/2/release/${NEW}?inc=release-groups&fmt=json`);
+    if (u.pathname === `/prefix/ws/2/release/${OLD}`) return redirect(`/prefix/ws/2/release/${NEW}?inc=release-groups&fmt=json`);
+    if (u.pathname.endsWith(`/ws/2/release/${NEW}`)) return jsonAnswer({ id: NEW, 'release-group': { id: NEW, title: 'Now', 'primary-type': 'Album', 'secondary-types': [], 'first-release-date': '2001' } });
+    if (u.pathname === '/ws/2/release/elsewhere') return redirect('https://evil.example/login');
+    if (u.pathname === `/ws/2/release/${LOOP}`) return redirect(`${u.origin}/ws/2/release/${LOOP}?fmt=json`);
+    return jsonAnswer({}, 404);
+  };
+  const mb = new MusicBrainz({ base: 'http://10.10.10.100:5000', fetchImpl, gapMs: 0, log });
+  const got = await mb.ask(`/ws/2/release/${OLD}`, { inc: 'release-groups' }, null, { background: true });
+  assert.equal(got.id, NEW);
+  assert.deepEqual(asked, [`http://10.10.10.100:5000/ws/2/release/${OLD}?inc=release-groups&fmt=json`, `http://10.10.10.100:5000/ws/2/release/${NEW}?inc=release-groups&fmt=json`]);
+  assert.equal(mb.down(), false, 'a redirect is an answer, not MusicBrainz not answering');
+  assert.ok(lines.some((l) => l.includes(`/ws/2/release/${OLD} is now /ws/2/release/${NEW}`)), lines.join('\n'));
+  // Behind a proxy's path: its path kept.
+  asked.length = 0;
+  const behind = new MusicBrainz({ base: 'http://proxy.local/prefix', fetchImpl, gapMs: 0 });
+  assert.equal((await behind.ask(`/ws/2/release/${OLD}`, {}, null, { background: true })).id, NEW);
+  assert.equal(asked[1], `http://proxy.local/prefix/ws/2/release/${NEW}?inc=release-groups&fmt=json`);
+  // Anywhere but its web service, or round and round: not followed, and said so (an answer, all the same).
+  asked.length = 0;
+  await assert.rejects(mb.ask('/ws/2/release/elsewhere', {}, null, { background: true }), (e) => e instanceof MusicBrainzError && e.answered === 301 && /redirect elsewhere/.test(e.message));
+  assert.ok(asked.every((u) => u.startsWith('http://10.10.10.100:5000/')), asked.join(' '));
+  asked.length = 0;
+  await assert.rejects(mb.ask(`/ws/2/release/${LOOP}`, {}, null, { background: true }), (e) => e.answered === 301);
+  assert.equal(asked.length, MB_LIMITS.redirects + 1);
+  assert.equal(mb.down(), false);
+});
+
+test('MusicBrainz features: an album or artist by an id Plex has that\'s been merged into another is found by the one it is now (from 0.39.3)', async () => {
+  const OLD_ALBUM = '25650162-2dbc-4309-947e-5a1d35c1a8c5';
+  const NEW_ALBUM = '359720b1-6c37-4aab-87e6-64d7f00e982e';
+  const OLD_ARTIST = '35723b60-732e-4bd8-957f-320b416e7b70';
+  const NEW_ARTIST = '35723b60-732e-4bd8-957f-320b416e7b7f';
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    if (u.pathname === `/ws/2/release/${OLD_ALBUM}`) return new Response(null, { status: 301, headers: { Location: `http://localhost:5000/ws/2/release/${NEW_ALBUM}${u.search}` } });
+    if (u.pathname === `/ws/2/release/${NEW_ALBUM}`) return jsonAnswer({ id: NEW_ALBUM, 'release-group': { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', title: 'Greatest Hits', 'primary-type': 'Album', 'secondary-types': ['Compilation'], 'first-release-date': '2007-03-12' } });
+    if (u.pathname === `/ws/2/artist/${OLD_ARTIST}`) return new Response(null, { status: 307, headers: { Location: `/ws/2/artist/${NEW_ARTIST}${u.search}` } });
+    if (u.pathname === `/ws/2/artist/${NEW_ARTIST}`) return jsonAnswer({ id: NEW_ARTIST, name: 'Groove Armada', 'sort-name': 'Groove Armada', aliases: [], genres: [] });
+    return jsonAnswer({}, 404);
+  };
+  const mb = new MusicBrainz({ base: 'http://10.10.10.100:5000', fetchImpl, gapMs: 0 }).advanced(new MBKept());
+  const group = await mb.albumGroup(OLD_ALBUM, { background: true });
+  assert.equal(group?.title, 'Greatest Hits');
+  const artist = await mb.artistInfo('Groove Armada', { id: OLD_ARTIST, background: true });
+  assert.equal(artist?.id, NEW_ARTIST, 'its id as MusicBrainz has it now, for its release groups');
+});
+
 test('MusicBrainz: the log says why a request got no answer, and a server that can\'t be connected to at all is told apart (from 0.39.2)', async () => {
   const lines = [];
   const log = { debug: (l) => lines.push(l), warn() {}, info() {}, error() {} };

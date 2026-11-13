@@ -3,6 +3,22 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.39.3 - 2026-11-13
+
+### Fixed
+
+- **Years and genres to fix no longer crawls on a mirror of your own.** An
+  album or artist MusicBrainz has since merged into another is answered
+  with a redirect to the one it is now. The player took that for
+  MusicBrainz not answering, and held every lookup up for a minute each
+  time. Now it asks your MusicBrainz for the one it is now, so those are
+  found too. A redirect to another server is never followed.
+
+### Changed
+
+- **Debug mode logs each redirect followed**:
+  `musicbrainz: /ws/2/release/… is now /ws/2/release/…: asked there`.
+
 ## 0.39.2 - 2026-11-12
 
 ### Fixed
