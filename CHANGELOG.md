@@ -3,6 +3,17 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.39.6 - 2026-11-18
+
+### Changed
+
+- **The app's icon is in Plex's colours**: gold on charcoal, in the same
+  shape as before.
+
+### Fixed
+
+- **The icon saved to a home screen** no longer has a see-through arc.
+
 ## 0.39.5 - 2026-11-18
 
 ### Fixed
