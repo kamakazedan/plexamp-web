@@ -3,6 +3,16 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.39.5 - 2026-11-18
+
+### Fixed
+
+- **Menus swipe down to close.** A menu that slides up from the bottom
+  (Playback speed, Sleep timer, a track's menu and the rest) now follows
+  your finger down and closes when swiped or flicked, choosing nothing.
+  Let go part-way and it slides back. A long one that's scrolled scrolls
+  back to its top first.
+
 ## 0.39.4 - 2026-11-13
 
 ### Fixed
