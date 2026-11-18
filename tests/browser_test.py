@@ -3896,6 +3896,91 @@ with sync_playwright() as pw:
         player(page, "(p.transcoding = false, p.emit('track'), true)")
         page.wait_for_timeout(300)
         check('np: ...and the original file isn\'t marked', page.locator('.np-converted').count() == 0)
+
+        # Its sheets (Playback speed here) swipe down to close, with a finger:
+        # the browser's own touch input, each event at the time given, so a
+        # flick is as quick as it says however long the round trips take.
+        settings(page, {'playbackSpeed': True})
+        cdp = ctx.new_cdp_session(page)
+
+        def finger(x, y, path, gap=16, hold=0, lift=True):
+            """Down at (x, y), then through `path` (each move's dy, or
+            (dx, dy)), `gap` ms apart; held `hold` ms, and lifted."""
+            t0 = time.time()
+            send = lambda kind, points, ms: cdp.send('Input.dispatchTouchEvent', {'type': kind, 'touchPoints': points, 'timestamp': t0 + ms / 1000})
+            send('touchStart', [{'x': x, 'y': y}], 0)
+            for i, p in enumerate(path, 1):
+                dx, dy = p if isinstance(p, tuple) else (0, p)
+                page.wait_for_timeout(5)
+                send('touchMove', [{'x': x + dx, 'y': y + dy}], i * gap)
+            if lift:
+                page.wait_for_timeout(5)
+                send('touchEnd', [], (len(path) + 1) * gap + hold)
+            page.wait_for_timeout(600)
+
+        def open_speed():
+            page.locator('.np-tool[data-tool=speed]').tap()
+            page.wait_for_selector('.sheet.open')
+            page.wait_for_timeout(400)
+            box = page.locator('.sheet.open .sheet-panel').bounding_box()
+            return box['x'] + box['width'] / 2, box['y'] + 150
+
+        def sheet_now():
+            return js(page, """() => ({ open: document.querySelectorAll('.sheet').length, np: !!document.querySelector('.np.open'), ov: history.state?.ov,
+                moved: document.querySelector('.sheet .sheet-panel')?.style.transform || '', top: document.querySelector('.sheet .sheet-panel')?.scrollTop })""")
+
+        steps = lambda total, n: [round(total * i / n) for i in range(1, n + 1)]
+        depth = sheet_now()['ov']
+        x, y = open_speed()
+        finger(x, y, steps(300, 8))
+        swiped = sheet_now()
+        check('np: a sheet swiped down closes, choosing nothing, and the player stays open',
+              swiped['open'] == 0 and swiped['np'] and swiped['ov'] == depth and player(page, 'p.speed') == 1, json.dumps(swiped))
+        x, y = open_speed()
+        finger(x, y, steps(90, 6), gap=30, lift=False)
+        followed = page.locator('.sheet.open .sheet-panel').bounding_box()['y'] - (y - 150)
+        shot(page, 'np-02-sheet-swiped')
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+        page.wait_for_timeout(600)
+        back = sheet_now()
+        finger(x, y, [12, 25, 45, 60], gap=12)
+        flicked = sheet_now()
+        check('np: ...it follows the finger, slides back when let go short of the way, and a flick closes it however short',
+              85 <= followed <= 95 and back['open'] == 1 and not back['moved'] and flicked['open'] == 0, f'{followed} {json.dumps(back)} {json.dumps(flicked)}')
+        open_speed()
+        page.locator('.sheet.open .sheet-action', has_text='1.25×').tap()
+        page.wait_for_timeout(600)
+        check('np: ...a tap on one still chooses it', player(page, 'p.speed') == 1.25 and sheet_now()['open'] == 0, str(player(page, 'p.speed')))
+        # Dragged from an option down onto the player's toolbar: it closes,
+        # and neither the option nor what's under the finger is tapped.
+        before = player(page, '[p.speed, p.repeat, p.shuffle]')
+        open_speed()
+        start = page.locator('.sheet.open .sheet-action', has_text='0.5×').bounding_box()
+        under = page.locator('.np-tool[data-tool=repeat]').bounding_box()
+        sx, sy = start['x'] + start['width'] / 2, start['y'] + start['height'] / 2
+        ux, uy = under['x'] + under['width'] / 2, under['y'] + under['height'] / 2
+        finger(sx, sy, [((ux - sx) * i / 10, (uy - sy) * i / 10) for i in range(1, 11)])
+        after = player(page, '[p.speed, p.repeat, p.shuffle]')
+        page.go_back()
+        page.wait_for_timeout(600)
+        check('np: ...nothing under the finger is tapped as it goes, and Back then closes the player, as before',
+              before == after and not sheet_now()['np'], f'{before} {after}')
+        # Taller than the screen: a finger going up scrolls it, and down
+        # scrolls it back before it moves the sheet.
+        page.set_viewport_size({'width': 412, 'height': 560})
+        page.click('.pb-main')
+        page.wait_for_selector('.np.open')
+        page.wait_for_timeout(400)
+        x, y = open_speed()
+        finger(x, y + 50, steps(-120, 8))
+        scrolled = sheet_now()
+        finger(x, y, steps(60, 6), gap=40)
+        unscrolled = sheet_now()
+        js(page, "() => { document.querySelector('.sheet .sheet-panel').scrollTop = 0; }")
+        finger(x, y, steps(250, 8))
+        check('np: ...one taller than the screen scrolls back up first, and once at its top swipes away',
+              scrolled['top'] > 0 and unscrolled['open'] == 1 and unscrolled['top'] < scrolled['top'] and not unscrolled['moved'] and sheet_now()['open'] == 0,
+              f'{json.dumps(scrolled)} {json.dumps(unscrolled)}')
         ctx.close()
 
     # ---------- stream: tracks the server converts, and streams that fail ----------

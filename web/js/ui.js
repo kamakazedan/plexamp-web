@@ -726,6 +726,7 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
     dialog ? h('button.dialog-close', { type: 'button', onclick: () => popOverlay() }, closeLabel) : null,
   );
   const scrim = h(`div.sheet${dialog ? '.dialog' : ''}`, { onclick: (e) => e.target === scrim && popOverlay() }, panel);
+  if (!dialog) swipeToClose(scrim, panel);
   const close = () => {
     if (closed) return;
     closed = true;
@@ -743,6 +744,92 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
   });
   pushOverlay(close);
   return { close: () => popOverlay(), panel };
+}
+
+// A bottom sheet follows a finger dragging it down, from anywhere on it
+// where what's under the finger is scrolled to the top (a list in it
+// scrolls back up first). Let go far enough down, or flicked down, it
+// closes, as a tap outside it does; otherwise it slides back. Taps, and a
+// finger going up or sideways (scrolling), are the browser's as ever.
+const SWIPE_START = 6; // px: a finger that's moved less may still be a tap
+const SWIPE_CLOSE = 110; // px (or a third of a short sheet): let go this far down, it closes
+const SWIPE_FLICK = 0.5; // px/ms: let go going down this fast, it closes however far it's come
+
+function swipeToClose(scrim, panel) {
+  // The finger on the sheet: where it started and, once it's dragging the
+  // sheet, how far down it's been (`moves`).
+  let drag = null;
+  const letGo = (shut) => {
+    panel.style.transition = '';
+    panel.style.transform = shut ? 'translateY(100%)' : '';
+    if (!shut) return;
+    // It goes at once, on from where it was let go: the step back that
+    // closes it lands a moment later.
+    scrim.classList.remove('open');
+    popOverlay();
+  };
+  panel.addEventListener(
+    'touchstart',
+    (e) => {
+      if (drag?.moves) letGo(false); // a second finger
+      const t = e.touches[0];
+      const typing = e.target.closest('input, textarea, select, [contenteditable]');
+      drag = e.touches.length === 1 && !typing ? { x: t.clientX, y: t.clientY, from: e.target, moves: null } : null;
+    },
+    { passive: true },
+  );
+  panel.addEventListener(
+    'touchmove',
+    (e) => {
+      if (!drag) return;
+      const t = e.touches[0];
+      const dx = t.clientX - drag.x;
+      const dy = t.clientY - drag.y;
+      if (!drag.moves) {
+        if (Math.hypot(dx, dy) < SWIPE_START) return;
+        if (dy < Math.abs(dx) || scrolledDown(drag.from, panel)) {
+          drag = null; // scrolling
+          return;
+        }
+        drag.moves = [];
+        panel.style.transition = 'none';
+      }
+      if (e.cancelable) e.preventDefault(); // dragged, not scrolled as well
+      const down = Math.max(0, dy);
+      drag.moves.push({ dy: down, t: e.timeStamp });
+      panel.style.transform = `translateY(${down}px)`;
+    },
+    { passive: false },
+  );
+  const end = (e) => {
+    const moves = drag?.moves;
+    drag = null;
+    if (!moves) return;
+    // How fast it was going down as it was let go, over the last tenth of a
+    // second (not at all, if the finger had stopped).
+    const last = moves.at(-1);
+    const from = moves.find((m) => e.timeStamp - m.t <= 100) || last;
+    const speed = (last.dy - from.dy) / Math.max(1, e.timeStamp - from.t);
+    const far = last.dy > Math.min(SWIPE_CLOSE, panel.offsetHeight / 3);
+    // (Not if it was closed some other way meanwhile: a step back then would
+    // close what's under it.)
+    const shut = e.type === 'touchend' && scrim.classList.contains('open') && (speed > SWIPE_FLICK || (far && speed > -SWIPE_FLICK));
+    // No tap where it's let go, on what's under the sheet as it goes.
+    if (shut && e.cancelable) e.preventDefault();
+    letGo(shut);
+  };
+  panel.addEventListener('touchend', end);
+  panel.addEventListener('touchcancel', end);
+}
+
+// Whether anything from `el` up to `top` is scrolled down, so a finger
+// going down there scrolls it.
+function scrolledDown(el, top) {
+  for (; el; el = el.parentElement) {
+    if (el.scrollTop > 0) return true;
+    if (el === top) return false;
+  }
+  return false;
 }
 
 // A question with a text answer, in a dialog: resolves to the trimmed text,

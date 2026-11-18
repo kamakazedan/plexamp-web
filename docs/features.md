@@ -47,6 +47,7 @@ AI playlists and the AI DJ have a page of their own: [ai.md](ai.md).
 - **Cover menus**: the ⋯ on any album, playlist or collection cover (or a long press): play, shuffle, **Play next**, **Add to queue**, **Add to playlist…**, **Select**, and go to the album or artist.
 - **Choosing several at once**: **Select** in a menu, or Ctrl-click (⌘-click on a Mac) or Shift-click on a computer. Ctrl+A or **Select all** chooses everything in the list. What's chosen stays chosen as you search again, so songs from several searches can go into one playlist. The bar at the bottom has **Play next**, **Add to queue** and **Add to playlist** (and for the server's owner, **Add to collection…**).
 - **Appears in**, in any track's menu: the albums the song is on, and the playlists and collections it's in.
+- **Closing a menu** without choosing: swipe it down, tap outside it, or press Back.
 - **Favourites radio** (Home › Stations): the artists in ❤️ Tracks, their best-known tracks, and artists like them.
 
 ## Now Playing and playback
