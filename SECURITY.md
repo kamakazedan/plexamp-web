@@ -79,6 +79,7 @@ Off unless `OFFLINE_PWD` is set. The password signs in **as the server's owner**
 - **Only that very server**: each route is asked who it is, and only counts if it's your server, by its id.
 - **Your token stays private**: it goes to `https://` addresses (certificates checked), to plain `http://` addresses only on your home network for a server of your own (and only with the player itself on plain HTTP), and to the player. Never plain `http://` over the internet.
 - **Your account's token** never goes to someone else's server: the server's own access token does.
+- **In the Android app**, for downloads, the player gives the app the server's id, its addresses and the token it uses for it; signing out has the app forget them (see the app's [SECURITY.md](https://github.com/kamakazedan/plexamp-web-android/blob/main/SECURITY.md)). A browser has no app to give them to.
 - **An address you type** (Settings › Source) is first asked who it is with nothing of yours, and used only where plex.tv has it as one of your servers.
 
 ### Play Together

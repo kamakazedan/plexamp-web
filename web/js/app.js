@@ -31,6 +31,7 @@ import { initSharing, invitations } from './sharing.js';
 import { startSync } from './sync.js';
 import { startMissingSync } from './missingsync.js';
 import { watchOffline } from './offline.js';
+import { startDownloads, hasDownloads } from './downloads.js';
 import { connection, connectionLost, connectionBack, unreachable } from './connection.js';
 import './outbox.js';
 
@@ -236,10 +237,12 @@ async function checkConnection() {
 function connectionBanner() {
   const src = app.source;
   if (!src || !connection.lost) return;
+  // (And downloads, in the Android app: see downloads.js.)
+  const music = hasDownloads() ? 'Downloads and loaded music play on' : 'Loaded music plays on';
   const text =
     navigator.onLine === false
-      ? 'You’re offline. Loaded music plays on, and plays and ratings sync when you’re back.'
-      : `Can’t reach ${src.serverName}. Loaded music plays on, and plays and ratings sync when it’s back.`;
+      ? `You’re offline. ${music}, and plays and ratings sync when you’re back.`
+      : `Can’t reach ${src.serverName}. ${music}, and plays and ratings sync when it’s back.`;
   showBanner(text, 'Try again', () => ensureConnection(), 'connection');
 }
 
@@ -363,6 +366,9 @@ function boot() {
   // their pictures' addresses): with another way to it, they're built again
   // next time (the page on screen is brought up to date where that's chosen).
   on('source', ({ addressChanged }) => addressChanged && dropCached(() => true));
+
+  // Playlists downloaded to the phone, in the Android app.
+  startDownloads();
 
   startRouter({ mainEl: document.getElementById('main'), changed: onRouteChange });
 

@@ -140,16 +140,18 @@ export class Prefetcher {
     return !p.cast && !p.routed && !!app.server && !!app.auth?.token && p.index >= 0;
   }
 
-  // The tracks to have ready, the next first.
+  // The tracks to have ready, the next first: of the next tracks, those
+  // not played from the phone (downloads, which are ready: see
+  // player.sourceFor).
   wanted() {
     const p = this.player;
     const n = this.count;
     if (!n || !this.here || p.repeat === 'one') return [];
     const out = [];
-    for (let i = p.index + 1; i < p.queue.length && out.length < n; i++) {
+    for (let i = p.index + 1; i < p.queue.length && i <= p.index + n; i++) {
       const t = p.queue[i];
       if (!t?.partKey || (t.duration || 0) >= LONG_FORM_MS) break;
-      out.push(t);
+      if (!p.sourceFor(t, false).local) out.push(t);
     }
     return out;
   }
@@ -164,7 +166,7 @@ export class Prefetcher {
     const cur = p.current;
     if (cur && this.played[0] !== cur.qid) this.played = [cur.qid, ...this.played.filter((q) => q !== cur.qid)].slice(0, KEEP_PLAYED_MAX + 1);
     const inQueue = new Map(p.queue.map((t) => [t.qid, t]));
-    const keepable = (t) => t?.partKey && (t.duration || 0) < LONG_FORM_MS;
+    const keepable = (t) => t?.partKey && (t.duration || 0) < LONG_FORM_MS && !p.sourceFor(t, false).local;
     const out = cur && keepable(cur) ? [cur] : [];
     for (const qid of this.played) {
       if (out.length >= n + (cur && keepable(cur) ? 1 : 0)) break;
@@ -280,6 +282,7 @@ export class Prefetcher {
   // once played), if it can be here, and there's room for it.
   loadable(track, { keeping = false } = {}) {
     const src = this.player.sourceFor(track, false);
+    if (src.local) return null;
     // Converted, it's played through hls.js (not by browsers that play HLS
     // themselves, as Safari does: those stream it as it plays).
     if (src.hls && canPlayHlsNatively()) return null;
@@ -321,7 +324,7 @@ export class Prefetcher {
   // (see player.sourceFor) would load it now.
   ready(track, src) {
     const e = track && this.entries.get(track.qid);
-    return e && e.state === 'done' && e.src.hls === src.hls && e.src.kbps === src.kbps ? e : null;
+    return e && e.state === 'done' && e.src.hls === src.hls && e.src.kbps === src.kbps && !src.local ? e : null;
   }
 
   // The playback a player plays what's kept for a track as: the one it was
@@ -361,7 +364,7 @@ export class Prefetcher {
       const unread = e.keep && (e.state === 'loading' || e.state === 'paused') && !this.count;
       if (inUse.has(e.qid) && !overtaken && !unread) continue;
       const now = this.player.sourceFor(e.track, false);
-      const stale = e.src.hls !== now.hls || e.src.kbps !== now.kbps;
+      const stale = e.src.hls !== now.hls || e.src.kbps !== now.kbps || !!now.local;
       // (A stream kept as it came in, that its player let go of before it
       // was all in, isn't anything to play.)
       const unfinished = e.state === 'recording';

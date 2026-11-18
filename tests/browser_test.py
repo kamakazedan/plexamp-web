@@ -39,7 +39,7 @@ Plex Home (plexhome sends the browser's plex.tv calls to the mock too).
 
 Sections: core ws ai dj djs nows blocked poll wsonly custom desktop nav library edit
 lists pictures missing files sharing routes privacy np stream signal cast ratings
-devices fades together settings home formats select spotify debug sync
+devices fades together settings downloads home formats select spotify debug sync
 plexhome missingsync mb offline memory (default: all).
 """
 
@@ -6257,6 +6257,279 @@ with sync_playwright() as pw:
         shown = page.locator('.about-version').inner_text()
         link = page.locator('.about-links a', has_text='What’s new').get_attribute('href')
         check('settings: About shows the version, with what\'s new', shown == f'Version {newest}' and link.endswith('/CHANGELOG.md'), f'{shown} {link}')
+        ctx.close()
+
+    # ---------- downloads: playlists kept on the phone, in the Android app ----------
+    if run('downloads'):
+        # The server's playlists, as the app would download them.
+        pls = {p['title']: p for p in mock('/playlists?X-Plex-Token=t')['MediaContainer']['Metadata']}
+
+        # A browser hasn't got them: no Downloads in Settings, nor on a playlist.
+        ctx = browser.new_context(**MOBILE)
+        page = ctx.new_page()
+        attach(page, 'downloads-browser')
+        login(page, APP)
+        page.goto(APP + '#/settings')
+        page.wait_for_selector('a.row:has-text("Playback")')
+        in_settings = page.locator('a.row:has-text("Downloads")').count()
+        page.goto(APP + f"#/playlist/{pls['Workout']['ratingKey']}")
+        page.wait_for_selector('.hero-actions')
+        on_playlist = page.locator('.dl-line').count()
+        page.goto(APP + '#/settings/downloads')
+        page.wait_for_selector('.back-title:has-text("Downloads")')
+        said_here = page.locator('.empty-state').inner_text()
+        check('downloads: a browser has no downloads, and says where they are', in_settings == 0 and on_playlist == 0 and 'Android app' in said_here, said_here)
+        ctx.close()
+
+        catalog = {}
+        for title in ('Sunday morning', 'Favourite tracks', 'Workout'):
+            key = str(pls[title]['ratingKey'])
+            its = mock(f'/playlists/{key}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+            catalog[key] = {'title': title, 'tracks': [str(m['ratingKey']) for m in its], 'cover': its[0].get('parentThumb') if its else None}
+        sunday, favourites, workout = (str(pls[t]['ratingKey']) for t in ('Sunday morning', 'Favourite tracks', 'Workout'))
+
+        # A stand-in for the Android app (its page-bridge.js and
+        # DownloadBridge.kt): window.plexampAndroid.downloads, answering as
+        # the app does, each question told to the test too (`asked`). The
+        # test's own (window.__dl): a refusal for the next playlist added,
+        # and a playlist downloaded in full, as the app has it once it's
+        # synced. What the app serves at the player's own address (tracks,
+        # playlists as they were downloaded, and covers) comes from a route,
+        # from the mock, as the app's would come from the phone (`served`).
+        asked = []
+        served = []
+        ctx = browser.new_context(**MOBILE)
+        ctx.expose_function('__dlAsked', lambda op, args: asked.append((op, args)))
+        ctx.add_init_script('window.__dlCatalog = ' + json.dumps(catalog) + ';' + """(() => {
+            const st = { settings: { quality: 'original', network: 'wifi', prefer: 'always' }, storage: { free: 10e9, total: 128e9, used: 0 },
+                status: { state: 'idle' }, playlists: [], tracks: [], syncedAt: 0, metered: false };
+            const watchers = new Set();
+            const tell = () => { const s = JSON.parse(JSON.stringify(st)); watchers.forEach((fn) => fn(s)); return s; };
+            const dl = (window.__dl = { refuse: null });
+            dl.finish = (id) => {
+                const p = st.playlists.find((x) => x.id === id);
+                Object.assign(p, { saved: p.tracks, bytes: p.tracks * 5e6, cover: window.__dlCatalog[id].cover });
+                st.tracks = [...new Set([...st.tracks, ...window.__dlCatalog[id].tracks])];
+                st.storage.used = st.playlists.reduce((n, x) => n + x.bytes, 0);
+                st.status = { state: 'idle' };
+                st.syncedAt = Date.now();
+                tell();
+            };
+            const ops = {
+                state() {},
+                add({ playlist }) {
+                    const no = dl.refuse;
+                    dl.refuse = null;
+                    if (no) throw Object.assign(new Error(no.code), no);
+                    const c = window.__dlCatalog[playlist];
+                    st.playlists.push({ id: playlist, title: c.title, tracks: c.tracks.length, saved: 0, bytes: 0 });
+                    st.status = { state: 'downloading', done: 0, total: c.tracks.length, playlist };
+                },
+                remove({ playlist }) { st.playlists = st.playlists.filter((p) => p.id !== playlist); },
+                set(s) { for (const k of ['quality', 'network', 'prefer']) if (s[k] != null) st.settings[k] = s[k]; },
+                account() {},
+                forget() { st.playlists = []; st.tracks = []; },
+                bad({ track }) { st.tracks = st.tracks.filter((t) => t !== track); },
+            };
+            const ask = (op, args = {}) => new Promise((resolve, reject) => {
+                window.__dlAsked(op, args);
+                setTimeout(() => { try { ops[op](args); } catch (e) { return reject(e); } resolve(tell()); }, 30);
+            });
+            const local = (path) => new URL('__plexamp-web-android/downloads/' + path, document.baseURI).href;
+            const str = (v) => (v == null ? null : String(v));
+            const downloads = Object.freeze({
+                state: () => ask('state'),
+                add: (playlist) => ask('add', { playlist: String(playlist) }),
+                remove: (playlist) => ask('remove', { playlist: String(playlist) }),
+                set: (s = {}) => ask('set', { quality: str(s.quality), network: str(s.network), prefer: str(s.prefer) }),
+                account: (a = {}) => ask('account', { serverId: a.serverId, token: a.token, user: a.user, uris: [...(a.uris || [])], device: a.device }),
+                forget: () => ask('forget'),
+                bad: (track) => ask('bad', { track: String(track) }),
+                watch: (fn) => (watchers.add(fn), () => watchers.delete(fn)),
+                trackUrl: (id) => local('track/' + encodeURIComponent(id)),
+                playlistUrl: (id) => local('playlist/' + encodeURIComponent(id)),
+                coverUrl: (path) => local('cover?path=' + encodeURIComponent(path)),
+            });
+            Object.defineProperty(window, 'plexampAndroid', { value: Object.freeze({ downloads }) });
+        })();""")
+
+        def from_phone(route):
+            url = urllib.parse.urlparse(route.request.url)
+            what = url.path.split('/__plexamp-web-android/downloads/', 1)[1]
+            served.append(what + (f'?{url.query}' if url.query else ''))
+            if what.startswith('track/'):
+                with urllib.request.urlopen(f'{MOCK}/library/parts/{what[6:]}/0/file.flac', timeout=20) as r:
+                    return route.fulfill(status=200, body=r.read(), content_type='audio/wav')
+            if what.startswith('playlist/'):
+                key = what[9:]
+                info = mock(f'/playlists/{key}?X-Plex-Token=t')['MediaContainer']['Metadata'][0]
+                its = mock(f'/playlists/{key}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+                return route.fulfill(status=200, body=json.dumps({'playlist': info, 'items': its}), content_type='application/json')
+            if what == 'cover':
+                return route.fulfill(status=200, body=png(8, 8, (200, 60, 60)), content_type='image/png')
+            return route.fulfill(status=404, body='')
+        ctx.route('**/__plexamp-web-android/downloads/**', from_phone)
+        dpage = ctx.new_page()
+        attach(dpage, 'downloads')
+        login(dpage, APP)
+        dl_asked = lambda op: [a for o, a in asked if o == op]
+
+        # Signed in, the app's told the server, the sign-in and its addresses
+        # (to keep downloads up to date with the player closed).
+        wait_for(lambda: dl_asked('account'), 10, 0.2)
+        acct = (dl_asked('account') or [{}])[0]
+        source = js(dpage, "() => import('./js/state.js').then(({ app }) => ({ id: app.source.serverId, token: app.source.token }))")
+        check('downloads: signed in, the app\'s told the server and the sign-in',
+              acct.get('serverId') == source['id'] and acct.get('token') == source['token'] and acct.get('uris') and acct.get('device') and acct.get('user'),
+              json.dumps(acct))
+
+        # Settings › Downloads: the phone's space, the settings, and nothing downloaded yet.
+        dpage.goto(APP + '#/settings')
+        dpage.wait_for_selector('a.row:has-text("Downloads")')
+        index_line = dpage.locator('a.row:has-text("Downloads") .row-sub').inner_text()
+        dpage.click('a.row:has-text("Downloads")')
+        dpage.wait_for_selector('.dl-free')
+        free = dpage.locator('.dl-free').inner_text()
+        used = dpage.locator('.dl-used').inner_text()
+        values = dpage.locator('.choice-row .row-value').all_inner_texts()
+        shot(dpage, 'downloads-01-settings')
+        check('downloads: in the app, Settings has Downloads', index_line == 'Play playlists without a connection', index_line)
+        check('downloads: ...with the phone\'s space, and what downloads use', free == '10 GB of 128 GB available' and used == 'Downloads use 0 bytes', f'{free} | {used}')
+        check('downloads: ...quality, network, and when to play them, as the app has them', values == ['Original', 'Wi-Fi only', 'Always'], values)
+        choose(dpage, 'Download on', 'Wi-Fi and mobile data')
+        choose(dpage, 'Play downloads', 'Only offline')
+        choose(dpage, 'Download quality', 'High (320 kbps)')
+        wait_for(lambda: len(dl_asked('set')) >= 3, 5, 0.2)
+        sets = dl_asked('set')
+        check('downloads: ...each choice goes to the app',
+              len(sets) == 3 and sets[0]['network'] == 'any' and sets[0]['quality'] is None and sets[1]['prefer'] == 'offline' and sets[2]['quality'] == '320',
+              json.dumps(sets))
+        choose(dpage, 'Download quality', 'Original')
+        choose(dpage, 'Play downloads', 'Always')
+
+        # Add playlists: the server's, to choose one; it's downloading, and
+        # once it's on the phone, its size.
+        dpage.click('button.row:has-text("Add playlists")')
+        dpage.wait_for_selector('.sheet.open')
+        offered = dpage.locator('.sheet.open .sheet-action-label').all_inner_texts()
+        shot(dpage, 'downloads-02-add')
+        dpage.locator('.sheet.open .sheet-action', has_text='Sunday morning').click()
+        dpage.wait_for_selector('.toast:has-text("Downloading “Sunday morning”")')
+        dpage.wait_for_selector('.dl-row:has-text("Sunday morning")')
+        going = (dpage.locator('.dl-row .row-sub').inner_text(), dpage.locator('.dl-status').inner_text())
+        n = len(catalog[sunday]['tracks'])
+        check('downloads: Add playlists offers the server\'s playlists', all(t in offered for t in ('Sunday morning', 'Favourite tracks', 'Workout')), offered)
+        check('downloads: ...one chosen is downloading, as the app says', dl_asked('add') == [{'playlist': sunday}]
+              and going == (f'0 of {n} tracks · 0 bytes', f'Downloading… 0 of {n} tracks'), f'{dl_asked("add")} {going}')
+        dpage.evaluate('(id) => window.__dl.finish(id)', sunday)
+        dpage.wait_for_selector('.dl-status:has-text("Up to date")')
+        done = dpage.locator('.dl-row .row-sub').inner_text()
+        used = dpage.locator('.dl-used').inner_text()
+        shot(dpage, 'downloads-03-downloaded')
+        check('downloads: ...and once it\'s on the phone, the space it takes', done == f'{n} tracks · {n * 5} MB' and used == f'Downloads use {n * 5} MB', f'{done} | {used}')
+
+        # A playlist's page: Download, how it's going, and Downloaded.
+        dpage.goto(APP + f'#/playlist/{favourites}')
+        dpage.wait_for_selector('button.dl-line')
+        before = dpage.locator('button.dl-line').inner_text()
+        dpage.click('button.dl-line')
+        dpage.wait_for_selector('.toast-action:has-text("See progress")')
+        dpage.wait_for_selector('button.dl-line:has-text("Downloading…")')
+        during = dpage.locator('button.dl-line').inner_text()
+        dpage.click('.toast-action')
+        dpage.wait_for_selector('.dl-row:has-text("Favourite tracks")')
+        to_progress = js(dpage, '() => location.hash')
+        m = len(catalog[favourites]['tracks'])
+        check('downloads: a playlist\'s page downloads it, and the message leads to its progress',
+              before == 'Download' and during == f'Downloading… 0 of {m}' and to_progress == '#/settings/downloads', f'{before} | {during} | {to_progress}')
+        dpage.evaluate('(id) => window.__dl.finish(id)', favourites)
+        dpage.go_back()
+        dpage.wait_for_selector('button.dl-line:has-text("Downloaded")')
+        shot(dpage, 'downloads-04-playlist')
+        dpage.click('button.dl-line')
+        dpage.wait_for_selector('.sheet.open')
+        offers = dpage.locator('.sheet.open .sheet-action-label').all_inner_texts()
+        dpage.keyboard.press('Escape')
+        dpage.wait_for_selector('.sheet', state='detached')
+        check('downloads: ...once downloaded, it says so, and can be removed', 'Remove download' in offers, offers)
+
+        # Too big for the phone: refused, saying why.
+        dpage.evaluate("() => { window.__dl.refuse = { code: 'space', needed: 5e9, free: 1.2e9 }; }")
+        dpage.goto(APP + f'#/playlist/{workout}')
+        dpage.wait_for_selector('button.dl-line:has-text("Download")')
+        dpage.click('button.dl-line')
+        dpage.wait_for_selector('.sheet.open .sheet-title:has-text("Not enough space")')
+        said = dpage.locator('.sheet.open').inner_text()
+        shot(dpage, 'downloads-05-no-space')
+        dpage.click('.sheet.open .dialog-close')
+        dpage.wait_for_selector('.sheet', state='detached')
+        check('downloads: a playlist too big for the phone is refused, saying why',
+              '“Workout” needs about 5 GB, and this phone has 1.2 GB free for downloads.' in said and dpage.locator('button.dl-line').inner_text() == 'Download', said)
+
+        # Playing: a downloaded track from the phone; with Play downloads on
+        # Only offline, from the server.
+        dpage.goto(APP + f'#/playlist/{sunday}')
+        dpage.wait_for_selector('.track .track-main')
+        dpage.locator('.track .track-main').first.click()
+        wait_for(lambda: player(dpage, "p.state === 'playing'"), 10)
+        first = player(dpage, '({ src: p.audio.currentSrc, local: p.deck.local })')
+        check('downloads: a downloaded track plays from the phone', first['local'] and '/__plexamp-web-android/downloads/track/' in first['src']
+              and any(s.startswith('track/') for s in served), json.dumps(first))
+        dpage.evaluate("() => import('./js/downloads.js').then((m) => m.setDownloads({ prefer: 'offline' }))")
+        player(dpage, 'p.next()')
+        wait_for(lambda: player(dpage, "p.state === 'playing' && p.index === 1"), 10)
+        second = player(dpage, '({ src: p.audio.currentSrc, local: p.deck.local })')
+        check('downloads: ...and from the server, with Play downloads on Only offline', not second['local'] and '__plexamp-web-android' not in second['src'], json.dumps(second))
+        player(dpage, 'p.pause()')
+        dpage.evaluate("() => import('./js/downloads.js').then((m) => m.setDownloads({ prefer: 'always' }))")
+
+        # Offline (the server can't be reached): Playlists has the downloads,
+        # which open and play, with their covers from the phone.
+        server = re.compile(r'^' + re.escape(MOCK) + r'/|/pms/')
+        ctx.route(server, lambda route: route.abort('internetdisconnected'))
+        since = len(served)
+        dpage.evaluate("() => import('./js/connection.js').then((m) => m.connectionLost())")
+        dpage.click('#tabs .tab[data-tab=playlists]')
+        dpage.wait_for_selector('.page-sub:has-text("On this phone")')
+        cards = dpage.locator('.grid .card-title').all_inner_texts()
+        shot(dpage, 'downloads-06-offline')
+        check('downloads: offline, Playlists has the playlists on the phone', sorted(cards) == ['Favourite tracks', 'Sunday morning'], cards)
+        dpage.locator('.grid .card', has_text='Sunday morning').click()
+        dpage.wait_for_selector('div.dl-line:has-text("Downloaded")')
+        rows = dpage.locator('.tracks .track').count()
+        dpage.click('.hero-actions .btn-primary')
+        wait_for(lambda: player(dpage, "p.state === 'playing'"), 10)
+        offline = player(dpage, '({ local: p.deck.local, title: p.current?.title })')
+        shot(dpage, 'downloads-07-offline-playlist')
+        check('downloads: ...one opens offline, as it was downloaded, and plays from the phone', rows == n and offline['local'], f'{rows} rows, {json.dumps(offline)}')
+        check('downloads: ...with its albums\' covers from the phone', any(s.startswith('cover?path=') for s in served[since:]), served[since:][:6])
+        player(dpage, 'p.pause()')
+
+        # Back online, the page is the server's again.
+        ctx.unroute(server)
+        dpage.evaluate("() => import('./js/connection.js').then((m) => m.connectionBack())")
+        dpage.wait_for_selector('button.dl-line:has-text("Downloaded")', timeout=10000)
+        check('downloads: back online, the playlist\'s page is the server\'s again', dpage.locator('div.dl-line').count() == 0)
+
+        # Removing one, from Settings › Downloads (asked first).
+        dpage.goto(APP + '#/settings/downloads')
+        dpage.wait_for_selector('.dl-row:has-text("Favourite tracks")')
+        dpage.locator('.dl-row', has_text='Favourite tracks').locator('.dl-remove').click()
+        dpage.wait_for_selector('.sheet.open .sheet-title:has-text("Remove “Favourite tracks”?")')
+        dpage.locator('.sheet.open button.btn-danger').click()
+        dpage.wait_for_selector('.dl-row:has-text("Favourite tracks")', state='detached')
+        check('downloads: a playlist removed comes off the phone', dl_asked('remove') == [{'playlist': favourites}]
+              and dpage.locator('.dl-row').count() == 1, json.dumps(dl_asked('remove')))
+
+        # Signing out says downloads go, and the app forgets them (and the sign-in kept for them).
+        dpage.goto(APP + '#/settings/account')
+        dpage.click('.account-card button:has-text("Sign out")')
+        dpage.wait_for_selector('.sheet.open')
+        bye = dpage.locator('.sheet.open').inner_text()
+        with dpage.expect_event('load', timeout=15000):
+            dpage.locator('.sheet.open .sheet-action', has_text='Sign out').click()
+        wait_for(lambda: dl_asked('forget'), 5, 0.2)
+        check('downloads: signing out says downloads go, and the app forgets them', 'downloads' in bye and dl_asked('forget'), bye)
         ctx.close()
 
     # ---------- home: Home screen sections and Collections ----------

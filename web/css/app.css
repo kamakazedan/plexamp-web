@@ -4099,6 +4099,143 @@ body.bare #toasts {
   color: var(--faint);
 }
 
+/* ---------- downloads (the Android app: views/downloads.js) ---------- */
+
+/* Settings › Downloads: the phone's space, with a bar of what downloads use
+   (tinted) and the rest of what's used. */
+.dl-space {
+  margin: 18px var(--gutter) 0;
+}
+
+.dl-free {
+  font-size: calc(20px * var(--fs, 1));
+  font-weight: 700;
+}
+
+.dl-bar {
+  display: flex;
+  height: 10px;
+  margin: 12px 0 10px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.dl-bar-mine {
+  background: var(--tint-hi);
+}
+
+.dl-bar-other {
+  background: var(--faint);
+}
+
+.dl-used {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: calc(15px * var(--fs, 1));
+}
+
+.dl-key {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tint-hi);
+}
+
+/* What downloads are doing now. */
+.dl-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px var(--gutter) 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: calc(15px * var(--fs, 1));
+}
+
+.dl-status .ic {
+  flex: none;
+}
+
+.dl-status.busy {
+  color: var(--text);
+}
+
+.dl-status.busy .ic {
+  color: var(--tint-hi);
+}
+
+.dl-status-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.dl-progress {
+  height: 4px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+
+.dl-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--tint-hi);
+  transition: width 0.4s var(--ease);
+}
+
+/* (Its plus as wide as a playlist's picture, so the titles line up.) */
+.dl-add .row-icon {
+  width: 52px;
+}
+
+/* A playlist kept: its link, and Remove after it. */
+.dl-row {
+  padding-right: 4px;
+}
+
+.dl-row:hover {
+  background: var(--hover);
+}
+
+.dl-row .row-link > .art {
+  width: 52px;
+}
+
+.dl-remove {
+  color: var(--muted);
+}
+
+.dl-remove:hover {
+  color: var(--danger);
+}
+
+.dl-none {
+  margin-top: 4px;
+}
+
+/* Under a playlist's title: Download, or how its download's going. */
+.dl-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  text-align: left;
+}
+
+.dl-line.on {
+  color: var(--tint-hi);
+}
+
+.dl-line[aria-busy='true'] {
+  opacity: 0.7;
+}
+
 /* ---------- editing playlists and collections ---------- */
 
 .lock-btn.on {
