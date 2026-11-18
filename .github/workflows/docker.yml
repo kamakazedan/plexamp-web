@@ -51,6 +51,8 @@ jobs:
           fi
       - name: Test the service (sessions, sync, cleaning, redaction)
         run: node --test server/test.js
+      - name: Test what the Android app relies on (docs/android-app.md)
+        run: node --test tests/android-app.test.mjs
       - name: Check scripts
         run: |
           sh -n docker/40-plexamp-web.sh

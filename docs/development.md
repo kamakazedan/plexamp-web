@@ -34,6 +34,7 @@ CI runs them all against the built image, and publishes the image only when they
 
 ```sh
 node --test server/test.js                       # the service: sessions, sync, merging, cleaning, redaction
+node --test tests/android-app.test.mjs           # what the Android app relies on (docs/android-app.md)
 bash tests/proxmox-test.sh                       # the Proxmox script, with stand-ins for pct and the rest
 bash tests/proxmox-install-test.sh               # its installer, in Debian 12 and 13 containers
 docker build -t plexamp-web:test .
