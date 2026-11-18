@@ -94,6 +94,7 @@ How each part works: [docs/features.md](docs/features.md). AI playlists and the 
 | [docs/troubleshooting.md](docs/troubleshooting.md) | When something doesn't work |
 | [SECURITY.md](SECURITY.md) | What the player handles, where it goes, and reporting a problem |
 | [docs/development.md](docs/development.md) | Running it from the source, the tests, and the code's layout |
+| [docs/android-app.md](docs/android-app.md) | What the Android app relies on here, so a change doesn't break it |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in each version |
 
 ## Licence
