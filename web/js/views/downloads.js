@@ -15,6 +15,8 @@ import {
   downloadState,
   hasDownloads,
   refreshDownloads,
+  canCheckDownloads,
+  checkDownloads,
   addDownload,
   removeDownload,
   setDownloads,
@@ -230,10 +232,23 @@ export async function downloadsView({ el, onDispose }) {
     if (yes) remove(now);
   };
 
+  let checking = false;
+  const check = async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      await checkDownloads();
+    } catch {
+      toast('Couldn’t check for changes. Try again.');
+    } finally {
+      checking = false;
+    }
+  };
+
   function paint() {
     const now = downloadState() || st;
     paintSpace(space, now);
-    paintStatus(status, now);
+    paintStatus(status, now, canCheckDownloads() ? check : null);
     const playlists = now.playlists || [];
     const order = [];
     for (const p of playlists) {
@@ -282,8 +297,9 @@ function paintSpace(box, st) {
   );
 }
 
-// What the downloads are doing now.
-function paintStatus(box, st) {
+// What the downloads are doing now. Up to date, or with the server out of
+// reach, a tap checks for changes now (`onCheck`, where the app can).
+function paintStatus(box, st, onCheck) {
   const s = st.status || {};
   const any = !!st.playlists?.length;
   box.hidden = !any;
@@ -311,8 +327,13 @@ function paintStatus(box, st) {
         unreachable: 'Couldn’t reach your server. Trying again soon.',
       }[s.state] || 'Waiting';
   }
+  const checkable = !!onCheck && (s.state === 'idle' || s.state === 'unreachable');
+  const content = [icon(mark, 20), h('div.dl-status-text', null, text, progress)];
   box.classList.toggle('busy', s.state === 'downloading');
-  box.replaceChildren(icon(mark, 20), h('div.dl-status-text', null, text, progress));
+  box.classList.toggle('can-check', checkable);
+  box.replaceChildren(
+    ...(checkable ? [h('button.dl-check', { type: 'button', title: 'Check for changes now', onclick: onCheck }, ...content, icon('refresh', 20))] : content),
+  );
 }
 
 // The playlists not downloaded yet (as Library › Playlists has them), to

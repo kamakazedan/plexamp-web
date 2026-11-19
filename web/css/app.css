@@ -4175,6 +4175,31 @@ body.bare #toasts {
   min-width: 0;
 }
 
+/* Up to date (or the server out of reach): the whole of it a button, to check now. */
+.dl-status.can-check {
+  padding: 0;
+}
+
+.dl-check {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dl-check:active {
+  background: var(--surface-2);
+}
+
 .dl-progress {
   height: 4px;
   margin-top: 8px;

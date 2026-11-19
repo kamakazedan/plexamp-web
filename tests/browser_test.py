@@ -2281,6 +2281,10 @@ with sync_playwright() as pw:
             with urllib.request.urlopen(f'{base}{path}{sep}X-Plex-Token=t', timeout=20) as r:
                 return json.loads(r.read() or b'{}').get('MediaContainer', {})
 
+        # (A smart playlist counted, with the list of playlists: one entry
+        # asked for, to see how many it has now. Not a read of what's in it.)
+        counted = lambda u: re.search(r'/playlists/\d+/items\?', u) and re.search(r'[?&]X-Plex-Container-Size=1(&|$)', u)
+
         def done_looking():
             page.wait_for_selector('.appears-track')
             page.wait_for_function("() => !document.querySelector('.appears-status .spinner')", timeout=30000)
@@ -2347,7 +2351,7 @@ with sync_playwright() as pw:
         # Looking again reads nothing again, until a list changes (a smart
         # playlist's rules neither).
         reads = []
-        page.on('request', lambda r: reads.append(r.url) if re.search(r'/(items|children)\?|/playlists/\d+\?', r.url) else None)
+        page.on('request', lambda r: reads.append(r.url) if re.search(r'/(items|children)\?|/playlists/\d+\?', r.url) and not counted(r.url) else None)
         page.goto(APP + '#/')
         page.wait_for_selector('.wide-card')
         page.goto(APP + f"#/appears/{t['ratingKey']}")
@@ -2479,7 +2483,7 @@ with sync_playwright() as pw:
               and all(int(re.search(r'X-Plex-Container-Size=(\d+)', u).group(1)) <= 120 for u in light_in if '/library/collections/' in u), str(light_in[:3]))
         in_reads.clear()
         again = appears_in(gh)
-        read_again = [u for u in in_reads if '/playlists/' in u or '/library/collections/' in u]
+        read_again = [u for u in in_reads if ('/playlists/' in u or '/library/collections/' in u) and not counted(u)]
         check('lists: ...and looking again is quick (what was read is kept, for the track menu\'s Appears in too)', not read_again and again == shown, f'{read_again} {again == shown}')
         page.evaluate("() => document.querySelector('.view section[data-group=\"Appears in\"] a.card[href^=\"#/playlist/\"]').click()")
         page.wait_for_timeout(500)
@@ -2503,7 +2507,7 @@ with sync_playwright() as pw:
 
         def list_read(r):
             m = re.search(r'/(playlists|library/collections)/(\d+)/(items|children)\?.*X-Plex-Container-Start=(\d+)', r.url)
-            if m and 'includeFields' in r.url:
+            if m and 'includeFields' in r.url and not counted(r.url):
                 list_reads.append((m.group(2), m.group(4)))
         twin.on('request', list_read)
         both = js(twin, f"""() => Promise.all([import('./js/membership.js'), import('./js/state.js')]).then(async ([m, s]) => {{
@@ -2740,7 +2744,7 @@ with sync_playwright() as pw:
             login(page, APP_BIG)
             big_lists = {p['title']: p for p in mc('/playlists?X-Plex-Container-Size=500', base=MOCK_BIG)['Metadata']}
             long_reads = []
-            page.on('request', lambda r: long_reads.append(r.url) if any(f"/playlists/{big_lists[n]['ratingKey']}/items" in r.url for n in ('Everything', 'Long smart mix')) else None)
+            page.on('request', lambda r: long_reads.append(r.url) if any(f"/playlists/{big_lists[n]['ratingKey']}/items" in r.url for n in ('Everything', 'Long smart mix')) and not counted(r.url) else None)
             first = mc('/library/sections/1/all?type=10&X-Plex-Container-Size=1', base=MOCK_BIG)['Metadata'][0]
             page.goto(APP_BIG + f"#/appears/{first['ratingKey']}")
             done_looking()
@@ -6279,6 +6283,40 @@ with sync_playwright() as pw:
         page.wait_for_selector('.back-title:has-text("Downloads")')
         said_here = page.locator('.empty-state').inner_text()
         check('downloads: a browser has no downloads, and says where they are', in_settings == 0 and on_playlist == 0 and 'Android app' in said_here, said_here)
+
+        # A smart playlist's count (and length) is Plex's as it last worked
+        # them out, which can be behind its rules (a track rated since, as
+        # in ❤️ Tracks here, which Plex fills from ratings): Playlists and
+        # its page say what's in it now, as its download counts it.
+        rate = lambda t, r: mock(f'/:/rate?key={t}&rating={r}&identifier=com.plexapp.plugins.library&X-Plex-Token=t')
+        rated = [t['ratingKey'] for t in mock('/__mock/tracks')['MediaContainer']['Metadata'][2:40:12]]
+        try:
+            for t in rated:
+                rate(t, 10)
+            mock('/__mock/config?loved=smart')
+            mock('/__mock/config?behind=1')
+            rate(rated[0], -1)
+            hearts = next(p for p in mock('/playlists?X-Plex-Token=t')['MediaContainer']['Metadata'] if p['title'] == '❤️ Tracks')
+            now_in = mock(f"/playlists/{hearts['ratingKey']}/items?X-Plex-Token=t&X-Plex-Container-Size=500")['MediaContainer'].get('Metadata', [])
+            page.goto(APP + '#/playlists')
+            page.reload()
+            card = page.locator('.grid .card', has_text='❤️ Tracks')
+            card.wait_for()
+            on_card = card.locator('.card-sub').inner_text()
+            card.click()
+            page.wait_for_selector('.hero-title:has-text("❤️ Tracks")')
+            wait_for(lambda: page.locator('.view .tracks .track').count() == len(now_in), 10, 0.2)
+            page.wait_for_function("() => document.querySelector('.hero-meta')?.textContent.includes(',')", timeout=10000)
+            meta = page.locator('.hero-meta').first.inner_text()
+            length = js(page, f"() => import('./js/ui.js').then(({{ fmt }}) => fmt.long({sum(m['duration'] for m in now_in)}))")
+            shot(page, 'downloads-00-smart-count')
+            check('playlists: a smart playlist\'s count is what\'s in it now (Plex\'s own can be behind its rules), on Playlists and on its page, with its length',
+                  hearts['leafCount'] == len(now_in) + 1 and len(now_in) >= 2 and on_card == f'{len(now_in)} tracks' and meta == f'{len(now_in)} tracks, {length}',
+                  f'Plex says {hearts["leafCount"]}, {len(now_in)} in it: {on_card} | {meta}')
+        finally:
+            for t in rated[1:]:
+                rate(t, -1)
+            mock('/__mock/config?loved=none&behind=0')
         ctx.close()
 
         catalog = {}
@@ -6292,8 +6330,9 @@ with sync_playwright() as pw:
         # DownloadBridge.kt): window.plexampAndroid.downloads, answering as
         # the app does, each question told to the test too (`asked`). The
         # test's own (window.__dl): a refusal for the next playlist added,
-        # and a playlist downloaded in full, as the app has it once it's
-        # synced. What the app serves at the player's own address (tracks,
+        # a playlist downloaded in full, as the app has it once it's
+        # synced, a check for changes over, and `old`, an app from before
+        # it could be asked to check (0.2.3). What the app serves at the player's own address (tracks,
         # playlists as they were downloaded, and covers) comes from a route,
         # from the mock, as the app's would come from the phone (`served`).
         asked = []
@@ -6305,7 +6344,7 @@ with sync_playwright() as pw:
                 status: { state: 'idle' }, playlists: [], tracks: [], syncedAt: 0, metered: false };
             const watchers = new Set();
             const tell = () => { const s = JSON.parse(JSON.stringify(st)); watchers.forEach((fn) => fn(s)); return s; };
-            const dl = (window.__dl = { refuse: null });
+            const dl = (window.__dl = { refuse: null, old: false });
             dl.finish = (id) => {
                 const p = st.playlists.find((x) => x.id === id);
                 Object.assign(p, { saved: p.tracks, bytes: p.tracks * 5e6, cover: window.__dlCatalog[id].cover });
@@ -6315,6 +6354,12 @@ with sync_playwright() as pw:
                 st.syncedAt = Date.now();
                 tell();
             };
+            dl.checked = () => {
+                st.status = { state: 'idle' };
+                st.syncedAt = Date.now();
+                tell();
+            };
+            dl.tell = tell;
             const ops = {
                 state() {},
                 add({ playlist }) {
@@ -6330,6 +6375,7 @@ with sync_playwright() as pw:
                 account() {},
                 forget() { st.playlists = []; st.tracks = []; },
                 bad({ track }) { st.tracks = st.tracks.filter((t) => t !== track); },
+                check() { st.status = { state: 'downloading' }; },
             };
             const ask = (op, args = {}) => new Promise((resolve, reject) => {
                 window.__dlAsked(op, args);
@@ -6337,7 +6383,7 @@ with sync_playwright() as pw:
             });
             const local = (path) => new URL('__plexamp-web-android/downloads/' + path, document.baseURI).href;
             const str = (v) => (v == null ? null : String(v));
-            const downloads = Object.freeze({
+            const downloads = {
                 state: () => ask('state'),
                 add: (playlist) => ask('add', { playlist: String(playlist) }),
                 remove: (playlist) => ask('remove', { playlist: String(playlist) }),
@@ -6349,8 +6395,9 @@ with sync_playwright() as pw:
                 trackUrl: (id) => local('track/' + encodeURIComponent(id)),
                 playlistUrl: (id) => local('playlist/' + encodeURIComponent(id)),
                 coverUrl: (path) => local('cover?path=' + encodeURIComponent(path)),
-            });
-            Object.defineProperty(window, 'plexampAndroid', { value: Object.freeze({ downloads }) });
+            };
+            Object.defineProperty(downloads, 'check', { enumerable: true, get: () => (dl.old ? undefined : () => ask('check')) });
+            Object.defineProperty(window, 'plexampAndroid', { value: Object.freeze({ downloads: Object.freeze(downloads) }) });
         })();""")
 
         def from_phone(route):
@@ -6427,6 +6474,21 @@ with sync_playwright() as pw:
         used = dpage.locator('.dl-used').inner_text()
         shot(dpage, 'downloads-03-downloaded')
         check('downloads: ...and once it\'s on the phone, the space it takes', done == f'{n} tracks · {n * 5} MB' and used == f'Downloads use {n * 5} MB', f'{done} | {used}')
+
+        # Up to date: a tap checks for changes now (and an app that can't
+        # be asked to has no button).
+        dpage.click('.dl-status button.dl-check')
+        dpage.wait_for_selector('.dl-status:has-text("Checking for changes…")')
+        checking = (len(dl_asked('check')), dpage.locator('.dl-status button').count())
+        dpage.evaluate('() => window.__dl.checked()')
+        dpage.wait_for_selector('.dl-status button.dl-check:has-text("Up to date")')
+        check('downloads: "Up to date" is a button that checks for changes now', checking == (1, 0), str(checking))
+        dpage.evaluate('() => { window.__dl.old = true; window.__dl.tell(); }')
+        wait_for(lambda: dpage.locator('.dl-status button').count() == 0, 5, 0.2)
+        old_app = (dpage.locator('.dl-status').inner_text(), dpage.locator('.dl-status button').count())
+        dpage.evaluate('() => { window.__dl.old = false; window.__dl.tell(); }')
+        dpage.wait_for_selector('.dl-status button.dl-check')
+        check('downloads: ...not with an app that can\'t be asked to', old_app[0].startswith('Up to date') and old_app[1] == 0, str(old_app))
 
         # A playlist's page: Download, how it's going, and Downloaded.
         dpage.goto(APP + f'#/playlist/{favourites}')
