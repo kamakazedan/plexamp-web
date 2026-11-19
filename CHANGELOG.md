@@ -12,6 +12,9 @@ you're running is shown in **Settings › About**.
   server (a new version opens straight away, or **Reload** is offered while
   music's playing) and the app on GitHub, with **Download app** for a newer
   one (plexamp-web for Android 0.2.4 or later).
+- **Downloaded playlists are marked**: in the Android app, a playlist on the
+  phone in full has a green download mark on its picture, on Playlists and
+  Home, so you can see at a glance which ones play without a connection.
 
 ### Changed
 

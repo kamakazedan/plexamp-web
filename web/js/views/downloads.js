@@ -7,7 +7,7 @@ import { navigate, refresh, dropCached } from '../router.js';
 import { connection } from '../connection.js';
 import { normTrack } from '../plex.js';
 import { playList, playPlaylist } from '../actions.js';
-import { trackRow, numberedList, playlistArt } from '../components.js';
+import { trackRow, numberedList, playlistArt, downloadedMark } from '../components.js';
 import { h, icon, iconButton, art, card, grid, row, sheet, toast, hideToast, fmt, backHeader, pageHeader, choiceRow, confirmAction, errorState, emptyState, pagedList } from '../ui.js';
 import {
   downloads,
@@ -23,6 +23,7 @@ import {
   downloadedPlaylist,
   playableHere,
   bytesText,
+  complete,
 } from '../downloads.js';
 
 // (As the app has them: see DownloadSettings.kt.)
@@ -54,7 +55,6 @@ const REFUSALS = {
 };
 
 const playlistOf = (id) => downloadState()?.playlists?.find((p) => p.id === String(id)) || null;
-const complete = (p) => p.tracks > 0 && p.saved >= p.tracks;
 
 // What's happening to a playlist now, as the app says (its status names the
 // playlist it's on): { doing: 'checking' } for changes; { doing:
@@ -432,8 +432,8 @@ export function offlinePlaylistsView({ el, onDispose }) {
   el.append(pageHeader('Playlists', { subtitle: 'On this phone' }));
   el.append(
     grid(
-      list.map((p) =>
-        card({
+      list.map((p) => {
+        const c = card({
           href: `/playlist/${p.id}`,
           image: p.cover,
           title: p.title,
@@ -441,8 +441,10 @@ export function offlinePlaylistsView({ el, onDispose }) {
           fallback: 'list',
           onPlay: () => playPlaylist(asPlaylist(p)),
           onShuffle: () => playPlaylist(asPlaylist(p), { shuffle: true }),
-        }),
-      ),
+        });
+        c.querySelector('.card-art')?.append(downloadedMark(p.id));
+        return c;
+      }),
       { centered: true, cls: 'grid-playlists' },
     ),
   );

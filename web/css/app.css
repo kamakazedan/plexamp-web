@@ -5261,6 +5261,28 @@ body.no-list-ratings .row-rating {
   pointer-events: none;
 }
 
+/* The mark at the bottom right of a playlist's picture once it's on the
+   phone in full (the Android app: components.js downloadedMark). */
+downloaded-mark {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--fav);
+  color: #0b0d12;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+downloaded-mark .ic g {
+  stroke-width: 2.6;
+}
+
 .hero-art-box > .shared-mark {
   top: 10px;
   left: 10px;

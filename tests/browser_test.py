@@ -6358,7 +6358,11 @@ with sync_playwright() as pw:
         page.goto(APP + '#/settings/downloads')
         page.wait_for_selector('.back-title:has-text("Downloads")')
         said_here = page.locator('.empty-state').inner_text()
+        page.goto(APP + '#/playlists')
+        page.wait_for_selector('.grid .card')
+        marks_here = page.locator('downloaded-mark').count()
         check('downloads: a browser has no downloads, and says where they are', in_settings == 0 and on_playlist == 0 and 'Android app' in said_here, said_here)
+        check('downloads: ...nor marks any playlist downloaded', marks_here == 0, f'{marks_here} marks')
 
         # A smart playlist's count (and length) is Plex's as it last worked
         # them out, which can be behind its rules (a track rated since, as
@@ -6656,6 +6660,9 @@ with sync_playwright() as pw:
         player(dpage, 'p.pause()')
         dpage.evaluate("() => import('./js/downloads.js').then((m) => m.setDownloads({ prefer: 'always' }))")
 
+        # (The playlists marked as on the phone in full, on the page on screen.)
+        marked = lambda: sorted(js(dpage, "() => [...document.querySelectorAll('.grid .card')].filter((c) => c.querySelector('downloaded-mark:not([hidden])')).map((c) => c.querySelector('.card-title').textContent)"))
+
         # Offline (the server can't be reached): Playlists has the downloads,
         # which open and play, with their covers from the phone.
         server = re.compile(r'^' + re.escape(MOCK) + r'/|/pms/')
@@ -6665,8 +6672,10 @@ with sync_playwright() as pw:
         dpage.click('#tabs .tab[data-tab=playlists]')
         dpage.wait_for_selector('.page-sub:has-text("On this phone")')
         cards = dpage.locator('.grid .card-title').all_inner_texts()
+        offline_marks = marked()
         shot(dpage, 'downloads-06-offline')
         check('downloads: offline, Playlists has the playlists on the phone', sorted(cards) == ['Favourite tracks', 'Sunday morning'], cards)
+        check('downloads: ...each marked as on the phone in full', offline_marks == ['Favourite tracks', 'Sunday morning'], offline_marks)
         dpage.locator('.grid .card', has_text='Sunday morning').click()
         dpage.wait_for_selector('div.dl-line:has-text("Downloaded")')
         rows = dpage.locator('.tracks .track').count()
@@ -6683,6 +6692,35 @@ with sync_playwright() as pw:
         dpage.evaluate("() => import('./js/connection.js').then((m) => m.connectionBack())")
         dpage.wait_for_selector('button.dl-line:has-text("Downloaded")', timeout=10000)
         check('downloads: back online, the playlist\'s page is the server\'s again', dpage.locator('div.dl-line').count() == 0)
+
+        # Playlists marks each one on the phone in full (and only those), and
+        # follows the downloads as they change: on screen, and on coming back
+        # to the page as it was kept.
+        dpage.click('#tabs .tab[data-tab=playlists]')
+        dpage.wait_for_selector('.grid .card:has-text("Workout")')
+        wait_for(lambda: marked() == ['Favourite tracks', 'Sunday morning'], 5, 0.2)
+        in_full = marked()
+        mark_looks = js(dpage, """() => {
+            const el = document.querySelector('downloaded-mark:not([hidden])');
+            const r = el.getBoundingClientRect(), a = el.closest('.card-art').getBoundingClientRect();
+            return { label: el.getAttribute('aria-label'), right: Math.round(a.right - r.right), bottom: Math.round(a.bottom - r.bottom) };
+        }""")
+        shot(dpage, 'downloads-08-playlists-marked')
+        dpage.evaluate('([b, m]) => window.__dl.now({ state: "downloading", playlist: b, done: m - 1, total: m }, { [b]: { saved: m - 1 } })', [favourites, m])
+        wait_for(lambda: marked() == ['Sunday morning'], 5, 0.2)
+        partly = marked()
+        dpage.evaluate("() => { document.querySelector('.view').dataset.kept = '1'; }")
+        dpage.click('#tabs .tab[data-tab=settings]')
+        dpage.wait_for_selector('.view[data-kept]', state='detached')
+        dpage.evaluate('(b) => window.__dl.finish(b)', favourites)
+        dpage.click('#tabs .tab[data-tab=playlists]')
+        dpage.wait_for_selector('.view[data-kept] .grid .card:has-text("Workout")')
+        wait_for(lambda: marked() == ['Favourite tracks', 'Sunday morning'], 5, 0.2)
+        back_to = marked()
+        check('downloads: Playlists marks the playlists on the phone in full, at the bottom right of each picture',
+              in_full == ['Favourite tracks', 'Sunday morning'] and mark_looks == {'label': 'Downloaded', 'right': 6, 'bottom': 6}, f'{in_full} {mark_looks}')
+        check('downloads: ...not one while it isn\'t, and again once it is, when the page is shown again as it was kept',
+              partly == ['Sunday morning'] and back_to == ['Favourite tracks', 'Sunday morning'], f'{partly} then {back_to}')
 
         # Removing one, from Settings › Downloads (asked first).
         dpage.goto(APP + '#/settings/downloads')
