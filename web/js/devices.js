@@ -39,8 +39,17 @@ const MAX_TRACKS = 1000; // sent in one command (see server/devices.js)
 const clientNow = () => performance.timeOrigin + performance.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// A tab's own id: two tabs in one browser are two devices.
+// The Android app (plexamp-web-android): its page bridge, or what it adds to
+// the user agent (an old WebView has no bridge).
+const inAndroidApp = () => !!window.plexampAndroid || /\splexamp-web-android\//.test(navigator.userAgent);
+
+// A tab's own id: two tabs in one browser are two devices. The Android app
+// shows the player in one page, so it's one device, the same each time it
+// opens: a page Android closed (the app swiped away, say) never says it's
+// gone, and the app opened again is still the device that plays, not one
+// following it.
 function tabId() {
+  if (inAndroidApp()) return 'app';
   try {
     let id = sessionStorage.getItem('pw.tab');
     if (!id) {
@@ -351,6 +360,7 @@ class Devices extends EventTarget {
 
   apply(v, { first = false } = {}) {
     if (!v || v.version < this.version) return;
+    const joining = this.version === 0; // (the first answer since this device joined in)
     this.version = v.version;
     if (Array.isArray(v.queue)) {
       this.queue = v.queue;
@@ -365,6 +375,12 @@ class Devices extends EventTarget {
       this.active = null;
       if (this.taking) return; // takeOver() carries on from here
       if (this.role === 'remote') this.leaveRemote({ adopt: false });
+      // Already the one that plays, as this device joins in: its page closed
+      // without a word (the Android app swiped away, say) and opened again.
+      // What this page has, where it was, is what plays now.
+      if (joining && this.role === 'idle' && !this.claiming) {
+        debugLog('devices', `still the device that plays, from before this page opened: it carries on here${player.current ? `, from “${player.current.title}” at ${player.time.toFixed(1)} s` : ''}`);
+      }
       if (this.role !== 'active') this.becomeActive();
       this.runCommands(v.commands || []);
     } else if (activeId) {

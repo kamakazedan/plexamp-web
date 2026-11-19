@@ -136,7 +136,7 @@ Signed in to the same Plex account on the same server, your devices share what's
 - **Names**: devices are named like "Chrome on Android". Choose your own in **Settings › Experience › Player name**.
 - **Play on two at once**: turn off **Settings › Playback › Share playback with your devices** on one.
 
-Each browser tab counts as a device. Sharing pauses during Play Together.
+Each browser tab counts as a device. The Android app is one device, the same each time it opens: swiped away as it plays and opened again, it has the music, paused where it stopped. Sharing pauses during Play Together.
 
 ## Play Together
 

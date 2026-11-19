@@ -578,15 +578,18 @@ test('your devices: one that goes quiet stops being the one that plays', async (
   d.activate(h, mac);
   d.report(h, mac, { queue: [qTrack(10, 1)], qid: '1', playing: true, position: 1000 });
   d.seen(h, phone);
+  now = 20000;
+  d.seen(h, mac); // (heard from last)
   now = 30000;
   d.seen(h, phone);
-  now = DEVICE_LIMITS.goneMs + 1000;
+  now = 20000 + DEVICE_LIMITS.goneMs + 1000;
+  assert.equal(d.view(h, phone.id).state.position, 1000 + now); // (playing, as far as anyone knows)
   assert.deepEqual(d.sweep(), [mac.name]); // (named in the log)
   assert.deepEqual(d.sweep(), []);
   const v = d.view(h, phone.id);
   assert.equal(v.active, null);
-  assert.equal(v.state.playing, false); // kept, paused where it got to
-  assert.ok(v.state.position > 1000);
+  assert.equal(v.state.playing, false); // kept, paused where it got to...
+  assert.equal(v.state.position, 21000); // ...as it was last heard from, not as it was found gone
   assert.deepEqual(v.devices.map((x) => x.id), [phone.id]);
   // Releasing: the same, straight away.
   d.activate(h, phone);
@@ -597,6 +600,26 @@ test('your devices: one that goes quiet stops being the one that plays', async (
   const waiting = d.wait(h, h.version, 1000);
   d.seen(h, mac);
   assert.equal(await waiting, true);
+});
+
+test('your devices: one closed without a word and opened again is still the one that plays, and what it has now goes', () => {
+  // (The Android app swiped away as it played: Android closes its page
+  // without a word, and it's the same device when it opens again.)
+  let now = 0;
+  const d = new Devices({ now: () => now });
+  const h = d.home(1001, 'mock-server-1');
+  d.activate(h, phone);
+  d.report(h, phone, { queue: [qTrack(10, 1), qTrack(11, 2)], qid: '2', playing: true, position: 5000 });
+  const pause = d.command(h, mac, { type: 'pause' }); // (for the page that's gone)
+  now = 8000;
+  const back = d.view(h, phone.id);
+  assert.equal(back.active.id, phone.id); // the one that plays, as far as the service knows...
+  assert.deepEqual(back.commands.map((c) => c.id), [pause]); // ...with what waited for it
+  d.report(h, phone, { queue: [qTrack(10, 1), qTrack(11, 2)], qid: '2', playing: false, position: 7000, ack: pause });
+  const v = d.view(h, mac.id);
+  assert.equal(v.active.id, phone.id);
+  assert.deepEqual([v.state.qid, v.state.playing, v.state.position], ['2', false, 7000]);
+  assert.equal(d.view(h, phone.id).commands.length, 0);
 });
 
 test('your devices: what one device can send another is checked', () => {
