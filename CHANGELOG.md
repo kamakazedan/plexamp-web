@@ -3,6 +3,25 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.40.3 - 2026-11-19
+
+### Added
+
+- **Check for updates, in the Android app**: Settings › About shows the
+  app's version too, and **Check for updates** checks the player on your
+  server (a new version opens straight away, or **Reload** is offered while
+  music's playing) and the app on GitHub, with **Download app** for a newer
+  one (plexamp-web for Android 0.2.4 or later).
+
+### Changed
+
+- **Downloads show each playlist's own progress**: Settings › Downloads says
+  which playlist is being checked for changes or downloaded, and that row
+  shows how far it's got ("Downloading… 29 of 88 tracks", with a bar), while
+  those still to come say they're waiting. No more one count for every
+  playlist together.
+- **Choosing a playlist to download** shows each one's picture.
+
 ## 0.40.2 - 2026-11-19
 
 ### Added

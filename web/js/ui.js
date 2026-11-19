@@ -719,7 +719,7 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
           list.map((a) =>
             // { heading }: a heading over the actions after it.
             a.heading ? h('div.sheet-heading', { role: 'presentation' }, a.heading) : h(
-              `button.sheet-action${a.danger ? '.danger' : ''}${a.description ? '.has-desc' : ''}${a.muted ? '.muted' : ''}`,
+              `button.sheet-action${a.danger ? '.danger' : ''}${a.description ? '.has-desc' : ''}${a.muted ? '.muted' : ''}${a.image !== undefined ? '.has-art' : ''}`,
               {
                 type: 'button',
                 'aria-pressed': a.checked === undefined ? null : String(!!a.checked),
@@ -735,7 +735,8 @@ export function sheet({ title, subtitle, image, round, actions = [], content, va
                   a.onSelect?.();
                 },
               },
-              a.icon ? icon(a.icon, 24) : h('span.sheet-spacer'),
+              // `image`: a picture (a playlist's, say), in place of an icon.
+              a.image !== undefined ? art(a.image, { size: 48, fallback: a.icon || 'note' }) : a.icon ? icon(a.icon, 24) : h('span.sheet-spacer'),
               h('span.sheet-action-text', null, h('span.sheet-action-label', null, a.label), a.description ? h('span.sheet-action-desc', null, a.description) : null),
               a.checked ? icon('check', 22, 'sheet-check') : null,
             ),

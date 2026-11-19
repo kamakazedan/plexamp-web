@@ -1849,12 +1849,18 @@ a.hero-link:hover {
   border-radius: 18px;
 }
 
-.about-links {
+.about-links,
+.about-update {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 10px;
   margin-top: 14px;
+}
+
+/* In the Android app: Check for updates (and a newer app), under the versions. */
+.about-update {
+  margin: -6px 0 10px;
 }
 
 .kv-list {
@@ -2774,6 +2780,20 @@ body.np-open #toasts {
 
 .sheet-action.muted .sheet-action-label {
   color: var(--faint);
+}
+
+/* An action with a picture of its own (a playlist's), in place of an icon. */
+.sheet-action.has-art {
+  align-items: center;
+  gap: 16px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.sheet-action > .art {
+  flex: none;
+  width: 48px;
+  border-radius: 4px;
 }
 
 .sheet.dialog {
@@ -4231,6 +4251,15 @@ body.bare #toasts {
 
 .dl-row .row-link > .art {
   width: 52px;
+}
+
+/* The one being checked or downloaded: what's happening to it, and how far. */
+.dl-row.busy .row-sub {
+  color: var(--tint-hi);
+}
+
+.dl-row .dl-progress {
+  margin-top: 6px;
 }
 
 .dl-remove {
