@@ -3,6 +3,18 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.40.3 - 2026-11-19
+
+### Fixed
+
+- **The Android app, swiped away and opened again**, is the device that
+  plays, with what was playing paused where it stopped. It showed **Playing
+  on Chrome on Android** and **Listen here** instead, following itself, for
+  up to a minute.
+- **Carrying on from a device that's gone quiet** (an app swiped away, a
+  phone switched off): your other devices start from where it was last
+  heard from, not up to a minute further on.
+
 ## 0.40.2 - 2026-11-19
 
 ### Added

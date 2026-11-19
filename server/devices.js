@@ -173,15 +173,18 @@ export class Devices {
   }
 
   // The playing device stops being the active one (closed, paused for a
-  // while, or the setting turned off); what it was playing is kept, paused.
-  release(h, deviceId) {
+  // while, or the setting turned off); what it was playing is kept, paused
+  // where it got to: by now, or by `until` (one that's gone without a word
+  // stopped playing when it was last heard from, not as that's noticed).
+  release(h, deviceId, { until } = {}) {
     if (h.active !== deviceId) return false;
     h.active = null;
     h.commands = [];
     if (h.state?.playing) {
-      h.state.position = this.position(h);
+      const now = this.now();
+      h.state.position = Math.round(this.position(h, Math.min(until ?? now, now)));
       h.state.playing = false;
-      h.state.at = this.now();
+      h.state.at = now;
     }
     this.bump(h);
     return true;
@@ -242,7 +245,7 @@ export class Devices {
   position(h, now = this.now()) {
     const s = h.state;
     if (!s) return 0;
-    const p = s.playing ? s.position + (now - s.at) : s.position;
+    const p = s.playing ? s.position + Math.max(0, now - s.at) : s.position;
     return s.duration ? Math.min(p, s.duration) : p;
   }
 
@@ -255,7 +258,7 @@ export class Devices {
     for (const [key, h] of this.homes) {
       for (const d of [...h.devices.values()]) {
         if (now - d.seen <= LIMITS.goneMs) continue;
-        if (h.active === d.id && this.release(h, d.id)) quiet.push(d.name);
+        if (h.active === d.id && this.release(h, d.id, { until: d.seen })) quiet.push(d.name);
         h.devices.delete(d.id);
         this.bump(h);
       }
