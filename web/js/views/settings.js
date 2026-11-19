@@ -20,6 +20,7 @@ import { joinWithAnd, radioArrowKeys, SECRET_INPUT } from './common.js';
 import { setUpServer } from '../service.js';
 import { downloadsHere, downloadState, hasDownloads, bytesText } from '../downloads.js';
 import { downloadsView } from './downloads.js';
+import { androidAppVersion, canCheckForUpdates, appUpdates, checkForUpdates } from '../androidapp.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -1375,7 +1376,12 @@ function notesSection() {
 
 // ---------- About ----------
 
+// In the Android app, its version too, and Check for updates: the app on
+// GitHub, and this player on its server (a new version of it opens at once,
+// as the app does it), with a newer app it's found offered from its release.
 function aboutView({ el }) {
+  const appVersion = androidAppVersion();
+  const updates = appVersion && canCheckForUpdates() ? h('div.about-update') : null;
   el.append(
     backHeader('About', { fallback: '/settings' }),
     h(
@@ -1383,7 +1389,8 @@ function aboutView({ el }) {
       null,
       h('img.about-mark', { src: 'icons/icon.svg', alt: '', width: 72, height: 72 }),
       h('div.about-name', null, APP_INFO.product),
-      h('div.about-version', null, `Version ${APP_INFO.version}`),
+      h('div.about-version', null, `Version ${APP_INFO.version}`, appVersion ? h('div', null, `Android app ${appVersion}`) : null),
+      updates,
       h('p', null, 'An unofficial web player for Plex music libraries. It is not made, endorsed or supported by Plex.'),
       h(
         'div.about-links',
@@ -1393,4 +1400,44 @@ function aboutView({ el }) {
       ),
     ),
   );
+  if (updates) appUpdatesBox(updates);
+}
+
+// Check for updates, and a newer app found, to download.
+function appUpdatesBox(box) {
+  let update = null;
+  let checking = false;
+  const paint = () =>
+    box.replaceChildren(
+      update ? h('a.btn.btn-primary', { href: update.url, target: '_blank', rel: 'noopener' }, icon('download', 20), h('span', null, `Download app ${update.version}`)) : null,
+      h('button.btn.btn-secondary', { type: 'button', disabled: checking, onclick: () => check() }, icon('refresh', 20), h('span', null, checking ? 'Checking…' : 'Check for updates')),
+    );
+  async function check() {
+    if (checking) return;
+    checking = true;
+    paint();
+    try {
+      const found = await checkForUpdates();
+      update = found.update;
+      // (A new version of the player opening, or Reload offered while music's
+      // playing: the app shows that itself.)
+      if (found.player === 'reloading' || found.player === 'offered') return;
+      if (found.app === 'newer' && update) toast(`Android app ${update.version} is available`);
+      else if (found.app === 'failed' || found.player === 'failed') toast('Couldn’t check for updates. Try again.');
+      else toast('You’re up to date');
+    } catch {
+      toast('Couldn’t check for updates. Try again.');
+    } finally {
+      checking = false;
+      paint();
+    }
+  }
+  paint();
+  appUpdates()
+    .then((known) => {
+      if (checking) return;
+      update = known.update;
+      paint();
+    })
+    .catch(() => {});
 }

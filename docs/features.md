@@ -119,12 +119,14 @@ With `SPOTIFY_LINK_IMPORT=true` on the container (off to begin with), a public p
 
 In [plexamp-web for Android](https://github.com/kamakazedan/plexamp-web-android), playlists can be kept on the phone, to play without a connection. A browser has no downloads.
 
-- **Download**, on a playlist's page, or **Settings › Downloads › Add playlists**. A message says it's started, and Settings › Downloads (or the app's notification) shows how far it's got.
+- **Download**, on a playlist's page, or **Settings › Downloads › Add playlists** (each playlist with its picture). A message says it's started, and Settings › Downloads (or the app's notification) shows how far it's got: each playlist says what's happening to it (checking for changes, downloading and how far, or waiting its turn).
+- **Marked**: a playlist on the phone in full has a green download mark on its picture (on Playlists and Home), and offline too.
 - **Kept up to date**: tracks added to a playlist are downloaded, those taken off are removed, and a file changed on your server is downloaded again. The app checks every few hours, even when it's closed, and as you open it, on a network it may use. Tap **Up to date** in Settings › Downloads to check now.
 - **Settings › Downloads**: the quality (to begin with, Original: your files as they are), whether to download on Wi-Fi only or on mobile data too, and when to play downloads: **Always**, **On mobile data** or **Only offline**. With your server out of reach, they play whatever it says.
 - **Space**: the phone's free space and what downloads use, and each playlist's size. A playlist that won't fit is refused, saying how much it needs. Removing one frees its space (it comes off the phone, not your server).
 - **Offline**: Playlists shows the ones on the phone, each as it was last downloaded, with its covers.
 - **Signing out**, or switching user, removes them from the phone, and the app forgets the sign-in it kept them up to date with.
+- **Settings › About** shows the app's version too, and **Check for updates** (plexamp-web for Android 0.2.4 or later) checks the player on your server, opening a new version straight away (or offering **Reload** while music's playing), and the app on GitHub, with **Download app** for a newer one.
 
 ## Your devices
 

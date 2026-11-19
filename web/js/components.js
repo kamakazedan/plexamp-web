@@ -9,6 +9,7 @@ import { rowRating } from './ratings.js';
 import { sharedMark } from './sharing.js';
 import { selectable, startSelect } from './selection.js';
 import { watchFormat } from './formats.js';
+import { downloads, keepsDownloads, downloadedInFull } from './downloads.js';
 
 // An album's cover, with its format over it (Settings › Experience) once
 // it's been looked up, and its menu; it can be chosen with others
@@ -63,9 +64,37 @@ export function playlistCard(m, { subtitle } = {}) {
     onShuffle: () => playPlaylist(m, { shuffle: true }),
     onMenu: () => playlistMenu(m),
   });
-  // Shared with friends, or by one (top left of its picture).
-  c.querySelector('.card-art')?.append(sharedMark(m.ratingKey));
+  // Shared with friends, or by one (top left of its picture); on this phone
+  // in full, in the Android app (bottom right).
+  const box = c.querySelector('.card-art');
+  box?.append(sharedMark(m.ratingKey));
+  if (keepsDownloads()) box?.append(downloadedMark(m.ratingKey));
   return c;
+}
+
+// The mark on a playlist's picture once it's on this phone in full (the
+// Android app: downloads.js). It follows the downloads while it's on the
+// page, and looks again whenever it's put back (a page kept to go back to).
+class DownloadedMark extends HTMLElement {
+  paint = () => {
+    this.hidden = !downloadedInFull(this.dataset.pl);
+  };
+
+  connectedCallback() {
+    this.paint();
+    downloads.addEventListener('change', this.paint);
+  }
+
+  disconnectedCallback() {
+    downloads.removeEventListener('change', this.paint);
+  }
+}
+window.customElements?.define('downloaded-mark', DownloadedMark);
+
+export function downloadedMark(playlistId) {
+  const el = h('downloaded-mark', { role: 'img', 'aria-label': 'Downloaded', title: 'Downloaded', dataset: { pl: String(playlistId) } }, icon('download', 16));
+  el.hidden = !downloadedInFull(playlistId);
+  return el;
 }
 
 const COLLECTION_UNITS = { album: ['album', 'albums'], artist: ['artist', 'artists'], track: ['track', 'tracks'] };

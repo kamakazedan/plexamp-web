@@ -7,7 +7,7 @@ import { navigate, refresh, dropCached } from '../router.js';
 import { connection } from '../connection.js';
 import { normTrack } from '../plex.js';
 import { playList, playPlaylist } from '../actions.js';
-import { trackRow, numberedList } from '../components.js';
+import { trackRow, numberedList, playlistArt, downloadedMark } from '../components.js';
 import { h, icon, iconButton, art, card, grid, row, sheet, toast, hideToast, fmt, backHeader, pageHeader, choiceRow, confirmAction, errorState, emptyState, pagedList } from '../ui.js';
 import {
   downloads,
@@ -23,6 +23,7 @@ import {
   downloadedPlaylist,
   playableHere,
   bytesText,
+  complete,
 } from '../downloads.js';
 
 // (As the app has them: see DownloadSettings.kt.)
@@ -54,7 +55,25 @@ const REFUSALS = {
 };
 
 const playlistOf = (id) => downloadState()?.playlists?.find((p) => p.id === String(id)) || null;
-const complete = (p) => p.tracks > 0 && p.saved >= p.tracks;
+
+// What's happening to a playlist now, as the app says (its status names the
+// playlist it's on): { doing: 'checking' } for changes; { doing:
+// 'downloading', done, total }, its own tracks; { doing: 'waiting' }, still
+// to come; or null. (An app before 0.2.4 counts every playlist's tracks
+// together: then it's the playlist's count as the app last gave it.)
+function nowOf(p, st = downloadState()) {
+  const s = st?.status || {};
+  if (s.state !== 'downloading' || !s.playlist) return null;
+  if (s.playlist === p.id) {
+    if (s.checking) return { doing: 'checking' };
+    const own = s.total === p.tracks && s.done >= 0 && s.done <= s.total;
+    return { doing: 'downloading', done: own ? s.done : p.saved, total: p.tracks };
+  }
+  if (complete(p)) return null;
+  // (Each is checked first, then downloaded in turn, in the app's order.)
+  const order = (st.playlists || []).map((x) => x.id);
+  return s.checking || order.indexOf(p.id) > order.indexOf(s.playlist) ? { doing: 'waiting' } : null;
+}
 
 // "40 tracks · 1.2 GB", "12 of 40 tracks · 340 MB", "3 tracks didn't fit · 1.1 GB".
 function playlistLine(p) {
@@ -65,6 +84,17 @@ function playlistLine(p) {
   if (p.problem === 'failed') return `${fmt.count(missing, 'track', 'tracks')} couldn’t download · ${size}`;
   return `${fmt.number(p.saved)} of ${fmt.count(p.tracks, 'track', 'tracks')} · ${size}`;
 }
+
+// A playlist's line in Settings › Downloads: what's happening to it, or its
+// size.
+function rowLine(p, now) {
+  if (now?.doing === 'checking') return 'Checking for changes…';
+  if (now?.doing === 'downloading') return `Downloading… ${fmt.number(now.done)} of ${fmt.count(now.total, 'track', 'tracks')}`;
+  if (now?.doing === 'waiting') return `Waiting · ${fmt.number(p.saved)} of ${fmt.count(p.tracks, 'track', 'tracks')}`;
+  return playlistLine(p);
+}
+
+const share = (done, total) => `${Math.max(0, Math.min(100, (done / total) * 100)).toFixed(1)}%`;
 
 // ---------- downloading a playlist ----------
 
@@ -121,6 +151,7 @@ export function downloadLine(pl, onDispose) {
   const paint = () => {
     const p = playlistOf(id);
     const done = !!p && complete(p);
+    const now = p ? nowOf(p) : null;
     btn.firstChild.replaceWith(icon(done ? 'downloaded' : 'download', 18));
     btn.classList.toggle('on', !!p);
     btn.setAttribute('aria-busy', String(busy));
@@ -128,11 +159,17 @@ export function downloadLine(pl, onDispose) {
       ? 'Getting ready…'
       : !p
         ? 'Download'
-        : done
-          ? 'Downloaded'
-          : p.problem
-            ? `Downloaded ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`
-            : `Downloading… ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`;
+        : now?.doing === 'downloading'
+          ? `Downloading… ${fmt.number(now.done)} of ${fmt.number(now.total)}`
+          : done
+            ? 'Downloaded'
+            : now?.doing === 'checking'
+              ? 'Checking for changes…'
+              : now?.doing === 'waiting'
+                ? `Waiting · ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`
+                : p.problem
+                  ? `Downloaded ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`
+                  : `Downloading… ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`;
   };
   async function tapped() {
     if (busy) return;
@@ -218,13 +255,15 @@ export async function downloadsView({ el, onDispose }) {
   const rows = new Map();
   const playlistRow = (p) => {
     const sub = h('div.row-sub');
+    // (How far the one downloading has got.)
+    const bar = h('div.dl-progress', { 'aria-hidden': 'true', hidden: true }, h('span'));
     const el = h(
       'div.row.dl-row',
       null,
-      h('a.row-link', { href: `#/playlist/${p.id}` }, art(p.cover, { size: 52, fallback: 'list' }), h('div.row-main', null, h('div.row-title', null, p.title), sub)),
+      h('a.row-link', { href: `#/playlist/${p.id}` }, art(p.cover, { size: 52, fallback: 'list' }), h('div.row-main', null, h('div.row-title', null, p.title), sub, bar)),
       iconButton('trash', `Remove ${p.title} from this phone`, () => askRemove(p), { cls: 'dl-remove' }),
     );
-    return { el, sub, key: `${p.title}\n${p.cover || ''}` };
+    return { el, sub, bar, key: `${p.title}\n${p.cover || ''}` };
   };
   const askRemove = async (p) => {
     const now = playlistOf(p.id) || p;
@@ -260,7 +299,12 @@ export async function downloadsView({ el, onDispose }) {
         r = fresh;
         rows.set(p.id, r);
       }
-      r.sub.textContent = playlistLine(p);
+      const doing = nowOf(p, now);
+      const going = doing?.doing === 'downloading' && doing.total > 0;
+      r.el.classList.toggle('busy', !!doing && doing.doing !== 'waiting');
+      r.sub.textContent = rowLine(p, doing);
+      r.bar.hidden = !going;
+      if (going) r.bar.firstChild.style.width = share(doing.done, doing.total);
       order.push(r.el);
     }
     for (const [id, r] of rows) {
@@ -297,8 +341,10 @@ function paintSpace(box, st) {
   );
 }
 
-// What the downloads are doing now. Up to date, or with the server out of
-// reach, a tap checks for changes now (`onCheck`, where the app can).
+// What the downloads are doing now: the playlist it's checking or
+// downloading, by name (each playlist's row says how far it's got). Up to
+// date, or with the server out of reach, a tap checks for changes now
+// (`onCheck`, where the app can).
 function paintStatus(box, st, onCheck) {
   const s = st.status || {};
   const any = !!st.playlists?.length;
@@ -306,14 +352,10 @@ function paintStatus(box, st, onCheck) {
   if (!any) return;
   let text;
   let mark = 'info';
-  let progress = null;
-  if (s.state === 'downloading' && s.total > 0) {
-    text = `Downloading… ${fmt.number(s.done)} of ${fmt.count(s.total, 'track', 'tracks')}`;
-    mark = 'download';
-    progress = h('div.dl-progress', { 'aria-hidden': 'true' }, h('span', { style: { width: `${Math.min(100, (s.done / s.total) * 100).toFixed(1)}%` } }));
-  } else if (s.state === 'downloading') {
-    text = 'Checking for changes…';
-    mark = 'refresh';
+  if (s.state === 'downloading') {
+    const on = s.playlist ? st.playlists.find((p) => p.id === s.playlist) : null;
+    text = !on ? 'Checking for changes…' : s.checking ? `Checking “${on.title}” for changes…` : `Downloading “${on.title}”…`;
+    mark = on && !s.checking ? 'download' : 'refresh';
   } else if (s.state === 'idle') {
     text = st.syncedAt ? `Up to date, checked ${fmt.ago(st.syncedAt / 1000)}` : 'Up to date';
     mark = 'check';
@@ -328,7 +370,7 @@ function paintStatus(box, st, onCheck) {
       }[s.state] || 'Waiting';
   }
   const checkable = !!onCheck && (s.state === 'idle' || s.state === 'unreachable');
-  const content = [icon(mark, 20), h('div.dl-status-text', null, text, progress)];
+  const content = [icon(mark, 20), h('div.dl-status-text', null, text)];
   box.classList.toggle('busy', s.state === 'downloading');
   box.classList.toggle('can-check', checkable);
   box.replaceChildren(
@@ -355,7 +397,8 @@ async function addPlaylists() {
   sheet({
     title: 'Download a playlist',
     actions: left.map((p) => ({
-      icon: 'download',
+      image: playlistArt(p),
+      icon: 'list',
       label: p.title,
       description: fmt.count(p.leafCount, 'track', 'tracks'),
       onSelect: () => downloadPlaylist(p, { here: true }),
@@ -389,8 +432,8 @@ export function offlinePlaylistsView({ el, onDispose }) {
   el.append(pageHeader('Playlists', { subtitle: 'On this phone' }));
   el.append(
     grid(
-      list.map((p) =>
-        card({
+      list.map((p) => {
+        const c = card({
           href: `/playlist/${p.id}`,
           image: p.cover,
           title: p.title,
@@ -398,8 +441,10 @@ export function offlinePlaylistsView({ el, onDispose }) {
           fallback: 'list',
           onPlay: () => playPlaylist(asPlaylist(p)),
           onShuffle: () => playPlaylist(asPlaylist(p), { shuffle: true }),
-        }),
-      ),
+        });
+        c.querySelector('.card-art')?.append(downloadedMark(p.id));
+        return c;
+      }),
       { centered: true, cls: 'grid-playlists' },
     ),
   );

@@ -6294,6 +6294,82 @@ with sync_playwright() as pw:
         check('settings: About shows the version, with what\'s new', shown == f'Version {newest}' and link.endswith('/CHANGELOG.md'), f'{shown} {link}')
         ctx.close()
 
+        # In the Android app (its user agent says which version), About has
+        # the app's version too, and Check for updates, which asks the app
+        # (its page-bridge.js and AppBridge.kt, stood in for here: `__app`).
+        # Up to date, it says so; a new version of the player opening says
+        # nothing (the app does it); a newer app is offered from its release
+        # on GitHub, and from nowhere else; a check that fails says so; and
+        # an app from before it could check (0.2.3) has no button.
+        actx = browser.new_context(**MOBILE, user_agent='Mozilla/5.0 (Linux; Android 14; Pixel 8; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 Mobile Safari/537.36 plexamp-web-android/0.2.4')
+        actx.add_init_script("""(() => {
+            const a = (window.__app = { answer: { app: 'same', player: 'same' }, update: null, checks: 0, old: false });
+            const app = { state: () => Promise.resolve({ version: '0.2.4', update: a.update }) };
+            const check = () => new Promise((resolve, reject) => {
+                a.checks++;
+                setTimeout(() => {
+                    const r = a.answer;
+                    if (r.error) return reject(Object.assign(new Error(r.error), { code: r.error }));
+                    if (r.update !== undefined) a.update = r.update;
+                    resolve({ version: '0.2.4', update: a.update, app: r.app, player: r.player });
+                }, 300);
+            });
+            Object.defineProperty(app, 'check', { enumerable: true, get: () => (a.old ? undefined : check) });
+            Object.defineProperty(window, 'plexampAndroid', { value: Object.freeze({ app: Object.freeze(app) }) });
+        })();""")
+        apage = actx.new_page()
+        attach(apage, 'about-app')
+        login(apage, APP)
+        apage.goto(APP + '#/settings/about')
+        apage.wait_for_selector('.about-update button:has-text("Check for updates")')
+        versions = apage.locator('.about-version').inner_text()
+        no_toast = lambda: apage.evaluate("() => import('./js/ui.js').then((m) => m.hideToast())")
+        checked = lambda: apage.wait_for_selector('.about-update button:has-text("Check for updates"):not([disabled])')
+        apage.click('.about-update button')
+        busy = apage.locator('.about-update button').inner_text()
+        apage.wait_for_selector('.toast:has-text("You’re up to date")')
+        check('about: in the Android app, the app\'s version too, and Check for updates, which says when all\'s up to date',
+              versions == f'Version {newest}\nAndroid app 0.2.4' and busy == 'Checking…', f'{versions!r} {busy!r}')
+        checked()
+        no_toast()
+        apage.evaluate("() => { window.__app.answer = { app: 'same', player: 'reloading' }; }")
+        apage.click('.about-update button')
+        checked()
+        apage.wait_for_timeout(300)
+        check('about: ...a new version of the player opening says nothing of its own', apage.locator('.toast').count() == 0, apage.locator('#toasts').inner_text())
+        apk = 'https://github.com/kamakazedan/plexamp-web-android/releases/download/v0.2.5/plexamp-web-android-0.2.5.apk'
+        apage.evaluate("(url) => { window.__app.answer = { app: 'newer', player: 'same', update: { version: '0.2.5', url } }; }", apk)
+        apage.click('.about-update button')
+        apage.wait_for_selector('.toast:has-text("Android app 0.2.5 is available")')
+        offer = apage.locator('.about-update a.btn')
+        offered = (offer.inner_text(), offer.get_attribute('href'))
+        shot(apage, 'about-app-update')
+        apage.goto(APP + '#/settings')
+        apage.goto(APP + '#/settings/about')
+        apage.wait_for_selector('.about-update a.btn')
+        kept = apage.locator('.about-update a.btn').inner_text()
+        check('about: ...a newer app is offered, from its release, and still is on coming back', offered == ('Download app 0.2.5', apk) and kept == 'Download app 0.2.5', f'{offered} {kept}')
+        no_toast()
+        apage.evaluate("() => { window.__app.answer = { app: 'newer', player: 'same', update: { version: '0.2.6', url: 'https://example.com/plexamp-web-android.apk' } }; }")
+        apage.click('.about-update button')
+        checked()
+        check('about: ...but never from anywhere else', apage.locator('.about-update a').count() == 0)
+        no_toast()
+        apage.evaluate("() => { window.__app.answer = { error: 'failed' }; }")
+        apage.click('.about-update button')
+        apage.wait_for_selector('.toast:has-text("Couldn’t check for updates. Try again.")')
+        no_toast()
+        apage.evaluate("() => { window.__app.answer = { app: 'same', player: 'failed' }; }")
+        apage.click('.about-update button')
+        apage.wait_for_selector('.toast:has-text("Couldn’t check for updates. Try again.")')
+        check('about: ...and a check that fails says so', apage.evaluate('() => window.__app.checks') == 6)
+        apage.evaluate('() => { window.__app.old = true; }')
+        apage.goto(APP + '#/settings')
+        apage.goto(APP + '#/settings/about')
+        apage.wait_for_selector('.about-version')
+        check('about: ...and an app that can\'t check has no button', apage.locator('.about-update').count() == 0 and 'Android app' in apage.locator('.about-version').inner_text())
+        actx.close()
+
     # ---------- downloads: playlists kept on the phone, in the Android app ----------
     if run('downloads'):
         # The server's playlists, as the app would download them.
@@ -6313,7 +6389,11 @@ with sync_playwright() as pw:
         page.goto(APP + '#/settings/downloads')
         page.wait_for_selector('.back-title:has-text("Downloads")')
         said_here = page.locator('.empty-state').inner_text()
+        page.goto(APP + '#/playlists')
+        page.wait_for_selector('.grid .card')
+        marks_here = page.locator('downloaded-mark').count()
         check('downloads: a browser has no downloads, and says where they are', in_settings == 0 and on_playlist == 0 and 'Android app' in said_here, said_here)
+        check('downloads: ...nor marks any playlist downloaded', marks_here == 0, f'{marks_here} marks')
 
         # A smart playlist's count (and length) is Plex's as it last worked
         # them out, which can be behind its rules (a track rated since, as
@@ -6362,8 +6442,9 @@ with sync_playwright() as pw:
         # the app does, each question told to the test too (`asked`). The
         # test's own (window.__dl): a refusal for the next playlist added,
         # a playlist downloaded in full, as the app has it once it's
-        # synced, a check for changes over, and `old`, an app from before
-        # it could be asked to check (0.2.3). What the app serves at the player's own address (tracks,
+        # synced, a check for changes over, what it's doing now (`now`), and
+        # `old`, an app from before it could be asked to check (0.2.3). What
+        # the app serves at the player's own address (tracks,
         # playlists as they were downloaded, and covers) comes from a route,
         # from the mock, as the app's would come from the phone (`served`).
         asked = []
@@ -6388,6 +6469,12 @@ with sync_playwright() as pw:
             dl.checked = () => {
                 st.status = { state: 'idle' };
                 st.syncedAt = Date.now();
+                tell();
+            };
+            // What the app's doing now, and how far each playlist's got.
+            dl.now = (status, playlists = {}) => {
+                st.status = status;
+                for (const [id, change] of Object.entries(playlists)) Object.assign(st.playlists.find((x) => x.id === id), change);
                 tell();
             };
             dl.tell = tell;
@@ -6490,6 +6577,8 @@ with sync_playwright() as pw:
         dpage.click('button.row:has-text("Add playlists")')
         dpage.wait_for_selector('.sheet.open')
         offered = dpage.locator('.sheet.open .sheet-action-label').all_inner_texts()
+        wait_for(lambda: dpage.locator('.sheet.open .sheet-action > .art img').count() > 0, 5, 0.2)
+        pictures = (dpage.locator('.sheet.open .sheet-action > .art').count(), dpage.locator('.sheet.open .sheet-action > .art img').count())
         shot(dpage, 'downloads-02-add')
         dpage.locator('.sheet.open .sheet-action', has_text='Sunday morning').click()
         dpage.wait_for_selector('.toast:has-text("Downloading “Sunday morning”")')
@@ -6497,8 +6586,9 @@ with sync_playwright() as pw:
         going = (dpage.locator('.dl-row .row-sub').inner_text(), dpage.locator('.dl-status').inner_text())
         n = len(catalog[sunday]['tracks'])
         check('downloads: Add playlists offers the server\'s playlists', all(t in offered for t in ('Sunday morning', 'Favourite tracks', 'Workout')), offered)
-        check('downloads: ...one chosen is downloading, as the app says', dl_asked('add') == [{'playlist': sunday}]
-              and going == (f'0 of {n} tracks · 0 bytes', f'Downloading… 0 of {n} tracks'), f'{dl_asked("add")} {going}')
+        check('downloads: ...each with its picture', pictures[0] == len(offered) and pictures[1] > 0, f'{pictures} for {len(offered)}')
+        check('downloads: ...one chosen is downloading, as the app says, by name', dl_asked('add') == [{'playlist': sunday}]
+              and going == (f'Downloading… 0 of {n} tracks', 'Downloading “Sunday morning”…'), f'{dl_asked("add")} {going}')
         dpage.evaluate('(id) => window.__dl.finish(id)', sunday)
         dpage.wait_for_selector('.dl-status:has-text("Up to date")')
         done = dpage.locator('.dl-row .row-sub').inner_text()
@@ -6546,6 +6636,31 @@ with sync_playwright() as pw:
         dpage.wait_for_selector('.sheet', state='detached')
         check('downloads: ...once downloaded, it says so, and can be removed', 'Remove download' in offers, offers)
 
+        # While the app's at work, each playlist says what's happening to it:
+        # the one it's checking for changes, the one downloading (its own
+        # count, and a bar), and those still to come; the box at the top
+        # names the one it's on.
+        dpage.goto(APP + '#/settings/downloads')
+        dpage.wait_for_selector('.dl-row:has-text("Favourite tracks")')
+        line_of = lambda title: dpage.locator('.dl-row', has_text=title).locator('.row-sub').inner_text()
+        dpage.evaluate('(id) => window.__dl.now({ state: "downloading", playlist: id, checking: true })', sunday)
+        dpage.wait_for_selector('.dl-status:has-text("Checking “Sunday morning” for changes…")')
+        checking_lines = (line_of('Sunday morning'), line_of('Favourite tracks'))
+        dpage.evaluate('([a, b, n, m]) => window.__dl.now({ state: "downloading", playlist: a, done: n - 2, total: n }, { [a]: { saved: n - 2 }, [b]: { saved: m - 1 } })', [sunday, favourites, n, m])
+        dpage.wait_for_selector('.dl-status:has-text("Downloading “Sunday morning”…")')
+        going_lines = (line_of('Sunday morning'), line_of('Favourite tracks'))
+        bars = [dpage.locator('.dl-row', has_text=t).locator('.dl-progress').is_visible() for t in ('Sunday morning', 'Favourite tracks')]
+        shot(dpage, 'downloads-04b-each-playlist')
+        dpage.goto(APP + f'#/playlist/{favourites}')
+        dpage.wait_for_selector('button.dl-line:has-text("Waiting")')
+        waiting_here = dpage.locator('button.dl-line').inner_text()
+        check('downloads: each playlist says what\'s happening to it: the one being checked for changes',
+              checking_lines == ('Checking for changes…', f'{m} tracks · {m * 5} MB'), str(checking_lines))
+        check('downloads: ...the one downloading, with its own count and a bar, and those still to come',
+              going_lines == (f'Downloading… {n - 2} of {n} tracks', f'Waiting · {m - 1} of {m} tracks') and bars == [True, False], f'{going_lines} {bars}')
+        check('downloads: ...on its page too', waiting_here == f'Waiting · {m - 1} of {m}', waiting_here)
+        dpage.evaluate('([a, b]) => { window.__dl.finish(a); window.__dl.finish(b); }', [sunday, favourites])
+
         # Too big for the phone: refused, saying why.
         dpage.evaluate("() => { window.__dl.refuse = { code: 'space', needed: 5e9, free: 1.2e9 }; }")
         dpage.goto(APP + f'#/playlist/{workout}')
@@ -6576,6 +6691,9 @@ with sync_playwright() as pw:
         player(dpage, 'p.pause()')
         dpage.evaluate("() => import('./js/downloads.js').then((m) => m.setDownloads({ prefer: 'always' }))")
 
+        # (The playlists marked as on the phone in full, on the page on screen.)
+        marked = lambda: sorted(js(dpage, "() => [...document.querySelectorAll('.grid .card')].filter((c) => c.querySelector('downloaded-mark:not([hidden])')).map((c) => c.querySelector('.card-title').textContent)"))
+
         # Offline (the server can't be reached): Playlists has the downloads,
         # which open and play, with their covers from the phone.
         server = re.compile(r'^' + re.escape(MOCK) + r'/|/pms/')
@@ -6585,8 +6703,10 @@ with sync_playwright() as pw:
         dpage.click('#tabs .tab[data-tab=playlists]')
         dpage.wait_for_selector('.page-sub:has-text("On this phone")')
         cards = dpage.locator('.grid .card-title').all_inner_texts()
+        offline_marks = marked()
         shot(dpage, 'downloads-06-offline')
         check('downloads: offline, Playlists has the playlists on the phone', sorted(cards) == ['Favourite tracks', 'Sunday morning'], cards)
+        check('downloads: ...each marked as on the phone in full', offline_marks == ['Favourite tracks', 'Sunday morning'], offline_marks)
         dpage.locator('.grid .card', has_text='Sunday morning').click()
         dpage.wait_for_selector('div.dl-line:has-text("Downloaded")')
         rows = dpage.locator('.tracks .track').count()
@@ -6603,6 +6723,35 @@ with sync_playwright() as pw:
         dpage.evaluate("() => import('./js/connection.js').then((m) => m.connectionBack())")
         dpage.wait_for_selector('button.dl-line:has-text("Downloaded")', timeout=10000)
         check('downloads: back online, the playlist\'s page is the server\'s again', dpage.locator('div.dl-line').count() == 0)
+
+        # Playlists marks each one on the phone in full (and only those), and
+        # follows the downloads as they change: on screen, and on coming back
+        # to the page as it was kept.
+        dpage.click('#tabs .tab[data-tab=playlists]')
+        dpage.wait_for_selector('.grid .card:has-text("Workout")')
+        wait_for(lambda: marked() == ['Favourite tracks', 'Sunday morning'], 5, 0.2)
+        in_full = marked()
+        mark_looks = js(dpage, """() => {
+            const el = document.querySelector('downloaded-mark:not([hidden])');
+            const r = el.getBoundingClientRect(), a = el.closest('.card-art').getBoundingClientRect();
+            return { label: el.getAttribute('aria-label'), right: Math.round(a.right - r.right), bottom: Math.round(a.bottom - r.bottom) };
+        }""")
+        shot(dpage, 'downloads-08-playlists-marked')
+        dpage.evaluate('([b, m]) => window.__dl.now({ state: "downloading", playlist: b, done: m - 1, total: m }, { [b]: { saved: m - 1 } })', [favourites, m])
+        wait_for(lambda: marked() == ['Sunday morning'], 5, 0.2)
+        partly = marked()
+        dpage.evaluate("() => { document.querySelector('.view').dataset.kept = '1'; }")
+        dpage.click('#tabs .tab[data-tab=settings]')
+        dpage.wait_for_selector('.view[data-kept]', state='detached')
+        dpage.evaluate('(b) => window.__dl.finish(b)', favourites)
+        dpage.click('#tabs .tab[data-tab=playlists]')
+        dpage.wait_for_selector('.view[data-kept] .grid .card:has-text("Workout")')
+        wait_for(lambda: marked() == ['Favourite tracks', 'Sunday morning'], 5, 0.2)
+        back_to = marked()
+        check('downloads: Playlists marks the playlists on the phone in full, at the bottom right of each picture',
+              in_full == ['Favourite tracks', 'Sunday morning'] and mark_looks == {'label': 'Downloaded', 'right': 6, 'bottom': 6}, f'{in_full} {mark_looks}')
+        check('downloads: ...not one while it isn\'t, and again once it is, when the page is shown again as it was kept',
+              partly == ['Sunday morning'] and back_to == ['Favourite tracks', 'Sunday morning'], f'{partly} then {back_to}')
 
         # Removing one, from Settings › Downloads (asked first).
         dpage.goto(APP + '#/settings/downloads')

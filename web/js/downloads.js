@@ -34,7 +34,19 @@ export const downloadsHere = () => !!bridge() && !!app.auth?.token && !app.auth.
 
 export const downloadState = () => state;
 
+// Whether this is the Android app, which keeps downloads (whatever the
+// sign-in: offline, they still play).
+export const keepsDownloads = () => !!bridge();
+
 export const isDownloaded = (playlistId) => !!state?.playlists?.some((p) => p.id === String(playlistId));
+
+// A playlist on the phone in full: every track of it, as the app last found
+// it on the server.
+export const complete = (p) => p.tracks > 0 && p.saved >= p.tracks;
+export const downloadedInFull = (playlistId) => {
+  const p = state?.playlists?.find((x) => x.id === String(playlistId));
+  return !!p && complete(p);
+};
 
 export const hasDownloads = () => !!state?.playlists?.length;
 

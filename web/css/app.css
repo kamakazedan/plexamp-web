@@ -1849,12 +1849,18 @@ a.hero-link:hover {
   border-radius: 18px;
 }
 
-.about-links {
+.about-links,
+.about-update {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 10px;
   margin-top: 14px;
+}
+
+/* In the Android app: Check for updates (and a newer app), under the versions. */
+.about-update {
+  margin: -6px 0 10px;
 }
 
 .kv-list {
@@ -2774,6 +2780,20 @@ body.np-open #toasts {
 
 .sheet-action.muted .sheet-action-label {
   color: var(--faint);
+}
+
+/* An action with a picture of its own (a playlist's), in place of an icon. */
+.sheet-action.has-art {
+  align-items: center;
+  gap: 16px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.sheet-action > .art {
+  flex: none;
+  width: 48px;
+  border-radius: 4px;
 }
 
 .sheet.dialog {
@@ -4233,6 +4253,15 @@ body.bare #toasts {
   width: 52px;
 }
 
+/* The one being checked or downloaded: what's happening to it, and how far. */
+.dl-row.busy .row-sub {
+  color: var(--tint-hi);
+}
+
+.dl-row .dl-progress {
+  margin-top: 6px;
+}
+
 .dl-remove {
   color: var(--muted);
 }
@@ -5230,6 +5259,28 @@ body.no-list-ratings .row-rating {
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   pointer-events: none;
+}
+
+/* The mark at the bottom right of a playlist's picture once it's on the
+   phone in full (the Android app: components.js downloadedMark). */
+downloaded-mark {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--fav);
+  color: #0b0d12;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+downloaded-mark .ic g {
+  stroke-width: 2.6;
 }
 
 .hero-art-box > .shared-mark {
