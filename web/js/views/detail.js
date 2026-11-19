@@ -1413,6 +1413,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   const head = backHeader(pl.title, { collapse: true, fallback: '/playlists', actions: [lock?.el, menu] });
   const title = h('h1.hero-title', null, pl.title);
   const countEl = h('span', null, fmt.count(total, 'track', 'tracks'));
+  const lengthEl = h('span', null, pl.duration ? `, ${fmt.long(pl.duration)}` : '');
   el.append(
     head,
     h(
@@ -1423,7 +1424,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
         'div.hero-info',
         null,
         title,
-        h('div.hero-meta', null, countEl, pl.duration ? `, ${fmt.long(pl.duration)}` : ''),
+        h('div.hero-meta', null, countEl, lengthEl),
         pl.smart ? h('div.hero-meta', null, 'Smart playlist') : null,
         share
           ? share.role === 'owner'
@@ -1672,6 +1673,22 @@ export async function playlistView({ el, params, onDispose, onHide }) {
     settle: ({ moved, failed }) => (moved || (failed && !failed.tooLong)) && reload(),
   });
 
+  // A smart playlist's count, and its length, as its list has them: Plex's
+  // can be behind its rules (tracks rated since, say). A count that's
+  // changed has no length till the list is all in.
+  const ownCount = {
+    onTotal: (n) => {
+      if (n === total) return;
+      setCount(n);
+      lengthEl.textContent = '';
+    },
+    onDone: (all) => {
+      if (all.length !== total) setCount(all.length);
+      const ms = all.reduce((sum, m) => sum + (Number(m.duration) || 0), 0);
+      lengthEl.textContent = ms ? `, ${fmt.long(ms)}` : '';
+    },
+  };
+
   // (One list at a time, let go of with the page.)
   onDispose(() => pager?.dispose());
   function showList() {
@@ -1680,6 +1697,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
       fetchPage: (start, size) => s.playlistItems(pl.ratingKey, { start, size }),
       render: (m) => rowFor(m),
       empty: 'This playlist is empty.',
+      ...(pl.smart ? ownCount : {}),
     });
   }
 

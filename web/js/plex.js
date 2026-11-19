@@ -7,7 +7,7 @@ import { plexKind } from './releases.js';
 import { originalCopies } from './originals.js';
 
 // The version matches the newest entry in CHANGELOG.md (CI checks).
-export const APP_INFO = { product: 'plexamp-web', version: '0.40.1' };
+export const APP_INFO = { product: 'plexamp-web', version: '0.40.2' };
 
 const PLEX_TV = 'https://plex.tv';
 const CLIENTS = 'https://clients.plex.tv';
@@ -493,6 +493,7 @@ const TYPES_ONLY = {
   excludeFields: 'summary',
 };
 const LIST_PAGE = 500; // a list's entries asked for at a time (see readPages)
+const COUNT_WAIT_MS = 2000; // smart playlists' counts waited for, with the list of playlists (see playlists)
 // An artist's tracks as popularTracks reads them, every copy of each song:
 // what choosing between copies needs (originals.js), and no more, where Plex
 // can leave the rest out; POPULAR_COPIES of them at most.
@@ -729,11 +730,34 @@ export class PlexServer {
     return { items: asArray(mc.Metadata), total: mc.totalSize ?? mc.size ?? 0, counted: mc.totalSize ?? null };
   }
 
-  // Music playlists; with a section, only those with music from it.
+  // Music playlists; with a section, only those with music from it. A
+  // smart playlist's count (and length) is Plex's as it last worked them
+  // out, which can be behind its rules (tracks rated since, say), so each
+  // one's count is asked for as it is now, with the list; a length that
+  // goes with an old count is left out. (Not waited for long: one that
+  // comes later is in the list the next time it's shown.)
   playlists(section) {
-    return this.memo(`playlists:${section || 'all'}`, async () =>
-      asArray((await this.get('/playlists', { playlistType: 'audio', sectionID: section || undefined })).Metadata),
-    );
+    return this.memo(`playlists:${section || 'all'}`, async () => {
+      const lists = asArray((await this.get('/playlists', { playlistType: 'audio', sectionID: section || undefined })).Metadata);
+      const counting = lists
+        .filter((p) => [true, 1, '1'].includes(p.smart))
+        .map(async (p) => {
+          const n = await this.playlistCount(p.ratingKey).catch(() => null);
+          if (n === null || n === Number(p.leafCount)) return;
+          p.leafCount = n;
+          delete p.duration;
+        });
+      if (counting.length) await Promise.race([Promise.all(counting), new Promise((resolve) => setTimeout(resolve, COUNT_WAIT_MS))]);
+      return lists;
+    });
+  }
+
+  // How many entries a playlist has now, as Plex counts them for its list
+  // (one asked for, with its ids and no more), or null where it doesn't say.
+  async playlistCount(id) {
+    const mc = await this.get(`/playlists/${id}/items`, { ...LIGHT, 'X-Plex-Container-Start': 0, 'X-Plex-Container-Size': 1 });
+    const n = Number(mc.totalSize ?? NaN);
+    return Number.isInteger(n) && n >= 0 ? n : null;
   }
 
   forgetPlaylists() {

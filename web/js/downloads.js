@@ -90,6 +90,11 @@ export const removeDownload = (playlistId) => ask('remove', String(playlistId));
 export const setDownloads = (patch) => ask('set', patch);
 export const refreshDownloads = () => ask('state');
 
+// Has the app check for changes now (Settings › Downloads' "Up to date",
+// tapped), where it can (an app from before 0.2.3 can't).
+export const canCheckDownloads = () => typeof bridge()?.check === 'function';
+export const checkDownloads = () => ask('check');
+
 // A playlist as it was downloaded: { playlist, items } (Plex's own JSON for
 // it and its tracks, as the server last gave them), or null.
 export async function downloadedPlaylist(id) {

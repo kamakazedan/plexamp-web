@@ -73,7 +73,11 @@ testing, these endpoints need no token:
         albums by them and their page's rows), or all of them (as an older
         server);
         smartcollection=1|0: a smart collection (Electronic picks) listed,
-        whose items carry no tag for it, or not
+        whose items carry no tag for it, or not; behind=1: smart playlists'
+        counts and lengths (in the list of playlists, and on their own
+        pages) stay as they were last worked out, as a real server's can
+        lag their rules, while their items are what's in them now
+        (behind=0: caught up)
     /__mock/add-artist?name=...[&eps=N][&noalbum=1][&albums=T:Y,...][&mb=0]
                        [&format=Single][&live=T|T][&compilation=T|T][&tracks=T|T][&extra=T:S|S]
                        [&lengths=T:SECS,...][&rated=1][&first=YYYY-MM-DD][&firsttracks=T:SECS|T:SECS]
@@ -497,8 +501,10 @@ def follow_rule(pl):
         loved = [t for t in tracks if (t.get('userRating') or 0) >= 10]
         pl['_items'] = loved
         pl['_pids'] = [900000 + int(t['ratingKey']) for t in loved]
-        pl['leafCount'] = len(loved)
-        pl['duration'] = sum(t['duration'] for t in loved)
+        # (behind=1: its count and length as they were, as Plex's can lag.)
+        if not MOCK['behind']:
+            pl['leafCount'] = len(loved)
+            pl['duration'] = sum(t['duration'] for t in loved)
     return pl
 
 
@@ -1209,7 +1215,8 @@ def hls_playlist(seconds):
 # ---------------------------------------------------------------- notifications
 
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'honour': '--honour' in sys.argv, 'tv': 'down' if '--tv-down' in sys.argv else 'up',
-        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on', 'mbslow': '', 'mbmerged': False}
+        'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on', 'mbslow': '', 'mbmerged': False,
+        'behind': False}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 MERGES = []  # artists merged (PUT /library/metadata/ID/merge?ids=...)
 MERGED = {}  # ratingKey -> an artist merged into another, gone from the library (for undo_merges)
@@ -2234,6 +2241,8 @@ class Handler(BaseHTTPRequestHandler):
                 MOCK['mbslow'] = q['mbslow'][0].strip().lower()
             if 'mbmerged' in q:  # 1: lookups by id are redirected first, as a merged id's are
                 MOCK['mbmerged'] = q['mbmerged'][0] in ('1', 'on', 'true')
+            if 'behind' in q:  # 1: smart playlists' counts and lengths stay as they were (see follow_rule)
+                MOCK['behind'] = q['behind'][0] in ('1', 'on', 'true')
             if 'children' in q:  # all: an artist's /children has all their albums, as an older server's
                 MOCK['children'] = 'all' if q['children'][0] == 'all' else 'albums'
             if 'stall' in q:

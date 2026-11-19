@@ -3,6 +3,21 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.40.2 - 2026-11-19
+
+### Added
+
+- **Check downloads now**: in Settings › Downloads, tap **Up to date** to
+  look for changes to your downloaded playlists right away (plexamp-web for
+  Android 0.2.3 or later).
+
+### Fixed
+
+- **A smart playlist's count** is what's in it now, on Playlists, on its
+  page and when choosing one to download. Plex's own count (and length) for
+  a smart playlist can lag its rules, so a playlist of 75 tracks could say
+  99.
+
 ## 0.40.1 - 2026-11-19
 
 ### Changed

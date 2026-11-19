@@ -1025,8 +1025,9 @@ function farAway(entries) {
 // must resolve to { items, total }. Pass the view's onDispose so the list
 // stops watching the page once it's gone. A page that can't be loaded says
 // so under the list (nothing's thrown: the pages after the first are asked
-// for as it scrolls, where nothing could catch it).
-export function pagedList(container, { fetchPage, render, pageSize = 60, empty = 'Nothing here.', onTotal, onItems, onDispose }) {
+// for as it scrolls, where nothing could catch it). onDone(items): once
+// the whole list is in.
+export function pagedList(container, { fetchPage, render, pageSize = 60, empty = 'Nothing here.', onTotal, onItems, onDone, onDispose }) {
   let start = 0;
   let total = Infinity;
   let loading = false;
@@ -1054,7 +1055,10 @@ export function pagedList(container, { fetchPage, render, pageSize = 60, empty =
       });
       onItems?.(all);
       start += items.length;
-      if (!items.length || start >= total) finish();
+      if (!items.length || start >= total) {
+        finish();
+        onDone?.(all);
+      }
     } catch (err) {
       finish();
       if (!destroyed) {
