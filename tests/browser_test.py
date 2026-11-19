@@ -5501,6 +5501,37 @@ with sync_playwright() as pw:
         check('devices: ...so two can play at once', wait_for(lambda: D(desk, "p.state === 'playing'"), 6) and D(phone, "p.state === 'playing' && d.role === 'active'"))
         D(desk, 'p.pause()')
 
+        # The Android app swiped away as it plays: Android closes its page
+        # without a word, and the app opened again is the same device, so it
+        # plays again, where it was, paused, rather than following itself
+        # till the service gives up on it.
+        D(phone, 'd.stop(), p.pause()')  # (the app plays next, with the phone following)
+        app_ua = js(phone, '() => navigator.userAgent') + ' plexamp-web-android/0.2.3'
+        app_ctx, app1 = device('App', **MOBILE, user_agent=app_ua)
+        play_first_album_track(app1, APP, album=2, track=1)
+        D(phone, 'd.update()')
+        check('devices: the Android app, playing, is the one that plays', wait_for(lambda: D(app1, "d.role === 'active'"), 6)
+              and wait_for(lambda: D(phone, "d.role === 'remote' && p.state === 'playing' && d.active?.name === 'App'"), 8), D(app1, 'd.role'))
+        app_id = D(app1, 'd.id')
+        app_track = D(app1, 'p.current.id')
+        app1.wait_for_timeout(1500)
+        app_at = D(app1, 'p.time')
+        D(app1, '(d.post = () => new Promise(() => {}), true)')  # (not a word to the service as it closes)
+        app1.close()
+        app2 = app_ctx.new_page()
+        attach(app2, 'app-again')
+        app2.goto(APP)
+        back = wait_for(lambda: D(app2, "d.role === 'active' && !p.cast && p.state === 'paused'"), 10)
+        app2_at = D(app2, 'p.time')
+        check('devices: the Android app opened again (its page closed without a word) plays where it was, paused, not following itself',
+              back and D(app2, 'd.id') == app_id and D(app2, 'p.current.id') == app_track and app_at - 6 <= app2_at <= app_at + 1
+              and not app2.locator('.pb-here').is_visible(), f'{D(app2, "d.role")} {app_at} -> {app2_at}')
+        check('devices: ...and your other devices see it paused there, at once', wait_for(lambda: D(phone, "d.role === 'remote' && p.state === 'paused' && d.active?.name === 'App'"), 6)
+              and abs(D(phone, 'p.time') - app2_at) < 1, f'{D(phone, "p.time")} {app2_at}')
+        shot(app2, 'devices-03-app-opened-again')
+        D(app2, 'd.stop(), p.pause()')  # (closing a page here says nothing either)
+        app_ctx.close()
+
         # Someone else's account sees none of it.
         sam_ctx = browser.new_context(**MOBILE)
         sam = sam_ctx.new_page()
