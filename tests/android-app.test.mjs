@@ -109,3 +109,20 @@ test('what the player shares is text, as the app can share', () => {
 test('hls.js is named in a plain string, so the app finds it to save', () => {
   assert.match(read('web/js/player.js'), /['"]vendor\/hls\.min\.js['"]/, why("'vendor/hls.min.js', as a plain string", 'GuiRefs.find, which saves the files scripts name'));
 });
+
+test("Settings › Downloads is the page the app's downloads notification opens", () => {
+  assert.match(read('web/js/app.js'), /\broute\(\s*['"]\/settings\/:page['"]/, why('the pages #/settings/…', 'MainActivity, whose downloads notification opens #/settings/downloads'));
+  assert.match(read('web/js/views/settings.js'), /\bconst pages = \{[^}]*\bdownloads:/, why('the page #/settings/downloads', 'MainActivity, whose downloads notification opens it'));
+});
+
+test('the page gives the app what it keeps downloads up to date with, and has it forget them on signing out', () => {
+  const downloads = read('web/js/downloads.js');
+  assert.match(
+    downloads,
+    /\.account\(\{[^}]*\bserverId:[^}]*\btoken:[^}]*\buser:[^}]*\buris\b[^}]*\bdevice:/,
+    why('the server, the sign-in and its addresses, given as downloads.account({ serverId, token, user, uris, device })', 'DownloadBridge.kt'),
+  );
+  assert.match(downloads, /on\(\s*['"]source['"]/, why('…again as the server changes', 'DownloadBridge.kt'));
+  assert.match(downloads, /on\(\s*['"]signing-out['"][\s\S]*?\.forget\(\)/, why('downloads.forget() as someone signs out or switches', 'DownloadBridge.kt, which removes the files and the sign-in'));
+  assert.match(read('web/js/state.js'), /function leave\([^)]*\)\s*\{[^}]*?emit\(\s*['"]signing-out['"]\s*\)/, why("'signing-out', as someone signs out or switches", 'DownloadBridge.kt, by way of js/downloads.js'));
+});

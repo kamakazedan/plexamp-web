@@ -10,6 +10,9 @@ import { isLovedTitle } from '../ratings.js';
 import { importPicker, backUpPlaylists } from './playlistfiles.js';
 import { sharingOn, sharesSoon, invitations } from '../sharing.js';
 import { invitationRows } from './share.js';
+import { unreachable } from '../connection.js';
+import { hasDownloads, offlineNow } from '../downloads.js';
+import { offlinePlaylistsView } from './downloads.js';
 
 // ---------- Browsing the library (in Search) ----------
 
@@ -495,7 +498,17 @@ function playlistsMenu() {
 }
 
 export async function playlistsView({ el, onDispose }) {
-  const [pls] = await Promise.all([app.server.playlists(playlistScope()), sharingOn() ? sharesSoon() : null]);
+  // The server can't be reached, in the Android app with playlists
+  // downloaded: those.
+  if (offlineNow() && hasDownloads()) return offlinePlaylistsView({ el, onDispose });
+  let found;
+  try {
+    found = await Promise.all([app.server.playlists(playlistScope()), sharingOn() ? sharesSoon() : null]);
+  } catch (err) {
+    if (hasDownloads() && unreachable(err)) return offlinePlaylistsView({ el, onDispose });
+    throw err;
+  }
+  const [pls] = found;
   const menu = iconButton('more', 'Import and back up', playlistsMenu, { cls: 'playlists-menu' });
   el.append(pageHeader('Playlists', { subtitle: pls.length ? fmt.count(pls.length, 'playlist', 'playlists') : null, actions: [menu] }));
   // Shared with you by Plex friends, to add (or not). (One added or turned

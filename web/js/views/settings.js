@@ -18,6 +18,8 @@ import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.j
 import { keptCount } from '../outbox.js';
 import { joinWithAnd, radioArrowKeys, SECRET_INPUT } from './common.js';
 import { setUpServer } from '../service.js';
+import { downloadsHere, downloadState, hasDownloads, bytesText } from '../downloads.js';
+import { downloadsView } from './downloads.js';
 
 const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 
@@ -50,12 +52,21 @@ export async function settingsView({ el }) {
         title: 'Playback',
         subtitle: app.config.devices ? 'Streaming quality, crossfade and your devices' : 'Streaming quality, gapless playback and crossfade',
       }),
+      downloadsHere() ? row({ href: '/settings/downloads', lead: lead('download'), title: 'Downloads', subtitle: downloadsSummary() }) : null,
       row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
       mbFeatures() ? row({ href: '/settings/musicbrainz', lead: lead('disc'), title: 'MusicBrainz', subtitle: 'Missing albums, original years' }) : null,
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'How this device reaches your server' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
     ),
   );
+}
+
+// Settings › Downloads, in a line: what's downloaded, or what it's for.
+function downloadsSummary() {
+  const list = downloadState()?.playlists || [];
+  if (!list.length) return 'Play playlists without a connection';
+  const used = downloadState().storage?.used || 0;
+  return `${fmt.count(list.length, 'playlist', 'playlists')}, ${bytesText(used)}`;
 }
 
 export async function settingsPageView(ctx) {
@@ -69,6 +80,7 @@ export async function settingsPageView(ctx) {
     desktop: desktopView,
     home: homeEditorView,
     playback: playbackView,
+    downloads: downloadsView,
     ai: aiView,
     missing: missingTracksView,
     musicbrainz: musicbrainzSettingsView,
@@ -135,7 +147,7 @@ function accountButtons() {
 function confirmSignOut() {
   sheet({
     title: 'Sign out?',
-    subtitle: `Clears your queue, lists, AI settings, player name and Home layout from this device${store.keys('profile.').length ? ', and settings kept for anyone switched from' : ''}. How the app looks and plays stays.${
+    subtitle: `Clears your queue, lists, ${hasDownloads() ? 'downloads, ' : ''}AI settings, player name and Home layout from this device${store.keys('profile.').length ? ', and settings kept for anyone switched from' : ''}. How the app looks and plays stays.${
       keptCount() ? ` ${keptCount() === 1 ? 'A play or rating' : `${keptCount()} plays and ratings`} from while you were offline will be lost.` : ''
     }${
       app.auth?.offline

@@ -8,6 +8,7 @@
 - [Shared playlists](#shared-playlists)
 - [Playlist files](#playlist-files)
 - [From Spotify](#from-spotify)
+- [Downloads, in the Android app](#downloads-in-the-android-app)
 - [Your devices](#your-devices)
 - [Play Together](#play-together)
 - [Play on](#play-on)
@@ -113,6 +114,17 @@ With `SPOTIFY_LINK_IMPORT=true` on the container (off to begin with), a public p
 - **Only its first 100 tracks** come over: the player reads the page Spotify shows anyone for the playlist, which lists no more.
 - **Nothing about you** goes to Spotify: the player fetches the page, not your browser.
 - It's against Spotify's terms, and stops working whenever Spotify changes that page (the app says so).
+
+## Downloads, in the Android app
+
+In [plexamp-web for Android](https://github.com/kamakazedan/plexamp-web-android), playlists can be kept on the phone, to play without a connection. A browser has no downloads.
+
+- **Download**, on a playlist's page, or **Settings › Downloads › Add playlists**. A message says it's started, and Settings › Downloads (or the app's notification) shows how far it's got.
+- **Kept up to date**: tracks added to a playlist are downloaded, those taken off are removed, and a file changed on your server is downloaded again. The app checks every few hours, even when it's closed, and as you open it, on a network it may use.
+- **Settings › Downloads**: the quality (to begin with, Original: your files as they are), whether to download on Wi-Fi only or on mobile data too, and when to play downloads: **Always**, **On mobile data** or **Only offline**. With your server out of reach, they play whatever it says.
+- **Space**: the phone's free space and what downloads use, and each playlist's size. A playlist that won't fit is refused, saying how much it needs. Removing one frees its space (it comes off the phone, not your server).
+- **Offline**: Playlists shows the ones on the phone, each as it was last downloaded, with its covers.
+- **Signing out**, or switching user, removes them from the phone, and the app forgets the sign-in it kept them up to date with.
 
 ## Your devices
 

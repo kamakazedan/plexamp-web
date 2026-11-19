@@ -19,5 +19,9 @@ Changing one is fine, with the app changed to match (the **In the app** column).
 | Files to save: a Blob's link (`URL.createObjectURL`), clicked as an `<a download>` | `download` in `web/js/ui.js` | `page-bridge.js` | Saving a playlist file does nothing in the app |
 | Sharing text and links, not files (`navigator.share`) | `web/js/views/missingtracks.js` | `page-bridge.js` | Share does nothing in the app |
 | Files a script loads by name are named in plain strings (`'vendor/hls.min.js'`) | `web/js/player.js` | `GuiRefs.find` | The file isn't saved, so it doesn't load without a connection |
+| The page `#/settings/downloads` (Settings › Downloads) | `pages` in `web/js/views/settings.js` | `MainActivity` (`DOWNLOADS_ROUTE`) | Tapping the downloads notification opens the wrong page |
+| Downloads: the page gives the app the server, the sign-in to it and its addresses (`account`) as it opens and as they change, and has it forget them (`forget`) as someone signs out or switches | `web/js/downloads.js` | `DownloadBridge.kt` | Downloads aren't kept up to date, or stay on the phone after signing out |
 
 The app finds the player's files as a browser does: from the page, each module's imports (`./`, `../` or `/`), the styles, the manifest, and paths in scripts' own strings. A file named any other way (a template string, a path put together as it runs) isn't saved. The app's own CI saves this repository's `web/` folder, from `main`, and checks every file in it was found.
+
+Downloads are the one thing the player asks the app for by name: `window.plexampAndroid.downloads`, which only the app's `page-bridge.js` gives a page. The player plays downloads from the addresses it hands out, under `__plexamp-web-android/downloads/` at the player's own address (`isLocal` in `web/js/downloads.js` knows them by that). What each call takes and answers is in the app's `DownloadBridge.kt`.

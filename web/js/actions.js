@@ -10,6 +10,8 @@ import { addToPlaylist, addToCollection, isAdminNow, tracksOf } from './editing.
 import { exportPlaylistFile } from './views/playlistfiles.js';
 import { lovedPlaylist, LOVED_TITLE } from './ratings.js';
 import { pickable, withoutDisliked } from './picks.js';
+import { unreachable } from './connection.js';
+import { isDownloaded, downloadedPlaylist, playableHere, offlineNow } from './downloads.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 const REMOTE_LIMIT = 500; // tracks sent to a Play Together session at once (player.js)
@@ -75,8 +77,24 @@ export const playArtist = (artist, { shuffle = false, without = null } = {}) =>
   });
 
 // A playlist's items: from `start`, at most `limit` of them, or (`sample`)
-// that many from all over a bigger one.
-async function playlistItems(pl, { start = 0, limit = PLAYLIST_PLAY_LIMIT, sample = false } = {}) {
+// that many from all over a bigger one. Downloaded to the phone (the
+// Android app), and the server can't be reached: its tracks on the phone.
+async function playlistItems(pl, opts = {}) {
+  if (offlineNow() && isDownloaded(pl.ratingKey)) return downloadedItems(pl, opts);
+  try {
+    return await serverItems(pl, opts);
+  } catch (err) {
+    if (isDownloaded(pl.ratingKey) && unreachable(err)) return downloadedItems(pl, opts);
+    throw err;
+  }
+}
+
+async function downloadedItems(pl, { start = 0, limit = PLAYLIST_PLAY_LIMIT, sample = false } = {}) {
+  const items = ((await downloadedPlaylist(pl.ratingKey))?.items || []).filter((m) => playableHere({ id: String(m.ratingKey) }));
+  return sample && items.length > limit ? shuffleArray(items).slice(0, limit) : items.slice(start, start + limit);
+}
+
+async function serverItems(pl, { start = 0, limit = PLAYLIST_PLAY_LIMIT, sample = false } = {}) {
   const s = app.server;
   const total = pl.leafCount || 0;
   if (sample && total > limit) {

@@ -18,6 +18,7 @@ import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.
 import { Prefetcher, cachedLoader, recordingLoader, LONG_FORM_MS } from './prefetch.js';
 import { connection, connectionLost, connectionBack, serverAnswers } from './connection.js';
 import { keepPlayed, flush } from './outbox.js';
+import { localUrl, isLocal, notPlayable, playableHere } from './downloads.js';
 
 // (Tracks at least this long count as long-form: see prefetch.js, which
 // this module imports, so it's kept there.)
@@ -243,9 +244,10 @@ function bufferedEnd(el, t) {
 }
 
 // Whether a deck has its track loaded as `src` (see sourceFor) would load
-// it: as the file, or converted at the same bitrate.
+// it: as the file (from the server, or the phone), or converted at the same
+// bitrate.
 function sameSource(deck, src) {
-  return deck.isHls === src.hls && (!src.hls || deck.kbps === src.kbps);
+  return deck.isHls === src.hls && deck.local === !!src.local && (!src.hls || deck.kbps === src.kbps);
 }
 
 // An element with what it needs to play from where it is (not still
@@ -332,6 +334,7 @@ export class Deck {
     this.waitingSince = 0; // performance.now() since it's been waiting for data (0: not waiting)
     this.prefetched = null; // what was loaded ahead for its track, played from memory (see prefetch.js)
     this.recording = null; // ...or, a converted stream coming in, what's kept of it as it comes (to play again)
+    this.local = false; // ...or, a download, played from the phone (see downloads.js)
     this.gen = 0;
   }
 
@@ -352,6 +355,7 @@ export class Deck {
     this.playback = playback;
     this.prefetched = prefetched;
     this.recording = !prefetched && isHls && !canPlayHlsNatively() ? recording : null;
+    this.local = !isHls && !prefetched && isLocal(url);
     if (isHls && !canPlayHlsNatively()) {
       const Hls = await loadHls();
       if (gen !== this.gen) throw new DOMException('Another track was loaded.', 'AbortError');
@@ -414,6 +418,7 @@ export class Deck {
     this.waitingSince = 0;
     this.prefetched = null;
     this.recording = null;
+    this.local = false;
   }
 }
 
@@ -788,6 +793,11 @@ class Player extends EventTarget {
 
   // `playback`: the track's playback, for a converted stream (see playbackId).
   sourceFor(track, forceTranscode, playback) {
+    // Downloaded to the phone (the Android app), and Play downloads says to
+    // play it from there now, or the server can't be reached: from there,
+    // as it is. (Not to AirPlay or Cast, which play from the server.)
+    const local = !forceTranscode && !this.useMediaToken ? localUrl(track) : null;
+    if (local) return { url: local, hls: false, kbps: null, local: true };
     const s = app.server;
     const quality = app.settings.quality;
     // On AirPlay or Cast, a temporary token for another server or account
@@ -847,7 +857,8 @@ class Player extends EventTarget {
     // a file's had to be (see readInFull), but for a long mix, or one more
     // than can be kept, which plays as it comes first, as Load ahead has
     // them: see Prefetcher.canReadInFull.)
-    const inFull = viaMemory || (this.readInFull && !asStream && this.ahead.canReadInFull(track) && !this.remote && !this.cast && !this.routed && !this.sourceFor(track, false).hls);
+    const plain = this.sourceFor(track, false);
+    const inFull = viaMemory || (this.readInFull && !asStream && this.ahead.canReadInFull(track) && !this.remote && !this.cast && !this.routed && !plain.hls && !plain.local);
     const memory = inFull && !pre && !transcode;
     let src = memory ? null : pre?.src || this.sourceFor(track, transcode, playback);
     this.transcoding = !!src?.hls;
@@ -1827,9 +1838,16 @@ class Player extends EventTarget {
     const media = this.audio.error;
     debugLog(
       'player',
-      `couldn’t play “${track.title}” (${track.codec || 'unknown format'}, ${this.transcoding ? 'converted by the server' : 'original file'}): ${err?.message || (media ? `media error ${media.code}${media.message ? `, ${media.message}` : ''}` : 'stream error')}`,
+      `couldn’t play “${track.title}” (${track.codec || 'unknown format'}, ${this.deck.local ? 'downloaded to the phone' : this.transcoding ? 'converted by the server' : 'original file'}): ${err?.message || (media ? `media error ${media.code}${media.message ? `, ${media.message}` : ''}` : 'stream error')}`,
       'warn',
     );
+    // A download that didn't play from the phone (damaged, say): from the
+    // server instead, from where it got to (the app downloads it again).
+    if (this.deck.local) {
+      notPlayable(track);
+      this.load(this.index, { autoplay: this.loadAutoplay || this.state === 'playing', startAt: this.restartAt(track, this.time), reportPrev: false, resume: true });
+      return;
+    }
     // Playing through AirPlay or Cast: the server's temporary token may be
     // one it doesn't take any more (it's restarted since, say), so another
     // is asked for (cast.js), for what plays from here.
@@ -2144,6 +2162,13 @@ class Player extends EventTarget {
   // the server answers then.
   holdFor(track, at, autoplay, { delay = HOLD_ASK.firstMs, gone = true, transcode = false } = {}) {
     this.cancelHold();
+    // Downloaded to the phone: from there, at once (see sourceFor).
+    if (gone && playableHere(track) && !this.deck.local && !this.cast && !this.remote) {
+      debugLog('player', `the connection’s gone: “${track.title}” plays from the phone, at ${at.toFixed(1)} s`, 'warn');
+      connectionLost();
+      this.load(this.index, { autoplay, startAt: at, reportPrev: false, resume: true });
+      return;
+    }
     const qid = track.qid;
     const hold = { qid, at, gone, tries: 0, timer: 0 };
     this.held = hold;
