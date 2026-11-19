@@ -55,6 +55,9 @@ import { chooseMissingKinds, missingKinds } from './mbsettings.js';
 import { copyText, toCsv } from '../missing.js';
 import { clearSelection } from '../selection.js';
 import { sortChoices, sortedOrder, restoreOrder, saveOrder } from '../sorting.js';
+import { unreachable } from '../connection.js';
+import { isDownloaded, offlineNow } from '../downloads.js';
+import { downloadLine, offlinePlaylistView } from './downloads.js';
 
 function actionButtons(buttons) {
   return h(
@@ -1314,6 +1317,10 @@ function pictureBox(path, { what, id, title, load, onChanged }) {
 // ---------- Playlist ----------
 
 export async function playlistView({ el, params, onDispose, onHide }) {
+  // Downloaded to the phone (the Android app), and the server can't be
+  // reached: as it was downloaded.
+  const offline = () => offlinePlaylistView({ el, id: params.id, onDispose });
+  if (offlineNow() && isDownloaded(params.id)) return offline();
   const s = app.server;
   const hash = location.hash;
   // (The shares are waited for a few seconds at most, so a slow service
@@ -1323,7 +1330,14 @@ export async function playlistView({ el, params, onDispose, onHide }) {
   // put aside, the next time it's opened), as that changes what can be
   // done with it. Where they can't be had, it's taken as not shared, as
   // before.)
-  const [pl, shares] = await Promise.all([s.playlist(params.id), sharingOn() ? sharesSoon() : []]);
+  let found;
+  try {
+    found = await Promise.all([s.playlist(params.id), sharingOn() ? sharesSoon() : []]);
+  } catch (err) {
+    if (isDownloaded(params.id) && unreachable(err)) return offline();
+    throw err;
+  }
+  const [pl, shares] = found;
   if (!pl) throw Object.assign(new Error('Not found'), { status: 404 });
   let sharesKnown = shares !== null;
   // Shared with friends (yours), or shared with you (see sharing.js).
@@ -1416,6 +1430,7 @@ export async function playlistView({ el, params, onDispose, onHide }) {
             ? h('button.hero-meta.share-line.link-btn', { type: 'button', onclick: () => openShareDialog(pl, { onChange: sharingChanged }) }, icon('together', 18), h('span', null, shareLine(share)))
             : h('div.hero-meta.share-line', null, icon('together', 18), h('span', null, shareLine(share)))
           : null,
+        downloadLine(pl, onDispose),
         actionButtons([
           { icon: 'play', label: 'Play', primary: true, onClick: () => playPlaylist(pl) },
           { icon: 'shuffle', label: 'Shuffle', onClick: () => playPlaylist(pl, { shuffle: true }) },

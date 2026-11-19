@@ -3,6 +3,7 @@
 import { app } from './state.js';
 import { store } from './plex.js';
 import { pushOverlay, popOverlay, back as goBack } from './router.js';
+import { phoneCover, offlineNow } from './downloads.js';
 
 // ---------- element builder ----------
 
@@ -145,6 +146,9 @@ const ICONS = {
   sliders: S('<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.1"/><circle cx="9" cy="17" r="2.1"/>'),
   monitor: S('<rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M9 20h6M12 16.5V20"/>'),
   plus: S('<path d="M12 5v14M5 12h14"/>'),
+  // Downloads (downloads.js): an arrow down onto the phone, and ticked once it's there.
+  download: S('<path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/>'),
+  downloaded: S('<path d="M5 19.5h14M7.5 11.5l3.2 3.2L17 8.5"/>'),
   arrowUp: S('<path d="M12 19V5M6 11l6-6 6 6"/>'),
   arrowDown: S('<path d="M12 5v14M6 13l6 6 6-6"/>'),
   home2: S('<path d="M4 10.2 12 4l8 6.2V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M9 14h6"/>'),
@@ -254,11 +258,20 @@ export function art(path, { size = 160, most, round = false, cls = '', fallback 
     missing();
     return wrap;
   }
-  const img = h('img', { alt, loading: 'lazy', decoding: 'async', draggable: 'false', src });
+  // An album's cover downloaded with its tracks is on the phone too (the
+  // Android app: see downloads.js): from there first offline, and from
+  // there where the server's doesn't come.
+  const phone = phoneCover(path);
+  const tries = !phone ? [src] : offlineNow() ? [phone, src] : [src, phone];
+  const img = h('img', { alt, loading: 'lazy', decoding: 'async', draggable: 'false', src: tries.shift() });
   const failed = () => {
     // A picture let go on purpose (off screen, see pagedList and the router)
     // isn't a broken one.
     if (!img.getAttribute('src')) return;
+    if (tries.length) {
+      img.src = tries.shift();
+      return;
+    }
     img.removeEventListener('error', failed);
     missing();
   };
@@ -668,6 +681,12 @@ export function toast(message, { action, onAction, timeout = 3500 } = {}) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('out'), timeout);
   setTimeout(() => el.isConnected && el.classList.contains('out') && el.remove(), timeout + 400);
+}
+
+// Takes away the toast showing, if there is one.
+export function hideToast() {
+  clearTimeout(toastTimer);
+  document.getElementById('toasts')?.replaceChildren();
 }
 
 // ---------- bottom sheets ----------
