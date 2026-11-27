@@ -3,6 +3,23 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.41.3 - 2026-11-27
+
+### Fixed
+
+- **Home stays still while Plex scans your library.** It reloaded every
+  few seconds through a scan: sections flashed grey, went, and came back.
+  Now what's on Home stays on screen while it's brought up to date, and
+  only what's changed changes: albums the scan finds come in where they
+  go, once a minute while it scans and as soon as it's done. A section
+  the server's too busy to answer for mid-scan keeps what it had. The
+  "Scanning" line under the heading stays put through Plex's steps (no
+  more flicking between "Scanning" and "Updating Metadata", or going off
+  in between), and no longer moves the page when it comes and goes.
+- **Going back to Home** after new music arrived shows it at once, as you
+  left it, then brings it up to date in place, rather than loading it
+  again.
+
 ## 0.41.1 - 2026-11-27
 
 ### Changed

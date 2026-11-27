@@ -20,6 +20,10 @@ const POLL_HIDDEN = 5 * 60000;
 const WS_BLOCKED_FOR = 6 * 3600 * 1000;
 const MAX_FAILURES = 3;
 const WS_ONLY_RETRY_MAX = 60000; // WebSockets only: the longest wait between tries
+const LIBRARY_BATCH = 4000; // new music, passed on this long after Plex first says
+const SCAN_BATCH = 60000; // ...while Plex is scanning the library: at most once a minute, and as soon as it's done
+const SCAN_LINGER = 8000; // the scan's line stays this long after it ends (Plex often goes straight on to another)
+const ACTIVITY_SILENT = 5 * 60000; // a scan not heard of for this long has ended (its end missed while the connection was down)
 
 const EVENT_TYPES = ['timeline', 'activity', 'playing', 'status', 'progress', 'reachability', 'update.statechange'];
 
@@ -41,8 +45,10 @@ class LiveUpdates extends EventTarget {
     this.wakeFn = null;
     this.snapshot = null;
     this.scanning = null;
+    this.activities = new Map(); // what Plex is doing in this library (scans, metadata): its id → { title, progress, timer }, oldest first
+    this.lingerTimer = 0;
     this.pending = { library: false, playlists: new Set(), items: new Set() };
-    this.flushTimers = {};
+    this.flushTimers = {}; // kind → { due, id }
 
     // (Another server's notifications still to be passed on go with it:
     // their ids are its own.)
@@ -107,6 +113,10 @@ class LiveUpdates extends EventTarget {
     this.closeFn = null;
     this.wakeFn?.();
     this.snapshot = null;
+    for (const a of this.activities.values()) clearTimeout(a.timer);
+    this.activities.clear();
+    clearTimeout(this.lingerTimer);
+    this.lingerTimer = 0;
     this.setScanning(null);
   }
 
@@ -330,7 +340,8 @@ class LiveUpdates extends EventTarget {
     const sig = dir ? [dir.contentChangedAt, dir.updatedAt, dir.scannedAt].map((v) => v ?? '').join(':') : '';
     const lists = new Map(asArray(playlists.Metadata).map((p) => [String(p.ratingKey), String(p.updatedAt ?? p.addedAt ?? '')]));
     const refreshing = dir && [true, 1, '1', 'true'].includes(dir.refreshing);
-    this.setScanning(refreshing ? { title: `Plex is scanning ${dir.title}` } : null);
+    if (refreshing) this.activityGoing('poll', `Plex is scanning ${dir.title}`);
+    else this.activityEnded('poll');
 
     const prev = this.snapshot;
     this.snapshot = { sig, lists };
@@ -392,24 +403,75 @@ class LiveUpdates extends EventTarget {
     if (state === 5 && id) this.queueItem(id);
   }
 
+  // Plex can do several things in a library at once, or one straight after
+  // another (scanning it, then updating its metadata): it's scanning until
+  // the last of them has ended.
   onActivity(n) {
     const act = n.Activity || {};
     if (!/^library\./.test(String(act.type || ''))) return;
     const sec = act.Context?.librarySectionID;
     if (sec != null && String(sec) !== String(app.source?.sectionKey)) return;
+    const id = String(n.uuid || act.uuid || act.type);
     if (n.event === 'ended') {
-      this.setScanning(null);
+      this.activityEnded(id);
       this.queueLibrary();
     } else {
-      this.setScanning({ title: act.title || 'Plex is updating your library', progress: act.progress });
+      this.activityGoing(id, act.title || 'Plex is updating your library', act.progress);
+    }
+  }
+
+  // Whether Plex is scanning (or otherwise working on) the library now: the
+  // scan's line stays a moment longer (see paintScan).
+  isScanning() {
+    return this.activities.size > 0;
+  }
+
+  activityGoing(id, title, progress) {
+    const was = this.activities.get(id);
+    clearTimeout(was?.timer);
+    const timer = setTimeout(() => {
+      this.activityEnded(id);
+      this.queueLibrary();
+    }, ACTIVITY_SILENT);
+    this.activities.set(id, { title, progress, timer });
+    this.paintScan();
+  }
+
+  activityEnded(id) {
+    const was = this.activities.get(id);
+    if (!was) return;
+    clearTimeout(was.timer);
+    this.activities.delete(id);
+    // (Music it found waiting for the scan to end goes now: see queueLibrary.)
+    if (!this.activities.size && this.flushTimers.library) this.flushLater('library', LIBRARY_BATCH);
+    this.paintScan();
+  }
+
+  // What the scan's line says: the first thing still going (not each in
+  // turn as they say how far they've got), and nothing a moment after the
+  // last has ended (not between one and the next, so the page doesn't jump).
+  paintScan() {
+    const first = this.activities.values().next().value;
+    if (first) {
+      clearTimeout(this.lingerTimer);
+      this.lingerTimer = 0;
+      this.setScanning({ title: first.title, progress: first.progress });
+    } else if (this.scanning && !this.lingerTimer) {
+      this.lingerTimer = setTimeout(() => {
+        this.lingerTimer = 0;
+        if (!this.activities.size) this.setScanning(null);
+      }, SCAN_LINGER);
     }
   }
 
   // ---------- batching ----------
 
+  // While Plex scans the library (each album it finds is news), what's new
+  // is passed on once a minute, and as soon as the scan's done: pages
+  // aren't brought up to date every few seconds through a long scan.
   queueLibrary() {
     this.pending.library = true;
-    this.flushLater('library', 4000);
+    this.flushLater('library', this.activities.size ? SCAN_BATCH : LIBRARY_BATCH);
   }
 
   queuePlaylists(ids) {
@@ -424,14 +486,21 @@ class LiveUpdates extends EventTarget {
 
   // What's waiting to be passed on (see flushLater), let go of.
   dropPending() {
-    for (const timer of Object.values(this.flushTimers)) clearTimeout(timer);
+    for (const t of Object.values(this.flushTimers)) clearTimeout(t?.id);
     this.flushTimers = {};
     this.pending = { library: false, playlists: new Set(), items: new Set() };
   }
 
+  // Passed on `ms` from now, with whatever else comes meanwhile (or sooner,
+  // if it was to go sooner already).
   flushLater(kind, ms) {
-    if (this.flushTimers[kind]) return;
-    this.flushTimers[kind] = setTimeout(() => {
+    const due = Date.now() + ms;
+    const was = this.flushTimers[kind];
+    if (was) {
+      if (was.due <= due) return;
+      clearTimeout(was.id);
+    }
+    const id = setTimeout(() => {
       this.flushTimers[kind] = null;
       if (kind === 'library') {
         this.pending.library = false;
@@ -446,6 +515,7 @@ class LiveUpdates extends EventTarget {
         this.emit('items', { ids });
       }
     }, ms);
+    this.flushTimers[kind] = { due, id };
   }
 
   setScanning(scan) {

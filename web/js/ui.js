@@ -401,6 +401,12 @@ function watchShelf(head, shelf, back, on) {
   }
 }
 
+// A shelf's buttons, checked again: what's on it has changed (`head`: its
+// heading, as sectionHeader made it).
+export function shelfChanged(head) {
+  shelfChecks.get(head)?.();
+}
+
 // ---------- cards, shelves, grids ----------
 
 // Cards grow with the window on big screens (app.css), and so does the

@@ -2,7 +2,7 @@
 import './debug.js';
 import { app, setSource, on, proxyUri, serverFor } from './state.js';
 import { listServers, pickConnection, routeRank, ROUTE_KINDS } from './plex.js';
-import { route, startRouter, navigate, goTab, parseHash, refresh, dropCached, overlayDepth } from './router.js';
+import { route, startRouter, navigate, goTab, parseHash, refresh, refreshQuietly, dropCached, outdateCached, overlayDepth } from './router.js';
 import { h, icon } from './ui.js';
 import { player } from './player.js';
 import { initBackdrop } from './backdrop.js';
@@ -279,28 +279,32 @@ function hideBanner() {
 
 // ---------- live updates ----------
 
-// Re-render the page on screen only when that won't pull it from under the
-// user: they're near the top and nothing is open over it.
+// Bring the page on screen up to date only when that won't pull it from
+// under the user: they're near the top and nothing is open over it. (Home
+// changes in place, only where something has: see refreshQuietly. Busy
+// with it, it's brought up to date when it's next shown.)
 function refreshIfIdle(test) {
   const { path } = parseHash();
-  if (!test(path) || window.scrollY > 150 || overlayDepth() || isSelecting() || document.querySelector('.ai-progress, .view.is-editing, .view.is-sorting')) return;
-  refresh();
+  if (!test(path)) return;
+  const busy = window.scrollY > 150 || overlayDepth() || isSelecting() || document.querySelector('.ai-progress, .view.is-editing, .view.is-sorting');
+  refreshQuietly({ later: !!busy });
 }
 
 function wireLiveUpdates() {
   // Long lists keep their cached copy (and scroll position) for the back
-  // button; they load fresh the next time they're opened.
+  // button; they load fresh the next time they're opened (Home's brought
+  // up to date in place then).
   const summaryPages = (p) => p === '/' || p === '/recent' || p === '/search';
   live.addEventListener('library', () => {
     app.server?.cache.clear();
-    dropCached(summaryPages);
+    outdateCached(summaryPages);
     refreshIfIdle((p) => p === '/' || p === '/search');
   });
   live.addEventListener('playlists', (e) => {
     app.server?.forgetPlaylists();
     const ids = e.detail.ids.map(String);
     const affected = (p) => p === '/' || p === '/playlists' || (p.startsWith('/playlist/') && (!ids.length || ids.includes(p.split('/')[2])));
-    dropCached(affected);
+    outdateCached(affected);
     refreshIfIdle(affected);
   });
   live.addEventListener('scan', (e) => {

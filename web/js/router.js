@@ -547,12 +547,40 @@ export function refresh() {
   render(currentKey, false);
 }
 
+// The page on screen brought up to date: in place where its view can (its
+// onUpdate: Home's sections stay on screen, and only what's changed in them
+// changes), or else loaded again. `later`: not now (the person's busy with
+// it, scrolled down, say): a page that can be brought up to date in place
+// is when it's next shown.
+export function refreshQuietly({ later = false } = {}) {
+  const entry = cache.get(currentKey);
+  if (entry?.update) {
+    if (later) entry.stale = true;
+    else {
+      entry.stale = false;
+      entry.update();
+    }
+  } else if (!later) refresh();
+}
+
 // Forget kept pages (other than the one on screen) whose path matches, so
 // going back to them loads fresh data.
 export function dropCached(test) {
   for (const [k, entry] of [...cache]) {
     if (k === currentKey) continue;
     if (test(parseHash(entry.hash).path)) dropEntry(k);
+  }
+}
+
+// The same, for what's changed on the server (new music, a playlist): kept
+// pages that can be brought up to date in place (see refreshQuietly) stay,
+// and are when they're shown again, so going back to them shows them at
+// once rather than loading.
+export function outdateCached(test) {
+  for (const [k, entry] of [...cache]) {
+    if (k === currentKey || !test(parseHash(entry.hash).path)) continue;
+    if (entry.update) entry.stale = true;
+    else dropEntry(k);
   }
 }
 
@@ -688,6 +716,11 @@ async function render(k, useCache, { same = false } = {}) {
     show(cached);
     const y = scrolls.get(k) || 0;
     requestAnimationFrame(() => window.scrollTo(0, y));
+    // (Something on it changed while it was put aside: see outdateCached.)
+    if (cached.stale && cached.update) {
+      cached.stale = false;
+      cached.update();
+    }
     return;
   }
   dropEntry(k);
@@ -695,7 +728,7 @@ async function render(k, useCache, { same = false } = {}) {
   const el = document.createElement('div');
   // Pages to read and fill in keep to a column on big screens (app.css).
   el.className = m.narrow ? 'view view-narrow' : 'view';
-  const entry = { el, hash: location.hash, disposers: [], hiders: [], size: 0 };
+  const entry = { el, hash: location.hash, disposers: [], hiders: [], size: 0, update: null, stale: false };
   cache.set(k, entry);
   while (cache.size > CACHE_LIMIT) dropEntry(cache.keys().next().value);
   show(entry);
@@ -705,7 +738,8 @@ async function render(k, useCache, { same = false } = {}) {
     // onDispose: for a view's own listeners and timers, run when the page
     // is no longer kept (at once, for a page let go while it was still
     // loading: refreshed, say). onHide: run each time the page is put aside
-    // (a playlist unlocked for editing locks again, say).
+    // (a playlist unlocked for editing locks again, say). onUpdate: how the
+    // page brings itself up to date in place (see refreshQuietly).
     await m.view({
       params: m.params,
       query,
@@ -715,6 +749,7 @@ async function render(k, useCache, { same = false } = {}) {
       key: k,
       onDispose: (fn) => (entry.dropped ? runDisposer(fn) : entry.disposers.push(fn)),
       onHide: (fn) => entry.hiders.push(fn),
+      onUpdate: (fn) => (entry.update = fn),
     });
   } catch (err) {
     console.error(err);
