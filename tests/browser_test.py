@@ -8463,6 +8463,10 @@ with sync_playwright() as pw:
         page.wait_for_selector('.sheet', state='detached')
         check('plexhome: ...everyone in the Plex Home, you among them (not to switch to), saying who\'s managed and who has a PIN, and that your settings come back when you switch back',
               rows == [['Dan', 'You · Admin', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', '', True]] and 'kept on this device for when you switch back' in said, f'{rows} {said!r}')
+        # (Who this device signed in with: whoever's signed in, till someone
+        # switches here.)
+        first = js(page, "() => import('./js/state.js').then(({ signedInWith }) => signedInWith('a1001'))")
+        check('plexhome: (before anyone switches, the device signed in with whoever\'s signed in: Dan)', first == 'a1001', str(first))
 
         # Dan's: settings (some kept for his account), a search, what's
         # playing, a missing track an AI playlist of his suggested (with what
@@ -8541,6 +8545,9 @@ with sync_playwright() as pw:
         check('plexhome: ...not even what another tab of Dan\'s kept in the moment before it heard (his queue, his settings)',
               js(page, "() => localStorage.getItem('test.kept')") and 'dans-queued-track' not in kid_stored and 'dans-key' not in kid_stored
               and 'pw.left' not in keys, kid_stored[:300])
+        kid_auth = js(page, "() => JSON.parse(localStorage.getItem('pw.auth'))")
+        check('plexhome: ...who this device signed in with (Dan, by his Plex account\'s id) is kept with Kid\'s sign-in, to switch back to; never his token',
+              kid_auth.get('origin') == 'a1001' and kid_auth.get('token') == 't4' and not re.search(r'"(token|authToken|accessToken)":"t"', kid_stored), json.dumps(kid_auth))
         page.go_back()
         page.wait_for_timeout(1200)
         back_to = (js(page, '() => location.hash'), page.locator('.view .wide-card').count() > 0, page.locator('.account-card').count())
@@ -8567,8 +8574,34 @@ with sync_playwright() as pw:
         page.wait_for_selector('.sheet', state='detached')
         check('plexhome: ...and Kid can switch too, with Kid as "You"', shown and page.locator('.account-name').inner_text() == 'Kid'
               and kids_rows[1:] == [['Kid', 'You · Managed user', False], ['Gran', '', True]], str(kids_rows))
-        check('plexhome: ...but not to Dan, the Home\'s admin and the server\'s owner, who has no PIN: it says to set one in Plex, or sign in as him',
-              kids_rows[0] == ['Dan', 'Admin · Needs a PIN', False] and pin_note == ['To switch to Dan, set a PIN for them in Plex, or sign in as them.'], f'{kids_rows} {pin_note}')
+        check('plexhome: ...and back to Dan, the Home\'s admin and the server\'s owner, who has no PIN, without one, as this device signed in as him (as in Plex\'s own apps)',
+              kids_rows[0] == ['Dan', 'Admin', True] and pin_note == [], f'{kids_rows} {pin_note}')
+        # A switch made before 0.41.2 kept nobody's sign-in with Kid's: there,
+        # Dan still needs a PIN, as before (or signing in again).
+        js(page, "() => { const a = JSON.parse(localStorage.getItem('pw.auth')); delete a.origin; localStorage.setItem('pw.auth', JSON.stringify(a)); }")
+        page.reload()
+        switch_button(page)
+        page.click('.account-card button:has-text("Switch user")')
+        old_rows = home_rows(page)
+        old_note = page.locator('.sheet.open .home-users-pin').all_inner_texts()
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        kept_how = js(page, """() => import('./js/state.js').then(({ app, signedInWith }) => {
+            const auth = app.auth;
+            try {
+                const none = signedInWith('a1004');
+                app.auth = { ...auth, origin: 'a1001' };
+                const kept = signedInWith('a1004');
+                app.auth = { ...auth, origin: 'not/an id' };
+                return [none, kept, signedInWith('a1004')];
+            } finally {
+                app.auth = auth;
+            }
+        })""")
+        check('plexhome: ...but after a switch made before 0.41.2 (who signed in wasn\'t kept), not without a PIN: it says to set one in Plex, or sign in as him',
+              old_rows[0] == ['Dan', 'Admin · Needs a PIN', False] and old_note == ['To switch to Dan, set a PIN for them in Plex, or sign in as them.']
+              and kept_how == [None, 'a1001', None], f'{old_rows} {old_note} {kept_how}')
+        js(page, "() => { const a = JSON.parse(localStorage.getItem('pw.auth')); a.origin = 'a1001'; localStorage.setItem('pw.auth', JSON.stringify(a)); }")
         # Who isn't offered without a PIN: the Home's admin; the server's owner,
         # by plex.tv's id for them, or by their name (one who isn't the admin,
         # with a name of their own to show); and where who owns it can't be
@@ -8580,7 +8613,7 @@ with sync_playwright() as pw:
                 { id: '3', uuid: 'u3', title: 'Kid', restricted: true },
                 { id: '4', uuid: 'u4', title: 'Gran', username: 'gran', protected: true },
             ];
-            const names = (servers, id) => users.filter(off(users, servers, id)).map((u) => u.title).join(',');
+            const names = (servers, id, back) => users.filter(off(users, servers, id, back)).map((u) => u.title).join(',');
             return [
                 names([{ id: 's', owned: true }], 's'),
                 names([{ id: 's', owned: false, ownerId: '2', sharedBy: 'someone' }], 's'),
@@ -8590,20 +8623,27 @@ with sync_playwright() as pw:
                 names(null, 's'),
                 names([{ id: 'other', owned: true }], 's'),
                 names([{ id: 's', owned: true }], undefined),
+                // (Whoever the device signed in with: offered without a PIN.)
+                names([{ id: 's', owned: true }], 's', 'u1'),
+                names([{ id: 's', owned: false, ownerId: '2', sharedBy: 'someone' }], 's', 'u2'),
+                names(null, 's', 'u2'),
+                names(null, 's', 'u3'),
+                names(null, 's', 'nobody'),
             ];
         })""")
         check('plexhome: ...nor to the server\'s owner without a PIN (by plex.tv\'s id for them, or their name), nor, where who owns it can\'t be told, anyone but managed users',
-              rule == ['Dad', 'Dad,Mom', 'Dad,Mom', 'Dad', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom'], str(rule))
+              rule[:8] == ['Dad', 'Dad,Mom', 'Dad,Mom', 'Dad', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom', 'Dad,Mom'], str(rule))
+        check('plexhome: ...but always to whoever the device signed in with, the Home\'s admin or the server\'s owner too (and to nobody else for it)',
+              rule[8:] == ['', 'Dad', 'Dad', 'Dad,Mom', 'Dad,Mom'], str(rule))
 
-        # Back to Dan, once he has a PIN (as plex.tv says from here on; the
-        # mock takes any PIN of his): his own again, as kept for his account.
+        # Back to Dan with a tap (he has no PIN, and this device signed in as
+        # him): his own again, as kept for his account.
         def dan_has_pin(route):
             u = urllib.parse.urlsplit(route.request.url)
             home = route.fetch(url=f'{MOCK}{u.path}?{u.query}').json()
             for user in home.get('users', []):
                 user['protected'] = user['protected'] or user['admin']
             route.fulfill(status=200, content_type='application/json', body=json.dumps(home), headers={'Access-Control-Allow-Origin': '*'})
-        ctx.route(re.compile(r'https://(clients\.)?plex\.tv/api/v2/home/users(\?.*)?$'), dan_has_pin)
 
         def switch_by_pin(pg, name, pin, where='.account-card'):
             switch_to(pg, name, where)
@@ -8616,16 +8656,17 @@ with sync_playwright() as pw:
         switch_button(page)
         js(page, COVER_WATCH)
         with page.expect_event('load', timeout=15000):
-            switch_by_pin(page, 'Dan', DAN_PIN)
+            switch_to(page, 'Dan')
         page.wait_for_selector('.wide-card:not(.skeleton)', timeout=20000)
         back = who(page)
         dan_again = wait_for(lambda: js(page, "() => import('./js/state.js').then(({ app }) => [app.settings.gridSize, app.settings.skipDisliked])") == ['large', False], 10, 0.3)
         his_missing = wait_for(lambda: 'Dans Secret Song' in js(page, "() => import('./js/missing.js').then((m) => m.missingList().map((x) => x.title))"), 10, 0.5)
         page.goto(A + '#/playlists')
         page.wait_for_selector('.view .grid-playlists .card', timeout=15000)
-        check('plexhome: switching back to Dan (by his PIN): his token, server and library, and his settings, missing tracks and playlists again',
+        check('plexhome: switching back to Dan is a tap, no PIN asked: his token, server and library, and his settings, missing tracks and playlists again',
               back['token'] == 't' and back['server'] == 'mock-server-1' and back['section'] == section_before and dan_again and his_missing
-              and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts(), str(back))
+              and 'Favourite tracks' in page.locator('.view .grid-playlists .card .card-title').all_inner_texts()
+              and mock('/__mock/home')['MediaContainer']['switches'][-1] == {'from': 't4', 'to': 't', 'pin': ''}, str(back))
         own_again = js(page, "() => import('./js/state.js').then(({ app }) => ({ quality: app.settings.quality, name: app.settings.playerName, ai: app.settings.ai }))")
         aside = js(page, "() => [Object.keys(localStorage).filter((k) => k.startsWith('pw.profile.')).sort(), JSON.parse(localStorage.getItem('pw.profile.a1004') || 'null')]")
         check('plexhome: ...his settings kept on the device come back too (Streaming quality, the player\'s name, his own AI server, but for its key), and Kid\'s are kept aside for Kid',
@@ -8646,10 +8687,24 @@ with sync_playwright() as pw:
         check('plexhome: switching to Gran (who has no PIN, and can\'t use Dan\'s server): she chooses a server, and can switch user or sign out from there',
               gran['token'] == 't5' and gran['server'] is None and page.url.endswith('#/setup') and 'Signed in as Gran' in setup_said and at_setup
               and page.locator('.setup-account button:has-text("Sign out")').count() == 1, f'{gran} {page.url} {setup_said!r}')
+        page.click('.setup-account button:has-text("Switch user")')
+        grans_rows = home_rows(page)
+        page.keyboard.press('Escape')
+        page.wait_for_selector('.sheet', state='detached')
+        check('plexhome: ...and from her, Dan is offered without a PIN too: the device signed in as him',
+              grans_rows == [['Dan', 'Admin', True], ['Kid', 'Managed user · Has a PIN', True], ['Gran', 'You', False]], str(grans_rows))
+        # Once Dan has a PIN (as plex.tv says from here on; the mock takes
+        # any PIN of his), switching back to him asks for it, though the
+        # device signed in as him.
+        ctx.route(re.compile(r'https://(clients\.)?plex\.tv/api/v2/home/users(\?.*)?$'), dan_has_pin)
+        page.reload()
+        switch_button(page, '.setup-account')
         with page.expect_event('load', timeout=15000):
             switch_by_pin(page, 'Dan', DAN_PIN, where='.setup-account')
         page.wait_for_selector('.source-body .row', timeout=20000)
-        check('plexhome: ...back to Dan from there, who chooses his (nothing of Gran\'s to go on)', who(page)['token'] == 't' and page.url.endswith('#/setup'), str(who(page)))
+        check('plexhome: ...and once he has a PIN, switching back to him asks for it: back to Dan from there by his PIN, who chooses his server (nothing of Gran\'s to go on)',
+              who(page)['token'] == 't' and page.url.endswith('#/setup') and mock('/__mock/home')['MediaContainer']['switches'][-1] == {'from': 't5', 'to': 't', 'pin': DAN_PIN},
+              str(who(page)))
         # Signing out: everyone's kept settings go too.
         page.click('.setup-account button:has-text("Sign out")')
         with page.expect_event('load', timeout=15000):
@@ -8664,7 +8719,7 @@ with sync_playwright() as pw:
         pin_here = re.compile(rf'\b({KID_PIN}|{WRONG_PIN})\b')
         stored = js(page, '() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage)')
         check('plexhome: Kid\'s PIN went to plex.tv only: none sent to this app (nor in what the browser logs to it), none kept',
-              [(s['to'], s['pin']) for s in switches] == [('t4', WRONG_PIN), ('t4', KID_PIN), ('t', DAN_PIN), ('t5', ''), ('t', DAN_PIN)]
+              [(s['to'], s['pin']) for s in switches] == [('t4', WRONG_PIN), ('t4', KID_PIN), ('t', ''), ('t5', ''), ('t', DAN_PIN)]
               and not any(pin_here.search(x) for x in to_app) and not pin_here.search(stored) and any('api/debug/log' in x for x in to_app),
               f'{switches} {[x[:120] for x in to_app if pin_here.search(x)]}')
         ctx.close()
@@ -8679,6 +8734,43 @@ with sync_playwright() as pw:
         sam.goto(A + '#/settings/account')
         sam.reload()
         check('plexhome: someone not in a Plex Home has no Switch user', not switch_button(sam) and sam.locator('.account-card button:has-text("Sign out")').count() == 1)
+        ctx.close()
+
+        # The other way about: Gran, signed in on her own device, can't get
+        # into Dan's account without his PIN (he's the Home's admin), nor can
+        # anyone she switches to there; they can switch back to her with a
+        # tap, as the device signed in as her.
+        mock('/__mock/home?reset=1')
+        ctx = browser.new_context(**MOBILE)
+        plex_tv_from_mock(ctx)
+        own = ctx.new_page()
+        attach(own, 'plexhome-gran')
+        own.goto(A + '#/login')
+        own.wait_for_selector('.login-form, button:has-text("Sign in")', timeout=15000)
+        js(own, "() => import('./js/state.js').then((m) => m.setAuth({ token: 't5', username: 'Gran', thumb: null, manual: false }))")
+        own.goto(A + '#/setup')
+        switch_button(own, '.setup-account')
+        own.click('.setup-account button:has-text("Switch user")')
+        own_rows = home_rows(own)
+        own_note = own.locator('.sheet.open .home-users-pin').all_inner_texts()
+        own.keyboard.press('Escape')
+        own.wait_for_selector('.sheet', state='detached')
+        check('plexhome: someone else in the Home, signed in on their own device (Gran), still can\'t switch to Dan without his PIN',
+              own_rows == [['Dan', 'Admin · Needs a PIN', False], ['Kid', 'Managed user · Has a PIN', True], ['Gran', 'You', False]]
+              and own_note == ['To switch to Dan, set a PIN for them in Plex, or sign in as them.'], f'{own_rows} {own_note}')
+        with own.expect_event('load', timeout=15000):
+            switch_by_pin(own, 'Kid', KID_PIN, where='.setup-account')
+        own.wait_for_selector('.setup-account', timeout=20000)
+        switch_button(own, '.setup-account')
+        own.click('.setup-account button:has-text("Switch user")')
+        kid_here = home_rows(own)
+        check('plexhome: ...nor can Kid, switched to there; but Kid can switch back to Gran without a PIN, as the device signed in as her (where no server\'s chosen, anyone else who may own one needs a PIN)',
+              kid_here == [['Dan', 'Admin · Needs a PIN', False], ['Kid', 'You · Managed user', False], ['Gran', '', True]], str(kid_here))
+        with own.expect_event('load', timeout=15000):
+            own.locator('.sheet.open button.home-user', has_text='Gran').click()
+        own.wait_for_selector('.setup-account', timeout=20000)
+        made = [(x['from'], x['to'], x['pin']) for x in mock('/__mock/home')['MediaContainer']['switches']]
+        check('plexhome: ...back to Gran with a tap, no PIN asked', who(own)['token'] == 't5' and made == [('t5', 't4', KID_PIN), ('t4', 't5', '')], f'{who(own)} {made}')
         ctx.close()
         for t in ('t', 't2', 't4'):
             kept_for(t, 'DELETE')
