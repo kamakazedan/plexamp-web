@@ -157,20 +157,18 @@ STUB
         expect "an update after that changes nothing more" sh -c "cp /etc/plexamp-web/plexamp-web.env /tmp/settings.before && env PATH=\"/tmp/stub:\$PATH\" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1 && cmp -s /tmp/settings.before /etc/plexamp-web/plexamp-web.env && ! grep -q \"are called OFFLINE_PWD\" /tmp/update.log"
         sed -i -e "/^# Where the offline password can be used from:/d" -e "/^OFFLINE_PWD=/d" -e "/^[[:space:]]*OFFLINE_NETWORKS=/d" /etc/plexamp-web/plexamp-web.env
         configure >/dev/null
-        # Spotify imports'"'"' words as a settings file from before 0.41.0 has
-        # them (that turned a link on to begin with, and the download of your
-        # data off): an update has them as they are now, saying so, and keeps
-        # the values.
-        sed -i -e "s/^# true: playlists from Spotify'"'"'s download of your data\. Empty: off\.\$/# Playlists from Spotify'"'"'s download of your data. Empty: on./" \
-            -e "s/^# A playlist from a public Spotify link (first 100 tracks; against\$/# true: a playlist from a public Spotify link (first 100 tracks; against/" \
-            -e "s/^# Spotify'"'"'s terms)\. Empty: on; false: off\.\$/# Spotify'"'"'s terms). Empty: off./" -e "s/^SPOTIFY_LINK_IMPORT=\$/SPOTIFY_LINK_IMPORT=true/" /etc/plexamp-web/plexamp-web.env
-        expect "(the settings file as 0.40.4 wrote it, for the test)" grep -qx "# Spotify'"'"'s terms). Empty: off." /etc/plexamp-web/plexamp-web.env
+        # Spotify imports as 0.40.4 wrote them in the settings (before 0.41.0
+        # turned a link on to begin with, and the download of your data off),
+        # with a link turned on: an update has the words as they are now,
+        # saying so, and keeps the values.
+        printf "%s\n" "# Playlists from Spotify'"'"'s download of your data. Empty: on." "SPOTIFY_FILE_IMPORT=" "# true: a playlist from a public Spotify link (first 100 tracks; against" "# Spotify'"'"'s terms). Empty: off." "SPOTIFY_LINK_IMPORT=true" >>/etc/plexamp-web/plexamp-web.env
         expect "an update has 0.40.4'"'"'s words about Spotify imports as they are now" update update-plexamp-web
         expect "...saying so" grep -q "a playlist from a Spotify link is on now unless SPOTIFY_LINK_IMPORT=false" /tmp/update.log
         expect "...with the words as they are now" sh -c "grep -qx \"# true: playlists from Spotify'"'"'s download of your data. Empty: off.\" /etc/plexamp-web/plexamp-web.env && grep -qx \"# A playlist from a public Spotify link (first 100 tracks; against\" /etc/plexamp-web/plexamp-web.env && grep -qx \"# Spotify'"'"'s terms). Empty: on; false: off.\" /etc/plexamp-web/plexamp-web.env"
         expect "...keeping the values" grep -qx "SPOTIFY_LINK_IMPORT=true" /etc/plexamp-web/plexamp-web.env
         expect "...and an update after that says nothing more of them" sh -c "env PATH=\"/tmp/stub:\$PATH\" PW_SOURCE_DIR=/src PW_NO_SYSTEMD=1 update-plexamp-web >/tmp/update.log 2>&1 && ! grep -q \"Spotify link is on now\" /tmp/update.log"
-        sed -i "s/^SPOTIFY_LINK_IMPORT=true\$/SPOTIFY_LINK_IMPORT=/" /etc/plexamp-web/plexamp-web.env
+        sed -i -e "/^# true: playlists from Spotify'"'"'s download of your data\. Empty: off\.\$/d" -e "/^SPOTIFY_FILE_IMPORT=/d" \
+            -e "/^# A playlist from a public Spotify link (first 100 tracks; against\$/d" -e "/^# Spotify'"'"'s terms)\. Empty: on; false: off\.\$/d" -e "/^SPOTIFY_LINK_IMPORT=/d" /etc/plexamp-web/plexamp-web.env
         configure >/dev/null
         # Every step in detail: --verbose, or PW_VERBOSE=1 (which commands
         # from before --verbose pass on to the installer too).
