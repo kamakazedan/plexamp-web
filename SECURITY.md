@@ -167,6 +167,7 @@ From a link (on unless `SPOTIFY_LINK_IMPORT=false`):
 ### Switching user, in a Plex Home
 
 - **The Home's admin and the server's owner** are only offered if they have a PIN. Where who owns the server can't be told, only managed users and those with a PIN are. plex.tv is asked again just before switching.
+- **Whoever signed in on the device** is offered there without a PIN where they have none, to switch back to, from anyone they switched to (a managed user too), as in Plex's own apps. It's known only from a sign-in on that device, kept with each switch and gone on signing out. Switching back is plex.tv's own switch: no token of theirs is kept, so a PIN they set later is asked for.
 - **It clears what signing out clears.** Your settings are kept aside on the device, by your account's id, for when you switch back. Your own AI server's key isn't: you enter it again.
 - **The PIN** goes from the browser to plex.tv only: never to the container, never kept, and taken out of debug logs.
 - From the moment someone else is signed in, an open tab of the last person's keeps nothing more on the device.

@@ -241,6 +241,7 @@ Each is listed with how many albums it has and who MusicBrainz says it is. To me
 Where your account is in a Plex Home, **Settings › Account › Switch user** lists everyone in it, and asks for a PIN where they have one.
 
 - **The Home's admin and the server's owner** are only offered if they have a PIN, so nobody else can get into their account with a tap.
+- **Switching back to whoever signed in on the device** needs no PIN where they have none, from anyone they switched to there, as in Plex's own apps. Give them a PIN in Plex to stop that.
 - **Each person is their own**: your settings are kept aside on the device for when you switch back, and the next person gets theirs. The queue, searches and anything else kept for you go, as on signing out.
 - **The PIN** goes to plex.tv only.
 - **Their own access**: playlists, ratings and plays are theirs in Plex. They stay on the same server and library if they can use it, or choose one.

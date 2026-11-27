@@ -290,9 +290,12 @@ export async function homeUsers(token) {
 // the server owner's account with a tap. Where it can't be told who owns it
 // (no server chosen yet, plex.tv didn't list it, or its owner is named as
 // nobody in the Home is), everyone but managed users, who can't own a
-// server. A PIN they have, plex.tv asks for. Returns (user) -> true for
+// server. A PIN they have, plex.tv asks for. But never the account this
+// device signed in with (`back`: plex.tv's id for it, or null; see state.js
+// signedInWith): the device is theirs to switch back to, as in Plex's own
+// apps (with their PIN, where they have one). Returns (user) -> true for
 // those not offered.
-export function homeUsersOffLimits(users, servers, serverId) {
+export function homeUsersOffLimits(users, servers, serverId, back = null) {
   const same = (a, b) => !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
   const server = serverId && Array.isArray(servers) ? servers.find((s) => s.id === serverId) : null;
   let owners = null; // ids of the Home's people who may own it; null: can't be told
@@ -302,7 +305,7 @@ export function homeUsersOffLimits(users, servers, serverId) {
     const named = users.filter((u) => same(u.username, server.sharedBy) || same(u.title, server.sharedBy));
     if (named.length) owners = new Set(named.map((u) => u.id));
   }
-  return (u) => !u.protected && (u.admin || (owners ? owners.has(u.id) : !u.restricted));
+  return (u) => !u.protected && !(back && u.uuid === back) && (u.admin || (owners ? owners.has(u.id) : !u.restricted));
 }
 
 // Switches to one of them (`pin`: theirs, where they have one): plex.tv's
