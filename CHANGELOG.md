@@ -3,6 +3,19 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.41.2 - 2026-11-27
+
+### Fixed
+
+- **Switch user switches back to whoever signed in on the device**,
+  without a PIN where they have none, as Plex's own apps do: switched from
+  your account to someone else's, you couldn't get back to yours if you're
+  the Plex Home's admin or own the server, unless you signed out and in
+  again. From anyone switched to there, a managed user too: give yourself
+  a PIN in Plex to stop that. Someone in the Home on their own device still
+  can't get into the admin's or server owner's account without their PIN.
+  A device that switched before this version needs one more sign-in first.
+
 ## 0.41.1 - 2026-11-27
 
 ### Changed

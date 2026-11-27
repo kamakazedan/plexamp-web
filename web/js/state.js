@@ -177,7 +177,7 @@ settleLeft();
 
 export const app = {
   config: window.PW_CONFIG || {},
-  auth: store.get('auth'), // { token, username, thumb, manual, offline }
+  auth: store.get('auth'), // { token, username, thumb, manual, offline, origin (see signedInWith) }
   source: store.get('source'), // { serverId, serverName, uri, token, kind, sectionKey, sectionTitle, connections }
   server: null,
   settings: { ...DEFAULT_SETTINGS, ...storedSettings() },
@@ -298,6 +298,20 @@ export function signOut() {
 // (`next.source`), or else they choose.
 export function switchAccount(next) {
   leave(next);
+}
+
+// The Plex account this device signed in with (plex.tv's id for it), as
+// people switch in its Plex Home: it can be switched back to without a PIN
+// where it has none, as the device is theirs (see plex.js
+// homeUsersOffLimits). Till someone switches here (nobody's settings are
+// kept aside till then: see leave), it's whoever's signed in (`myId`);
+// after that, the one each switch keeps with the sign-in (`origin`), or
+// nobody, where a switch before 0.41.2 kept none. Never anyone who wasn't
+// signed in here. (It goes as they sign out, or someone signs in over them.)
+export function signedInWith(myId) {
+  const kept = app.auth?.origin;
+  if (profileKey(kept)) return String(kept);
+  return !store.keys(PROFILE).length && profileKey(myId) ? String(myId) : null;
 }
 
 function leave(next) {
