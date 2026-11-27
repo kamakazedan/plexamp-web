@@ -1,4 +1,4 @@
-// Settings › MusicBrainz › Years and genres to fix, for the server's owner:
+// Settings › Server owner › Years and genres to fix, for the server's owner:
 // the library's albums looked up on MusicBrainz (by the player, in the
 // background: on musicbrainz.org, once a second, so a big library takes a
 // while; on a MusicBrainz of the player's own, several at a time), each the
@@ -58,7 +58,7 @@ function newScan(key) {
 }
 
 export async function mbReviewView({ el, onDispose }) {
-  el.append(backHeader('Years and genres to fix', { fallback: '/settings/musicbrainz' }));
+  el.append(backHeader('Years and genres to fix', { fallback: '/settings/owner' }));
   if (!mbFeatures()) {
     el.append(emptyState('MusicBrainz features are turned off on this player.'));
     return;

@@ -4,20 +4,42 @@
 // Spotify for a download of your data, and to choosing just its playlist
 // files from it; then the playlists in them, to choose from; then the
 // import (playlistfiles.js runImport), with the tracks that aren't in the
-// library put on Missing tracks, unless that's turned off. And, with
+// library put on Missing tracks, where the server's owner has them on
+// (unless that's unchecked). And, with
 // SPOTIFY_LINK_IMPORT (SPOTIFY_IMPORT before 0.22.0), a public playlist
 // from its link: the link; then the playlist as Spotify has it, and a name
-// for it here; then the import (straight there, without the other).
+// for it here, or one of yours to add it to (a long one comes over a part at
+// a time, split on Spotify); then the import (straight there, without the
+// other).
 import { app } from '../state.js';
 import { popOverlay } from '../router.js';
 import { h, sheet, fmt, icon } from '../ui.js';
+import { playlistsToAddTo } from '../editing.js';
 import { readSpotifyPlaylist, spotifyLinkKind, spotifyEntries, spotifyOffered, spotifyFilesOffered, sortSpotifyFiles, readSpotifyFiles, SPOTIFY_PRIVACY_URL, LIKED_SONGS } from '../spotify.js';
 import { runImport, nameKey, libraryName, pickFiles } from './playlistfiles.js';
-import { missingKeptNote } from '../missing.js';
+import { missingKeptNote, missingOn, missingEditable } from '../missing.js';
 import { FILE_LIMITS } from '../playlistio.js';
 import { joinWithAnd } from './common.js';
 
 const NOT_A_LINK = 'That isn’t a link to a Spotify playlist. In Spotify, choose Share › Copy link to playlist, and paste that.';
+
+// "Put what isn't here on Missing tracks", where the server's owner has
+// them on: theirs to choose (checked to begin with). A friend's go there
+// (that's the owner's to say), as a line tells them.
+function keepRow(keep) {
+  if (!missingOn()) return null;
+  if (!missingEditable()) return h('p.hint.spotify-keep.spotify-keep-note', null, `What isn’t here goes on Missing tracks. ${missingKeptNote()}`);
+  return h(
+    'label.import-choice.spotify-keep',
+    null,
+    keep,
+    h('span.import-choice-text', null, h('span.import-choice-title', null, 'Put what isn’t here on Missing tracks'), h('span.import-choice-sub', null, 'Listed in Settings › Server owner, to go and find.')),
+  );
+}
+
+// Whether what isn't here goes on Missing tracks: as the owner chose, and
+// always for a friend.
+const keeping = (keep) => missingOn() && (!missingEditable() || keep.checked);
 
 // ---------- from Spotify's download of your data ----------
 
@@ -263,12 +285,7 @@ function choosePlaylists({ playlists, tooBig, more, moreIn, moreAlone, files, re
       passed ? h('p.spotify-refused', null, passed) : null,
       usable.length > 1 ? all : null,
       h('div.import-choices', null, boxes.map((b) => b.row)),
-      h(
-        'label.import-choice.spotify-keep',
-        null,
-        keep,
-        h('span.import-choice-text', null, h('span.import-choice-title', null, 'Put what isn’t here on Missing tracks'), h('span.import-choice-sub', null, `Listed in Settings › AI › Missing tracks, to go and find${missingKeptNote() ? `.${missingKeptNote()}` : ''}`)),
-      ),
+      keepRow(keep),
       go,
     ),
     variant: 'dialog',
@@ -276,12 +293,17 @@ function choosePlaylists({ playlists, tooBig, more, moreIn, moreAlone, files, re
     onClose: () => {
       if (!chosen?.length) return;
       const jobs = chosen.map(({ p, title }) => ({ p: { title: p.title, tracks: p.tracks }, title, from: p.title }));
-      Promise.resolve().then(() => runImport(jobs, { remember: keep.checked ? { via: 'spotify' } : null }));
+      Promise.resolve().then(() => runImport(jobs, { remember: keeping(keep) ? { via: 'spotify' } : null }));
     },
   });
 }
 
 // ---------- from a public playlist's link (SPOTIFY_LINK_IMPORT) ----------
+
+// The playlist the last one made or was added to (till the app's opened
+// again): first among yours to add the next to, as a long one comes over a
+// part at a time.
+let lastInto = '';
 
 function fromLink() {
   let ctrl = null;
@@ -289,6 +311,8 @@ function fromLink() {
   let chosen = null; // what to import, once the dialog has closed
   let name = null;
   let keep = null;
+  let target = null; // the playlist it goes in: a new one, or one of yours
+  let yours = [];
   const input = h('input', { type: 'url', inputmode: 'url', autocomplete: 'off', spellcheck: 'false', maxLength: 500, placeholder: 'https://open.spotify.com/playlist/…' });
   const status = h('p.ask-message.spotify-status', { role: 'status' });
   const next = h('button.btn.btn-primary', { type: 'submit' }, 'Next');
@@ -314,7 +338,13 @@ function fromLink() {
     onClose: () => {
       ctrl?.abort();
       // (Once this dialog has gone: the import opens one of its own.)
-      if (chosen) Promise.resolve().then(() => runImport([{ p: chosen.p, title: chosen.title }], { remember: chosen.remember }));
+      if (!chosen) return;
+      Promise.resolve()
+        .then(() => runImport([{ p: chosen.p, title: chosen.title, into: chosen.into }], { remember: chosen.remember }))
+        .then((done) => {
+          const pl = done?.[0]?.playlist;
+          if (pl) lastInto = String(pl.ratingKey);
+        });
     },
   });
   setTimeout(() => input.focus(), 60);
@@ -348,49 +378,74 @@ function fromLink() {
   }
 
   async function showPlaylist(pl) {
+    // The names of the playlists you have (a new one isn't given one of
+    // them), and those it can be added to.
     let have = new Set();
     try {
       have = new Set((await app.server.playlists()).map((p) => nameKey(p.title)));
+      yours = await playlistsToAddTo();
     } catch {
-      /* names aren't checked */
+      /* names aren't checked, and it's a new one */
     }
     const taken = have.has(nameKey(pl.name));
+    // Yours to add it to: the one the last went in first, then one by its
+    // name, then the one looked at or changed last.
+    const rank = (p) => (String(p.ratingKey) === lastInto ? 2 : nameKey(p.title) === nameKey(pl.name) ? 1 : 0);
+    yours = yours.slice().sort((a, b) => rank(b) - rank(a));
     name = h('input', { type: 'text', value: taken ? `${pl.name} (from Spotify)` : pl.name, maxLength: 200, autocomplete: 'off', spellcheck: 'false' });
+    target = h('select', null, h('option', { value: '' }, 'New playlist'), ...yours.map((p) => h('option', { value: String(p.ratingKey) }, p.title)));
     keep = h('input', { type: 'checkbox', checked: true });
+    const naming = h('label.field', null, h('span', null, 'Name'), name);
+    const go = h('button.btn.btn-primary', { type: 'submit' });
+    const paint = () => {
+      const into = intoOf();
+      naming.hidden = !!into;
+      go.textContent = into ? `Add to “${into.title}”` : 'Make the playlist';
+    };
+    target.addEventListener('change', paint);
+    paint();
     const length = pl.tracks.reduce((ms, t) => ms + (t.duration || 0), 0);
-    form.replaceChildren(
+    const count = fmt.count(pl.tracks.length, 'track', 'tracks');
+    // (replaceChildren would put "null" for one left out.)
+    const parts = [
       h(
         'div.spotify-found',
         null,
         h('div.spotify-found-title', null, pl.name),
-        h('div.spotify-found-sub', null, [pl.owner ? `By ${pl.owner}` : '', fmt.count(pl.tracks.length, 'track', 'tracks'), fmt.long(length)].filter(Boolean).join(' · ')),
+        h('div.spotify-found-sub', null, [pl.owner ? `By ${pl.owner}` : '', pl.capped ? `First ${count}` : count, fmt.long(length)].filter(Boolean).join(' · ')),
       ),
+      // As many as Spotify's page lists: how the rest come over.
+      pl.capped ? h('p.spotify-capped', null, icon('info', 20), h('span', null, 'Over 100 tracks? Split it into playlists of 100 on Spotify, then add each to one playlist here.')) : null,
       h(
         'p.ask-message',
         null,
-        `Each is looked for in ${libraryName()} by its title, artist and length, and those found make a playlist here, in the same order.` +
-          (pl.capped ? ' Spotify’s public page lists a playlist’s first 100 tracks, so any after those aren’t in it.' : '') +
-          (taken ? ` You have a playlist called “${pl.name}” already.` : ''),
+        `Each is looked for in ${libraryName()} by its title, artist and length, and those found come over in the same order.${taken ? ` You have a playlist called “${pl.name}” already.` : ''}`,
       ),
-      h('label.field', null, h('span', null, 'Name'), name),
-      h(
-        'label.import-choice.spotify-keep',
-        null,
-        keep,
-        h('span.import-choice-text', null, h('span.import-choice-title', null, 'Put what isn’t here on Missing tracks'), h('span.import-choice-sub', null, `Listed in Settings › AI › Missing tracks, to go and find${missingKeptNote() ? `.${missingKeptNote()}` : ''}`)),
-      ),
-      h('button.btn.btn-primary', { type: 'submit' }, 'Make the playlist'),
-    );
+      yours.length ? h('label.field', null, h('span', null, 'Playlist'), target) : null,
+      naming,
+      keepRow(keep),
+      go,
+    ];
+    form.replaceChildren(...parts.filter(Boolean));
     setTimeout(() => {
       name.focus();
       name.select();
     }, 30);
   }
 
+  // One of yours, chosen to add it to (null: a new one).
+  const intoOf = () => yours.find((p) => String(p.ratingKey) === target?.value) || null;
+
   function make() {
-    const title = name.value.trim();
+    const into = intoOf();
+    const title = into ? into.title : name.value.trim();
     if (!title) return name.focus();
-    chosen = { p: { title, tracks: spotifyEntries(found) }, title, remember: keep.checked ? { via: 'spotify', from: found.name } : null };
+    chosen = {
+      p: { title, tracks: spotifyEntries(found) },
+      title,
+      into: into ? { ratingKey: String(into.ratingKey), title: into.title } : null,
+      remember: keeping(keep) ? { via: 'spotify', from: found.name } : null,
+    };
     popOverlay();
   }
 }

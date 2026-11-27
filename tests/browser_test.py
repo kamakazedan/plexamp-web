@@ -227,6 +227,11 @@ def settings(page, patch):
     js(page, f"() => import('./js/state.js').then(m => m.saveSettings({json.dumps(patch)}))")
 
 
+def owner_features(page, patch):
+    """What the server's owner has on for everyone (Settings › Server owner), set as the owner."""
+    js(page, f"() => import('./js/features.js').then(m => m.setFeatures({json.dumps(patch)}))")
+
+
 def toggle(page, title, on):
     box = page.locator('label.toggle-row', has_text=title).locator('input')
     if box.is_checked() != on:
@@ -2902,16 +2907,23 @@ with sync_playwright() as pw:
         check('missing: ...and nothing is left in its place', 'null' not in page.locator('.ai-body').inner_text().split('\n'))
 
         page.goto(APP + '#/settings/ai')
-        page.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
-        check('missing: Settings › AI has Show missing tracks (and no list yet)', page.locator('a.missing-link').is_hidden())
-        mb_row = page.locator('label.toggle-row', has_text='Check suggestions on MusicBrainz')
-        check('missing: ...and, the player having a MusicBrainz to ask (its own), checking suggestions there, on to begin with',
-              mb_row.count() == 1 and mb_row.locator('input').is_checked() and 'the player’s own MusicBrainz server' in mb_row.inner_text(), mb_row.inner_text() if mb_row.count() else '')
-        toggle(page, 'Show missing tracks', True)
+        page.wait_for_selector('.ai-shared, .ai-custom')
+        check('missing: it isn\'t in Settings › AI any more (it\'s Spotify imports\' too)', page.locator('label.toggle-row:has-text("missing")').count() == 0)
+        page.goto(APP + '#/settings')
+        page.locator('a.row[href="#/settings/owner"]').click()
+        page.wait_for_selector('label.toggle-row:has-text("List what’s missing")')
+        on_row = page.locator('label.toggle-row', has_text='List what’s missing')
+        check('missing: Settings › Server owner has it, off to begin with (and no list yet)', not on_row.locator('input').is_checked() and page.locator('a.missing-link').is_hidden())
+        toggle(page, 'List what’s missing', True)
+        mb_row = page.locator('label.toggle-row', has_text='Check AI suggestions on MusicBrainz')
+        page.wait_for_timeout(300)
+        check('missing: ...and once it\'s on, checking AI suggestions on MusicBrainz (the player has its own), on to begin with',
+              mb_row.is_visible() and mb_row.locator('input').is_checked() and 'the player’s own MusicBrainz server' in mb_row.inner_text(), mb_row.inner_text() if mb_row.count() else '')
         # First without MusicBrainz: everything suggested and missing is listed.
-        toggle(page, 'Check suggestions on MusicBrainz', False)
-        page.wait_for_timeout(200)
-        check('missing: ...and once it\'s on, the list', page.locator('a.missing-link').is_visible())
+        toggle(page, 'Check AI suggestions on MusicBrainz', False)
+        page.wait_for_timeout(300)
+        check('missing: ...and the list', page.locator('a.missing-link').is_visible())
+        check('missing: ...each for everyone, as the player keeps them', js(page, "() => import('./js/features.js').then((m) => m.readFeatures({ force: true }).then(() => [m.featureOn('missing'), m.featureOn('mbCheck')]))") == [True, False])
         shot(page, 'missing-01-settings')
 
         make('Late night drive')
@@ -2992,9 +3004,10 @@ with sync_playwright() as pw:
         # With MusicBrainz: an AI playlist checks its suggestions before it
         # lists them, and says what it left out, and why.
         mb_before = mock('/__mock/musicbrainz')['MediaContainer']['requests']
-        page.goto(APP + '#/settings/ai')
-        page.wait_for_selector('label.toggle-row:has-text("Check suggestions on MusicBrainz")')
-        toggle(page, 'Check suggestions on MusicBrainz', True)
+        page.goto(APP + '#/settings/owner')
+        page.wait_for_selector('label.toggle-row:has-text("Check AI suggestions on MusicBrainz")')
+        toggle(page, 'Check AI suggestions on MusicBrainz', True)
+        page.wait_for_timeout(300)
         make('Late night drive')
         page.wait_for_selector('.ai-missing')
         page.click('.ai-missing summary')
@@ -3076,6 +3089,12 @@ with sync_playwright() as pw:
         page.wait_for_timeout(400)
         check('missing: the list can be cleared (another server\'s stays)', [m['title'] for m in stored()] == ['Elsewhere Song'] and page.locator('.missing-row').count() == 0
               and page.locator('.empty-state').count() == 1, str(stored()))
+
+        # Off again, for everyone: AI playlists list nothing, and imports
+        # don't offer to.
+        owner_features(page, {'missing': False, 'mbCheck': True})
+        make('Late night drive')
+        check('missing: turned off again, an AI playlist lists nothing', page.locator('.ai-missing, .ai-missing-none').count() == 0 and [m['title'] for m in stored()] == ['Elsewhere Song'])
         settings(page, {'ai': {'mode': 'auto'}})
         ctx.close()
 
@@ -7429,6 +7448,9 @@ with sync_playwright() as pw:
         page = ctx.new_page()
         attach(page, 'spotify', expected=('status of 404',))  # the private playlist, on purpose
         login(page, APP)
+        # (What isn't found goes on Missing tracks where the server's owner
+        # has them on, for everyone: on here, then off again below.)
+        owner_features(page, {'missing': True})
         page.goto(APP + '#/search')
         page.wait_for_selector('.spotify-row')
         form = '.spotify-form'
@@ -7437,6 +7459,8 @@ with sync_playwright() as pw:
         # From Spotify's download of your data: a guide to asking for it, and
         # to choosing just its playlist files, which are read in the browser.
         def guide():
+            # (Not the list from before, if it's still on its way out.)
+            page.wait_for_selector('.spotify-choose-form', state='detached')
             page.locator('.spotify-row').scroll_into_view_if_needed()
             page.click('.spotify-row')
             page.wait_for_selector('.spotify-guide')
@@ -7924,9 +7948,50 @@ with sync_playwright() as pw:
         open_dialog()
         look('https://open.spotify.com/playlist/mockHundred00000000003', '.spotify-found')
         hundred = page.locator(f'{form}').inner_text()
-        check('spotify: a playlist as long as Spotify\'s page lists says the rest aren\'t in it', '100 tracks' in hundred and 'first 100 tracks, so any after those aren’t in it' in hundred, hundred[:400])
+        shot(page, 'spotify-04-hundred')
+        check('spotify: a playlist as long as Spotify\'s page lists says it\'s the first 100, and how to bring a longer one over (in parts, into one playlist)',
+              'First 100 tracks' in hundred and 'Over 100 tracks? Split it into playlists of 100 on Spotify, then add each to one playlist here.' in hundred, hundred[:400])
         page.click('.dialog-close')
         page.wait_for_timeout(400)
+        # Added to one of yours instead (a long one comes over a part at a
+        # time that way): only what isn't in it already goes on its end.
+        road_key = js(page, """() => import('./js/state.js').then(async ({ app }) => {
+            app.server.forgetPlaylists();
+            return String((await app.server.playlists()).find((p) => p.title === 'Road trip classics').ratingKey);
+        })""")
+        items_of = lambda key: js(page, f"""() => import('./js/state.js').then(async ({{ app }}) => (await app.server.playlistItems('{road_key}', {{ start: 0, size: 100 }})).items.map((m) => String(m.ratingKey)))""")
+        road_before = items_of(road_key)
+        def add_late_night():
+            open_dialog()
+            look('spotify:playlist:mockLateNight000000002', '.spotify-found')
+            opts = page.locator(f'{form} select option').all_inner_texts()
+            page.select_option(f'{form} select', road_key)
+            shown = (page.locator(f'{form} button[type=submit]').inner_text(), page.locator(f'{form} input[type=text]').is_hidden())
+            if shot_it:
+                shot(page, 'spotify-05-into')
+            page.click(f'{form} button[type=submit]')
+            page.wait_for_selector('.dialog-close:has-text("Done")', timeout=60000)
+            out = page.locator('.import-form').inner_text()
+            page.click('.dialog-close')
+            page.wait_for_timeout(400)
+            return opts, shown, out
+        shot_it = True
+        opts, shown, into = add_late_night()
+        road_after = items_of(road_key)
+        late_keys = js(page, """() => import('./js/state.js').then(async ({ app }) => {
+            app.server.forgetPlaylists();
+            const pl = (await app.server.playlists()).find((p) => p.title === 'Night drive mix');
+            return (await app.server.playlistItems(pl.ratingKey, { start: 0, size: 50 })).items.map((m) => String(m.ratingKey));
+        })""")
+        fresh = [k for k in late_keys if k not in road_before]
+        check('spotify: it can go into one of your playlists instead of a new one (chosen from yours: then it has no name of its own to give)',
+              opts[0] == 'New playlist' and 'Road trip classics' in opts and shown == ('Add to “Road trip classics”', True), f'{opts} {shown}')
+        check('spotify: ...where only what isn\'t in it already goes, on its end, and it says how many',
+              fresh and road_after == road_before + fresh and f'Added {len(fresh)} track' in into and 'to “Road trip classics”' in into, f'{into!r} {road_before} {road_after} {late_keys}')
+        shot_it = False
+        _, _, again_into = add_late_night()
+        check('spotify: ...so adding the same one again adds nothing, and says so', items_of(road_key) == road_after and 'Nothing new' in again_into and 'in “Road trip classics” already' in again_into,
+              again_into)
         open_dialog()
         look('https://open.spotify.com/playlist/mockRoadTrip0000000001', '.spotify-found')
         again = (page.input_value(f'{form} input[type=text]'), page.locator(f'{form}').inner_text())
@@ -7943,9 +8008,19 @@ with sync_playwright() as pw:
             app.server.forgetPlaylists();
             for (const p of await app.server.playlists()) if (['Road trip classics', 'Road trip classics (from Spotify)', 'Night drive mix'].includes(p.title)) await app.server.deletePlaylist(p.ratingKey);
         })""")
-        # On a player with neither way (SPOTIFY_FILE_IMPORT=false, and no
-        # SPOTIFY_LINK_IMPORT), there's no From Spotify; with the link alone
-        # (by its new name, and the file import turned off), it's the link.
+        # With Missing tracks off for everyone, an import doesn't offer to put
+        # what isn't found there.
+        owner_features(page, {'missing': False})
+        page.goto(APP + '#/search')
+        page.wait_for_selector('.spotify-row')
+        open_dialog()
+        look('spotify:playlist:mockLateNight000000002', '.spotify-found')
+        check('spotify: with Missing tracks off (Settings › Server owner), an import doesn\'t offer to put what isn\'t found there', page.locator(f'{form} .spotify-keep').count() == 0)
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(400)
+        # On a player with neither way (SPOTIFY_LINK_IMPORT=false, and no
+        # SPOTIFY_FILE_IMPORT), there's no From Spotify; with the defaults
+        # (the link alone, since 0.41.0), it's the link.
         login(page, APP_NOWS)
         page.goto(APP_NOWS + '#/search')
         page.wait_for_selector('a.row[href="#/sonic-path"]')  # (in the same block as From Spotify)
@@ -7959,7 +8034,7 @@ with sync_playwright() as pw:
             page.locator('.spotify-row').scroll_into_view_if_needed()
             page.click('.spotify-row')
             page.wait_for_selector(form)
-            check('spotify: with the link alone (SPOTIFY_LINK_IMPORT), From Spotify opens it straight away',
+            check('spotify: with the defaults (a link alone), From Spotify opens it straight away',
                   'link' in sub and page.locator('.spotify-guide').count() == 0 and page.locator(f'{form} input[type=url]').count() == 1, sub)
             page.keyboard.press('Escape')
         ctx.close()
@@ -8695,8 +8770,26 @@ with sync_playwright() as pw:
                 login(pg, APP_DEBUG, token, app_defaults=True)
             return c, pg, bodies
 
+        def features(token, method='GET', body=None):
+            req = urllib.request.Request(APP_DEBUG + f'api/features?server={SRV}', method=method, data=json.dumps(body).encode() if body is not None else None,
+                                         headers={'X-Plex-Token': token, 'Content-Type': 'application/json', 'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read() or b'{}')
+
         # (Everyone's on the server, cleared by its owner: as if new.)
         lists('t', 'POST', {'ops': [{'type': 'clear', 'id': op_id(), 'everyone': True}]})
+        # Missing tracks are the server owner's to turn on, for everyone, and
+        # only theirs: while they're off, a friend's new ones aren't kept.
+        features('t', 'PUT', {'set': {'missing': False}})
+        try:
+            features('t2', 'PUT', {'set': {'missing': True}})
+            friend_set = 200
+        except urllib.error.HTTPError as err:
+            friend_set = err.code
+        off_note = lists('t2', 'POST', {'ops': [{'type': 'note', 'id': op_id(), 'items': [{'kind': 'artist', 'artist': 'Too Soon Band'}], 'section': '1', 'library': 'Music'}]})
+        check('missingsync: only the server\'s owner turns Missing tracks on, for everyone; while it\'s off, a friend\'s new ones aren\'t kept',
+              friend_set == 403 and features('t2')['features'].get('missing') is False and off_note.get('skipped') == 1, f'{friend_set} {off_note}')
+        features('t', 'PUT', {'set': {'missing': True}})
 
         # The server's owner's browser with a list from before (0.23.0): it
         # goes to the account, put together, without what was asked for or
@@ -8736,7 +8829,7 @@ with sync_playwright() as pw:
         check('missingsync: another browser of the account has the same list', sorted(r.split('\n')[0] for r in desk_rows) == ['Legacy Band', 'Old Tune'], str(desk_rows))
         check('missingsync: ...without what was asked for or the playlist\'s name', not any(w in ' '.join(desk_rows) for w in ('secret', 'Dans Old List')), str(desk_rows))
         check('missingsync: ...and, for the server\'s owner, it says it\'s everyone\'s (with no switch of any kind)',
-              'yours and your friends' in lede and 'Kept by this player for your account' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
+              'yours and your friends' in lede and desk.locator('.missing-lede ~ .rows label').count() == 0, lede)
 
         # Noted on one device, on the other once it's read again; counted again.
         note(desk, [{'kind': 'track', 'artist': 'Shared Artist', 'title': 'Shared Song'}], 'dan request')
@@ -8763,20 +8856,30 @@ with sync_playwright() as pw:
               json.dumps(theirs)[:300])
         check('missingsync: ...never with what they asked for, or their playlist\'s name (in what\'s sent, or kept)',
               not any(w in json.dumps(theirs) + ' '.join(sam_sent) for w in ('friend secret', 'friend old secret', 'Friends Gym')), ' '.join(sam_sent)[:300])
-        sam_rows = rows(sam, lambda r: len(r) == 4)
+        # They see theirs, from Settings (Server owner is the owner's): to
+        # look at and export, not to change, which is the owner's to say.
+        sam.goto(APP_DEBUG + '#/settings')
+        sam.wait_for_selector('a.row.missing-own-link', timeout=10000)
+        no_owner_row = sam.locator('a.row[href="#/settings/owner"]').is_hidden()
+        sam.click('a.row.missing-own-link')
+        sam.wait_for_selector('.missing-row', timeout=10000)
+        wait_for(lambda: len(sam.locator('.missing-row').all_inner_texts()) == 4, 10, 0.3)
+        sam_rows = sam.locator('.missing-row').all_inner_texts()
         sam_lede = sam.locator('.missing-lede').inner_text()
         shot(sam, 'missingsync-02-friend')
-        check('missingsync: ...their page has theirs only, says whoever runs the server sees them, and has no switch',
-              sorted(r.split('\n')[0] for r in sam_rows) == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'] and 'Whoever runs ' in sam_lede and 'sees them too' in sam_lede
-              and sam.locator('.missing-lede ~ .rows label').count() == 0, f'{sam_rows} {sam_lede}')
-        sam.goto(APP_DEBUG + '#/settings/ai')
-        sam.wait_for_selector('label.toggle-row:has-text("Show missing tracks")')
-        told = sam.locator('label.toggle-row', has_text='Show missing tracks').inner_text()
-        check('missingsync: ...as Settings › AI › Show missing tracks does, with no switch to keep them on the device',
-              'sees them too' in told and sam.locator('.ai-missing-settings label.toggle-row', has_text='Keep them for your Plex account').count() == 0, told)
+        told = js(sam, "() => import('./js/missing.js').then((m) => [m.missingOn(), m.missingKeptNote()])")
+        check('missingsync: ...a friend sees theirs (in Settings, with no Server owner), and is told whoever runs the server sees them too, with their name',
+              no_owner_row and sorted(r.split('\n')[0] for r in sam_rows) == ['Friend Before', 'Friend Only', 'Friend Spotify', 'Shared Song'] and 'Whoever runs it sees them too' in sam_lede
+              and told[0] is True and told[1].startswith('For whoever runs ') and 'with your name' in told[1], f'{no_owner_row} {sam_rows} {sam_lede!r} {told}')
+        check('missingsync: ...to look at and export, not to change: nothing to take one off, clear it, or check it again with',
+              sam.locator('.missing-row button').count() == 0 and sam.locator('.missing-clear').count() == 0 and sam.locator('.missing-check, .missing-mb').count() == 0
+              and sam.locator('.missing-csv').count() == 1, f'{sam.locator(".missing-row button").count()} {sam.locator(".missing-clear").count()} {sam.locator(".missing-check").count()}')
         check('missingsync: someone who can\'t use the server can\'t have a list for it', status_of('t3') == 403)
         refused = lists('t2', 'POST', {'ops': [{'type': 'clear', 'id': op_id(), 'everyone': True}]})
         check('missingsync: ...and a friend can\'t change everyone\'s', refused.get('skipped') == 1 and len(titles('t2')) == 4, json.dumps(refused))
+        own_refused = lists('t2', 'POST', {'ops': [{'type': 'clear', 'id': op_id()}, {'type': 'mb', 'id': op_id(), 'real': [], 'dropped': []}]})
+        check('missingsync: ...nor theirs: the player takes nothing off a friend\'s from them (but what\'s found in the library)',
+              own_refused.get('skipped') == 2 and len(titles('t2')) == 4, json.dumps(own_refused))
         stale = lists('t2', 'POST', {'ops': [{'type': 'unshare', 'id': op_id()}]})
         check('missingsync: ...nor take theirs off the player as 0.24.0 could (a page of it still open)', stale.get('skipped') == 1 and len(titles('t2')) == 4, json.dumps(stale))
 
@@ -8797,8 +8900,9 @@ with sync_playwright() as pw:
         # The owner takes one off: off the friend's list too.
         desk.locator('.missing-row', has_text='Friend Only').locator('button').click()
         sent(desk)
+        js(sam, "() => import('./js/missingsync.js').then((m) => m.pullMissing({ force: true }))")
         check('missingsync: one the owner takes off is off the friend\'s list too', 'Friend Only' not in titles('t2')
-              and not any(r.startswith('Friend Only') for r in rows(sam, lambda r: not any(x.startswith('Friend Only') for x in r))), str(titles('t2')))
+              and wait_for(lambda: 'Friend Only' not in here(sam), 10, 0.3), f'{titles("t2")} {here(sam)}')
 
         # Changed offline: kept here, and sent once it's back.
         desk_ctx.set_offline(True)
@@ -8891,6 +8995,7 @@ with sync_playwright() as pw:
         check('missingsync: with SYNC_MISSING_TRACKS=false, nothing goes to the player, and the list says it\'s this device\'s',
               not asked and 'Kept on this device' in local_lede and local.locator('.missing-lede ~ .rows label').count() == 0, f'{asked} {local_lede}')
         local_ctx.close()
+        features('t', 'PUT', {'set': {'missing': False}})
 
     # ---------- mb: the MusicBrainz features (MUSICBRAINZ_ADVANCED) ----------
     if run('mb') and APP_MB:
@@ -8911,20 +9016,23 @@ with sync_playwright() as pw:
             page.goto(APP_MB + f"#/artist/{named[name]['ratingKey']}")
             page.wait_for_selector(until, timeout=20000)
 
-        # Settings › MusicBrainz, where the player has them: each on to begin
-        # with, and for the server's owner, the years and genres to fix; and
-        # Skip live tracks and demos, which they add to, in Settings ›
-        # Playback, on to begin with here.
+        # Settings › Server owner, where the player has them: each on to
+        # begin with, for everyone, and the years and genres to fix; and Skip
+        # live tracks and demos, which they add to, in Settings › Playback,
+        # each person's own, on to begin with here.
         page.goto(APP_MB + '#/settings')
-        page.locator('a.row[href="#/settings/musicbrainz"]').click()
+        page.locator('a.row[href="#/settings/owner"]').click()
         page.wait_for_selector('label.toggle-row:has-text("Missing albums on artist pages")')
         shot(page, 'mb-01-settings')
-        on = [page.locator('label.toggle-row', has_text=t).locator('input').is_checked() for t in ('Missing albums on artist pages', 'Original release years')]
+        on = [page.locator('label.toggle-row', has_text=t).locator('input').is_checked() for t in ('Missing albums on artist pages', 'Original release years', 'Artists of the same name')]
         kinds_now = page.locator('.mb-kinds-row .row-sub').inner_text()
         skip_here = page.locator('label.toggle-row:has-text("Skip live tracks and demos")').count()
-        check('mb: Settings › MusicBrainz, each on to begin with, the missing albums\' kinds, and for the owner, the years and genres to fix',
-              on == [True, True] and kinds_now == 'Albums, Singles & EPs, Compilations, Soundtracks, Remixes' and not skip_here
-              and page.locator('a.row[href="#/settings/mbreview"]').count() == 1, f'{on} {kinds_now} {skip_here}')
+        check('mb: Settings › Server owner, each on to begin with, the missing albums\' kinds, and the years and genres to fix',
+              on == [True, True, True] and kinds_now == 'Albums, Singles & EPs, Compilations, Soundtracks, Remixes' and not skip_here
+              and page.locator('a.row[href="#/settings/mbreview"]').count() == 1 and page.locator('.owner-mb').count() == 1, f'{on} {kinds_now} {skip_here}')
+        page.goto(APP_MB + '#/settings/musicbrainz')
+        page.wait_for_selector('label.toggle-row:has-text("Missing albums on artist pages")')
+        check('mb: ...where a link to Settings › MusicBrainz (before 0.41.0) leads too', page.locator('.back-head').inner_text().strip().endswith('Server owner'), page.locator('.back-head').inner_text())
         page.goto(APP_MB + '#/settings/playback')
         page.wait_for_selector('label.toggle-row:has-text("Skip live tracks and demos")')
         skip_row = page.locator('label.toggle-row', has_text='Skip live tracks and demos')
@@ -8950,14 +9058,14 @@ with sync_playwright() as pw:
         page.wait_for_selector('.sheet', state='detached')
         page.wait_for_selector('.view .mb-missing-kind[data-kind="Demos"]', timeout=5000)
         demos = missing('Demos')
-        saved = js(page, "() => import('./js/state.js').then(({ app }) => app.settings.mbMissingKinds)")
-        check('mb: ...of the kinds chosen there (Kinds…), straight away', demos == ['Early Tapes'] and 'demos' in saved, f'{demos} {saved}')
+        saved = js(page, "() => import('./js/features.js').then((m) => m.readFeatures({ force: true }).then(() => m.features().mbMissingKinds))")
+        check('mb: ...of the kinds chosen there (Kinds…, for the owner), straight away, for everyone', demos == ['Early Tapes'] and 'demos' in saved, f'{demos} {saved}')
         with page.expect_download() as dl:
             page.click('.view .mb-missing-csv')
         csv_text = open(dl.value.path(), encoding='utf-8-sig').read()
         check('mb: ...and downloaded, all of them, with their MusicBrainz release groups', dl.value.suggested_filename.startswith('missing-albums-Glass-Harbour-')
               and all(t in csv_text for t in ('Sea Glass', 'Undertow', 'Early Tapes', 'musicbrainz.org/release-group/')) and 'Tidal Lines' not in csv_text, csv_text[:300])
-        settings(page, {'mbMissingKinds': ['albums', 'singles', 'compilations', 'soundtracks', 'remixes']})
+        owner_features(page, {'mbMissingKinds': ['albums', 'singles', 'compilations', 'soundtracks', 'remixes']})
 
         # An album Plex hasn't typed: shown as Plex has it (MusicBrainz never
         # changes which kind an album in the library is), and, as
@@ -9006,7 +9114,7 @@ with sync_playwright() as pw:
         page.wait_for_selector('.hero-first:not([hidden])', timeout=20000)
         first_line = page.locator('.hero-first').inner_text()
         shot(page, 'mb-03-album')
-        settings(page, {'mbOriginalYears': False})
+        owner_features(page, {'mbOriginalYears': False})
         artist_page('Juniper & Ash', '.view section[data-group="Albums"] .card')
         page.wait_for_timeout(1500)
         plex_year = hearthstone_year()
@@ -9014,7 +9122,7 @@ with sync_playwright() as pw:
         page.wait_for_selector('.hero-album')
         page.wait_for_timeout(1500)
         no_line = page.locator('.hero-first:not([hidden])').count() == 0
-        settings(page, {'mbOriginalYears': True})
+        owner_features(page, {'mbOriginalYears': True})
         check('mb: Original release years: an artist\'s album with the year it first came out, and its page says so (not with it off)',
               first_year == '1998' and first_line == 'First released in 1998' and plex_year == '2015' and no_line, f'{first_year} {first_line!r} {plex_year} {no_line}')
         artist_page('Northbound Static', '.view section[data-group="Albums"] .card')
@@ -9043,11 +9151,11 @@ with sync_playwright() as pw:
         wait_for(lambda: player(page, 'p.queue.length') > before, 5)
         added = set(player(page, f'p.queue.slice({before}).map((t) => t.album)') or [])
         check('mb: ...and out of what the page\'s menu adds to the queue', added == {'Interference'}, added)
-        settings(page, {'mbNamesakes': False})
+        owner_features(page, {'mbNamesakes': False})
         artist_page('Northbound Static', '.view section[data-group="Albums"] .card')
         page.wait_for_timeout(1500)
         check('mb: ...and not with it off', page.locator('.view section.artist-namesake').count() == 0 and 'Long Way North' in group('Albums'), group('Albums'))
-        settings(page, {'mbNamesakes': True})
+        owner_features(page, {'mbNamesakes': True})
 
         # Other names: an artist not found by their name is looked for by
         # the others MusicBrainz has for them (not without the features).
@@ -9062,10 +9170,10 @@ with sync_playwright() as pw:
               by_alias == ['Northbound Static'] and without == [None], f'{by_alias} {without}')
         plain_page.goto(APP + f"#/artist/{named['Glass Harbour']['ratingKey']}")
         plain_page.wait_for_selector('.view section[data-similar=sonic]', timeout=10000)
-        plain_page.goto(APP + '#/settings')
-        plain_page.wait_for_selector('a.row[href="#/settings/ai"]')
-        check('mb: ...and without them, no MusicBrainz in Settings, nor missing albums on artist pages',
-              plain_page.locator('a.row[href="#/settings/musicbrainz"]').count() == 0, plain_page.url)
+        plain_page.goto(APP + '#/settings/owner')
+        plain_page.wait_for_selector('label.toggle-row:has-text("List what’s missing")')
+        check('mb: ...and without them, no MusicBrainz in Settings › Server owner, nor missing albums on artist pages',
+              plain_page.locator('.owner-mb, label.toggle-row:has-text("Missing albums on artist pages")').count() == 0, plain_page.url)
         plain.close()
 
         # For the server's owner: the years and genres to fix, in Plex,
@@ -9371,7 +9479,7 @@ with sync_playwright() as pw:
                 return mock('/__mock/musicbrainz')['MediaContainer']['requests'] == n
             wait_for(mb_quiet, 30, 0.1)
             mb_before = mock('/__mock/musicbrainz')['MediaContainer']['requests']
-            page.goto(APP_MB + '#/settings/musicbrainz')
+            page.goto(APP_MB + '#/settings/owner')
             page.locator('a.row[href="#/settings/mbmerge"]').click()
             page.wait_for_function("() => /^Checked/.test(document.querySelector('.mb-merge-status')?.textContent || '')", timeout=60000)
             shot(page, 'mb-05-merge')
@@ -9412,15 +9520,27 @@ with sync_playwright() as pw:
             for a in added:
                 mock(f"/__mock/add-artist?remove={a['ratingKey']}")
 
-        # A friend: the features, but not the years and genres to fix.
+        # A friend: the features, as the owner has them, but not their
+        # switches, nor the years and genres to fix.
         friend = browser.new_context(**MOBILE)
         fpage = friend.new_page()
         attach(fpage, 'mb-friend')
         login(fpage, APP_MB, 't2')
-        fpage.goto(APP_MB + '#/settings/musicbrainz')
-        fpage.wait_for_selector('label.toggle-row:has-text("Missing albums on artist pages")')
+        fpage.goto(APP_MB + '#/settings')
+        fpage.wait_for_selector('a.row[href="#/settings/ai"]')
+        no_owner_row = fpage.locator('a.row[href="#/settings/owner"]').is_hidden()
+        fpage.goto(APP_MB + '#/settings/owner')
+        fpage.wait_for_selector('.view .empty-state', timeout=10000)
+        owner_only = fpage.locator('.view .empty-state').inner_text()
         no_row = fpage.locator('a.row[href="#/settings/mbreview"]').count() == 0
         no_merge_row = fpage.locator('a.row[href="#/settings/mbmerge"]').count() == 0
+        fpage.goto(APP_MB + '#/')
+        fpage.goto(APP_MB + f"#/artist/{named['Glass Harbour']['ratingKey']}")
+        fpage.wait_for_selector('.view .mb-missing', timeout=20000)
+        has_missing = fpage.locator('.view .mb-missing-row').count() > 0
+        no_kinds = fpage.locator('.view .mb-kinds-btn').count() == 0
+        check('mb: a friend has the features as the server\'s owner has them on, for everyone, without their switches (no Server owner, no Kinds…)',
+              no_owner_row and 'Only the owner of' in owner_only and has_missing and no_kinds, f'{no_owner_row} {owner_only!r} {has_missing} {no_kinds}')
         fpage.goto(APP_MB + '#/settings/mbreview')
         fpage.wait_for_selector('.view .empty-state', timeout=10000)
         told = fpage.locator('.view .empty-state').inner_text()

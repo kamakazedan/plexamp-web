@@ -6,11 +6,13 @@ import { live, LIVE_MODES } from '../live.js';
 import { aiSettings, sharedAI, sharedModelName, sharedRefused, aiTarget, listModels, aiVersion, sharedStatus, chat, parseReply, describeAIError, WAIT_CHOICES, aiWaitMinutes } from '../ai.js';
 import { experienceView, appearanceView, playerSettingsView, skipTimesView, desktopView, homeEditorView } from './experience.js';
 import { missingTracksView } from './missingtracks.js';
-import { musicbrainzSettingsView } from './mbsettings.js';
+import { serverOwnerView } from './serverowner.js';
 import { mbReviewView } from './mbreview.js';
 import { mbMergeView } from './mbmerge.js';
 import { mbFeatures, skipLiveOn } from '../mb.js';
-import { missingCount, mbOffered, mbWhere, missingKeptNote } from '../missing.js';
+import { canSetFeatures, readFeatures, ownerHere, featureOn } from '../features.js';
+import { missingShown, missingEditable, myMissingCount } from '../missing.js';
+import { isAdminNow } from '../editing.js';
 import { together } from '../together.js';
 import { canFade } from '../transitions.js';
 import { setAccountSync, accountSyncState } from '../sync.js';
@@ -29,10 +31,24 @@ const REPO_URL = 'https://github.com/kamakazedan/plexamp-web';
 // Who's signed in: their Plex picture, or the offline password's lock.
 const authAvatar = (auth, size = 24) => (auth.offline ? h('span.badge-circle', { 'aria-hidden': 'true' }, icon('lock', size)) : avatar(auth.thumb, auth.username));
 
-export async function settingsView({ el }) {
+export async function settingsView({ el, onDispose }) {
   const src = app.source;
   const auth = app.auth || {};
   const lead = (name) => h('span.row-icon', null, icon(name, 26));
+  // For the server's owner alone, once the player has said who that is (or
+  // while it hasn't yet, as Plex says).
+  const owner = row({ href: '/settings/owner', lead: lead('server'), title: 'Server owner', subtitle: mbFeatures() ? 'Missing tracks and MusicBrainz, for everyone' : 'Missing tracks, for everyone', cls: 'owner-link' });
+  // For a friend, their own Missing tracks, to see: while the owner has them
+  // on, or there's anything on theirs.
+  const missing = row({ href: '/settings/missing', lead: lead('list'), title: 'Missing tracks', subtitle: 'From your AI playlists and Spotify imports', cls: 'missing-own-link' });
+  const paintOwner = () => {
+    owner.hidden = !(canSetFeatures() || (ownerHere() === null && isAdminNow()));
+    missing.hidden = !owner.hidden || missingEditable() || !missingShown() || !(featureOn('missing') || myMissingCount() > 0);
+  };
+  paintOwner();
+  onDispose?.(on('features', paintOwner));
+  onDispose?.(on('missing', paintOwner));
+  readFeatures();
   el.append(
     pageHeader('Settings'),
     h(
@@ -55,7 +71,8 @@ export async function settingsView({ el }) {
       }),
       downloadsHere() ? row({ href: '/settings/downloads', lead: lead('download'), title: 'Downloads', subtitle: downloadsSummary() }) : null,
       row({ href: '/settings/ai', lead: lead('sparkle'), title: 'AI', subtitle: aiSummary() }),
-      mbFeatures() ? row({ href: '/settings/musicbrainz', lead: lead('disc'), title: 'MusicBrainz', subtitle: 'Missing albums, original years' }) : null,
+      owner,
+      missing,
       row({ href: '/settings/debug', lead: lead('terminal'), title: 'Connection', subtitle: 'How this device reaches your server' }),
       row({ href: '/settings/about', lead: lead('info'), title: 'About', subtitle: `Version ${APP_INFO.version}` }),
     ),
@@ -85,7 +102,9 @@ export async function settingsPageView(ctx) {
     downloads: downloadsView,
     ai: aiView,
     missing: missingTracksView,
-    musicbrainz: musicbrainzSettingsView,
+    owner: serverOwnerView,
+    // (Its name before 0.41.0, kept for links to it.)
+    musicbrainz: serverOwnerView,
     mbreview: mbReviewView,
     mbmerge: mbMergeView,
     debug: debugView,
@@ -1053,57 +1072,6 @@ function saveAI(patch) {
   dropCached((p) => p === '/ai-playlist' || p === '/search' || p === '/settings' || p === '/settings/missing');
 }
 
-// Show missing tracks: on or off, and the list (shown while it's on, or
-// while there's anything on it).
-function missingSection(onDispose) {
-  const count = h('span.row-value');
-  const listRow = row({ href: '/settings/missing', title: 'Missing tracks', subtitle: 'See them, export them, or check again', right: count, chevron: true, cls: 'missing-link' });
-  const show = toggleRow({
-    title: 'Show missing tracks',
-    subtitle: '',
-    checked: aiSettings().missing === true,
-    onChange: (v) => {
-      saveAI({ missing: v });
-      paint();
-    },
-  });
-  const showSub = h('div.row-sub');
-  show.querySelector('.row-main').append(showSub);
-  function paint() {
-    const n = missingCount();
-    count.textContent = n ? fmt.number(n) : '';
-    listRow.hidden = !aiSettings().missing && !n;
-    showSub.textContent = `List songs and artists the AI suggests that you don’t have.${missingKeptNote()}`;
-  }
-  paint();
-  // An AI playlist made meanwhile can add to it (and the player says whose
-  // the server is).
-  onDispose(on('missing', paint));
-  return h(
-    'div.ai-missing-settings',
-    null,
-    h('div.section-head', null, h('h2', null, 'Missing tracks')),
-    h(
-      'div.rows',
-      null,
-      show,
-      // AI models make songs up: MusicBrainz knows which are real.
-      mbOffered()
-        ? toggleRow({
-            title: 'Check suggestions on MusicBrainz',
-            subtitle: `Drops made-up songs and artists, checked on ${mbWhere()} (only names are sent).`,
-            checked: aiSettings().musicbrainz !== false,
-            onChange: (v) => {
-              saveAI({ musicbrainz: v });
-              paint();
-            },
-          })
-        : null,
-      listRow,
-    ),
-  );
-}
-
 // How long to wait for the model to start answering.
 function waitRow() {
   return h(
@@ -1144,10 +1112,6 @@ function aiView({ el, onDispose }) {
   const modelBox = h('div.ai-models');
   const waitBox = waitRow();
   const notes = notesSection();
-  const missing = missingSection(onDispose);
-  // (Friends' too, for the server's owner, once the player has said: then
-  // the list is shown with AI off on this device as well.)
-  onDispose(on('missing', () => (missing.hidden = chosen() === 'off' && !missingCount())));
 
   // (Which loadModels is the latest: what one before it gets back, from an
   // Ollama asked about before, isn't shown.)
@@ -1172,7 +1136,6 @@ function aiView({ el, onDispose }) {
     modelBox,
     waitBox,
     notes,
-    missing,
   );
   render();
 
@@ -1184,7 +1147,6 @@ function aiView({ el, onDispose }) {
     modelsAsked += 1;
     waitBox.hidden = mode === 'off';
     notes.hidden = mode === 'off';
-    missing.hidden = mode === 'off' && !missingCount();
     if (mode === 'custom' && aiSettings().url) loadModels();
   }
 

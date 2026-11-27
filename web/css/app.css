@@ -1644,6 +1644,32 @@ a.hero-link:hover {
   outline-offset: 0;
 }
 
+/* A choice among a few, as a field (From Spotify's playlist to put it in). */
+.field select {
+  height: 48px;
+  padding: 0 40px 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.25) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%23ffffff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 16px center;
+  color: #fff;
+  font: inherit;
+  font-size: calc(16px * var(--fs, 1));
+  font-weight: 400;
+  text-overflow: ellipsis;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.field select:focus {
+  outline: 2px solid rgba(255, 255, 255, 0.55);
+  outline-offset: 0;
+}
+
+.field select option {
+  background: #1d1f24;
+  color: #fff;
+}
+
 .hint {
   display: flex;
   align-items: center;
@@ -2999,7 +3025,7 @@ body.np-open #toasts {
   opacity: 0.85;
 }
 
-/* Settings › MusicBrainz › Years and genres to fix: an album's title, and
+/* Settings › Server owner › Years and genres to fix: an album's title, and
    its artist's name, open their pages. */
 .mb-review-link {
   color: inherit;
@@ -3026,7 +3052,7 @@ body.np-open #toasts {
   border-width: 2px;
 }
 
-/* Settings › MusicBrainz › Artists to merge: each artist Plex has, to
+/* Settings › Server owner › Artists to merge: each artist Plex has, to
    open, and who MusicBrainz says it is. */
 .mb-merge-links {
   display: flex;
@@ -3198,6 +3224,31 @@ body.np-open #toasts {
 
 .spotify-keep {
   margin: 0 -8px;
+}
+
+/* A friend's go there: no choice, a line saying so. */
+.spotify-keep.spotify-keep-note {
+  margin: 0;
+}
+
+/* A playlist as long as Spotify's page lists: how the rest come over. */
+.spotify-capped {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: rgba(255, 255, 255, 0.86);
+  font-size: calc(14px * var(--fs, 1));
+  line-height: 1.5;
+}
+
+.spotify-capped .ic {
+  flex: none;
+  margin-top: 1px;
+  color: var(--tint-hi);
 }
 
 /* The guide to Spotify's download of your data (it scrolls, as a whole). */
@@ -5906,7 +5957,7 @@ body.in-together .pb-art::after {
   font-size: calc(14px * var(--fs, 1));
 }
 
-/* With Show missing tracks on, when everything suggested was found. */
+/* With Missing tracks on, when everything suggested was found. */
 .ai-missing-none {
   display: flex;
   align-items: center;

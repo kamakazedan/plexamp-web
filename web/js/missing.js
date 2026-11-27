@@ -1,31 +1,35 @@
 // Songs and artists that AI playlists suggested but the library doesn't
 // have, and the tracks of playlists imported from Spotify it doesn't have
-// (via: 'spotify'), in Settings › AI › Missing tracks, so whoever looks
-// after the server can go and find them. Each with the Plex server and
-// library it's missing from: the list shows the server in use's (different
-// servers have different music). Kept on this device (until it's cleared,
-// or you sign out), and where this player keeps them for each Plex account
+// (via: 'spotify'), in Settings › Server owner › Missing tracks, so whoever
+// looks after the server can go and find them: where its owner has them on
+// for everyone (features.js). Each with the Plex server and library it's
+// missing from: the list shows the server in use's (different servers have
+// different music). Kept on this device (until it's cleared, or you sign
+// out), and where this player keeps them for each Plex account
 // (missingsync.js), for yours: then every browser you sign in on has them,
-// and the server's owner sees everyone's, one list (`others`: whose, and how
-// often for them), so they can add what's missing. It's exported as a
-// spreadsheet (CSV) or plain text.
+// and the server's owner sees everyone's, one list (`others`: whose, and
+// how often for them), so they can add what's missing. A friend sees their
+// own, and what happens to it is the owner's to say: they can't take
+// anything off it (see missingEditable). It's exported as a spreadsheet
+// (CSV) or plain text.
 //
 // How each change goes is the same here and in the player's service
 // (missinglist.js): it's made here, and sent as that change.
 //
 // AI models make songs up, and take albums for songs. Where the player has
-// a MusicBrainz to ask (MUSICBRAINZ_URL) and Settings › AI › Check
-// suggestions on MusicBrainz is on, an AI playlist's suggestions are looked
-// up there before they're listed (see checkSuggestions): those it doesn't
+// a MusicBrainz to ask (MUSICBRAINZ_URL) and the owner has Check AI
+// suggestions on MusicBrainz on, an AI playlist's suggestions are looked up
+// there before they're listed (see checkSuggestions): those it doesn't
 // know, and albums, never come here, and those it knows are marked (mb:
 // 'real'). Ones listed without being checked (before there was a
 // MusicBrainz to ask) can be checked from the list (checkMissingOnMusicBrainz).
 import { app } from './state.js';
 import { chunks } from './plex.js';
-import { songInLibrary, artistInLibrary, aiSettings, mapLimit } from './ai.js';
+import { songInLibrary, artistInLibrary, mapLimit } from './ai.js';
 import { MISSING_LIMITS, MISSING_LISTS, keyOf, idOf, listId, sourceOf, applyNote, applyForget, applyClear, applyVerdicts, applyRestore } from './missinglist.js';
 import { loadMissing as load, saveMissing as save, queueMissing, missingOthers, editMissingOthers, ownsServer, syncs } from './missingsync.js';
 import { aliasesOf } from './mb.js';
+import { featureOn, ownerHere } from './features.js';
 import { serviceFetch } from './service.js';
 
 export { MISSING_LIMITS, MISSING_LISTS };
@@ -45,27 +49,35 @@ const ENTRIES = 200;
 // taking some off the list, or clearing it, is for everyone's.
 export const everyoneShown = (src = app.source) => !!src && syncs(serverOf(src)) && ownsServer(serverOf(src)) === true;
 
-// How they're kept, for saying so where they're turned on: on this device
-// only (null), or for your account, where the server's owner sees them too
-// ({ owner: false }: a friend's; true: as that owner; undefined: until the
-// player has said whose the server is, as it hasn't yet when the app's just
-// opened).
-export function missingKept() {
-  const server = serverOf();
-  if (!syncs(server)) return null;
-  return { owner: ownsServer(server) };
-}
+// Whether this account owns the server in use, as the player says (null:
+// not known yet).
+export const ownsHere = (src = app.source) => {
+  const server = serverOf(src);
+  return ownerHere(server) ?? ownsServer(server) ?? null;
+};
 
-// ...said where they're turned on (Show missing tracks, an import's "Put
-// what isn't here on Missing tracks"): a sentence (true whoever's the
-// server's, while that isn't known), or nothing.
+// Missing tracks are on, for the server in use: its owner has them on for
+// everyone, and they go where the owner sees them (theirs, or a friend's
+// where the player keeps them for each account: not one on a friend's
+// device alone, which no one would see).
+export const missingOn = (src = app.source) => !!src && featureOn('missing', serverOf(src)) && (ownsHere(src) === true || syncs(serverOf(src)));
+
+// The list can be seen here: the server's owner's (theirs, and their
+// friends'), and a friend's own where the player keeps them for each
+// account (not one on a friend's device alone, which no one else sees).
+export const missingShown = (src = app.source) => ownsHere(src) === true || (!!src && syncs(serverOf(src)));
+
+// ...and changed here: by the server's owner alone. A friend's is theirs to
+// see, and its owner's to change (the player takes nothing off it from them
+// but what's found in the library, as it's noted).
+export const missingEditable = (src = app.source) => ownsHere(src) === true;
+
+// Where they go, said to a friend where they're noted (under an AI
+// playlist, importing from Spotify): one line, or nothing (the owner's
+// own).
 export function missingKeptNote() {
-  const kept = missingKept();
-  if (!kept) return '';
-  const server = app.source?.serverName || 'the server';
-  if (kept.owner === true) return ' Kept by this player for your account. You see your friends’ too.';
-  if (kept.owner === false) return ` Kept by this player for your account. Whoever runs ${server} sees them too, with your name.`;
-  return ` Kept by this player for your account. The owner of ${server} sees them too, with your name.`;
+  if (missingEditable()) return '';
+  return `For whoever runs ${app.source?.serverName || 'the server'}, with your name.`;
 }
 
 // What's kept for the server in use, artists first, then by artist and
@@ -254,8 +266,9 @@ export async function checkMissingAgain({ signal, onProgress } = {}) {
 }
 
 // The server in use's that MusicBrainz could be asked about: this
-// account's own (a friend's are checked as they choose, on their devices),
-// not checked yet, and suggested by an AI (what came from Spotify is real).
+// account's own (a friend's AI suggestions are checked before they're
+// listed, while the owner has that on), not checked yet, and suggested by
+// an AI (what came from Spotify is real).
 export const askable = (m) => sameServer(m) && !!m.mine && m.mb !== 'real' && tally(m).spotify === 0;
 
 // The ones listed without being checked on MusicBrainz (made before there
@@ -311,10 +324,11 @@ export function restoreMissing(entries = []) {
 
 // ---------- MusicBrainz ----------
 
-// The player has a MusicBrainz to ask, and this device asks it (on unless
-// turned off). Where: musicbrainz.org, or the player's own.
+// The player has a MusicBrainz to ask, and the server's owner has AI
+// suggestions checked on it (on unless they turned it off). Where:
+// musicbrainz.org, or the player's own.
 export const mbOffered = () => !!app.config.musicbrainz;
-export const mbOn = () => mbOffered() && aiSettings().musicbrainz !== false;
+export const mbOn = () => mbOffered() && featureOn('mbCheck');
 export const mbWhere = () => (app.config.musicbrainz === 'own' ? 'the player’s own MusicBrainz server' : 'musicbrainz.org');
 
 const BATCH = 5;
