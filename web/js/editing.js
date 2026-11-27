@@ -96,6 +96,14 @@ export function refreshLists(kind) {
 
 // ---------- playlists ----------
 
+// Your playlists that music can be added to: not smart ones (their rules
+// decide what's in them), nor ones shared with you to view only (what's
+// added would be undone). The one looked at or changed last first.
+export async function playlistsToAddTo() {
+  const lists = (await app.server.playlists(playlistScope())).filter((p) => !p.smart && (p.playlistType || 'audio') === 'audio' && shareOf(p.ratingKey)?.role !== 'view');
+  return lists.sort((a, b) => (b.lastViewedAt || b.updatedAt || 0) - (a.lastViewedAt || a.updatedAt || 0));
+}
+
 // Add music to one of your playlists, or a new one. `what` is a short
 // description for the sheet ("3 tracks", an album's name); `load` gives the
 // tracks (it can be slow, so it runs after a playlist is picked). `extra`:
@@ -103,17 +111,13 @@ export function refreshLists(kind) {
 // `done(ok)`: once it's been tried (`load` has run), whether they're in it
 // now; `after()`: more for the message that says they are.
 export async function addToPlaylist({ what, load, suggest = '', title = 'Add to playlist', extra = [], done, after }) {
-  const s = app.server;
   let lists = [];
   try {
-    // Not smart ones (their rules decide what's in them), nor ones shared
-    // with you to view only (what's added would be undone).
-    lists = (await s.playlists(playlistScope())).filter((p) => !p.smart && (p.playlistType || 'audio') === 'audio' && shareOf(p.ratingKey)?.role !== 'view');
+    lists = await playlistsToAddTo();
   } catch (err) {
     toast(describeError(err));
     return;
   }
-  lists.sort((a, b) => (b.lastViewedAt || b.updatedAt || 0) - (a.lastViewedAt || a.updatedAt || 0));
   sheet({
     title,
     subtitle: what,

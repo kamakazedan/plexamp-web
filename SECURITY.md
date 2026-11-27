@@ -18,11 +18,11 @@ Use **Report a vulnerability** in the repository's **Security** tab if it's ther
 - **Your Plex sign-in** is kept in the browser. It goes only to plex.tv, your Plex server (directly or through the player's `/pms/`), and the player's own service, which checks who you are.
 - **Your library**: requests go from your browser to your Plex server.
 - **Plays and ratings made while the connection's down** wait in the browser (two weeks at most), then go only to that very server, with the sign-in that made them. Signing out clears them.
-- **What the container keeps**, in `/data`, readable by its service only: shared playlists, each account's settings and Missing tracks, MusicBrainz's answers, and fingerprints of the server owner's sign-ins. No database, and never a token.
+- **What the container keeps**, in `/data`, readable by its service only: shared playlists, each account's settings and Missing tracks, what each Plex server's owner turns on for everyone, MusicBrainz's answers, and fingerprints of the server owner's sign-ins. No database, and never a token.
 - **In memory only**: Play Together sessions, what your devices are playing, and offline-password sessions.
 - **No tracking**: no analytics or third-party scripts. hls.js is bundled into the image.
 - **Who the browser talks to**: plex.tv, your Plex server, and an Ollama of your own if you set one up.
-- **Who the container talks to**: plex.tv, your Plex server, and, only if you set them up, the shared Ollama, MusicBrainz, and Spotify (for link imports).
+- **Who the container talks to**: plex.tv, your Plex server, Spotify for link imports (unless `SPOTIFY_LINK_IMPORT=false`), and, only if you set them up, the shared Ollama and MusicBrainz.
 - **Signing out** clears everything kept for you on that device.
 
 What each feature sends:
@@ -117,7 +117,7 @@ The service passes commands to Plex players on your network, so it's tightly lim
 
 ### MusicBrainz
 
-- **Off unless set up** (`MUSICBRAINZ_URL`). The features need `MUSICBRAINZ_ADVANCED=true` too. Each person can turn each off.
+- **Off unless set up** (`MUSICBRAINZ_URL`). The features need `MUSICBRAINZ_ADVANCED=true` too. The Plex server's owner turns each on or off for everyone (see [Server owner settings](#server-owner-settings)).
 - **Only names and MusicBrainz ids go** (see [At a glance](#at-a-glance)), from the container, with a User-Agent naming the app and its version, as MusicBrainz asks. No tokens, nothing about your account or server.
 - **For people who can use your Plex server**, as the shared AI model is.
 - **Searches it builds itself**, each name quoted. Answers read up to 8 MB; redirects never followed.
@@ -128,18 +128,18 @@ The service passes commands to Plex players on your network, so it's tightly lim
 
 ### Spotify imports
 
-From Spotify's download of your data:
+From Spotify's download of your data (off unless `SPOTIFY_FILE_IMPORT=true`):
 
 - **Only the playlist files are opened**: `Playlist1.json` (`Playlist2.json`…) and `YourLibrary.json`. Any other file, the ZIP included, is turned away by its name, unread: the others hold personal details (email, address, payment card, listening history).
 - **Read in the browser**, at most 25 MB a file, 1,000 playlists, 20,000 tracks a playlist and 100,000 in all. Only playlist names and tracks' titles, artists and albums are kept.
 - **Nothing goes to Spotify.** The titles go to your Plex server, as any search does. Tracks not found go to Missing tracks, without the playlist's name.
 
-From a link (off unless `SPOTIFY_LINK_IMPORT=true`):
+From a link (on unless `SPOTIFY_LINK_IMPORT=false`):
 
 - **Only the playlist's id goes to Spotify**, from the container. The link must be a Spotify playlist link; the page is always fetched from Spotify's own address. Your browser never contacts Spotify.
 - **Bounded**: 15 seconds, 5 MB of page, redirects only within Spotify, and only names, titles and lengths come out of it, as plain text.
 - **For people who can use your Plex server.** 10 playlists a minute each, 60 for everyone.
-- Spotify's terms don't allow reading its pages like this: that's why it's off to begin with.
+- Spotify's terms don't allow reading its pages like this. `SPOTIFY_LINK_IMPORT=false` turns it off.
 
 ### Missing tracks
 
@@ -147,8 +147,15 @@ From a link (off unless `SPOTIFY_LINK_IMPORT=true`):
 - **Spotify playlists are counted by a short hash** of each name (12 bits: one name in 4,096 shares it), never the name. Someone with the file could only check a single guess against it.
 - **Never kept**: what anyone asked an AI for, a sign-in, anyone's name.
 - **Only changes are sent**, never the whole list, checked as they come in, within limits (500 accounts, 10 servers each, 100,000 tracks in all).
-- **Friends see only their own.** The server's owner sees everyone's, with whose each is, and friends are told so.
+- **On or off for everyone, by the server's owner** (off to begin with). While it's off, nothing new goes on anyone's but the owner's.
+- **Friends see only their own**, and can't change it: nothing comes off it but by the owner, or as it's found in the library. The server's owner sees everyone's, with whose each is, and friends are told so.
 - `SYNC_MISSING_TRACKS=false` keeps nothing.
+
+### Server owner settings
+
+- **Kept** in `/data/features.json`, readable by the service only: for each Plex server (by its id), which of Missing tracks and the MusicBrainz features its owner has on for everyone. No accounts, names or sign-ins.
+- **Only the server's owner changes them**, as plex.tv says, checked by the player for every change. Everyone who can use the server reads them; no one else can.
+- **Checked**: only those settings, each as the kind it is, 8 KB a change, for 1,000 servers at most.
 
 ### Shared playlists
 

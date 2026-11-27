@@ -1,8 +1,8 @@
 // "AI playlist": describe what you want to hear and an Ollama model builds a
 // playlist from your library.
-import { aiReady, aiTarget, aiSettings, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
+import { aiReady, aiTarget, sharedStatus, generatePlaylist, describeAIError } from '../ai.js';
 import { norm } from '../missinglist.js';
-import { noteMissing, myMissingCount, mbOn, mbWhere, checkSuggestions, missingKeptNote } from '../missing.js';
+import { noteMissing, myMissingCount, mbOn, mbWhere, checkSuggestions, missingKeptNote, missingOn, missingShown, missingEditable } from '../missing.js';
 import { on, emit } from '../state.js';
 import { playList } from '../actions.js';
 import { player } from '../player.js';
@@ -58,6 +58,9 @@ function startJob(prompt) {
       j.loading = on;
       emit();
     },
+    // (Which suggestions aren't in the library, and which are, where the
+    // server's owner has Missing tracks on.)
+    trackMissing: missingOn(),
   })
     .then((result) => {
       j.result = result;
@@ -83,16 +86,17 @@ function startJob(prompt) {
   return j;
 }
 
-// Settings › AI › Show missing tracks: what wasn't found goes on the list
-// (and what was found comes off it). With a MusicBrainz to ask, the
+// Missing tracks, where the server's owner has them on (Settings › Server
+// owner): what wasn't found goes on the list (and what was found comes off
+// it). With a MusicBrainz to ask, the
 // suggestions are looked up there first: those it doesn't know (mostly
 // made up) and albums taken for songs are left out, and the playlist's
 // page says so. found.mb follows the check: { state: 'checking', 'done' or
 // 'failed', done, of, verdicts (see checkSuggestions), error }.
 function keepMissing(found, prompt) {
   if (!found?.missing && !found?.seen) return;
-  if (!aiSettings().missing && !myMissingCount()) return;
-  const missing = aiSettings().missing ? found.missing || [] : [];
+  if (!missingOn() && !myMissingCount()) return;
+  const missing = missingOn() ? found.missing || [] : [];
   if (!missing.length || !mbOn()) {
     noteMissing(missing, found.seen || {}, prompt);
     return;
@@ -130,11 +134,11 @@ function keepMissing(found, prompt) {
 const leftOut = (verdict) => verdict === 'unknown' || verdict === 'album';
 const missingLine = (m) => (m.kind === 'artist' ? `${m.artist} (no music by them)` : `${m.artist ? `${m.artist} — ` : ''}${m.title}`);
 
-// Under a playlist, with Show missing tracks on: the songs and artists it
+// Under a playlist, with Missing tracks on: the songs and artists it
 // suggested that aren't in the library, or that they all are. (`watch`:
 // the page's, for following its MusicBrainz check: see missingBlock.)
 function missingNote(found, watch) {
-  if (!aiSettings().missing) return null;
+  if (!missingOn()) return null;
   if (found?.missing?.length) return missingBlock(found, watch);
   const one = (list, key) => new Set((list || []).map(key).filter(Boolean)).size;
   const artists = one(found?.seen?.artists, (a) => norm(a));
@@ -158,9 +162,9 @@ function missingBlock(found, watch) {
   const list = h('ul.ai-missing-list');
   const left = h('div.ai-missing-left');
   const note = h('p.ai-missing-mb');
-  // Where they're kept (for your account, where whoever runs the server sees
-  // them too), said where they're noted.
-  const kept = missingKeptNote().trim();
+  // Where they go, said to a friend (whoever runs the server sees them,
+  // with their name); the list itself, for its owner.
+  const kept = missingKeptNote();
   const el = h(
     'details.ai-missing',
     null,
@@ -168,8 +172,8 @@ function missingBlock(found, watch) {
     list,
     left,
     note,
-    kept ? h('p.ai-missing-mb.ai-missing-kept', null, kept) : null,
-    h('a.link-btn.ai-missing-all', { href: '#/settings/missing' }, 'All missing tracks, to export'),
+    kept ? h('p.ai-missing-mb.ai-missing-kept', null, `On Missing tracks. ${kept}`) : null,
+    missingShown() ? h('a.link-btn.ai-missing-all', { href: '#/settings/missing' }, missingEditable() ? 'All missing tracks, to export' : 'See Missing tracks') : null,
   );
   const group = (why, items) => h('div.ai-missing-group', null, h('p.ai-missing-why', null, why), h('ul.ai-missing-list.out', null, items.map((m) => h('li', null, missingLine(m)))));
   const paint = () => {

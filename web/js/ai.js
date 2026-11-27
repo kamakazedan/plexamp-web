@@ -42,12 +42,12 @@ export class AIError extends Error {
 
 // ---------- configuration ----------
 
-// As state.js has them to begin with, and: missing: keep a list of the songs
-// and artists AI playlists suggest that aren't in the library (Settings ›
-// AI › Show missing tracks); musicbrainz: check them on MusicBrainz first,
-// where the player has one to ask (see missing.js). wait: minutes to wait
-// for the model to start answering.
-const DEFAULTS = { ...DEFAULT_SETTINGS.ai, missing: false, musicbrainz: true, wait: 5 };
+// As state.js has them to begin with, and wait: minutes to wait for the
+// model to start answering. (Missing tracks, and whether they're checked on
+// MusicBrainz first, were settings of each device's here, missing and
+// musicbrainz, before 0.41.0: now the server's owner has them on or off for
+// everyone, in Settings › Server owner. See features.js.)
+const DEFAULTS = { ...DEFAULT_SETTINGS.ai, wait: 5 };
 
 export const aiSettings = () => ({ ...DEFAULTS, ...(app.settings.ai || {}) });
 export const WAIT_CHOICES = [2, 5, 10, 15, 30];
@@ -1040,9 +1040,9 @@ function oneOfEach(list) {
 
 // steps reported through onStep: 'plan' → 'search' → 'order'.
 // trackMissing: also say which suggested songs and artists aren't in the
-// library (`missing`), and which are (`seen`).
+// library (`missing`), and which are (`seen`): see missing.js missingOn.
 // onLoading(true/false): the model is being loaded into memory meanwhile.
-export async function generatePlaylist({ prompt, length = 25, signal, onStep, onLoading, trackMissing = aiSettings().missing === true }) {
+export async function generatePlaylist({ prompt, length = 25, signal, onStep, onLoading, trackMissing = false }) {
   const started = performance.now();
   const notes = aiSettings().notes.trim();
   onStep?.('plan');

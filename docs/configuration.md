@@ -50,7 +50,7 @@ Settings in the app itself (themes, playback and so on) follow each Plex account
 | `MUSICBRAINZ_ADVANCED` | `true` | Turns on the [MusicBrainz features](features.md#musicbrainz-features): missing albums on artist pages, original release years, artists' other names, and for the server's owner, years and genres to fix. Needs `MUSICBRAINZ_URL`. |
 
 - The features look up your whole library: musicbrainz.org allows one request a second, so a mirror of your own is much quicker, and keeps the names on your network.
-- What MusicBrainz says is kept in `/data` for a month. Each person can turn each feature off in **Settings › MusicBrainz**.
+- What MusicBrainz says is kept in `/data` for a month. Your Plex server's owner turns each feature on or off for everyone in **Settings › Server owner**.
 - `MUSICBRAINZ=false`, the old setting, still turns the checks off.
 
 ### Sharing and sync
@@ -63,16 +63,16 @@ Settings in the app itself (themes, playback and so on) follow each Plex account
 | `SYNC_SETTINGS` | `true` (default), `false` | Each Plex account's app settings, kept by the player so they follow it to every browser. |
 | `SYNC_MISSING_TRACKS` | `true` (default), `false` | Each account's Missing tracks, kept by the player, and everyone's shown to the server's owner. `false`: each browser keeps its own. |
 
-Shared playlists, settings and Missing tracks are kept in `/data`, for Plex accounts that can use your server.
+Shared playlists, settings and Missing tracks are kept in `/data`, for Plex accounts that can use your server. So is what your Plex server's owner turns on for everyone in **Settings › Server owner** (Missing tracks, and the MusicBrainz features).
 
 ### Spotify
 
 | Setting | Example | What it does |
 | --- | --- | --- |
-| `SPOTIFY_FILE_IMPORT` | `true` (default), `false` | **Search › From Spotify** from Spotify's download of your data: all your playlists and Liked Songs. The files are read in the browser, and never go to the player or to Spotify. |
-| `SPOTIFY_LINK_IMPORT` | `true`, `false` (default) | **Search › From Spotify** from a public playlist's link. The player reads Spotify's public page for it: the first 100 tracks only, against Spotify's terms, and it can stop working whenever Spotify changes the page. |
+| `SPOTIFY_LINK_IMPORT` | `true` (default), `false` | **Search › From Spotify** from a public playlist's link. The player reads Spotify's public page for it: the first 100 tracks only, against Spotify's terms, and it can stop working whenever Spotify changes the page. |
+| `SPOTIFY_FILE_IMPORT` | `true`, `false` (default) | **Search › From Spotify** from Spotify's download of your data: all your playlists and Liked Songs. The files are read in the browser, and never go to the player or to Spotify. |
 
-`SPOTIFY_IMPORT`, the old name for `SPOTIFY_LINK_IMPORT`, still works. See [features.md](features.md#from-spotify).
+`SPOTIFY_IMPORT`, the old name for `SPOTIFY_LINK_IMPORT`, still works. Before 0.41.0 it was the other way round (the files on to begin with, the link off): set both to keep it that way. See [features.md](features.md#from-spotify).
 
 ### Offline mode
 
@@ -89,7 +89,7 @@ Shared playlists, settings and Missing tracks are kept in `/data`, for Plex acco
 | Setting | Example | What it does |
 | --- | --- | --- |
 | `DEBUG` | `true` | Extra detail in the container log, with tokens removed. See [Debug mode](#debug-mode). |
-| `DATA_DIR` | `/data` (default; `/var/lib/plexamp-web` on Proxmox VE) | Where shared playlists, account settings, Missing tracks and MusicBrainz answers are kept. Give the container a volume there. |
+| `DATA_DIR` | `/data` (default; `/var/lib/plexamp-web` on Proxmox VE) | Where shared playlists, account settings, Missing tracks, what the server's owner turns on for everyone, and MusicBrainz answers are kept. Give the container a volume there. |
 | `NGINX_ACCESS_LOG` | `/dev/stdout` (default) | In debug mode, where nginx's log of requests goes. |
 | `NGINX_LOG_PORT` | `5140` (default) | In debug mode, the local UDP port nginx sends its errors to, to have tokens removed. |
 

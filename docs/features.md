@@ -94,7 +94,18 @@ Friends who can use your server can import a file you send them and get the same
 
 ## From Spotify
 
-**Search › From Spotify** makes playlists here from yours on Spotify, using Spotify's download of your data: all your playlists, however long, and your Liked Songs. A free Spotify account works.
+**Search › From Spotify** brings a playlist over from Spotify by its link: the tracks your libraries have make a playlist here, in the same order.
+
+- **The link**: **Share › Copy link to playlist** in Spotify. The playlist has to be public.
+- **A new playlist, or one of yours**: choose one of yours under **Playlist** to add it to that instead. Only what isn't in it already goes on, at the end.
+- **Only its first 100 tracks** come over: the player reads the page Spotify shows anyone for the playlist, which lists no more. For a longer one, split it into playlists of 100 on Spotify, then add each to the same playlist here (the app says so, and offers the one the last went into first).
+- **What isn't found** is listed (to copy or save as a spreadsheet) and goes on **Missing tracks**, with the Spotify playlist it was in, while your server's owner has that on (see [ai.md](ai.md#missing-tracks)).
+- **Nothing about you** goes to Spotify: the player fetches the page, not your browser.
+- It's against Spotify's terms, and stops working whenever Spotify changes that page (the app says so). `SPOTIFY_LINK_IMPORT=false` on the container turns it off.
+
+### From Spotify's download of your data
+
+With `SPOTIFY_FILE_IMPORT=true` on the container (off to begin with), From Spotify uses Spotify's download of your data instead: all your playlists, however long, and your Liked Songs. A free Spotify account works. (With the link on too, **Use a link instead** is under it.)
 
 1. **Ask for your data**: on spotify.com, **Account › Privacy settings › Download your data**, tick **Account data**, and request it. Spotify emails you when it's ready, usually within a few days.
 2. **Choose the files**: open the ZIP and choose only `Playlist1.json` (with `Playlist2.json` and so on, if there are more) and `YourLibrary.json` (your Liked Songs). The rest hold personal details, and the app turns away any other file without opening it.
@@ -102,18 +113,8 @@ Friends who can use your server can import a file you send them and get the same
 4. **Done**: each track is found in your libraries by its title and artist (a remix or live take only as that very one), and the playlist is made on your Plex server.
 
 - **What's kept from the files**: each playlist's name, and each track's title, artist and album. Everything is read in your browser, and nothing goes to Spotify.
-- **What isn't found** is listed (to copy or save as a spreadsheet) and goes on **Missing tracks**, with the Spotify playlist it was in, unless you turn that off for the import.
+- **What isn't found** goes on **Missing tracks** too, as from a link.
 - **Limits**: 1,000 playlists, 100,000 tracks, 20,000 in one playlist, 25 MB a file. The list says what was cut short.
-- `SPOTIFY_FILE_IMPORT=false` on the container turns it off.
-
-### From a link
-
-With `SPOTIFY_LINK_IMPORT=true` on the container (off to begin with), a public playlist comes over straight from its link: **Use a link instead**, under Search › From Spotify.
-
-- **The link**: **Share › Copy link to playlist** in Spotify. The playlist has to be public.
-- **Only its first 100 tracks** come over: the player reads the page Spotify shows anyone for the playlist, which lists no more.
-- **Nothing about you** goes to Spotify: the player fetches the page, not your browser.
-- It's against Spotify's terms, and stops working whenever Spotify changes that page (the app says so).
 
 ## Downloads, in the Android app
 
@@ -186,7 +187,7 @@ Choose a DJ with the DJ button in Now Playing. It plays along with your queue un
 
 With `MUSICBRAINZ_ADVANCED=true` (and a `MUSICBRAINZ_URL`: see [configuration.md](configuration.md#musicbrainz)), the player looks your library's artists up on [MusicBrainz](https://musicbrainz.org): their other names, genres and every release, with its kind and when it first came out.
 
-- **Nothing else needs them**, and they never change what Plex says your albums are. Each one can be turned off for you in **Settings › MusicBrainz**.
+- **Nothing else needs them**, and they never change what Plex says your albums are. Your Plex server's owner turns each on or off for everyone in **Settings › Server owner** (all on to begin with).
 - **What's sent**: artists' names, or the MusicBrainz ids Plex has for them. A mirror of your own is also asked about albums, by their MusicBrainz ids. Album and track titles are never sent: they're compared in the player.
 - **What's kept**: MusicBrainz's answers, in `/data`, for a month.
 - **How fast**: musicbrainz.org allows one request a second, so a big library takes hours the first time. A mirror of your own is asked up to 8 things at once while it answers within a second (4 to begin with), fewer while its answers take over 2 seconds, and 20 a second at most. A MusicBrainz that says it's busy is left alone for as long as it asks.
@@ -196,7 +197,7 @@ With `MUSICBRAINZ_ADVANCED=true` (and a `MUSICBRAINZ_URL`: see [configuration.md
 
 What they do:
 
-- **Missing albums on artist pages**: **Not in your library**, under an artist's albums, lists the releases you don't have, linked to MusicBrainz, to copy or download (CSV). **Kinds…** chooses which kinds are listed.
+- **Missing albums on artist pages**: **Not in your library**, under an artist's albums, lists the releases you don't have, linked to MusicBrainz, to copy or download (CSV). The server's owner chooses which kinds are listed (**Kinds…**, or **Settings › Server owner › Missing albums shown**), for everyone.
 - **Original release years**: an artist's albums in the order they first came out, with that year (Plex often has a reissue's year). An album's page says when it first came out.
 - **Artists of the same name**: where Plex has two artists of one name as one, the other's albums are kept apart, under **Another artist called …**, with MusicBrainz's description ("Brazilian rapper"). Only on plain evidence: anything less, and an album stays where Plex has it.
 - **Other names**: an artist an import can't find by their name is looked for by their other names on MusicBrainz ("Мумий Тролль" and "Mumiy Troll").
@@ -204,7 +205,7 @@ What they do:
 
 ### Years and genres to fix
 
-For the server's owner: **Settings › MusicBrainz › Years and genres to fix**.
+For the server's owner: **Settings › Server owner › Years and genres to fix**.
 
 - **What it finds**: albums whose year in Plex is later than when they first came out (often a reissue's), and albums without a genre that MusicBrainz has genres for.
 - **Exact matches only**: the release Plex has the album as (by its MusicBrainz id), or a studio album of the very same title. Singles, EPs, compilations and live albums are only matched by Plex's id.
@@ -218,7 +219,7 @@ For the server's owner: **Settings › MusicBrainz › Years and genres to fix**
 
 ### Artists to merge
 
-For the server's owner: **Settings › MusicBrainz › Artists to merge**. For your information only: nothing is changed.
+For the server's owner: **Settings › Server owner › Artists to merge**. For your information only: nothing is changed.
 
 - **One artist, more than once**: Plex links them to the same artist on MusicBrainz. Merge them in Plex.
 - **Can't tell**: Plex hasn't linked them all.

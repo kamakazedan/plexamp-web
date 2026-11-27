@@ -1,9 +1,11 @@
-// Settings › AI › Missing tracks: the songs and artists AI playlists
-// suggested, and the tracks of playlists imported from Spotify, that the
-// library doesn't have, to export and go looking for. Where this player
-// keeps them for each Plex account: on every device the account signs in
-// on, and for the server's owner with everyone's, saying whose each is, so
-// they can see everything that's missing from their server.
+// Settings › Server owner › Missing tracks, for the server's owner: the
+// songs and artists AI playlists suggested, and the tracks of playlists
+// imported from Spotify, that the library doesn't have, to export and go
+// looking for. Where this player keeps them for each Plex account: on every
+// device the owner signs in on, with everyone's, saying whose each is, so
+// they can see everything that's missing from their server. A friend sees
+// their own here (Settings › Missing tracks), to look at or export: what
+// comes off it is the owner's to say (see missingEditable).
 import { app, on } from '../state.js';
 import { describeError } from '../router.js';
 import { h, icon, backHeader, row, sectionHeader, emptyState, iconButton, toast, fmt, confirmAction, download, fileDate } from '../ui.js';
@@ -19,14 +21,16 @@ import {
   missingText,
   copyText,
   everyoneShown,
+  missingShown,
+  missingEditable,
   mbOn,
   mbWhere,
   tally,
   promptOf,
-  missingKept,
+  ownsHere,
 } from '../missing.js';
-import { pullMissing, missingPlayerFull } from '../missingsync.js';
-import { aiSettings } from '../ai.js';
+import { pullMissing, missingPlayerFull, syncs } from '../missingsync.js';
+import { featureOn, readFeatures } from '../features.js';
 import { joinWithAnd } from './common.js';
 
 // Whose one of everyone's is (for the server's owner): you and their names,
@@ -39,22 +43,29 @@ export function whose(m) {
   return joinWithAnd(names);
 }
 
-export function missingTracksView({ el, onDispose }) {
+export async function missingTracksView({ el, onDispose }) {
   const server = app.source?.serverName || 'this server';
+  el.append(backHeader('Missing tracks', { fallback: ownsHere() === true ? '/settings/owner' : '/settings' }));
+  // Whose server it is, as the player says (asked now, the first time the
+  // app's opened).
+  if (ownsHere() === null) await readFeatures({ force: true });
+  if (!missingShown()) {
+    el.append(emptyState(`Only the owner of ${server} sees these.`));
+    return;
+  }
+  // (Which, the owner's or a friend's, as the page is opened.)
+  const editable = missingEditable();
   const lede = h('p.lede.missing-lede');
   const paintLede = () => {
-    const kept = missingKept();
+    if (!editable) {
+      lede.textContent = `Songs and artists from your AI playlists and Spotify imports that ${server} doesn’t have. Whoever runs it sees them too.`;
+      return;
+    }
     const what = `Songs and artists from AI playlists and Spotify imports that ${server} doesn’t have`;
-    lede.textContent =
-      (!kept
-        ? `${what}. Kept on this device.`
-        : kept.owner === true
-          ? `${what}: yours and your friends’. Kept by this player for your account; what anyone asked the AI stays on their device.`
-          : `${what}. Kept by this player for your account. ${kept.owner === false ? `Whoever runs ${server}` : `The owner of ${server}`} sees them too, with your name, so they can add them; what you asked the AI stays on your device.`) +
-      (mbOn() ? '' : ' The AI sometimes makes songs up, so check before you go looking.');
+    lede.textContent = (syncs() ? `${what}: yours and your friends’.` : `${what}. Kept on this device.`) + (mbOn() ? '' : ' The AI sometimes makes songs up, so check before you go looking.');
   };
   paintLede();
-  el.append(backHeader('Missing tracks', { fallback: '/settings/ai' }), lede);
+  el.append(lede);
   const actions = h('div.pad.button-row.missing-actions');
   const status = h('p.hint.pad.missing-status', { role: 'status' });
   const body = h('div.missing-body');
@@ -108,8 +119,8 @@ export function missingTracksView({ el, onDispose }) {
             navigator.share
               ? button('external', 'Share…', () => navigator.share({ title: 'Missing tracks', text: missingText(list) }).catch(() => {}), '.missing-share')
               : null,
-            button('refresh', 'Check again', checkAgain, '.missing-check'),
-            mbOn() && list.some(askable) ? button('check', 'Check on MusicBrainz', checkOnMusicBrainz, '.missing-mb') : null,
+            editable ? button('refresh', 'Check again', checkAgain, '.missing-check') : null,
+            editable && mbOn() && list.some(askable) ? button('check', 'Check on MusicBrainz', checkOnMusicBrainz, '.missing-mb') : null,
           ].filter(Boolean)
         : []),
     );
@@ -117,10 +128,12 @@ export function missingTracksView({ el, onDispose }) {
     if (checking) actions.querySelector('.missing-check')?.setAttribute('disabled', '');
 
     const remove = (m) =>
-      iconButton('close', `Take ${m.title || m.artist} off ${everyone ? 'everyone’s list' : 'the list'}`, () => {
-        forgetMissing(m);
-        render();
-      });
+      editable
+        ? iconButton('close', `Take ${m.title || m.artist} off ${everyone ? 'everyone’s list' : 'the list'}`, () => {
+            forgetMissing(m);
+            render();
+          })
+        : null;
     const lead = (name) => h('span.tile.tile-plain', null, icon(name, 22));
     // Checked on MusicBrainz and found: real, not made up.
     const found = (m) => (m.mb === 'real' ? h('span.mb-found', { title: `Found on ${mbWhere()}` }, 'On MusicBrainz') : null);
@@ -163,7 +176,7 @@ export function missingTracksView({ el, onDispose }) {
         ),
       );
     }
-    if (list.length) {
+    if (list.length && editable) {
       kids.push(
         h(
           'div.pad.missing-clear',
@@ -189,10 +202,10 @@ export function missingTracksView({ el, onDispose }) {
           ),
         ),
       );
-    } else {
+    } else if (!list.length) {
       kids.push(
         emptyState(
-          everyone || aiSettings().missing ? 'Nothing missing so far.' : 'Turn on Show missing tracks in Settings › AI to list them here.',
+          featureOn('missing') || !editable ? 'Nothing missing so far.' : 'Turn on List what’s missing in Settings › Server owner to list them here.',
         ),
       );
     }

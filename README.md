@@ -53,14 +53,14 @@ The names are the same everywhere: `-e NAME=value` with `docker run`, or a `NAME
 | `OLLAMA_AUTH` | `plex` (default), `off` | Who can use it: people signed in with Plex (only those who can use your server, with `PLEX_SERVER_URL` set), or anyone. |
 | `OLLAMA_API_KEY` | | Only for an Ollama behind a proxy that asks for a key. |
 | `MUSICBRAINZ_URL` | `https://musicbrainz.org` | Checks AI suggestions are real songs. A mirror of your own keeps the names on your network. |
-| `MUSICBRAINZ_ADVANCED` | `true` | The MusicBrainz features: missing albums, original years, years and genres to fix. |
+| `MUSICBRAINZ_ADVANCED` | `true` | The MusicBrainz features: missing albums, original years, years and genres to fix. The server's owner turns each on or off for everyone. |
 | `PLAY_TOGETHER` | `true` (default), `false` | Listen in sync with Plex friends. |
 | `CASTING` | `true` (default), `false` | Play on Plexamp and other Plex players, for the server's owner (needs `PLEX_SERVER_URL`). |
 | `PLAYLIST_SHARING` | `true` (default), `false` | Share playlists with Plex friends. |
 | `SYNC_SETTINGS` | `true` (default), `false` | Your app settings follow your Plex account to every browser. |
 | `SYNC_MISSING_TRACKS` | `true` (default), `false` | Missing tracks follow your account, and the server's owner sees everyone's. |
-| `SPOTIFY_FILE_IMPORT` | `true` (default), `false` | Playlists from Spotify's download of your data. |
-| `SPOTIFY_LINK_IMPORT` | `true`, `false` (default) | A playlist from a public Spotify link (first 100 tracks; against Spotify's terms). |
+| `SPOTIFY_LINK_IMPORT` | `true` (default), `false` | A playlist from a public Spotify link (first 100 tracks; against Spotify's terms). |
+| `SPOTIFY_FILE_IMPORT` | `true`, `false` (default) | Playlists from Spotify's download of your data. |
 | `OFFLINE_PWD` | a long random password | Sign in with this while plex.tv is down. It signs in as your server's owner: [read this first](docs/configuration.md#offline-mode). |
 | `OFFLINE_NETWORKS` | `private` (default), `192.168.1.0/24` | Where the offline password works from. |
 | `DEBUG` | `true` | Extra detail in the container log, with tokens removed. |

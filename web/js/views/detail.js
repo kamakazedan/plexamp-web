@@ -51,7 +51,8 @@ import { browseHref } from './library.js';
 import { mbFeatures, mbOn, artistOnMB, albumsOnMB, matchGroup, albumKey, kindOf, plexKind, firstYear, sameTitle, apartFromNamesakes, RELEASE_KINDS, KIND_NAMES, mbidOf, exactAlbum, shortRelease, kindsAgree, notThatRecording, mbOwnServer, albumTracks, placeholderArtist } from '../mb.js';
 import { releasesFromHubs, albumOfTrack, creditedTo } from '../hubs.js';
 import { artistAppearsIn } from '../membership.js';
-import { chooseMissingKinds, missingKinds } from './mbsettings.js';
+import { chooseMissingKinds, missingKinds } from './serverowner.js';
+import { canSetFeatures } from '../features.js';
 import { copyText, toCsv } from '../missing.js';
 import { clearSelection } from '../selection.js';
 import { sortChoices, sortedOrder, restoreOrder, saveOrder } from '../sorting.js';
@@ -750,7 +751,8 @@ export async function artistView({ el, params, onDispose }) {
     const shape = JSON.stringify([chosen, missing.map((g) => g.id)]);
     if (shape === missingPainted) return;
     missingPainted = shape;
-    const kindsButton = h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albumsNow())) }, 'Kinds…');
+    // (Which kinds are shown is the server's owner's to choose, for everyone.)
+    const kindsButton = canSetFeatures() ? h('button.link-btn.mb-kinds-btn', { type: 'button', onclick: () => chooseMissingKinds(() => paintMissing(albumsNow())) }, 'Kinds…') : null;
     const head = sectionHeader('Not in your library', null, kindsButton);
     if (!missing.length) {
       missingBox.replaceChildren(h('section.block.mb-missing', null, head, h('p.hint.pad', null, `You have everything MusicBrainz lists for ${artist.title}.`)));

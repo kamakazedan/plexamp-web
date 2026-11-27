@@ -1,4 +1,4 @@
-// Settings › MusicBrainz › Artists to merge, for the server's owner: for
+// Settings › Server owner › Artists to merge, for the server's owner: for
 // their information only, the library's artists that Plex may have more than
 // once, with what Plex itself says of each, what's wrong and what to do, and
 // nothing changed (merging, if they're one, is theirs to do in Plex):
@@ -54,7 +54,7 @@ export function linkOf(members) {
 }
 
 export async function mbMergeView({ el, onDispose }) {
-  el.append(backHeader('Artists to merge', { fallback: '/settings/musicbrainz' }));
+  el.append(backHeader('Artists to merge', { fallback: '/settings/owner' }));
   if (!mbFeatures()) {
     el.append(emptyState('MusicBrainz features are turned off on this player.'));
     return;

@@ -381,19 +381,33 @@ KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/settings.json; cat /data
 contains "settings: kept in /data, the service's alone" "nginx 600" "$KEPT"
 lacks "settings: ...without anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
 contains "settings: ...and forgotten when asked" '{"settings":{},"changed":{},"rev":0,"off":false}' "$(cb -H 'X-Plex-Token: t' -X DELETE "$SET" >/dev/null; cb -H 'X-Plex-Token: t' "$SET")"
+# What the Plex server's owner turns on for everyone (Settings › Server
+# owner): everyone who can use the server reads it; only the owner, as
+# plex.tv says, changes it. Kept in /data, the service's alone.
+FEAT="$W/api/features?server=mock-server-1"
+contains "server owner settings: nothing turned on to begin with" '{"features":{},"rev":0,"owner":false}' "$(cb -H 'X-Plex-Token: t2' "$FEAT")"
+expect "server owner settings: only the server's owner changes them" 403 "$(c -H 'X-Plex-Token: t2' -H "$JSON" -X PUT -d '{"set":{"missing":true}}' "$FEAT")"
+expect "server owner settings: only for people who can use the server" 403 "$(c -H 'X-Plex-Token: t3' "$FEAT")"
+expect "server owner settings: not without a sign-in" 401 "$(c "$FEAT")"
 # Missing tracks that follow each account: each account's own, and for the
 # server's owner everyone's, whose by their Plex name; never what anyone
-# asked an AI for. Kept in /data, the service's alone; only on a Plex server
-# the account can use.
+# asked an AI for. A friend's only once the owner has turned Missing tracks
+# on, and theirs to see but the owner's to change. Kept in /data, the
+# service's alone; only on a Plex server the account can use.
 MIS="$W/api/missing?server=mock-server-1"
 contains "missing tracks: none kept yet" '"entries":[]' "$(cb -H 'X-Plex-Token: t2' "$MIS")"
-contains "missing tracks: a friend's are kept for their account, for the server's owner to see" '"skipped":0' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789ab","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music","prompt":"not-for-keeping"}]}' "$MIS")"
+contains "missing tracks: a friend's aren't kept while the server's owner hasn't turned Missing tracks on" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789aa","items":[{"kind":"track","artist":"Friend Artist","title":"Too Soon"}],"section":"1","library":"Music"}]}' "$MIS")"
+contains "server owner settings: the owner turns Missing tracks on, for everyone" '{"features":{"missing":true},"rev":1,"owner":true}' "$(cb -H 'X-Plex-Token: t' -H "$JSON" -X PUT -d '{"set":{"missing":true}}' "$FEAT")"
+contains "server owner settings: ...which a friend reads" '{"features":{"missing":true},"rev":1,"owner":false}' "$(cb -H 'X-Plex-Token: t2' "$FEAT")"
+contains "missing tracks: then a friend's are kept for their account, for the server's owner to see" '"skipped":0' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789ab","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music","prompt":"not-for-keeping"}]}' "$MIS")"
 KEPT="$(cb -H 'X-Plex-Token: t2' "$MIS")"
 contains "missing tracks: ...and read back" '"title":"Friend Song"' "$KEPT"
 lacks "missing tracks: ...never what it was asked for" "not-for-keeping" "$KEPT"
 lacks "missing tracks: ...nor, for a friend, everyone else's" '"others"' "$KEPT"
 contains "missing tracks: the server's owner sees everyone's, whose by name" '"who":["Sam"]' "$(cb -H 'X-Plex-Token: t' "$MIS")"
 contains "missing tracks: ...and a friend can't change everyone's" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"clear","id":"0123456789ac","everyone":true}]}' "$MIS")"
+contains "missing tracks: ...nor take theirs off (that's the owner's to do)" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"clear","id":"0123456789ad"}]}' "$MIS")"
+contains "missing tracks: ...so theirs is still there" '"title":"Friend Song"' "$(cb -H 'X-Plex-Token: t2' "$MIS")"
 expect "missing tracks: only for people who can use the server" 403 "$(c -H 'X-Plex-Token: t3' "$MIS")"
 expect "missing tracks: ...on a server they can use" 403 "$(c -H 'X-Plex-Token: t' "$W/api/missing?server=someone-elses")"
 expect "missing tracks: not without a sign-in" 401 "$(c "$MIS")"
@@ -402,6 +416,9 @@ KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/missing.json; cat /data/
 contains "missing tracks: kept in /data, the service's alone" "nginx 600" "$KEPT"
 lacks "missing tracks: ...without what anyone asked for" "not-for-keeping" "$KEPT"
 lacks "missing tracks: ...or anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
+KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/features.json; cat /data/features.json')"
+contains "server owner settings: kept in /data, the service's alone" "nginx 600" "$KEPT"
+lacks "server owner settings: ...without anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
 # A sign-in the service hasn't seen is checked with plex.tv: a few a minute
 # from each address, so made-up tokens can't keep plex.tv busy. (Last here:
 # the restart below starts the counts again.)
@@ -414,6 +431,7 @@ docker restart pw-web >/dev/null
 wait_service pw-web
 # (With /data/musicbrainz.json there too, the MusicBrainz features' own.)
 contains "shares: still there after a restart" '"version":2,"count":3' "$(cb -H 'X-Plex-Token: t' "$W/api/shares?server=mock-server-1")"
+contains "server owner settings: still there after a restart" '{"features":{"missing":true},"rev":1,"owner":false}' "$(cb -H 'X-Plex-Token: t2' "$FEAT")"
 lacks "...with what the MusicBrainz features looked up in /data too, nothing's turned off" "other files in it" "$(docker logs pw-web 2>&1)"
 contains "...and that's still kept there, the service's alone" "nginx 600" "$(docker exec pw-web stat -c '%U %a' /data/musicbrainz.json)"
 docker logs pw-web 2>&1 | grep -q "plexamp-web service: ready" && pass "the service started" || fail "the service started"
@@ -441,11 +459,14 @@ docker run -d --name pw-web2 --network "$NET" -v "$DATA_VOLUME:/data" "$IMAGE" >
 wait_http pw-web2 http://pw-web2/
 wait_service pw-web2
 lacks "defaults: with a volume at /data, nothing is said about it" "which isn't a volume" "$(docker logs pw-web2 2>&1)"
-expect "defaults: Play Together, your devices, shared playlists, account settings and missing tracks, and playlists from Spotify's download of your data, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true, missingSync: true, spotifyFiles: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
+expect "defaults: Play Together, your devices, shared playlists, account settings and missing tracks, and playlists from Spotify links, nothing else" "window.PW_CONFIG = { together: true, devices: true, sharing: true, settingsSync: true, missingSync: true, spotify: true };" "$(cb http://pw-web2/config.js | tr -d '\n')"
 contains "defaults: Play on with Plex players needs PLEX_SERVER_URL (it's for the server's owner)" "Play on with Plex players needs PLEX_SERVER_URL" "$(docker logs pw-web2 2>&1)"
 expect "defaults: ...so the service has no players for anyone" 404 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/cast/players)"
 expect "defaults: no MusicBrainz checks (MUSICBRAINZ_URL isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"items":[]}' http://pw-web2/api/musicbrainz/check)"
-expect "defaults: no Spotify import by link (SPOTIFY_LINK_IMPORT isn't set)" 404 "$(c -H 'X-Plex-Token: t' -H 'Content-Type: application/json' -X POST -d '{"link":"spotify:playlist:mockRoadTrip0000000001"}' http://pw-web2/api/spotify/playlist)"
+# (Asked with GET, which it doesn't take: nothing goes to plex.tv or Spotify.)
+expect "defaults: Spotify import by link is on (SPOTIFY_LINK_IMPORT isn't set)" 405 "$(c -H 'X-Plex-Token: t' http://pw-web2/api/spotify/playlist)"
+contains "defaults: ...and the log says so" "importing from Spotify by link is on" "$(docker logs pw-web2 2>&1)"
+lacks "defaults: ...but not from Spotify's download of your data (SPOTIFY_FILE_IMPORT isn't set)" "download of your data is on" "$(docker logs pw-web2 2>&1)"
 expect "defaults: /pms not proxied" 200 "$(c http://pw-web2/pms/identity)"
 expect "defaults: /ollama off" 404 "$(c http://pw-web2/ollama/api/tags)"
 expect "defaults: Play Together needs a sign-in" 401 "$(c http://pw-web2/api/together/me)"
@@ -462,9 +483,11 @@ expect "OLLAMA_AUTH=off: no sign-in needed" 200 "$(c http://pw-web3/ollama/api/t
 contains "OLLAMA_MODEL not set: the first model installed is used" '"model":"llama3.1:8b"' "$(cb http://pw-web3/ollama/api/status)"
 
 # ---------- 4. No Plex proxy: sign-in checked with the real plex.tv ----------
-docker run -d --name pw-web4 --network "$NET" -e OLLAMA_URL=http://pw-ollama:11434 "$IMAGE" >/dev/null
+docker run -d --name pw-web4 --network "$NET" -e OLLAMA_URL=http://pw-ollama:11434 -e SPOTIFY_IMPORT=false "$IMAGE" >/dev/null
 wait_http pw-web4 http://pw-web4/
 wait_service pw-web4
+lacks "SPOTIFY_IMPORT=false (its name before 0.22.0) alone: no Spotify by link" "spotify" "$(cb http://pw-web4/config.js)"
+expect "...and the service hasn't it either" 404 "$(c -H 'X-Plex-Token: t' http://pw-web4/api/spotify/playlist)"
 code="$(c -H 'X-Plex-Token: not-a-real-token' http://pw-web4/ollama/api/tags)"
 if [ "$code" != 200 ] && [ "$code" != 000 ]; then pass "plex.tv check refuses a fake token ($code)"; else fail "plex.tv check refuses a fake token: got $code"; fi
 
@@ -627,7 +650,7 @@ docker run -d --name pw-web7 --network "$NET" -e PLAY_TOGETHER=false -e MUSICBRA
     -e OFFLINE_NETWORKS=private -e OLLAMA_AUTH=plex -e PLEX_CLAIM=claim-for-plex -e OLLAMA_HOST=0.0.0.0 "$IMAGE" >/dev/null
 wait_http pw-web7 http://pw-web7/
 wait_service pw-web7
-expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify by link)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true, spotifyFiles: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
+expect "PLAY_TOGETHER=false: not in config.js (and MUSICBRAINZ=true alone: musicbrainz.org; SPOTIFY_LINK_IMPORT=false over SPOTIFY_IMPORT=true: no Spotify by link)" 'window.PW_CONFIG = { musicbrainz: "public", devices: true, sharing: true, settingsSync: true, missingSync: true };' "$(cb http://pw-web7/config.js | tr -d '\n')"
 contains "MUSICBRAINZ=true: the log says where suggestions are checked" "checked on MusicBrainz at https://musicbrainz.org" "$(docker logs pw-web7 2>&1)"
 # (OFFLINE_NETWORKS=private and OLLAMA_AUTH=plex alone, as Proxmox VE's
 # settings have them: the defaults, so the container starts, as it has.)

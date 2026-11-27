@@ -59,25 +59,25 @@ Any device can use an Ollama of its own, for anyone the shared model isn't for, 
 
 ## Missing tracks
 
-Turn on **Settings › AI › Show missing tracks** (off to begin with), and each AI playlist lists the songs it suggested that your library doesn't have.
+AI playlists and Spotify imports can list what your library doesn't have, so whoever runs your Plex server can go and find it. The server's owner turns this on for everyone: **Settings › Server owner › List what's missing** (off to begin with).
 
-- **Settings › AI › Missing tracks** collects them all, with how often each was suggested. Download them as a spreadsheet (CSV), copy or share them.
-- **Spotify imports** put what they didn't find there too, with the Spotify playlist each was in.
-- **Check again**, after adding music, takes off what's in the library now.
+- **The server's owner** sees everyone's in **Settings › Server owner › Missing tracks**: each track, whose it is and how often, but never what anyone asked for or their Spotify playlists' names. Download them as a spreadsheet (CSV), copy or share them.
+- **Friends** see their own in **Settings › Missing tracks**, to look at or export. What happens to them is the owner's to say: a friend can't take any off, and can't keep theirs off the list.
+- **Each AI playlist** lists the songs it suggested that your library doesn't have, and **Spotify imports** put what they didn't find there too, with the Spotify playlist each was in.
+- **Check again**, after adding music, takes off what's in the library now, everyone's.
 - **Check on MusicBrainz** (with MusicBrainz set up) takes off what MusicBrainz doesn't know (likely made up), with Undo.
-- **Kept**: the latest 500 from AI playlists and, apart from those, 1,000 from Spotify, for each Plex server.
+- **Kept**: the latest 500 from AI playlists and, apart from those, 1,000 from Spotify, for each Plex server and account.
 
-### On every device, and for the server's owner
+### On every device
 
-- **Your list follows your Plex account** to every browser (`SYNC_MISSING_TRACKS`, on to begin with).
-- **The server's owner sees everyone's**, so they know what's missing from their server: each track, whose it is and how often, but never what anyone asked for or their Spotify playlists' names. Friends' pages say so.
+- **Your list follows your Plex account** to every browser (`SYNC_MISSING_TRACKS`, on to begin with), which is how friends' reach the owner.
 - **What's asked for** an AI playlist, and Spotify playlists' names, never leave the device they were on.
-- **Off** (`SYNC_MISSING_TRACKS=false`, or without the player's service): each browser keeps its own list, and the owner sees only theirs.
-- A friend who can no longer use the server can't clear theirs: the owner's **Clear the list** can, or delete `/data/missing.json`.
+- **Off** (`SYNC_MISSING_TRACKS=false`): each of the owner's browsers keeps its own list, and nothing is listed for friends (it couldn't reach the owner).
+- Only the owner takes anything off a friend's: **Clear the list** clears everyone's, or delete `/data/missing.json`.
 
 ## Checking suggestions on MusicBrainz
 
-[MusicBrainz](https://musicbrainz.org) knows which songs and artists are real. Set `MUSICBRAINZ_URL`, and an AI playlist (with Show missing tracks on) checks what it suggested that you don't have: what MusicBrainz doesn't know, and album titles taken for songs, are left out. Each device can turn this off in **Settings › AI › Check suggestions on MusicBrainz**.
+[MusicBrainz](https://musicbrainz.org) knows which songs and artists are real. Set `MUSICBRAINZ_URL`, and an AI playlist (with Missing tracks on) checks what it suggested that you don't have: what MusicBrainz doesn't know, and album titles taken for songs, are left out. The server's owner can turn this off for everyone in **Settings › Server owner › Check AI suggestions on MusicBrainz**.
 
 | `MUSICBRAINZ_URL` | |
 | --- | --- |

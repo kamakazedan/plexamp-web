@@ -30,6 +30,7 @@ import { refreshRows } from './ratings.js';
 import { initSharing, invitations } from './sharing.js';
 import { startSync } from './sync.js';
 import { startMissingSync } from './missingsync.js';
+import { readFeatures } from './features.js';
 import { watchOffline } from './offline.js';
 import { startDownloads, hasDownloads } from './downloads.js';
 import { connection, connectionLost, connectionBack, unreachable } from './connection.js';
@@ -379,6 +380,8 @@ function boot() {
     // Missing tracks (missingsync.js).
     startSync();
     startMissingSync();
+    // What the server's owner has on for everyone (features.js).
+    readFeatures({ force: true });
     player.restore();
     // Still playing on another Plex player since the page was opened last?
     cast.resume();
@@ -399,6 +402,12 @@ function boot() {
   on('source', () => app.config.together && !together.inviteTimer && together.watch());
   on('source', () => app.server && startSync());
   on('source', () => app.server && startMissingSync());
+  on('source', () => app.server && readFeatures({ force: true }));
+  // (Read again as the app's shown again, now and then.)
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && app.server && readFeatures());
+  // Artist and album pages are built with the MusicBrainz ones: those kept
+  // to go back to are built again once one changes.
+  on('features', (e) => e?.mb && dropCached((p) => p.startsWith('/artist/') || p.startsWith('/album/')));
   // Whether menus offer collection changes (only the server's admin can).
   on('source', () => app.server && isAdmin().catch(() => {}));
   on('source', () => app.server && watchOffline());
