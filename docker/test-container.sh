@@ -381,19 +381,33 @@ KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/settings.json; cat /data
 contains "settings: kept in /data, the service's alone" "nginx 600" "$KEPT"
 lacks "settings: ...without anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
 contains "settings: ...and forgotten when asked" '{"settings":{},"changed":{},"rev":0,"off":false}' "$(cb -H 'X-Plex-Token: t' -X DELETE "$SET" >/dev/null; cb -H 'X-Plex-Token: t' "$SET")"
+# What the Plex server's owner turns on for everyone (Settings › Server
+# owner): everyone who can use the server reads it; only the owner, as
+# plex.tv says, changes it. Kept in /data, the service's alone.
+FEAT="$W/api/features?server=mock-server-1"
+contains "server owner settings: nothing turned on to begin with" '{"features":{},"rev":0,"owner":false}' "$(cb -H 'X-Plex-Token: t2' "$FEAT")"
+expect "server owner settings: only the server's owner changes them" 403 "$(c -H 'X-Plex-Token: t2' -H "$JSON" -X PUT -d '{"set":{"missing":true}}' "$FEAT")"
+expect "server owner settings: only for people who can use the server" 403 "$(c -H 'X-Plex-Token: t3' "$FEAT")"
+expect "server owner settings: not without a sign-in" 401 "$(c "$FEAT")"
 # Missing tracks that follow each account: each account's own, and for the
 # server's owner everyone's, whose by their Plex name; never what anyone
-# asked an AI for. Kept in /data, the service's alone; only on a Plex server
-# the account can use.
+# asked an AI for. A friend's only once the owner has turned Missing tracks
+# on, and theirs to see but the owner's to change. Kept in /data, the
+# service's alone; only on a Plex server the account can use.
 MIS="$W/api/missing?server=mock-server-1"
 contains "missing tracks: none kept yet" '"entries":[]' "$(cb -H 'X-Plex-Token: t2' "$MIS")"
-contains "missing tracks: a friend's are kept for their account, for the server's owner to see" '"skipped":0' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789ab","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music","prompt":"not-for-keeping"}]}' "$MIS")"
+contains "missing tracks: a friend's aren't kept while the server's owner hasn't turned Missing tracks on" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789aa","items":[{"kind":"track","artist":"Friend Artist","title":"Too Soon"}],"section":"1","library":"Music"}]}' "$MIS")"
+contains "server owner settings: the owner turns Missing tracks on, for everyone" '{"features":{"missing":true},"rev":1,"owner":true}' "$(cb -H 'X-Plex-Token: t' -H "$JSON" -X PUT -d '{"set":{"missing":true}}' "$FEAT")"
+contains "server owner settings: ...which a friend reads" '{"features":{"missing":true},"rev":1,"owner":false}' "$(cb -H 'X-Plex-Token: t2' "$FEAT")"
+contains "missing tracks: then a friend's are kept for their account, for the server's owner to see" '"skipped":0' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"note","id":"0123456789ab","items":[{"kind":"track","artist":"Friend Artist","title":"Friend Song"}],"section":"1","library":"Music","prompt":"not-for-keeping"}]}' "$MIS")"
 KEPT="$(cb -H 'X-Plex-Token: t2' "$MIS")"
 contains "missing tracks: ...and read back" '"title":"Friend Song"' "$KEPT"
 lacks "missing tracks: ...never what it was asked for" "not-for-keeping" "$KEPT"
 lacks "missing tracks: ...nor, for a friend, everyone else's" '"others"' "$KEPT"
 contains "missing tracks: the server's owner sees everyone's, whose by name" '"who":["Sam"]' "$(cb -H 'X-Plex-Token: t' "$MIS")"
 contains "missing tracks: ...and a friend can't change everyone's" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"clear","id":"0123456789ac","everyone":true}]}' "$MIS")"
+contains "missing tracks: ...nor take theirs off (that's the owner's to do)" '"skipped":1' "$(cb -H 'X-Plex-Token: t2' -H "$JSON" -X POST -d '{"ops":[{"type":"clear","id":"0123456789ad"}]}' "$MIS")"
+contains "missing tracks: ...so theirs is still there" '"title":"Friend Song"' "$(cb -H 'X-Plex-Token: t2' "$MIS")"
 expect "missing tracks: only for people who can use the server" 403 "$(c -H 'X-Plex-Token: t3' "$MIS")"
 expect "missing tracks: ...on a server they can use" 403 "$(c -H 'X-Plex-Token: t' "$W/api/missing?server=someone-elses")"
 expect "missing tracks: not without a sign-in" 401 "$(c "$MIS")"
@@ -402,6 +416,9 @@ KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/missing.json; cat /data/
 contains "missing tracks: kept in /data, the service's alone" "nginx 600" "$KEPT"
 lacks "missing tracks: ...without what anyone asked for" "not-for-keeping" "$KEPT"
 lacks "missing tracks: ...or anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
+KEPT="$(docker exec pw-web sh -c 'stat -c "%U %a" /data/features.json; cat /data/features.json')"
+contains "server owner settings: kept in /data, the service's alone" "nginx 600" "$KEPT"
+lacks "server owner settings: ...without anyone's sign-in" "token" "$(printf '%s' "$KEPT" | tr '[:upper:]' '[:lower:]')"
 # A sign-in the service hasn't seen is checked with plex.tv: a few a minute
 # from each address, so made-up tokens can't keep plex.tv busy. (Last here:
 # the restart below starts the counts again.)
@@ -414,6 +431,7 @@ docker restart pw-web >/dev/null
 wait_service pw-web
 # (With /data/musicbrainz.json there too, the MusicBrainz features' own.)
 contains "shares: still there after a restart" '"version":2,"count":3' "$(cb -H 'X-Plex-Token: t' "$W/api/shares?server=mock-server-1")"
+contains "server owner settings: still there after a restart" '{"features":{"missing":true},"rev":1,"owner":false}' "$(cb -H 'X-Plex-Token: t2' "$FEAT")"
 lacks "...with what the MusicBrainz features looked up in /data too, nothing's turned off" "other files in it" "$(docker logs pw-web 2>&1)"
 contains "...and that's still kept there, the service's alone" "nginx 600" "$(docker exec pw-web stat -c '%U %a' /data/musicbrainz.json)"
 docker logs pw-web 2>&1 | grep -q "plexamp-web service: ready" && pass "the service started" || fail "the service started"
