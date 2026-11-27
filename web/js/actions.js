@@ -11,7 +11,7 @@ import { exportPlaylistFile } from './views/playlistfiles.js';
 import { lovedPlaylist, LOVED_TITLE } from './ratings.js';
 import { pickable, withoutDisliked } from './picks.js';
 import { unreachable } from './connection.js';
-import { isDownloaded, downloadedPlaylist, playableHere, offlineNow } from './downloads.js';
+import { isDownloaded, downloadedPlaylist, playableHere, offlineNow, phoneOnly } from './downloads.js';
 
 const PLAYLIST_PLAY_LIMIT = 1000;
 const REMOTE_LIMIT = 500; // tracks sent to a Play Together session at once (player.js)
@@ -308,6 +308,9 @@ const selectAction = (select, what) => select && { icon: 'select', label: 'Selec
 
 export function trackMenu(track, { queueIndex, extra = [], select = null } = {}) {
   const inQueue = queueIndex !== undefined;
+  // (Another server's, played from the phone: this server has nothing of it
+  // to go on, so only the queue's own.)
+  const mine = !phoneOnly(track);
   sheet({
     title: track.title,
     subtitle: [track.artist, track.album].filter(Boolean).join(' — '),
@@ -324,16 +327,16 @@ export function trackMenu(track, { queueIndex, extra = [], select = null } = {})
           toast('Playing next');
         },
       },
-      { icon: 'radio', label: 'Play similar tracks', onSelect: () => similarRadio(track) },
+      mine && { icon: 'radio', label: 'Play similar tracks', onSelect: () => similarRadio(track) },
       inQueue && queueIndex !== player.index && { icon: 'close', label: 'Remove from queue', onSelect: () => player.remove(queueIndex) },
-      { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: track.title, load: async () => [track] }) },
-      isAdminNow() && {
+      mine && { icon: 'playlistAdd', label: 'Add to playlist…', onSelect: () => addToPlaylist({ what: track.title, load: async () => [track] }) },
+      mine && isAdminNow() && {
         icon: 'collection',
         label: 'Add to collection…',
         onSelect: () => addToCollection({ kind: 'track', what: track.title, load: async () => [track] }),
       },
-      selectAction(select, 'tracks'),
-      /^\d+$/.test(String(track.id)) && { icon: 'appears', label: 'Appears in…', onSelect: () => navigate(`/appears/${track.id}`) },
+      mine && selectAction(select, 'tracks'),
+      mine && /^\d+$/.test(String(track.id)) && { icon: 'appears', label: 'Appears in…', onSelect: () => navigate(`/appears/${track.id}`) },
       track.albumId && { icon: 'disc', label: 'Go to album', onSelect: () => navigate(`/album/${track.albumId}`) },
       track.artistId && { icon: 'mic', label: 'Go to artist', onSelect: () => navigate(`/artist/${track.artistId}`) },
     ],

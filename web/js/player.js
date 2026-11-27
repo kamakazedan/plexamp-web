@@ -12,13 +12,13 @@
 // does comes back through castUpdate().
 import { app, on } from './state.js';
 import { store, canPlayCodec, canPlayHlsNatively, isLossless, playbackId } from './plex.js';
-import { shuffleArray } from './ui.js';
+import { shuffleArray, toast } from './ui.js';
 import { debugLog, debugOn, megabytes, seconds } from './debug.js';
 import { loudnessOf, audibleSpan, followsOnAlbum, canFade } from './transitions.js';
 import { Prefetcher, cachedLoader, recordingLoader, LONG_FORM_MS } from './prefetch.js';
 import { connection, connectionLost, connectionBack, serverAnswers } from './connection.js';
 import { keepPlayed, flush } from './outbox.js';
-import { localUrl, isLocal, notPlayable, playableHere } from './downloads.js';
+import { localUrl, isLocal, notPlayable, playableHere, phoneOnly, phoneUrl, phoneThumbUrl } from './downloads.js';
 
 // (Tracks at least this long count as long-form: see prefetch.js, which
 // this module imports, so it's kept there.)
@@ -271,7 +271,8 @@ export function levelFor(gains, useAlbum) {
 
 // A track's gains (dB), from its full details; null if it isn't analysed.
 export async function gainsOf(track) {
-  const d = track?.id && app.server ? await app.server.trackDetail(track.id) : null;
+  // (Not another server's, played from the phone: this one hasn't got it.)
+  const d = track?.id && app.server && !phoneOnly(track) ? await app.server.trackDetail(track.id) : null;
   const stream = (d?.Media?.[0]?.Part?.[0]?.Stream || []).find((x) => x.streamType === 2);
   const num = (v) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
   const loudness = num(stream?.loudness);
@@ -793,6 +794,10 @@ class Player extends EventTarget {
 
   // `playback`: the track's playback, for a converted stream (see playbackId).
   sourceFor(track, forceTranscode, playback) {
+    // Another server's, downloaded to the phone (see downloads.js): from
+    // there, as it is, always. It's never asked of this server (where it
+    // isn't on the phone any more, it isn't found, and it's skipped).
+    if (phoneOnly(track)) return { url: phoneUrl(track), hls: false, kbps: null, local: true };
     // Downloaded to the phone (the Android app), and Play downloads says to
     // play it from there now, or the server can't be reached: from there,
     // as it is. (Not to AirPlay or Cast, which play from the server.)
@@ -1381,7 +1386,7 @@ class Player extends EventTarget {
   }
 
   async learn(track) {
-    if (!track?.id || this.spans.has(track.id) || !app.server) return;
+    if (!track?.id || phoneOnly(track) || this.spans.has(track.id) || !app.server) return;
     const server = app.source?.serverId;
     this.spans.set(track.id, null); // asked once; null until known (or for good, if it isn't analysed)
     while (this.spans.size > SPANS_KEPT) this.spans.delete(this.spans.keys().next().value);
@@ -1843,8 +1848,10 @@ class Player extends EventTarget {
     );
     // A download that didn't play from the phone (damaged, say): from the
     // server instead, from where it got to (the app downloads it again).
+    // Another server's can't be had from this one: it's skipped.
     if (this.deck.local) {
       notPlayable(track);
+      if (phoneOnly(track)) return this.couldntPlayHere(track, err);
       this.load(this.index, { autoplay: this.loadAutoplay || this.state === 'playing', startAt: this.restartAt(track, this.time), reportPrev: false, resume: true });
       return;
     }
@@ -2531,8 +2538,21 @@ class Player extends EventTarget {
   // In a session these become session commands; the session then sends
   // back the new queue.
 
+  // Another server's tracks, played from the phone (see downloads.js), play
+  // on this one only: not on another device, or for everyone listening
+  // together, which play from the server. There, they're left out.
+  hereOnly(tracks) {
+    if (!(this.cast || this.remote) || !tracks.some(phoneOnly)) return tracks;
+    toast('Downloads from another server play on this phone only.');
+    return tracks.filter((t) => !phoneOnly(t));
+  }
+
   playTracks(tracks, start = 0, { context = null, shuffle = false } = {}) {
     if (!tracks?.length) return;
+    const first = tracks[start];
+    tracks = this.hereOnly(tracks);
+    if (!tracks.length) return;
+    start = Math.max(0, tracks.indexOf(first));
     if (this.cast) return this.cast.playTracks(tracks, start, { context, shuffle });
     if (this.remote) {
       let list = tracks.slice(start);
@@ -2559,6 +2579,8 @@ class Player extends EventTarget {
   }
 
   playNext(tracks) {
+    tracks = this.hereOnly(tracks);
+    if (!tracks.length) return;
     if (this.remote) return this.remote.command({ type: 'add', where: 'next', tracks: tracks.slice(0, 500) });
     if (this.cast) return this.cast.add(tracks, { next: true });
     if (!this.current) return this.playTracks(tracks, 0);
@@ -2574,6 +2596,8 @@ class Player extends EventTarget {
   }
 
   addToQueue(tracks) {
+    tracks = this.hereOnly(tracks);
+    if (!tracks.length) return;
     if (this.remote) return this.remote.command({ type: 'add', tracks: tracks.slice(0, 500) });
     if (this.cast) return this.cast.add(tracks, { next: false });
     if (!this.current) return this.playTracks(tracks, 0);
@@ -2586,6 +2610,8 @@ class Player extends EventTarget {
   }
 
   replaceUpcoming(tracks, context) {
+    tracks = this.hereOnly(tracks);
+    if (!tracks.length) return;
     // A shared queue isn't wiped for one person: the tracks go next instead.
     if (this.remote) return this.playNext(tracks);
     if (this.cast) return this.cast.replaceUpcoming(tracks, context);
@@ -2794,7 +2820,8 @@ class Player extends EventTarget {
   // account's own token. Converted streams can't be sent to a device anyway.
   // False when there's no temporary token for this server yet.
   prepareRemote() {
-    if (this.cast || this.remote || !app.server || this.mediaToken?.key !== tokenKey(app.server)) return false;
+    // (Not another server's track, played from the phone: there's none of it to send.)
+    if (this.cast || this.remote || !app.server || this.mediaToken?.key !== tokenKey(app.server) || phoneOnly(this.current)) return false;
     this.useMediaToken = true;
     const t = this.current;
     const deck = this.deck;
@@ -2832,8 +2859,9 @@ class Player extends EventTarget {
   }
 
   report(state, track = this.current, time = this.time, force = false) {
-    // A player we cast to tells Plex what it plays itself.
-    if (!track || !app.server || !app.settings.reportPlays || this.cast) return;
+    // A player we cast to tells Plex what it plays itself. (Another server's
+    // track, played from the phone, isn't this server's to hear of.)
+    if (!track || !app.server || !app.settings.reportPlays || this.cast || phoneOnly(track)) return;
     const now = Date.now();
     if (!force && now - this.lastReport < REPORT_EVERY_MS) return;
     this.lastReport = now;
@@ -2896,12 +2924,14 @@ class Player extends EventTarget {
       ms.metadata = null;
       return;
     }
-    const art = (n) => ({ src: app.server.art(t.thumb, n), sizes: `${n}x${n}`, type: 'image/jpeg' });
+    // (Another server's cover, kept on the phone: from there, where it is.)
+    const phone = phoneThumbUrl(t.thumb);
+    const art = (n) => ({ src: phone ?? app.server.art(t.thumb, n), sizes: `${n}x${n}`, type: 'image/jpeg' });
     ms.metadata = new MediaMetadata({
       title: t.title,
       artist: t.artist,
       album: t.album,
-      artwork: t.thumb ? [art(256), art(512)] : [],
+      artwork: t.thumb && phone !== '' ? [art(256), art(512)] : [],
     });
   }
 

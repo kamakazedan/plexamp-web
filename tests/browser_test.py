@@ -6461,8 +6461,11 @@ with sync_playwright() as pw:
         # the app does, each question told to the test too (`asked`). The
         # test's own (window.__dl): a refusal for the next playlist added,
         # a playlist downloaded in full, as the app has it once it's
-        # synced, a check for changes over, what it's doing now (`now`), and
-        # `old`, an app from before it could be asked to check (0.2.3). What
+        # synced, a check for changes over, what it's doing now (`now`),
+        # `old`, an app from before it could be asked to check (0.2.3),
+        # `waitFor`, what a playlist added waits for ('wifi': on mobile data,
+        # with Wi-Fi only), and another server's playlist on the phone
+        # (`elsewhere`), as the app keeps each server's apart (0.3.0). What
         # the app serves at the player's own address (tracks,
         # playlists as they were downloaded, and covers) comes from a route,
         # from the mock, as the app's would come from the phone (`served`).
@@ -6472,17 +6475,38 @@ with sync_playwright() as pw:
         ctx.expose_function('__dlAsked', lambda op, args: asked.append((op, args)))
         ctx.add_init_script('window.__dlCatalog = ' + json.dumps(catalog) + ';' + """(() => {
             const st = { settings: { quality: 'original', network: 'wifi', prefer: 'always' }, storage: { free: 10e9, total: 128e9, used: 0 },
-                status: { state: 'idle' }, playlists: [], tracks: [], syncedAt: 0, metered: false };
+                status: { state: 'idle' }, server: null, name: null, playlists: [], tracks: [], syncedAt: 0, metered: false, others: [] };
             const watchers = new Set();
             const tell = () => { const s = JSON.parse(JSON.stringify(st)); watchers.forEach((fn) => fn(s)); return s; };
-            const dl = (window.__dl = { refuse: null, old: false });
+            const dl = (window.__dl = { refuse: null, old: false, waitFor: null });
+            const used = () => {
+                st.storage.used = [...st.playlists, ...st.others.flatMap((o) => o.playlists)].reduce((n, x) => n + x.bytes, 0);
+            };
             dl.finish = (id) => {
                 const p = st.playlists.find((x) => x.id === id);
                 Object.assign(p, { saved: p.tracks, bytes: p.tracks * 5e6, cover: window.__dlCatalog[id].cover });
                 st.tracks = [...new Set([...st.tracks, ...window.__dlCatalog[id].tracks])];
-                st.storage.used = st.playlists.reduce((n, x) => n + x.bytes, 0);
+                used();
                 st.status = { state: 'idle' };
                 st.syncedAt = Date.now();
+                tell();
+            };
+            // Another server's playlist, downloaded in full while the player
+            // was on it (`like`: the playlist of this one's it has the tracks of).
+            dl.elsewhere = (server, name, id, title, like) => {
+                const c = window.__dlCatalog[like];
+                let o = st.others.find((x) => x.server === server);
+                if (!o) st.others.push((o = { server, name, playlists: [], tracks: [], syncedAt: Date.now() - 2 * 86400e3 }));
+                o.playlists.push({ id, title, tracks: c.tracks.length, saved: c.tracks.length, bytes: c.tracks.length * 5e6, cover: c.cover });
+                o.tracks = [...new Set([...o.tracks, ...c.tracks])];
+                used();
+                tell();
+            };
+            // (A playlist added, gone again without a word to the page.)
+            dl.drop = (id) => {
+                st.playlists = st.playlists.filter((p) => p.id !== id);
+                st.status = { state: 'idle' };
+                used();
                 tell();
             };
             dl.checked = () => {
@@ -6499,18 +6523,28 @@ with sync_playwright() as pw:
             dl.tell = tell;
             const ops = {
                 state() {},
-                add({ playlist }) {
+                add({ playlist, server }) {
                     const no = dl.refuse;
                     dl.refuse = null;
                     if (no) throw Object.assign(new Error(no.code), no);
+                    // (The app takes none from another server than the one it's told the player's on.)
+                    if (server != null && server !== st.server) throw Object.assign(new Error('account'), { code: 'account' });
                     const c = window.__dlCatalog[playlist];
                     st.playlists.push({ id: playlist, title: c.title, tracks: c.tracks.length, saved: 0, bytes: 0 });
-                    st.status = { state: 'downloading', done: 0, total: c.tracks.length, playlist };
+                    st.status = dl.waitFor ? { state: dl.waitFor } : { state: 'downloading', done: 0, total: c.tracks.length, playlist };
                 },
-                remove({ playlist }) { st.playlists = st.playlists.filter((p) => p.id !== playlist); },
+                remove({ playlist, server }) {
+                    if (server == null || server === st.server) {
+                        st.playlists = st.playlists.filter((p) => p.id !== playlist);
+                    } else {
+                        st.others.forEach((o) => { if (o.server === server) o.playlists = o.playlists.filter((p) => p.id !== playlist); });
+                        st.others = st.others.filter((o) => o.playlists.length);
+                    }
+                    used();
+                },
                 set(s) { for (const k of ['quality', 'network', 'prefer']) if (s[k] != null) st.settings[k] = s[k]; },
-                account() {},
-                forget() { st.playlists = []; st.tracks = []; },
+                account(a) { st.server = a.serverId; st.name = a.serverName; },
+                forget() { st.playlists = []; st.tracks = []; st.others = []; st.server = null; st.name = null; },
                 bad({ track }) { st.tracks = st.tracks.filter((t) => t !== track); },
                 check() { st.status = { state: 'downloading' }; },
             };
@@ -6518,36 +6552,54 @@ with sync_playwright() as pw:
                 window.__dlAsked(op, args);
                 setTimeout(() => { try { ops[op](args); } catch (e) { return reject(e); } resolve(tell()); }, 30);
             });
-            const local = (path) => new URL('__plexamp-web-android/downloads/' + path, document.baseURI).href;
+            // (As page-bridge.js has them: `server`, the server they're from.)
+            const local = (path, server) => {
+                const u = new URL('__plexamp-web-android/downloads/' + path, document.baseURI);
+                if (server != null && server !== '') u.searchParams.set('server', String(server));
+                return u.href;
+            };
             const str = (v) => (v == null ? null : String(v));
             const downloads = {
                 state: () => ask('state'),
-                add: (playlist) => ask('add', { playlist: String(playlist) }),
-                remove: (playlist) => ask('remove', { playlist: String(playlist) }),
+                add: (playlist, server) => ask('add', { playlist: String(playlist), server: str(server) }),
+                remove: (playlist, server) => ask('remove', { playlist: String(playlist), server: str(server) }),
                 set: (s = {}) => ask('set', { quality: str(s.quality), network: str(s.network), prefer: str(s.prefer) }),
-                account: (a = {}) => ask('account', { serverId: a.serverId, token: a.token, user: a.user, uris: [...(a.uris || [])], device: a.device }),
+                account: (a = {}) => ask('account', { serverId: a.serverId, serverName: str(a.serverName), token: a.token, user: a.user, uris: [...(a.uris || [])], device: a.device }),
                 forget: () => ask('forget'),
-                bad: (track) => ask('bad', { track: String(track) }),
+                bad: (track, server) => ask('bad', { track: String(track), server: str(server) }),
                 watch: (fn) => (watchers.add(fn), () => watchers.delete(fn)),
-                trackUrl: (id) => local('track/' + encodeURIComponent(id)),
-                playlistUrl: (id) => local('playlist/' + encodeURIComponent(id)),
-                coverUrl: (path) => local('cover?path=' + encodeURIComponent(path)),
+                trackUrl: (id, server) => local('track/' + encodeURIComponent(id), server),
+                playlistUrl: (id, server) => local('playlist/' + encodeURIComponent(id), server),
+                coverUrl: (path, server) => {
+                    const u = new URL(local('cover', server));
+                    u.searchParams.set('path', String(path));
+                    return u.href;
+                },
             };
             Object.defineProperty(downloads, 'check', { enumerable: true, get: () => (dl.old ? undefined : () => ask('check')) });
             Object.defineProperty(window, 'plexampAndroid', { value: Object.freeze({ downloads: Object.freeze(downloads) }) });
         })();""")
 
+        # Another server's (as if the player had been on it): its "Road
+        # trip", with Workout's tracks, as that server gave them.
+        OTHER, ROAD = 'f00dfeed' * 5, '90001'
+
         def from_phone(route):
             url = urllib.parse.urlparse(route.request.url)
             what = url.path.split('/__plexamp-web-android/downloads/', 1)[1]
             served.append(what + (f'?{url.query}' if url.query else ''))
+            theirs = urllib.parse.parse_qs(url.query).get('server') == [OTHER]
             if what.startswith('track/'):
                 with urllib.request.urlopen(f'{MOCK}/library/parts/{what[6:]}/0/file.flac', timeout=20) as r:
                     return route.fulfill(status=200, body=r.read(), content_type='audio/wav')
             if what.startswith('playlist/'):
                 key = what[9:]
-                info = mock(f'/playlists/{key}?X-Plex-Token=t')['MediaContainer']['Metadata'][0]
-                its = mock(f'/playlists/{key}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+                if theirs and key != ROAD:
+                    return route.fulfill(status=404, body='')
+                info = mock(f'/playlists/{workout if theirs else key}?X-Plex-Token=t')['MediaContainer']['Metadata'][0]
+                its = mock(f'/playlists/{workout if theirs else key}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+                if theirs:
+                    info = {**info, 'ratingKey': ROAD, 'title': 'Road trip'}
                 return route.fulfill(status=200, body=json.dumps({'playlist': info, 'items': its}), content_type='application/json')
             if what == 'cover':
                 return route.fulfill(status=200, body=png(8, 8, (200, 60, 60)), content_type='image/png')
@@ -6562,9 +6614,10 @@ with sync_playwright() as pw:
         # (to keep downloads up to date with the player closed).
         wait_for(lambda: dl_asked('account'), 10, 0.2)
         acct = (dl_asked('account') or [{}])[0]
-        source = js(dpage, "() => import('./js/state.js').then(({ app }) => ({ id: app.source.serverId, token: app.source.token }))")
-        check('downloads: signed in, the app\'s told the server and the sign-in',
-              acct.get('serverId') == source['id'] and acct.get('token') == source['token'] and acct.get('uris') and acct.get('device') and acct.get('user'),
+        source = js(dpage, "() => import('./js/state.js').then(({ app }) => ({ id: app.source.serverId, token: app.source.token, name: app.source.serverName }))")
+        check('downloads: signed in, the app\'s told the server (by name too) and the sign-in',
+              acct.get('serverId') == source['id'] and acct.get('serverName') == source['name'] and acct.get('token') == source['token']
+              and acct.get('uris') and acct.get('device') and acct.get('user'),
               json.dumps(acct))
 
         # Settings › Downloads: the phone's space, the settings, and nothing downloaded yet.
@@ -6606,7 +6659,7 @@ with sync_playwright() as pw:
         n = len(catalog[sunday]['tracks'])
         check('downloads: Add playlists offers the server\'s playlists', all(t in offered for t in ('Sunday morning', 'Favourite tracks', 'Workout')), offered)
         check('downloads: ...each with its picture', pictures[0] == len(offered) and pictures[1] > 0, f'{pictures} for {len(offered)}')
-        check('downloads: ...one chosen is downloading, as the app says, by name', dl_asked('add') == [{'playlist': sunday}]
+        check('downloads: ...one chosen is downloading, as the app says, by name', dl_asked('add') == [{'playlist': sunday, 'server': source['id']}]
               and going == (f'Downloading… 0 of {n} tracks', 'Downloading “Sunday morning”…'), f'{dl_asked("add")} {going}')
         dpage.evaluate('(id) => window.__dl.finish(id)', sunday)
         dpage.wait_for_selector('.dl-status:has-text("Up to date")')
@@ -6680,6 +6733,32 @@ with sync_playwright() as pw:
         check('downloads: ...on its page too', waiting_here == f'Waiting · {m - 1} of {m}', waiting_here)
         dpage.evaluate('([a, b]) => { window.__dl.finish(a); window.__dl.finish(b); }', [sunday, favourites])
 
+        # On mobile data, with Download on Wi-Fi only, the app stops and says
+        # it waits for Wi-Fi: so does a playlist still to come, on its page
+        # (not "Downloading…"), and Settings › Downloads; one added then says
+        # it downloads on Wi-Fi.
+        dpage.evaluate("() => import('./js/downloads.js').then((m) => m.setDownloads({ network: 'wifi' }))")
+        dpage.evaluate('([b, m]) => window.__dl.now({ state: "wifi", playlist: b, done: m - 3, total: m }, { [b]: { saved: m - 3 } })', [favourites, m])
+        dpage.wait_for_selector('button.dl-line:has-text("Waiting for Wi-Fi")')
+        wifi_page = dpage.locator('button.dl-line').inner_text()
+        dpage.goto(APP + '#/settings/downloads')
+        dpage.wait_for_selector('.dl-status:has-text("Waiting for Wi-Fi")')
+        wifi_settings = (line_of('Favourite tracks'), dpage.locator('.dl-progress:visible').count())
+        shot(dpage, 'downloads-04c-waiting-for-wifi')
+        dpage.evaluate("() => { window.__dl.waitFor = 'wifi'; }")
+        dpage.goto(APP + f'#/playlist/{workout}')
+        dpage.wait_for_selector('button.dl-line:has-text("Download")')
+        dpage.click('button.dl-line')
+        dpage.wait_for_selector('.toast:has-text("“Workout” downloads on Wi-Fi")')
+        dpage.wait_for_selector('button.dl-line:has-text("Waiting for Wi-Fi")')
+        wifi_added = dpage.locator('button.dl-line').inner_text()
+        w = len(catalog[workout]['tracks'])
+        check('downloads: on mobile data, with Wi-Fi only, a playlist still to come says it\'s waiting for Wi-Fi (not downloading), on its page',
+              wifi_page == f'Waiting for Wi-Fi · {m - 3} of {m}', wifi_page)
+        check('downloads: ...and in Settings › Downloads, with no progress bar', wifi_settings == (f'{m - 3} of {m} tracks · {m * 5} MB', 0), str(wifi_settings))
+        check('downloads: ...and one added then says it downloads on Wi-Fi', wifi_added == f'Waiting for Wi-Fi · 0 of {w}', wifi_added)
+        dpage.evaluate('([w, b]) => { window.__dl.waitFor = null; window.__dl.drop(w); window.__dl.finish(b); }', [workout, favourites])
+
         # Too big for the phone: refused, saying why.
         dpage.evaluate("() => { window.__dl.refuse = { code: 'space', needed: 5e9, free: 1.2e9 }; }")
         dpage.goto(APP + f'#/playlist/{workout}')
@@ -6734,7 +6813,7 @@ with sync_playwright() as pw:
         offline = player(dpage, '({ local: p.deck.local, title: p.current?.title })')
         shot(dpage, 'downloads-07-offline-playlist')
         check('downloads: ...one opens offline, as it was downloaded, and plays from the phone', rows == n and offline['local'], f'{rows} rows, {json.dumps(offline)}')
-        check('downloads: ...with its albums\' covers from the phone', any(s.startswith('cover?path=') for s in served[since:]), served[since:][:6])
+        check('downloads: ...with its albums\' covers from the phone', any(s.startswith('cover?') and 'path=' in s for s in served[since:]), served[since:][:6])
         player(dpage, 'p.pause()')
 
         # Back online, the page is the server's again.
@@ -6772,6 +6851,92 @@ with sync_playwright() as pw:
         check('downloads: ...not one while it isn\'t, and again once it is, when the page is shown again as it was kept',
               partly == ['Sunday morning'] and back_to == ['Favourite tracks', 'Sunday morning'], f'{partly} then {back_to}')
 
+        # Another server's downloads (from when the player was on it), still
+        # on the phone: on Playlists under its name, marked, and in Settings ›
+        # Downloads, apart, saying they're updated back on that server.
+        k = len(catalog[workout]['tracks'])
+        dpage.evaluate('([s, id, like]) => window.__dl.elsewhere(s, "Work", id, "Road trip", like)', [OTHER, ROAD, workout])
+        dpage.wait_for_selector('.dl-elsewhere-cards .card:has-text("Road trip")')
+        wait_for(lambda: 'Road trip' in marked(), 5, 0.2)
+        theirs = (dpage.locator('.dl-elsewhere-cards h2').all_text_contents(), marked())
+        shot(dpage, 'downloads-09-another-server')
+        check('downloads: another server\'s playlists on the phone are on Playlists, under its name, marked as downloaded',
+              theirs == (['From Work'], ['Favourite tracks', 'Road trip', 'Sunday morning']), str(theirs))
+        dpage.goto(APP + '#/settings')
+        dpage.wait_for_selector('a.row:has-text("Downloads")')
+        summary = dpage.locator('a.row:has-text("Downloads") .row-sub').inner_text()
+        dpage.click('a.row:has-text("Downloads")')
+        dpage.wait_for_selector('.dl-server .dl-row:has-text("Road trip")')
+        theirs_settings = (dpage.locator('.dl-server h2').text_content(), dpage.locator('.dl-server .dl-server-note').inner_text(),
+                           dpage.locator('.dl-server .dl-row .row-sub').inner_text(), dpage.locator('.dl-playlists .dl-row').count())
+        used_all = dpage.locator('.dl-used').inner_text()
+        dpage.locator('.dl-server').scroll_into_view_if_needed()
+        shot(dpage, 'downloads-10-another-server-settings')
+        check('downloads: ...and in Settings › Downloads, apart, saying they\'re updated back on that server',
+              theirs_settings == ('From Work', 'Updated when you’re back on that server.', f'{k} tracks · {k * 5} MB', 2), str(theirs_settings))
+        check('downloads: ...and counted in Settings with this server\'s', summary == '3 playlists, ' + used_all.removeprefix('Downloads use '), f'{summary} | {used_all}')
+
+        # One opens from there as it was downloaded, saying where it's from,
+        # and plays from the phone as that server's: nothing of it goes to
+        # the server the player's on (no plays, no ratings, no pictures).
+        since = len(served)
+        dpage.locator('.dl-server .dl-row a.row-link').click()
+        dpage.wait_for_selector('.hero-title:has-text("Road trip")')
+        dpage.wait_for_selector('.view .tracks .track')
+        theirs_page = (js(dpage, '() => location.hash'), dpage.locator('button.dl-line').inner_text(),
+                       dpage.locator('.hero-meta').first.inner_text().split(',')[0], dpage.locator('.view .tracks .track .row-rating').count())
+        # (What the server might be asked about them: their files, their
+        # covers, a play or a rating, by that server's id or their own. The
+        # track the player had before is told it's stopped, as it would be.)
+        prev = player(dpage, 'p.current?.id')
+        its = mock(f'/playlists/{workout}/items?X-Plex-Token=t&X-Plex-Container-Size=500')['MediaContainer'].get('Metadata', [])
+        covers = {c for m in its for c in (m.get('thumb'), m.get('parentThumb')) if c}
+        to_server = []
+        heard = lambda req: to_server.append(urllib.parse.unquote(req.url)) if server.search(req.url) else None
+        dpage.on('request', heard)
+        dpage.click('.hero-actions .btn-primary')
+        wait_for(lambda: player(dpage, "p.state === 'playing'"), 10)
+        theirs_playing = player(dpage, '({ src: p.audio.currentSrc, local: p.deck.local, id: p.current?.id, rk: p.current?.rk })')
+        dpage.wait_for_timeout(1500)
+        shot(dpage, 'downloads-11-another-server-playlist')
+        player(dpage, 'p.next()')
+        wait_for(lambda: player(dpage, "p.state === 'playing' && p.index === 1"), 10)
+        player(dpage, 'p.pause()')
+        dpage.wait_for_timeout(1000)
+        dpage.remove_listener('request', heard)
+        rks = catalog[workout]['tracks']
+        about = [u for u in to_server if OTHER in u or '/library/parts/' in u or any(c in u for c in covers)
+                 or (re.search(r'/:/(timeline|scrobble|rate)', u) and f'ratingKey={prev}&' not in u)]
+        check('downloads: ...one opens from there, as it was downloaded, saying where it\'s from, with no ratings',
+              theirs_page == (f'#/downloads/{OTHER}/{ROAD}', 'From Work', f'{k} tracks', 0), str(theirs_page))
+        check('downloads: ...and plays from the phone, as that server\'s',
+              theirs_playing['local'] and theirs_playing['id'] == f'{OTHER}:{theirs_playing["rk"]}' and theirs_playing['rk'] in rks
+              and f'/__plexamp-web-android/downloads/track/{theirs_playing["rk"]}?server={OTHER}' in theirs_playing['src']
+              and any(x.startswith('cover?') and f'server={OTHER}' in x for x in served[since:]), f'{json.dumps(theirs_playing)} {served[since:][:4]}')
+        check('downloads: ...with nothing of it going to the server the player\'s on', not about, about[:5])
+
+        # Offline, Playlists has them too; back online, removed from its page.
+        ctx.route(server, lambda route: route.abort('internetdisconnected'))
+        dpage.evaluate("() => import('./js/connection.js').then((m) => m.connectionLost())")
+        dpage.goto(APP + '#/playlists')
+        dpage.wait_for_selector('.page-sub:has-text("On this phone")')
+        dpage.wait_for_selector('.dl-elsewhere-cards .card:has-text("Road trip")')
+        offline_theirs = dpage.locator('.dl-elsewhere-cards h2').all_text_contents()
+        ctx.unroute(server)
+        dpage.evaluate("() => import('./js/connection.js').then((m) => m.connectionBack())")
+        dpage.wait_for_selector('.page-sub:has-text("On this phone")', state='detached', timeout=10000)
+        dpage.locator('.dl-elsewhere-cards .card', has_text='Road trip').locator('.card-title').click()
+        dpage.wait_for_selector('button.dl-line:has-text("From Work")')
+        dpage.click('button.dl-line')
+        dpage.wait_for_selector('.sheet.open')
+        theirs_offers = dpage.locator('.sheet.open .sheet-action-label').all_inner_texts()
+        dpage.locator('.sheet.open .sheet-action', has_text='Remove download').click()
+        wait_for(lambda: js(dpage, '() => location.hash') == '#/playlists', 5, 0.2)
+        dpage.wait_for_selector('.dl-elsewhere-cards .card', state='detached')
+        check('downloads: ...offline, Playlists has another server\'s too', offline_theirs == ['From Work'], offline_theirs)
+        check('downloads: ...and one is removed from its page, as that server\'s',
+              theirs_offers == ['Remove download'] and dl_asked('remove') == [{'playlist': ROAD, 'server': OTHER}], f'{theirs_offers} {dl_asked("remove")}')
+
         # Removing one, from Settings › Downloads (asked first).
         dpage.goto(APP + '#/settings/downloads')
         dpage.wait_for_selector('.dl-row:has-text("Favourite tracks")')
@@ -6779,7 +6944,7 @@ with sync_playwright() as pw:
         dpage.wait_for_selector('.sheet.open .sheet-title:has-text("Remove “Favourite tracks”?")')
         dpage.locator('.sheet.open button.btn-danger').click()
         dpage.wait_for_selector('.dl-row:has-text("Favourite tracks")', state='detached')
-        check('downloads: a playlist removed comes off the phone', dl_asked('remove') == [{'playlist': favourites}]
+        check('downloads: a playlist removed comes off the phone', dl_asked('remove')[1:] == [{'playlist': favourites, 'server': source['id']}]
               and dpage.locator('.dl-row').count() == 1, json.dumps(dl_asked('remove')))
 
         # Signing out says downloads go, and the app forgets them (and the sign-in kept for them).

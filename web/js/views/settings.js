@@ -20,7 +20,7 @@ import { LOAD_AHEAD_MAX, LOAD_AHEAD_BYTES, KEEP_PLAYED_MAX } from '../prefetch.j
 import { keptCount } from '../outbox.js';
 import { joinWithAnd, radioArrowKeys, SECRET_INPUT } from './common.js';
 import { setUpServer } from '../service.js';
-import { downloadsHere, downloadState, hasDownloads, bytesText } from '../downloads.js';
+import { downloadsHere, downloadState, hasDownloads, otherDownloads, bytesText } from '../downloads.js';
 import { downloadsView } from './downloads.js';
 import { androidAppVersion, canCheckForUpdates, appUpdates, checkForUpdates } from '../androidapp.js';
 
@@ -79,12 +79,13 @@ export async function settingsView({ el, onDispose }) {
   );
 }
 
-// Settings › Downloads, in a line: what's downloaded, or what it's for.
+// Settings › Downloads, in a line: what's downloaded (from every server), or
+// what it's for.
 function downloadsSummary() {
-  const list = downloadState()?.playlists || [];
-  if (!list.length) return 'Play playlists without a connection';
-  const used = downloadState().storage?.used || 0;
-  return `${fmt.count(list.length, 'playlist', 'playlists')}, ${bytesText(used)}`;
+  const n = (downloadState()?.playlists?.length || 0) + otherDownloads().reduce((k, o) => k + o.playlists.length, 0);
+  if (!n) return 'Play playlists without a connection';
+  const used = downloadState()?.storage?.used || 0;
+  return `${fmt.count(n, 'playlist', 'playlists')}, ${bytesText(used)}`;
 }
 
 export async function settingsPageView(ctx) {

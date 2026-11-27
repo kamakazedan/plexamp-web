@@ -4325,6 +4325,13 @@ body.bare #toasts {
   margin-top: 4px;
 }
 
+/* Another server's playlists: under its name, with a line on when they're updated. */
+.dl-server-note {
+  margin: -4px 0 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 /* Under a playlist's title: Download, or how its download's going. */
 .dl-line {
   display: inline-flex;

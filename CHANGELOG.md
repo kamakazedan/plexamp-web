@@ -3,6 +3,25 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.41.1 - 2026-11-27
+
+### Changed
+
+- **Downloads from another server stay on the phone**: in the Android app,
+  switching servers keeps each server's downloads. Another server's are on
+  Playlists and in Settings › Downloads under that server's name ("From
+  Work"), and play from the phone wherever you are, as they were when you
+  were last on it; they're kept up to date again once you're back on that
+  server. Nothing about them goes to the server you're on now. Signing out,
+  or switching to someone else, still removes them all (plexamp-web for
+  Android 0.3.0 or later).
+
+### Fixed
+
+- **Downloads on mobile data, with Wi-Fi only**, say they're waiting for
+  Wi-Fi, on the playlist's page and in Settings › Downloads, rather than
+  "Downloading…". A playlist added then says it downloads on Wi-Fi.
+
 ## 0.41.0 - 2026-11-27
 
 ### Added

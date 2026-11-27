@@ -9,7 +9,7 @@ import { rowRating } from './ratings.js';
 import { sharedMark } from './sharing.js';
 import { selectable, startSelect } from './selection.js';
 import { watchFormat } from './formats.js';
-import { downloads, keepsDownloads, downloadedInFull } from './downloads.js';
+import { downloads, keepsDownloads, downloadedInFull, phoneOnly } from './downloads.js';
 
 // An album's cover, with its format over it (Settings › Experience) once
 // it's been looked up, and its menu; it can be chosen with others
@@ -77,7 +77,7 @@ export function playlistCard(m, { subtitle } = {}) {
 // page, and looks again whenever it's put back (a page kept to go back to).
 class DownloadedMark extends HTMLElement {
   paint = () => {
-    this.hidden = !downloadedInFull(this.dataset.pl);
+    this.hidden = !downloadedInFull(this.dataset.pl, this.dataset.server || null);
   };
 
   connectedCallback() {
@@ -91,9 +91,11 @@ class DownloadedMark extends HTMLElement {
 }
 window.customElements?.define('downloaded-mark', DownloadedMark);
 
-export function downloadedMark(playlistId) {
-  const el = h('downloaded-mark', { role: 'img', 'aria-label': 'Downloaded', title: 'Downloaded', dataset: { pl: String(playlistId) } }, icon('download', 16));
-  el.hidden = !downloadedInFull(playlistId);
+// (`server`: another server's playlist.)
+export function downloadedMark(playlistId, server = null) {
+  const dataset = server ? { pl: String(playlistId), server: String(server) } : { pl: String(playlistId) };
+  const el = h('downloaded-mark', { role: 'img', 'aria-label': 'Downloaded', title: 'Downloaded', dataset }, icon('download', 16));
+  el.hidden = !downloadedInFull(playlistId, server);
   return el;
 }
 
@@ -217,7 +219,8 @@ export function trackRow(
       ),
     ),
     albumCol,
-    (rating ?? !inQueue) ? rowRating(track) : null,
+    // (Not another server's, played from the phone: this server can't rate it.)
+    (rating ?? !inQueue) && !phoneOnly(track) ? rowRating(track) : null,
     h('span.track-dur', null, right),
     preview,
     h(
@@ -226,8 +229,9 @@ export function trackRow(
       icon('more', 22),
     ),
   );
-  const select = inQueue ? null : () => startSelect(el);
-  if (!inQueue) selectable(el, 'track', track);
+  // (Another server's: nothing to do with it here but play it.)
+  const select = inQueue || phoneOnly(track) ? null : () => startSelect(el);
+  if (select) selectable(el, 'track', track);
   markRow(el);
   return el;
 }

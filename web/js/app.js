@@ -13,6 +13,7 @@ import { forgetFormats } from './formats.js';
 import { homeView, recentView } from './views/home.js';
 import { browseView, playlistsView, tagsView } from './views/library.js';
 import { albumView, artistView, similarArtistsView, playlistView, collectionView } from './views/detail.js';
+import { phonePlaylistView } from './views/downloads.js';
 import { searchView, topView, sonicPathView } from './views/search.js';
 import { aiPlaylistView } from './views/aiplaylist.js';
 import { appearsInView } from './views/appearsin.js';
@@ -65,6 +66,8 @@ route('/artist/:id', needsSource(artistView));
 route('/artist/:id/similar', needsSource((ctx) => similarArtistsView({ ...ctx, kind: 'similar' })));
 route('/artist/:id/sonic', needsSource((ctx) => similarArtistsView({ ...ctx, kind: 'sonic' })));
 route('/playlist/:id', needsSource(playlistView));
+// Another server's playlist, downloaded to the phone (the Android app).
+route('/downloads/:server/:id', needsSource(phonePlaylistView), { tab: 'playlists' });
 route('/collection/:id', needsSource(collectionView));
 route('/appears/:id', needsSource(appearsInView));
 route('/search', needsSource(searchView), { tab: 'search' });
