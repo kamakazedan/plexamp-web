@@ -4,8 +4,9 @@
 import { app } from '../state.js';
 import { navigate, describeError, popOverlay, refresh, parseHash } from '../router.js';
 import { h, sheet, toast, askText, fmt, download, fileDate } from '../ui.js';
-import { copyText, noteMissing, keptCounter, missingFull, MISSING_LIMITS } from '../missing.js';
+import { copyText, noteMissing, keptCounter, missingFull, MISSING_LIMITS, missingShown } from '../missing.js';
 import { refreshLists } from '../editing.js';
+import { sharedPlaylistChanged } from '../sharing.js';
 import { exportPlaylists, playlistJson, playlistFileName, readPlaylistFile, importPlaylist, entryLine, entryWhere, entryText, entriesCsv } from '../playlistio.js';
 
 // The library tracks are looked for in, as it's named in what's said.
@@ -172,16 +173,19 @@ function choosePlaylists(list, have) {
   });
 }
 
-// Makes each, saying how it goes, and then what was found. `remember`:
+// Makes each (or, with `into`, adds to a playlist you have: see
+// importPlaylist), saying how it goes, and then what was found. `remember`:
 // what isn't found goes on Missing tracks ({ via, from: what it was in }, or
-// each job's own `from`, or its title), and what is comes off it.
+// each job's own `from`, or its title), and what is comes off it. Resolves
+// to what each did, once they're done.
 export function runImport(jobs, { remember = null } = {}) {
   const ctrl = new AbortController();
   const status = h('p.ask-message.import-status', { role: 'status' }, 'Looking for the tracks…');
   const results = h('div.import-results');
   let made = 0;
+  const one = jobs.length === 1 ? jobs[0] : null;
   const box = sheet({
-    title: jobs.length === 1 ? `Importing “${jobs[0].title}”` : `Importing ${fmt.count(jobs.length, 'playlist', 'playlists')}`,
+    title: one ? `${one.into ? 'Adding to' : 'Importing'} “${one.title}”` : `Importing ${fmt.count(jobs.length, 'playlist', 'playlists')}`,
     content: h('div.ask-form.import-form', null, status, results),
     variant: 'dialog',
     closeLabel: 'Stop',
@@ -194,7 +198,7 @@ export function runImport(jobs, { remember = null } = {}) {
     },
   });
   const closeBtn = box.panel.querySelector('.dialog-close');
-  (async () => {
+  return (async () => {
     const done = [];
     // Each row as shown, and how many of its it said were on Missing tracks
     // (a row is drawn again only when that changes, so one opened stays so);
@@ -211,6 +215,7 @@ export function runImport(jobs, { remember = null } = {}) {
       try {
         const r = await importPlaylist(job.p, {
           title: job.title,
+          into: job.into || null,
           signal: ctrl.signal,
           onProgress: (n, of) => (status.textContent = `${lead}looking for the tracks… ${fmt.number(n)} of ${fmt.number(of)}`),
         });
@@ -230,6 +235,7 @@ export function runImport(jobs, { remember = null } = {}) {
         }
         done.push({ job, ...r });
         if (r.playlist) made += 1;
+        if (job.into && r.added) sharedPlaylistChanged(job.into.ratingKey);
       } catch (err) {
         if (ctrl.signal.aborted) break;
         done.push({ job, error: err });
@@ -263,14 +269,22 @@ export function runImport(jobs, { remember = null } = {}) {
     }
     if (ctrl.signal.aborted) {
       if (made) toast(`Stopped: ${fmt.count(made, 'playlist', 'playlists')} imported`);
-      return;
+      return done;
     }
     const found = done.reduce((n, r) => n + (r.found || 0), 0);
     const missing = done.reduce((n, r) => n + (r.missing?.length || 0), 0);
-    status.textContent = made
-      ? `Imported ${fmt.count(made, 'playlist', 'playlists')}: ${fmt.count(found, 'track', 'tracks')} found in ${libraryName()}${missing ? `, ${fmt.number(missing)} not` : ''}.`
-      : 'Nothing was imported.';
+    const added = done[0]?.added || 0;
+    status.textContent = one?.into
+      ? made
+        ? added
+          ? `Added ${fmt.count(added, 'track', 'tracks')} to “${one.title}”.`
+          : `Nothing new: ${found === 1 ? 'it’s' : 'they’re all'} in “${one.title}” already.`
+        : 'Nothing was added.'
+      : made
+        ? `Imported ${fmt.count(made, 'playlist', 'playlists')}: ${fmt.count(found, 'track', 'tracks')} found in ${libraryName()}${missing ? `, ${fmt.number(missing)} not` : ''}.`
+        : 'Nothing was imported.';
     closeBtn.textContent = 'Done';
+    return done;
   })();
 }
 
@@ -293,7 +307,7 @@ function rememberedNote(r) {
       : why
         ? `There isn’t room for them on Missing tracks${why}: the spreadsheet has them all. `
         : 'They aren’t on Missing tracks now: the spreadsheet has them all. ';
-  return h('p.import-remembered', null, text, r.remembered ? h('button.link-btn', { type: 'button', onclick: () => navigate('/settings/missing') }, 'See Missing tracks') : null);
+  return h('p.import-remembered', null, text, r.remembered && missingShown() ? h('button.link-btn', { type: 'button', onclick: () => navigate('/settings/missing') }, 'See Missing tracks') : null);
 }
 
 // What wasn't found, to look at, copy or save.
@@ -330,24 +344,39 @@ function notFound(r, title) {
 
 function resultRow(r) {
   const title = r.job.title;
+  const into = !!r.job.into;
   if (r.error) return h('div.import-result.warn', null, h('div.import-result-title', null, title), h('div.import-result-sub', null, describeError(r.error)));
   if (!r.playlist) {
+    const so = into ? 'so nothing was added' : 'so it wasn’t made';
     return h(
       'div.import-result.warn',
       null,
       h('div.import-result-title', null, title),
-      h('div.import-result-sub', null, r.missing.length ? `None of its ${fmt.count(r.missing.length, 'track is', 'tracks are')} in ${libraryName()}, so it wasn’t made.` : 'It has no tracks, so it wasn’t made.'),
+      h('div.import-result-sub', null, r.missing.length ? `None of its ${fmt.count(r.missing.length, 'track is', 'tracks are')} in ${libraryName()}, ${so}.` : `It has no tracks, ${so}.`),
       notFound(r, title),
       rememberedNote(r),
     );
   }
   const of = r.found + r.missing.length;
   const id = r.playlist.ratingKey;
+  // Into one you have: how many were added, and how many it had already.
+  const already = into ? r.found - r.added : 0;
+  const sub = into
+    ? [
+        r.added === of ? `Added all ${fmt.count(of, 'track', 'tracks')}` : `Added ${fmt.number(r.added)} of ${fmt.count(of, 'track', 'tracks')}`,
+        already ? `${fmt.count(already, 'was', 'were')} in it already` : '',
+        r.missing.length ? `${fmt.number(r.missing.length)} not in ${libraryName()}` : '',
+      ]
+        .filter(Boolean)
+        .join('; ')
+    : r.missing.length
+      ? `${fmt.number(r.found)} of ${fmt.count(of, 'track', 'tracks')} found; ${fmt.number(r.missing.length)} not in ${libraryName()}`
+      : `All ${fmt.count(of, 'track', 'tracks')} found`;
   return h(
     'div.import-result',
     null,
     h('button.link-btn.import-result-title', { type: 'button', onclick: () => navigate(`/playlist/${id}`) }, title),
-    h('div.import-result-sub', null, r.missing.length ? `${fmt.number(r.found)} of ${fmt.count(of, 'track', 'tracks')} found; ${fmt.number(r.missing.length)} not in ${libraryName()}` : `All ${fmt.count(of, 'track', 'tracks')} found`),
+    h('div.import-result-sub', null, sub),
     notFound(r, title),
     rememberedNote(r),
   );

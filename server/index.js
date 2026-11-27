@@ -28,6 +28,7 @@ import { MusicBrainz, MB_LIMITS, MBKept, MB_ADVANCED_LIMITS } from './musicbrain
 import { Shares } from './shares.js';
 import { SettingsStore } from './settings.js';
 import { MissingStore } from './missing.js';
+import { ServerFeatures } from './features.js';
 import { Spotify, playlistId, NOT_A_LINK } from './spotify.js';
 import { listenForNginx } from './syslog.js';
 import { plainPath, clientIp } from './paths.js';
@@ -67,9 +68,9 @@ function loadConfig() {
     missingSync: env.PW_SERVICE_MISSING_SYNC ? env.PW_SERVICE_MISSING_SYNC === 'true' : cfg.missingSync !== false,
     dataDir: env.PW_SERVICE_DATA_DIR ?? cfg.dataDir ?? '',
     // Search › From Spotify by link (SPOTIFY_LINK_IMPORT, or SPOTIFY_IMPORT):
-    // off unless it's turned on. Its address is for tests (the mock's).
+    // on unless it's turned off. Its address is for tests (the mock's).
     // (From Spotify's download of your data is the browser's alone.)
-    spotify: env.PW_SERVICE_SPOTIFY ? env.PW_SERVICE_SPOTIFY === 'true' : cfg.spotify === true,
+    spotify: env.PW_SERVICE_SPOTIFY ? env.PW_SERVICE_SPOTIFY === 'true' : cfg.spotify !== false,
     spotifyUrl: env.PW_SERVICE_SPOTIFY_URL ?? cfg.spotifyUrl ?? '',
     // Development only: players at 127.0.0.1 (the mock player).
     castLoopback: env.PW_SERVICE_CAST_LOOPBACK === 'true',
@@ -91,6 +92,9 @@ function loadConfig() {
     // (false: the start-up script found the data folder wasn't one to keep
     // the owner's sign-ins in, so they're known in memory only.)
     ownersKeep: cfg.ownersKeep !== false,
+    // What each Plex server's owner turns on for everyone, kept in the data
+    // folder (in memory only without it).
+    featuresKeep: cfg.featuresKeep !== false,
     // Development and tests only, in ms: offline mode's "plex.tv hasn't
     // answered for" and "has answered again for" (see OFFLINE_LIMITS), and
     // how often plex.tv is asked again while it isn't answering, and pinged
@@ -154,6 +158,7 @@ let shares = null;
 let accountSettings = null;
 let missingLists = null;
 let owners = null; // the owner's sign-ins, as fingerprints (see owners.js)
+let features = null; // what each server's owner turns on for everyone (see features.js)
 
 // ---------- rate limits ----------
 
@@ -1444,7 +1449,8 @@ async function settingsRoute(req, res, parts, url) {
 // friends' names, as plex.tv has them), each left out if it's as the
 // browser last had it (its revs). POST ?server=ID { ops: [...] }: changes to
 // it (see server/missing.js), and from the owner to everyone's ({ everyone:
-// true }). Only for the account behind the request's sign-in, on a Plex
+// true }); a friend's only add to theirs. Only for the account behind the
+// request's sign-in, on a Plex
 // server it can use, and with PLEX_SERVER_URL set only for people who can
 // use that one, as the rest of the service is. Whether it owns the server,
 // plex.tv says.
@@ -1475,7 +1481,11 @@ async function missingRoute(req, res, parts, url) {
     const body = await readBody(req, 512 * 1024);
     const ops = Array.isArray(body.ops) ? body.ops : null;
     if (!ops) throw new HttpError(400, 'Those changes couldn’t be read.');
-    const r = missingLists.apply(user.id, server, ops, { owner });
+    // (Nothing new goes on anyone's but the owner's while the owner has
+    // Missing tracks off for everyone: see features.js. A friend's is
+    // theirs to see, and what happens to it is the owner's to say: nothing
+    // of it is taken off but by the owner, or as it's found in the library.)
+    const r = missingLists.apply(user.id, server, ops, { owner, adds: owner || !!features?.on(server, 'missing'), edits: owner });
     const mineOnly = ({ mine }) => ({ mine });
     return send(res, 200, { rev: owner ? r.rev : mineOnly(r.rev), before: owner ? r.before : mineOnly(r.before), skipped: r.skipped, refused: r.refused, full: r.full });
   }
@@ -1496,6 +1506,33 @@ async function named(token, rows) {
     }
   }
   return rows.map(({ who, ...r }) => ({ ...r, who: who.map((id) => names.get(id)).filter(Boolean), people: who.length }));
+}
+
+// ---------- what a Plex server's owner turns on for everyone ----------
+
+// GET ?server=ID: which of the features (see features.js) the server's
+// owner has set, for everyone, and whether this account is that owner
+// ({ features, rev, owner }); PUT ?server=ID { set: { name: value }, seed? }:
+// the owner changed some. Read by anyone who can use the server (with
+// PLEX_SERVER_URL set, only by people who can use that one, as the rest of
+// the service is); changed by its owner only, as plex.tv says.
+async function featuresRoute(req, res, parts, url) {
+  if (!features) throw new HttpError(404, 'Not found.');
+  if (parts.length) throw new HttpError(404, 'Not found.');
+  const { user, token } = await signedIn(req);
+  if (!allow(`feat|${user.id}`, 120)) throw new HttpError(429, 'Too many changes in a short time. Wait a minute.');
+  const server = String(url.searchParams.get('server') || '');
+  if (!SERVER_ID.test(server)) throw new HttpError(400, 'Which Plex server’s?');
+  // (A brief plex.tv outage isn't a no: the app tries again later.)
+  const access = await serverAccessOf(token, server);
+  if (!access.ok) throw new HttpError(403, 'You can’t play from that Plex server.');
+  const owner = access.owned === true;
+  if (req.method === 'GET') return send(res, 200, { ...features.get(server), owner });
+  if (req.method === 'PUT') {
+    if (!owner) throw new HttpError(403, 'Only the server’s owner can change these.');
+    return send(res, 200, { ...features.update(server, await readBody(req, 8 * 1024)), owner });
+  }
+  throw new HttpError(405, 'Not allowed.');
 }
 
 // Which way nginx passed a request on (X-PW-Route, which it sets itself and
@@ -1527,6 +1564,7 @@ async function handle(req, res) {
         sharing: !!shares,
         settings: !!accountSettings,
         missing: !!missingLists,
+        features: !!features,
         spotify: !!spotify,
         offline: offline.configured,
         debug: config.debug,
@@ -1550,6 +1588,7 @@ async function handle(req, res) {
     if (area === 'shares') return await sharesRoute(req, res, rest, url);
     if (area === 'settings') return await settingsRoute(req, res, rest, url);
     if (area === 'missing') return await missingRoute(req, res, rest, url);
+    if (area === 'features') return await featuresRoute(req, res, rest, url);
     if (area === 'spotify') return await spotifyRoute(req, res, rest);
     throw new HttpError(404, 'Not found.');
   } catch (err) {
@@ -1629,6 +1668,7 @@ function started() {
   missingLists = startKept(config.missingSync, 'missing tracks that follow each account', MissingStore);
   startMusicBrainzKept();
   startOwners();
+  startFeatures();
   const off = [
     !config.together && 'Play Together',
     !config.cast && 'playing on other devices',
@@ -1692,6 +1732,17 @@ function startOwners() {
   owners = new OwnerSignIns({ dir, log });
 }
 
+// What each Plex server's owner turns on for everyone (see features.js):
+// kept in the data folder too (in memory only if it can't be written to).
+function startFeatures() {
+  let dir = (config.featuresKeep && config.dataDir) || null;
+  if (dir && !canWrite(dir)) {
+    log.warn(`${dir} can't be written to by this service, so what each Plex server's owner turns on for everyone is kept in memory only (until it restarts)`);
+    dir = null;
+  }
+  features = new ServerFeatures({ dir, log });
+}
+
 server.on('error', (err) => {
   log.error(`couldn't start: ${err.message}`);
   process.exit(1);
@@ -1720,6 +1771,7 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGQUIT']) {
     missingLists?.flush();
     musicbrainz?.adv?.flush();
     owners?.flush();
+    features?.flush();
     server.close();
     process.exit(0);
   });

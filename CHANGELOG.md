@@ -3,6 +3,36 @@
 What changed in each version of plexamp-web, newest first. The version
 you're running is shown in **Settings › About**.
 
+## 0.41.0 - 2026-11-27
+
+### Added
+
+- **Settings › Server owner**: for your Plex server's owner, what's on for
+  everyone who plays from it here: Missing tracks, checking AI suggestions
+  on MusicBrainz, and the MusicBrainz features (with which kinds of missing
+  albums are shown). Only the owner can change them, as plex.tv says. It
+  takes the place of Settings › MusicBrainz, and of each person's own
+  switches for these.
+- **Add a Spotify playlist to one of yours**: From Spotify can add it to a
+  playlist you have instead of making a new one, and only what isn't in it
+  already goes on, at the end. For a playlist over 100 tracks, split it into
+  playlists of 100 on Spotify and add each to the same one here: the app
+  says so, and offers the one the last went into first.
+
+### Changed
+
+- **Missing tracks are the server owner's**, on or off for everyone (off to
+  begin with). Friends' always go to the owner, who sees everyone's in
+  Settings › Server owner › Missing tracks. Friends see their own in
+  Settings › Missing tracks, to look at or export: only the owner takes any
+  off.
+- **From Spotify uses a playlist's link to begin with**, and Spotify's
+  download of your data is off unless `SPOTIFY_FILE_IMPORT=true`.
+  `SPOTIFY_LINK_IMPORT=false` turns the link off.
+- **Upgrading**: what the owner had on for themselves (Show missing tracks,
+  Check suggestions on MusicBrainz, the MusicBrainz features) is how they
+  start for everyone.
+
 ## 0.40.4 - 2026-11-19
 
 ### Added

@@ -9,8 +9,8 @@
 // says of the library (which kind an album is, on an artist's page, is
 // Plex's alone): they only add to it.
 //
-//   Skip live tracks and demos (skipLive, Settings › Playback, for
-//     everyone; on to begin with where the player has these, mbSkipLive):
+//   Skip live tracks and demos (skipLive, Settings › Playback, each
+//     person's own; on to begin with where the player has these, mbSkipLive):
 //     left out of what the app picks for you (radio and stations,
 //     shuffling an artist or the library, Guest DJs), by their album's
 //     kind (Plex's, or, with these, MusicBrainz's where Plex hasn't one)
@@ -19,6 +19,10 @@
 //     their release groups the library doesn't have, of the kinds chosen.
 //   Original release years (mbOriginalYears): an artist's albums in the
 //     order they first came out, and on an album's page the year it did.
+//   Artists of the same name (mbNamesakes): another artist's albums kept
+//     apart on an artist's page.
+//   (These three are on or off for everyone, as the server's owner has them
+//   in Settings › Server owner: see features.js.)
 //   Other names: an artist not found by their name is looked for by the
 //     other names MusicBrainz has for them (imports, and Missing tracks'
 //     Check again).
@@ -28,6 +32,7 @@ import { app } from './state.js';
 import { norm } from './missinglist.js';
 import { RELEASE_KINDS, kindOf, plexKind, shortRelease, versionedTracks, placeholderArtist } from './releases.js';
 import { serviceFetch } from './service.js';
+import { featureOn } from './features.js';
 
 // The player has them.
 export const mbFeatures = () => !!app.config.musicbrainzAdvanced;
@@ -35,12 +40,14 @@ export const mbFeatures = () => !!app.config.musicbrainzAdvanced;
 // too, by their tracks (see albumsOnMB, `check`): musicbrainz.org is asked
 // about artists alone.
 export const mbOwnServer = () => mbFeatures() && app.config.musicbrainz === 'own';
-// ...and this one's on (each is on to begin with).
-export const mbOn = (setting) => mbFeatures() && app.settings[setting] !== false;
-// Skip live tracks and demos (Settings › Playback): on where it's been
-// turned on, or, where the player has the MusicBrainz features, unless
-// it's been turned off (as it was on to begin with, with those).
-export const skipLiveOn = () => app.settings.skipLive === true || mbOn('mbSkipLive');
+// ...and this one's on for everyone, as the server's owner has it (each is
+// on to begin with).
+export const mbOn = (feature) => mbFeatures() && featureOn(feature);
+// Skip live tracks and demos (Settings › Playback, each person's own): on
+// where it's been turned on, or, where the player has the MusicBrainz
+// features, unless it's been turned off (as it was on to begin with, with
+// those).
+export const skipLiveOn = () => app.settings.skipLive === true || (mbFeatures() && app.settings.mbSkipLive !== false);
 
 export { RELEASE_KINDS, kindOf, plexKind, firstYear, albumKey, matchGroup, sameTitle, apartFromNamesakes, exactAlbum, shortRelease, kindsAgree, placeholderArtist } from './releases.js';
 export const KIND_NAMES = Object.fromEntries(RELEASE_KINDS);

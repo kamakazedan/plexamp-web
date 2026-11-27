@@ -344,10 +344,10 @@ MUSICBRAINZ_URL=$MUSICBRAINZ_URL
 # true: the MusicBrainz features (missing albums, original years, years and
 # genres to fix). Best with your own mirror.
 MUSICBRAINZ_ADVANCED=
-# Playlists from Spotify's download of your data. Empty: on.
+# true: playlists from Spotify's download of your data. Empty: off.
 SPOTIFY_FILE_IMPORT=
-# true: a playlist from a public Spotify link (first 100 tracks; against
-# Spotify's terms). Empty: off.
+# A playlist from a public Spotify link (first 100 tracks; against
+# Spotify's terms). Empty: on; false: off.
 SPOTIFY_LINK_IMPORT=
 # Offline mode: sign in with this password while plex.tv is down, as your
 # Plex server's owner (read "Offline mode" in docs/configuration.md first).

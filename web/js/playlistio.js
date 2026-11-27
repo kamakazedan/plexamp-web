@@ -381,15 +381,25 @@ export async function matchEntries(entries, { signal, onProgress } = {}) {
 
 // ---------- import ----------
 
-// A playlist from a file, made in this library, called `title`: { playlist
-// (Plex's, or null if none of its tracks are here), found (how many),
-// missing: [entries] }.
-export async function importPlaylist(p, { title = p.title, signal, onProgress } = {}) {
+// A playlist from a file, made in this library, called `title`, or added to
+// the end of one you have (`into`: { ratingKey, title }), without the tracks
+// that one has already: { playlist (Plex's, or `into`; null if none of its
+// tracks are here), found (how many), added (into one you have: how many
+// weren't in it), missing: [entries] }.
+export async function importPlaylist(p, { title = p.title, into = null, signal, onProgress } = {}) {
   const found = await matchEntries(p.tracks, { signal, onProgress });
   const ids = found.filter(Boolean).map((m) => String(m.ratingKey));
   const missing = p.tracks.filter((_, i) => !found[i]);
   if (!ids.length) return { playlist: null, found: 0, missing };
   if (signal?.aborted) throw abortError();
+  if (into) {
+    const { items } = await playlistEntries(into.ratingKey, { limit: FILE_LIMITS.total, signal, ids: true });
+    const have = new Set(items.map((m) => String(m.ratingKey)));
+    const fresh = ids.filter((id) => !have.has(id));
+    if (signal?.aborted) throw abortError();
+    if (fresh.length) await app.server.addToPlaylist(into.ratingKey, fresh);
+    return { playlist: into, found: ids.length, added: fresh.length, missing };
+  }
   const playlist = await app.server.createPlaylist(title, ids);
   if (playlist && p.summary) await app.server.editPlaylist(playlist.ratingKey, { summary: p.summary }).catch(() => {});
   return { playlist, found: ids.length, missing };

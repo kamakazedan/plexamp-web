@@ -56,6 +56,12 @@ const text = (v, n) => (typeof v === 'string' ? v.replace(CONTROL_CHARACTERS, ' 
 const when = (v, now) => (Number.isSafeInteger(v) && v > 1e9 && v <= now + 86400 ? v : null);
 const counted = (v) => (Number.isSafeInteger(v) && v >= 1 && v <= 1e6 ? v : 1);
 const unreadable = () => new MissingError(400, 'Those changes couldn’t be read.');
+// A change that puts anything on a list (not one that only lets go of
+// what's been found).
+const adding = (op) => op.type === 'merge' || op.type === 'restore' || (op.type === 'note' && op.items.length > 0);
+// ...and one that takes anything off it, or marks what MusicBrainz said
+// (not one that lets go of what's been found in the library: see note).
+const EDITING = new Set(['forget', 'clear', 'mb']);
 
 // An entry as it's kept (see missinglist.js), or null if it can't be one.
 export function cleanEntry(raw, now) {
@@ -338,12 +344,16 @@ export class MissingStore {
   // once, however often it's sent), and from the server's owner,
   // `everyone`'s: taking some off everyone's list for it, or clearing it. A
   // change that can't be read, or that isn't theirs to make, is left out
-  // (`skipped`), as is one that needs more room than the player has left
-  // (`refused`, by id; `full`). Returns the revs from before and after.
+  // (`skipped`), as is one that would put anything on it while `adds` is
+  // false (the server's owner has Missing tracks off for everyone), one
+  // that takes anything off it or marks it while `edits` is false (a
+  // friend's list is theirs to see, and its owner's to change: see the
+  // route in index.js), and one that needs more room than the player has
+  // left (`refused`, by id; `full`). Returns the revs from before and after.
   // (Each list changed is changed as one copy, kept once, at the end:
   // `work`, its entries as changed so far, and how many more there are on
   // all the lists now.)
-  apply(uid, server, ops, { owner = false } = {}) {
+  apply(uid, server, ops, { owner = false, adds = true, edits = true } = {}) {
     const id = userId(uid);
     if (!id || !SERVER_ID.test(server) || !Array.isArray(ops)) throw unreadable();
     if (ops.length > MISSING_STORE_LIMITS.ops) throw new MissingError(413, 'Too many changes at once.');
@@ -354,7 +364,7 @@ export class MissingStore {
     const work = { lists: new Map(), grown: 0 };
     for (const raw of ops) {
       const op = cleanOp(raw, now);
-      if (!op || (op.everyone && !owner)) {
+      if (!op || (op.everyone && !owner) || (!adds && adding(op)) || (!edits && EDITING.has(op.type))) {
         skipped += 1;
         continue;
       }

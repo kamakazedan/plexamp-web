@@ -40,13 +40,13 @@
 #                       tracks here, for all of its devices, and syncing
 #                       everyone's into the Plex server owner's, so they can
 #                       see what's missing from their server (on by default)
-#   SPOTIFY_FILE_IMPORT Search › From Spotify with Spotify's download of your
-#                       data: its playlist files, read in the browser (on by
-#                       default; "false" turns it off)
-#   SPOTIFY_LINK_IMPORT "true" turns on Search › From Spotify with a public
-#                       playlist's link, read from Spotify's public page for
-#                       it (off by default: see server/spotify.js).
+#   SPOTIFY_LINK_IMPORT Search › From Spotify with a public playlist's link,
+#                       read from Spotify's public page for it (on by
+#                       default; "false" turns it off: see server/spotify.js).
 #                       (SPOTIFY_IMPORT, its name before 0.22.0, still works.)
+#   SPOTIFY_FILE_IMPORT "true" turns on Search › From Spotify with Spotify's
+#                       download of your data: its playlist files, read in
+#                       the browser (off by default)
 #   OFFLINE_PWD         offline mode, with PLEX_SERVER_URL: while plex.tv isn't
 #                       answering, this player can be signed in to with this
 #                       password (12 to 200 characters, no spaces), as the
@@ -61,7 +61,8 @@
 #                       0.30.0, stops the container, saying so.)
 #   DATA_DIR            where shared playlists, each account's settings and
 #                       Missing tracks, what the MusicBrainz features look
-#                       up, and the fingerprints of the Plex server owner's
+#                       up, what the Plex server's owner turns on for
+#                       everyone, and the fingerprints of the owner's
 #                       sign-ins (for /pms/ while plex.tv isn't answering),
 #                       are kept (default /data: give the container a
 #                       volume there). A folder of its own: it's made the
@@ -141,29 +142,29 @@ data_dir_problem() {
             [ -e "$e" ] || [ -L "$e" ] || continue
             case "${e##*/}" in
                 # (and what file systems and file browsers leave around)
-                shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | musicbrainz.json | musicbrainz.json.tmp | owners.json | owners.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
+                shares.json | shares.json.tmp | settings.json | settings.json.tmp | missing.json | missing.json.tmp | musicbrainz.json | musicbrainz.json.tmp | owners.json | owners.json.tmp | features.json | features.json.tmp | lost+found | .DS_Store | ._* | @eaDir | Thumbs.db | desktop.ini) ;;
                 # (One the service couldn't read, kept aside by it as it was,
                 # for whoever looks after it. Never changed here.)
-                shares.json.unreadable-* | settings.json.unreadable-* | missing.json.unreadable-* | musicbrainz.json.unreadable-* | owners.json.unreadable-*) ;;
+                shares.json.unreadable-* | settings.json.unreadable-* | missing.json.unreadable-* | musicbrainz.json.unreadable-* | owners.json.unreadable-* | features.json.unreadable-*) ;;
                 *)
                     echo "DATA_DIR ($DATA_DIR) has other files in it (${e##*/}): give it a folder of its own (a new or empty one, or a volume)"
                     return
                     ;;
             esac
         done
-        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/musicbrainz.json.tmp" "$DATA_DIR/owners.json" "$DATA_DIR/owners.json.tmp"; do
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/musicbrainz.json.tmp" "$DATA_DIR/owners.json" "$DATA_DIR/owners.json.tmp" "$DATA_DIR/features.json" "$DATA_DIR/features.json.tmp"; do
             if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; } || { [ -f "$f" ] && [ "$(stat -c %h "$f")" != 1 ]; }; then
                 echo "$f must be a file of its own (not a link, or a folder)"
                 return
             fi
         done
-        rm -f "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json.tmp" "$DATA_DIR/owners.json.tmp"
+        rm -f "$DATA_DIR/shares.json.tmp" "$DATA_DIR/settings.json.tmp" "$DATA_DIR/missing.json.tmp" "$DATA_DIR/musicbrainz.json.tmp" "$DATA_DIR/owners.json.tmp" "$DATA_DIR/features.json.tmp"
         d_group="$(id -gn "$d_user")"
         if ! chown -h "$d_user:$d_group" "$DATA_DIR"; then
             echo "$d_user can't own DATA_DIR ($DATA_DIR)"
             return
         fi
-        for f in "$DATA_DIR/shares.json" "$DATA_DIR/settings.json" "$DATA_DIR/missing.json" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/owners.json"; do
+        for f in "$DATA_DIR/shares.json" "$DATA_DIR/settings.json" "$DATA_DIR/missing.json" "$DATA_DIR/musicbrainz.json" "$DATA_DIR/owners.json" "$DATA_DIR/features.json"; do
             if [ -f "$f" ] && ! chown -h "$d_user:$d_group" "$f"; then
                 echo "$d_user can't own $f"
                 return
@@ -530,21 +531,23 @@ test_address PLEX_TV_URL "$PLEX_TV" https://plex.tv "every sign-in check goes th
 
 # ---------- Spotify imports ----------
 
-# From Spotify's download of your data (SPOTIFY_FILE_IMPORT, on unless it's
-# turned off: since 0.37.0, as it's been tried with real downloads): its
-# playlist files, read in the browser; nothing goes to this container or to
-# Spotify, so it doesn't need the service. From a public playlist's link
-# (SPOTIFY_LINK_IMPORT, off unless it's turned on; SPOTIFY_IMPORT before
-# 0.22.0, which it overrides when both are set): read from Spotify's public
-# pages, which Spotify's terms don't allow (see server/spotify.js).
+# From a public playlist's link (SPOTIFY_LINK_IMPORT, on unless it's turned
+# off, since 0.41.0: the way that takes no more than a link; SPOTIFY_IMPORT
+# before 0.22.0, which it overrides when both are set): read from Spotify's
+# public pages, which Spotify's terms don't allow (see server/spotify.js).
+# From Spotify's download of your data (SPOTIFY_FILE_IMPORT, off unless it's
+# turned on, since 0.41.0): its playlist files, read in the browser; nothing
+# goes to this container or to Spotify, so it doesn't need the service.
 # SPOTIFY_URL is for tests (the mock's address).
-SPOTIFY_FILES=false
-if truthy SPOTIFY_FILE_IMPORT "${SPOTIFY_FILE_IMPORT:-}" true; then SPOTIFY_FILES=true; fi
-SPOTIFY=false
-if truthy SPOTIFY_IMPORT "${SPOTIFY_IMPORT:-}"; then SPOTIFY=true; fi
+SPOTIFY=true
+if [ -n "${SPOTIFY_IMPORT:-}" ]; then
+    if truthy SPOTIFY_IMPORT "$SPOTIFY_IMPORT"; then SPOTIFY=true; else SPOTIFY=false; fi
+fi
 if [ -n "${SPOTIFY_LINK_IMPORT:-}" ]; then
     if truthy SPOTIFY_LINK_IMPORT "$SPOTIFY_LINK_IMPORT"; then SPOTIFY=true; else SPOTIFY=false; fi
 fi
+SPOTIFY_FILES=false
+if truthy SPOTIFY_FILE_IMPORT "${SPOTIFY_FILE_IMPORT:-}"; then SPOTIFY_FILES=true; fi
 SPOTIFY_URL="${SPOTIFY_URL:-https://open.spotify.com}"
 whole "$SPOTIFY_URL" '^https?://[]A-Za-z0-9._:[-]+$' || fail "SPOTIFY_URL isn't a plain address (got: $(safe_url "$SPOTIFY_URL"))"
 test_address SPOTIFY_URL "$SPOTIFY_URL" https://open.spotify.com "Spotify playlists' links are read from there instead of from open.spotify.com"
@@ -1000,7 +1003,10 @@ CONF
     # server/owners.js.)
     OWNERS_KEEP=false
     if [ -n "$PMS_URL" ]; then OWNERS_KEEP=true; fi
-    if [ "$SHARING" = true ] || [ "$SETTINGS_SYNC" = true ] || [ "$MISSING_SYNC" = true ] || [ "$MB_ADV" = true ] || [ "$OWNERS_KEEP" = true ]; then
+    # (What each Plex server's owner turns on or off for everyone, in
+    # Settings › Server owner: see server/features.js.)
+    FEATURES_KEEP=true
+    if [ "$SHARING" = true ] || [ "$SETTINGS_SYNC" = true ] || [ "$MISSING_SYNC" = true ] || [ "$MB_ADV" = true ] || [ "$OWNERS_KEEP" = true ] || [ "$FEATURES_KEEP" = true ]; then
         why="$(data_dir_problem)"
         if [ -n "$why" ]; then
             if [ "$SHARING" = true ]; then say "shared playlists are off: $why"; fi
@@ -1008,11 +1014,13 @@ CONF
             if [ "$MISSING_SYNC" = true ]; then say "missing tracks that follow each account are off: $why"; fi
             if [ "$MB_ADV" = true ]; then say "what the MusicBrainz features look up is kept in memory only (until the service restarts): $why"; fi
             if [ "$OWNERS_KEEP" = true ]; then say "your own Plex sign-ins, for /pms/ while plex.tv isn't answering, are known in memory only (until the service restarts): $why"; fi
+            say "what a Plex server's owner turns on for everyone (Settings › Server owner) is kept in memory only (until the service restarts): $why"
             SHARING=false
             SETTINGS_SYNC=false
             MISSING_SYNC=false
             MB_KEEP=false
             OWNERS_KEEP=false
+            FEATURES_KEEP=false
         else
             # In a container, a folder that isn't a volume goes when the
             # container is replaced (an update, say), and what's in it.
@@ -1023,6 +1031,7 @@ CONF
                 if [ "$MISSING_SYNC" = true ]; then kept="$kept, missing tracks"; fi
                 if [ "$MB_ADV" = true ]; then kept="$kept, what the MusicBrainz features look up"; fi
                 if [ "$OWNERS_KEEP" = true ]; then kept="$kept, your own Plex sign-ins (as fingerprints, for /pms/ while plex.tv isn't answering)"; fi
+                kept="$kept, what you turn on for everyone in Settings › Server owner"
                 say "${kept#, }: kept in $DATA_DIR, which isn't a volume, so they'd be lost when this container is replaced (by an update, say). Give the container a volume there (see docker-compose.yml)."
             fi
         fi
@@ -1053,6 +1062,7 @@ else
     MB_ADV=false
     MB_KEEP=false
     OWNERS_KEEP=false
+    FEATURES_KEEP=false
     SHARING=false
     SETTINGS_SYNC=false
     MISSING_SYNC=false
@@ -1161,6 +1171,7 @@ if [ "$SERVICE" = true ]; then
   "pmsResolver": "$(json "${PMS_NS:-}")",
   "plexTvUrl": "$(json "$PLEX_TV")",
   "ownersKeep": $OWNERS_KEEP,
+  "featuresKeep": $FEATURES_KEEP,
   "offlinePwd": "$([ "$OFFLINE" = true ] && json "$OFFLINE_PWD_SET")",
   "offlineNetworks": "$(json "$OFFLINE_NETWORKS_SET")",
   "nginxLogPort": $NGINX_LOG_PORT,

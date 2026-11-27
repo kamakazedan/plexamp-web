@@ -35,10 +35,10 @@ services:
       PLAYLIST_SHARING: "true"     # sharing playlists with Plex friends
       SYNC_SETTINGS: "true"        # app settings follow each Plex account
       SYNC_MISSING_TRACKS: "true"  # Missing tracks follow each account
-      # Playlists from Spotify's download of your data. Empty: on.
+      # true: playlists from Spotify's download of your data. Empty: off.
       SPOTIFY_FILE_IMPORT: ""
-      # true: a playlist from a public Spotify link (first 100 tracks; against
-      # Spotify's terms). Empty: off.
+      # A playlist from a public Spotify link (first 100 tracks; against
+      # Spotify's terms). Empty: on; false: off.
       SPOTIFY_LINK_IMPORT: ""
       # Where the offline password (OFFLINE_PWD, below) works from: private
       # (default), any, or networks, e.g. 192.168.1.0/24.

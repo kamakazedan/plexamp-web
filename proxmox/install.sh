@@ -281,10 +281,10 @@ MUSICBRAINZ_URL=
 # true: the MusicBrainz features (missing albums, original years, years and
 # genres to fix). Best with your own mirror.
 MUSICBRAINZ_ADVANCED=
-# Playlists from Spotify's download of your data. Empty: on.
+# true: playlists from Spotify's download of your data. Empty: off.
 SPOTIFY_FILE_IMPORT=
-# true: a playlist from a public Spotify link (first 100 tracks; against
-# Spotify's terms). Empty: off.
+# A playlist from a public Spotify link (first 100 tracks; against
+# Spotify's terms). Empty: on; false: off.
 SPOTIFY_LINK_IMPORT=
 # Offline mode: sign in with this password while plex.tv is down, as your
 # Plex server's owner (read "Offline mode" in docs/configuration.md first).
@@ -321,6 +321,18 @@ if [ "${#renames[@]}" -gt 0 ]; then
         -e 's/^# Where the offline key can be used from: private \(your own networks\), any,$/# Where the offline password can be used from: private (your own networks), any,/' \
         "$ENV_FILE"
     say "Settings: OFFLINE_KEY and OFFLINE_FROM are called OFFLINE_PWD and OFFLINE_NETWORKS now, so they've been renamed, keeping their values"
+fi
+# Spotify imports' words as a settings file from before 0.41.0 has them,
+# which 0.41.0 turned around (a playlist from a link on to begin with, and
+# from Spotify's download of your data off): as they are now, saying so.
+# Their values stay as they are.
+if grep -qx "# Playlists from Spotify's download of your data. Empty: on." "$ENV_FILE" || grep -qx "# Spotify's terms). Empty: off." "$ENV_FILE"; then
+    sed -i --follow-symlinks \
+        -e "s/^# Playlists from Spotify's download of your data\. Empty: on\.\$/# true: playlists from Spotify's download of your data. Empty: off./" \
+        -e "s/^# true: a playlist from a public Spotify link (first 100 tracks; against\$/# A playlist from a public Spotify link (first 100 tracks; against/" \
+        -e "s/^# Spotify's terms)\. Empty: off\.\$/# Spotify's terms). Empty: on; false: off./" \
+        "$ENV_FILE"
+    say "Settings: a playlist from a Spotify link is on now unless SPOTIFY_LINK_IMPORT=false, and from Spotify's download of your data off unless SPOTIFY_FILE_IMPORT=true"
 fi
 chmod 600 "$ENV_FILE"
 

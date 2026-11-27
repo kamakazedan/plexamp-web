@@ -69,10 +69,9 @@ export const DEFAULT_SETTINGS = {
 
   // MusicBrainz features, where the player has them (MUSICBRAINZ_ADVANCED: mb.js)
   mbSkipLive: true, // ...Skip live tracks and demos on, to begin with, where it has them (see skipLive)
-  mbMissingAlbums: true, // an artist's albums the library hasn't, on their page
-  mbMissingKinds: ['albums', 'singles', 'compilations', 'soundtracks', 'remixes'], // ...those of these kinds (mb.js RELEASE_KINDS)
-  mbOriginalYears: true, // albums by the year they first came out
-  mbNamesakes: true, // another artist's albums of the same name kept apart on an artist's page
+  // (The rest, each person's own before 0.41.0, mbMissingAlbums,
+  // mbMissingKinds, mbOriginalYears and mbNamesakes, are the server's
+  // owner's for everyone now: see features.js.)
 
   // Home screen, one for every library: { '*': { order, hidden, options, seen } }
   home: {},

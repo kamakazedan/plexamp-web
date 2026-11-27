@@ -16,6 +16,7 @@ import { Shares, ShareError, mergeTracks, withUnseen, missingFrom, SHARE_LIMITS,
 import { Spotify, SpotifyError, SPOTIFY_LIMITS, playlistId, shortCode, embedPlaylist, trackOf } from './spotify.js';
 import { SettingsStore, SETTINGS_LIMITS, SYNCED_SETTINGS, cleanValue } from './settings.js';
 import { MissingStore, MISSING_STORE_LIMITS, cleanOp, cleanEntry } from './missing.js';
+import { ServerFeatures, FEATURES, FEATURES_LIMITS } from './features.js';
 import { applyNote, applyMerge, applyRestore, keyOf, idOf, listId, shortList, norm, MISSING_LIMITS } from './missinglist.js';
 import { readDataFile } from './datafile.js';
 import { createServer, request as httpRequest } from 'node:http';
@@ -2573,6 +2574,79 @@ const statePage = (e) => `<html><body><script id="initial-state" type="text/plai
 const resourcePage = (e) => `<html><body><script id="resource" type="text/plain">${Buffer.from(JSON.stringify(e)).toString('base64')}</script></body></html>`;
 const otherPage = (e) => `<html><body><script type="application/json">${JSON.stringify({ deep: { inside: [{ x: 1 }, { playlist: e }] } })}</script></body></html>`;
 
+// ---------- what each Plex server's owner turns on for everyone ----------
+
+const PMS = 'srv-1';
+
+test('server owners\' settings: each server its own, as they start till its owner sets them, each the kind of value it is', () => {
+  const f = new ServerFeatures();
+  assert.deepEqual(f.get(PMS), { features: {}, rev: 0 });
+  assert.equal(f.on(PMS, 'missing'), false);
+  assert.equal(f.on(PMS, 'mbOriginalYears'), true);
+  assert.deepEqual(f.update(PMS, { set: { missing: true, mbOriginalYears: false, mbMissingKinds: ['albums', 'albums', 'eps'], made: 'up', ai: { apiKey: 'k' } } }), {
+    features: { missing: true, mbOriginalYears: false, mbMissingKinds: ['albums', 'eps'] },
+    rev: 1,
+  });
+  assert.equal(f.on(PMS, 'missing'), true);
+  assert.equal(f.on(PMS, 'mbOriginalYears'), false);
+  assert.equal(f.on('another-server', 'missing'), false);
+  // Set the first time only (two of the owner's devices at once don't undo each other's).
+  assert.equal(f.update(PMS, { seed: true, set: { missing: false } }).rev, 1);
+  assert.equal(f.update('another-server', { seed: true, set: { missing: true } }).rev, 1);
+  assert.equal(f.on('another-server', 'missing'), true);
+  // Nothing that's a feature: nothing changes.
+  assert.equal(f.update(PMS, { set: { made: 'up' } }).rev, 1);
+  const bad = (set, server = PMS) => assert.throws(() => f.update(server, { set }), (e) => e.status === 400);
+  bad(null);
+  bad(['missing']);
+  bad({ missing: 'yes' });
+  bad({ mbMissingKinds: 'albums' });
+  bad({ mbMissingKinds: ['Albums!'] });
+  bad({ mbMissingKinds: Array.from({ length: 13 }, (_, i) => `k${'x'.repeat(i)}`) });
+  bad({ missing: true }, '../../etc');
+  bad({ ...JSON.parse('{"__proto__": {"missing": true}}'), missing: 1 });
+  assert.equal({}.missing, undefined);
+  assert.equal(f.get(PMS).rev, 1);
+  // So many servers kept: no more.
+  const full = new ServerFeatures();
+  for (let i = 1; i <= FEATURES_LIMITS.servers; i++) full.servers.set(`s${i}`, { features: {}, rev: 1, at: 0 });
+  assert.throws(() => full.update('one-more', { set: { missing: true } }), (e) => e.status === 507);
+  assert.equal(full.update('s1', { set: { missing: true } }).rev, 2);
+});
+
+test('server owners\' settings: the same ones, starting the same, here as in the app (web/js/features.js)', () => {
+  const src = readFileSync(new URL('../web/js/features.js', import.meta.url), 'utf8');
+  const list = src.match(/export const FEATURES = Object\.freeze\(\{([\s\S]*?)\n\}\);/);
+  assert.ok(list, 'FEATURES in web/js/features.js');
+  // (Read as the app has them: its file imports the app's state, so it's read here as text.)
+  const theirs = Function(`return {${list[1]}};`)();
+  assert.deepEqual(JSON.parse(JSON.stringify(theirs)), JSON.parse(JSON.stringify(FEATURES)));
+});
+
+test('server owners\' settings: kept in a file only the service can read, and read back (what doesn\'t check out left out)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-features-'));
+  try {
+    const f = new ServerFeatures({ dir });
+    f.update(PMS, { set: { missing: true } });
+    f.flush();
+    const file = join(dir, 'features.json');
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.deepEqual(new ServerFeatures({ dir }).get(PMS), { features: { missing: true }, rev: 1 });
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    data.servers['../x'] = { features: { missing: true }, rev: 1 };
+    data.servers['srv-2'] = { features: { missing: 'yes', mbNamesakes: false, made: 'up' }, rev: 4 };
+    data.servers['srv-3'] = 'not one';
+    writeFileSync(file, JSON.stringify(data));
+    const read = new ServerFeatures({ dir });
+    assert.deepEqual([...read.servers.keys()].sort(), [PMS, 'srv-2'].sort());
+    assert.deepEqual(read.get('srv-2'), { features: { mbNamesakes: false }, rev: 4 });
+    writeFileSync(file, '{ not json');
+    assert.equal(new ServerFeatures({ dir }).servers.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Spotify: a playlist from its link, URI or id, and nothing else', () => {
   for (const ok of [
     `https://open.spotify.com/playlist/${SP_ID}?si=abc123&pt=x`,
@@ -2744,6 +2818,32 @@ test('missing tracks: a friend\'s list is kept for their account as they use it,
   // The server's owner's own, as ever.
   asOwner(st, [noteOp([song('C', 'Three')])]);
   assert.deepEqual(mineOf(st, dan.id).map((m) => m.title), ['Three']);
+});
+
+test('missing tracks: a friend\'s list is theirs to see and the server\'s owner\'s to change: nothing new goes on it while the owner has them off for everyone, and nothing comes off it but by the owner, or as it\'s found in the library', () => {
+  const st = store();
+  asFriend(st, sam, [noteOp([song('A', 'One')])]);
+  // (As the route has it for a friend: see missingRoute in index.js.)
+  const friend = (ops, { on = true } = {}) => st.apply(sam.id, SRV, ops, { adds: on, edits: false });
+  const r = friend([noteOp([song('B', 'Two')]), { type: 'merge', id: opId(), entries: [{ kind: 'track', artist: 'C', title: 'Three', section: '1', last: AT }] }, { type: 'restore', id: opId(), entries: [{ kind: 'track', artist: 'D', title: 'Four', section: '1', last: AT }] }], { on: false });
+  assert.equal(r.skipped, 3);
+  assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One']);
+  // Taking some off, clearing it, marking what MusicBrainz said: the owner's to do, on or off.
+  const oneId = idOf({ ...song('A', 'One'), section: '1' });
+  assert.equal(friend([{ type: 'forget', id: opId(), ids: [oneId] }, { type: 'clear', id: opId() }, { type: 'mb', id: opId(), real: [], dropped: [oneId] }]).skipped, 3);
+  assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One']);
+  // While it's on, a friend's new ones go on it.
+  assert.equal(friend([noteOp([song('F', 'Six')])]).skipped, 0);
+  assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One', 'Six']);
+  // Found in the library: let go, on or off.
+  assert.equal(friend([noteOp([], { found: [keyOf(song('F', 'Six'))] })], { on: false }).skipped, 0);
+  assert.deepEqual(mineOf(st, sam.id).map((m) => m.title), ['One']);
+  // The owner takes it off everyone's...
+  asOwner(st, [{ type: 'forget', id: opId(), ids: [oneId], everyone: true }]);
+  assert.deepEqual(mineOf(st, sam.id), []);
+  // ...and their own goes on theirs, on or off.
+  st.apply(dan.id, SRV, [noteOp([song('E', 'Five')])], { owner: true, adds: true, edits: true });
+  assert.deepEqual(mineOf(st, dan.id).map((m) => m.title), ['Five']);
 });
 
 test('missing tracks: each account its own list; AI suggestions counted again, a change sent twice made once', () => {
@@ -3117,6 +3217,7 @@ test('the data folder: a file that can\'t be read is kept aside, never written o
       ['missing.json', () => new MissingStore({ dir, log, now: () => AT * 1000 }), (st) => asOwner(st, [noteOp([song('A', 'One')])])],
       ['musicbrainz.json', () => new MBKept({ dir, log }), (st) => st.set('genres|x', ['Rock'])],
       ['owners.json', () => new OwnerSignIns({ dir, log }), (st) => st.add(createHash('sha256').update('t').digest('hex'))],
+      ['features.json', () => new ServerFeatures({ dir, log }), (st) => st.update(SRV, { set: { missing: true } })],
     ];
     for (const [name, make, change] of stores) {
       const file = join(dir, name);
@@ -3627,6 +3728,52 @@ test('api/server: which Plex server this is set up for, as it says itself, asked
     await without.stop();
     p.close();
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('api/features: everyone who can use the server reads what its owner turned on for everyone; only the owner, as plex.tv says, changes it; while Missing tracks is off, friends\' new ones aren\'t kept; and a friend\'s own is theirs to see', async () => {
+  const p = await fakePlex();
+  const dir = mkdtempSync(join(tmpdir(), 'pw-service-'));
+  const env = { PW_SERVICE_PLEX_TV_URL: p.tv, PW_SERVICE_MISSING_SYNC: 'true' };
+  let svc = await startService(env, dir);
+  const ask = (token, method = 'GET', body = undefined, area = 'features') =>
+    fetch(`${svc.url}/api/${area}?server=srv-1`, {
+      method,
+      headers: { 'X-Plex-Token': token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  const said = async (r) => ({ status: r.status, ...(await r.json()) });
+  let n = 0;
+  const note = (title) => ({ ops: [{ type: 'note', id: `abcdef${String(++n).padStart(6, '0')}`, items: [{ kind: 'track', artist: 'A', title }], found: [], unreal: [], via: '', section: '1', library: 'Music', at: Math.floor(Date.now() / 1000) }] });
+  try {
+    assert.deepEqual(await said(await ask('owner-token')), { status: 200, features: {}, rev: 0, owner: true });
+    assert.deepEqual(await said(await ask('sam-token')), { status: 200, features: {}, rev: 0, owner: false });
+    assert.equal((await ask('alex-token')).status, 403); // (can't use the server)
+    assert.equal((await ask('made-up-token')).status, 401);
+    assert.equal((await ask('sam-token', 'PUT', { set: { missing: true } })).status, 403);
+    assert.equal((await ask('sam-token', 'PUT', { seed: true, set: { missing: true } })).status, 403);
+    // Missing tracks off (as it starts): a friend's new ones aren't kept; the owner's are.
+    assert.equal((await said(await ask('sam-token', 'POST', note('One'), 'missing'))).skipped, 1);
+    assert.equal((await said(await ask('owner-token', 'POST', note('Two'), 'missing'))).skipped, 0);
+    assert.deepEqual(await said(await ask('owner-token', 'PUT', { set: { missing: true, mbNamesakes: false } })), { status: 200, features: { missing: true, mbNamesakes: false }, rev: 1, owner: true });
+    assert.deepEqual((await said(await ask('sam-token'))).features, { missing: true, mbNamesakes: false });
+    assert.equal((await said(await ask('sam-token', 'POST', note('Three'), 'missing'))).skipped, 0);
+    assert.deepEqual((await said(await ask('sam-token', 'GET', undefined, 'missing'))).entries.map((m) => m.title), ['Three']);
+    // A friend's is theirs to see: what comes off it is the owner's to say.
+    assert.equal((await said(await ask('sam-token', 'POST', { ops: [{ type: 'clear', id: 'abcdef999999' }] }, 'missing'))).skipped, 1);
+    assert.deepEqual((await said(await ask('sam-token', 'GET', undefined, 'missing'))).entries.map((m) => m.title), ['Three']);
+    assert.equal((await ask('owner-token', 'PUT', { set: { missing: 'yes' } })).status, 400);
+    assert.equal((await said(await ask('owner-token', 'PUT', { seed: true, set: { missing: false } }))).rev, 1);
+    // Kept across a restart, in a file of its own with no one's sign-in in it.
+    await svc.stop();
+    const kept = readFileSync(join(dir, 'features.json'), 'utf8');
+    assert.ok(!kept.includes('token') && !kept.includes('sam'), kept);
+    svc = await startService(env, dir);
+    assert.deepEqual(await said(await ask('sam-token')), { status: 200, features: { missing: true, mbNamesakes: false }, rev: 1, owner: false });
+  } finally {
+    await svc.stop();
+    p.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
