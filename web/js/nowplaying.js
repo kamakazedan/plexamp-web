@@ -16,6 +16,7 @@ import { cast, openCastSheet, castLabel } from './cast.js';
 import { devices } from './devices.js';
 import { rateTrack, ratingEvents, ratingMode, isDownRating, LOVED, LOVED_TITLE } from './ratings.js';
 import { formatOf, audioStream } from './formats.js';
+import { phoneOnly } from './downloads.js';
 
 const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const QUEUE_SHOWN = 200; // Up next shows this many tracks at most (the one playing first)
@@ -569,7 +570,8 @@ function ratingControl() {
 
   function paint() {
     const mode = ratingMode();
-    el.hidden = mode === 'off';
+    // (Not for another server's track, played from the phone: this server can't rate it.)
+    el.hidden = mode === 'off' || phoneOnly(player.current);
     el.dataset.mode = mode;
     if (mode === 'tick') {
       const on = value === LOVED;
@@ -602,7 +604,7 @@ function ratingControl() {
 
   async function choose(next) {
     const t = player.current;
-    if (!t || !app.server) return;
+    if (!t || !app.server || phoneOnly(t)) return;
     const before = value;
     value = next;
     paint();
@@ -844,6 +846,8 @@ function buildNowPlaying() {
     showFormat(t, null, converted);
     quality.hidden = !converted;
     quality.replaceChildren(...(converted ? [convertedMark(t, q, kbps), `${kbps} kbps`] : []));
+    // (Another server's track, played from the phone: what it came with is all there is.)
+    if (phoneOnly(t)) return;
     try {
       const d = await app.server.trackDetail(t.id);
       if (mine !== detailToken || !d) return;

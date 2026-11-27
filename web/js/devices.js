@@ -17,6 +17,7 @@ import { player } from './player.js';
 import { together } from './together.js';
 import { toast, shuffleArray } from './ui.js';
 import { debugLog } from './debug.js';
+import { phoneOnly, phoneContext } from './downloads.js';
 
 const API = 'api/devices';
 const WAIT_SECONDS = 25;
@@ -503,12 +504,14 @@ class Devices extends EventTarget {
       shuffle: p.shuffle,
       repeat: p.repeat,
       volume: p.muted ? 0 : p.volume,
-      context: p.context,
+      // (Not another server's downloads, played from this phone: no other
+      // device can have them.)
+      context: phoneContext(p.context) ? null : p.context,
       output: p.cast && p.cast !== this.remote ? p.cast.target?.name || null : p.routed ? 'an AirPlay or Cast device' : null,
       ack: this.lastCmd,
     };
     if (this.queueDirty || from !== this.sentFrom) {
-      body.queue = p.queue.slice(from, from + WINDOW).map(slim);
+      body.queue = p.queue.slice(from, from + WINDOW).filter((t) => !phoneOnly(t)).map(slim);
       this.queueDirty = false;
       this.sentFrom = from;
     }

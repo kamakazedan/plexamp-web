@@ -126,3 +126,18 @@ test('the page gives the app what it keeps downloads up to date with, and has it
   assert.match(downloads, /on\(\s*['"]signing-out['"][\s\S]*?\.forget\(\)/, why('downloads.forget() as someone signs out or switches', 'DownloadBridge.kt, which removes the files and the sign-in'));
   assert.match(read('web/js/state.js'), /function leave\([^)]*\)\s*\{[^}]*?emit\(\s*['"]signing-out['"]\s*\)/, why("'signing-out', as someone signs out or switches", 'DownloadBridge.kt, by way of js/downloads.js'));
 });
+
+test("each server's downloads are asked for as that server's", () => {
+  const downloads = read('web/js/downloads.js');
+  assert.match(downloads, /\.account\(\{[^}]*\bserverName:/, why("the server's name, given with downloads.account({ serverName })", 'DownloadBridge.kt, which names its downloads after it'));
+  for (const op of ['add', 'remove']) {
+    assert.match(downloads, new RegExp(`ask\\(\\s*['"]${op}['"],[^\\n]*,\\s*(server|app\\.source\\?\\.serverId)\\)`), why(`downloads.${op}(playlist, server)`, 'DownloadBridge.kt, which takes it from that server'));
+  }
+  assert.match(downloads, /\.bad\([^)]*\bserverId\b/, why('downloads.bad(track, server)', 'DownloadBridge.kt'));
+  assert.match(downloads, /\.trackUrl\([^\n]*,\s*track\.server\)/, why("another server's track asked for with its server", 'DownloadServer.kt'));
+  assert.match(
+    downloads,
+    /__plexamp-web-android\/downloads\/track\/[\s\S]{0,120}searchParams\.set\(\s*['"]server['"]/,
+    why("another server's track, at …/downloads/track/<id>?server=<its id>", 'DownloadServer.kt'),
+  );
+});

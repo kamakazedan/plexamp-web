@@ -1,19 +1,19 @@
 // Downloads, in the Android app (see downloads.js): Settings › Downloads
 // (the phone's space, what's downloading, the settings for downloads, and
-// the playlists kept, each with the space it takes); downloading a playlist
-// from its page; and, offline, the playlists on the phone, to play.
+// the playlists kept, each with the space it takes, another server's apart);
+// downloading a playlist from its page; offline, the playlists on the phone,
+// to play; and another server's, here or offline.
 import { app, playlistScope } from '../state.js';
 import { navigate, refresh, dropCached } from '../router.js';
 import { connection } from '../connection.js';
 import { normTrack } from '../plex.js';
 import { playList, playPlaylist } from '../actions.js';
 import { trackRow, numberedList, playlistArt, downloadedMark } from '../components.js';
-import { h, icon, iconButton, art, card, grid, row, sheet, toast, hideToast, fmt, backHeader, pageHeader, choiceRow, confirmAction, errorState, emptyState, pagedList } from '../ui.js';
+import { h, icon, iconButton, art, card, grid, row, sheet, toast, hideToast, fmt, backHeader, pageHeader, sectionHeader, choiceRow, confirmAction, errorState, emptyState, pagedList } from '../ui.js';
 import {
   downloads,
   downloadsHere,
   downloadState,
-  hasDownloads,
   refreshDownloads,
   canCheckDownloads,
   checkDownloads,
@@ -24,6 +24,10 @@ import {
   playableHere,
   bytesText,
   complete,
+  otherDownloads,
+  otherServer,
+  phoneTracks,
+  phonePicture,
 } from '../downloads.js';
 
 // (As the app has them: see DownloadSettings.kt.)
@@ -55,6 +59,23 @@ const REFUSALS = {
 };
 
 const playlistOf = (id) => downloadState()?.playlists?.find((p) => p.id === String(id)) || null;
+
+// What a playlist still to come waits for, where nothing's being done for
+// it now: as the app's status says.
+const WAITS = {
+  wifi: 'Waiting for Wi-Fi',
+  offline: 'Waiting for a connection',
+  unreachable: 'Can’t reach your server',
+  signin: 'Sign in again to download',
+};
+function waitingLine(p, st = downloadState()) {
+  const s = st?.status?.state;
+  const left = `${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`;
+  return s === 'downloading' ? `Downloading… ${left}` : `${WAITS[s] || 'Waiting'} · ${left}`;
+}
+
+// Another server's name, as you'd say where its downloads are from.
+const fromName = (o) => (o?.name ? `From ${o.name}` : 'From another server');
 
 // What's happening to a playlist now, as the app says (its status names the
 // playlist it's on): { doing: 'checking' } for changes; { doing:
@@ -115,7 +136,11 @@ export async function downloadPlaylist(pl, { here = false } = {}) {
   } finally {
     clearTimeout(slow);
   }
-  toast(`Downloading “${title}”`, here ? {} : { action: 'See progress', onAction: () => navigate('/settings/downloads'), timeout: 6000 });
+  // (On mobile data, with Wi-Fi only: it waits.)
+  const st = downloadState();
+  const wifi = st?.status?.state === 'wifi';
+  const said = wifi ? `“${title}” downloads on Wi-Fi` : `Downloading “${title}”`;
+  toast(said, here ? {} : { action: 'See progress', onAction: () => navigate('/settings/downloads'), timeout: 6000 });
   return true;
 }
 
@@ -134,10 +159,17 @@ function notEnoughSpace(title, { needed, free }) {
   });
 }
 
-function remove(p) {
-  removeDownload(p.id)
-    .then(() => toast(`Removed “${p.title}” from this phone`))
-    .catch(() => toast('Couldn’t remove it. Try again.'));
+// (`server`: another server's.) Resolves to whether it's gone.
+function remove(p, server) {
+  return removeDownload(p.id, server || undefined)
+    .then(() => {
+      toast(`Removed “${p.title}” from this phone`);
+      return true;
+    })
+    .catch(() => {
+      toast('Couldn’t remove it. Try again.');
+      return false;
+    });
 }
 
 // Under a playlist's title (Android app only): Download, or how its
@@ -169,7 +201,7 @@ export function downloadLine(pl, onDispose) {
                 ? `Waiting · ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`
                 : p.problem
                   ? `Downloaded ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`
-                  : `Downloading… ${fmt.number(p.saved)} of ${fmt.number(p.tracks)}`;
+                  : waitingLine(p);
   };
   async function tapped() {
     if (busy) return;
@@ -220,6 +252,9 @@ export async function downloadsView({ el, onDispose }) {
   const status = h('div.dl-status');
   const list = h('div.rows.dl-playlists');
   const none = h('p.lede.dl-none', null, 'Downloaded playlists play without a connection.');
+  // Another server's, each apart (redrawn only as they change).
+  const elsewhere = h('div.dl-elsewhere');
+  let elsewhereKey = '';
 
   const s = st.settings || {};
   let quality = s.quality || 'original';
@@ -238,7 +273,7 @@ export async function downloadsView({ el, onDispose }) {
         onChange: (v) => {
           if (v === quality) return;
           quality = v;
-          save({ quality: v }).then(() => hasDownloads() && toast('Downloading your playlists again, at the new quality'));
+          save({ quality: v }).then(() => downloadState()?.playlists?.length && toast('Downloading your playlists again, at the new quality'));
         },
       }),
       choiceRow({ title: 'Download on', options: NETWORKS, value: s.network || 'wifi', onChange: (v) => save({ network: v }) }),
@@ -248,6 +283,7 @@ export async function downloadsView({ el, onDispose }) {
     h('div.rows', null, row({ lead: h('span.row-icon', null, icon('plus', 26)), title: 'Add playlists', onClick: () => addPlaylists(), cls: 'dl-add' })),
     list,
     none,
+    elsewhere,
   );
 
   // Each playlist's row, kept as it changes (rebuilt only for a new title
@@ -265,10 +301,40 @@ export async function downloadsView({ el, onDispose }) {
     );
     return { el, sub, bar, key: `${p.title}\n${p.cover || ''}` };
   };
-  const askRemove = async (p) => {
-    const now = playlistOf(p.id) || p;
+  // (`server`: another server's.)
+  const askRemove = async (p, server = null) => {
+    const now = (server ? otherServer(server)?.playlists.find((x) => x.id === p.id) : playlistOf(p.id)) || p;
     const yes = await confirmAction({ title: `Remove “${now.title}”?`, message: `It comes off this phone (${bytesText(now.bytes)}), not your server.`, confirm: 'Remove' });
-    if (yes) remove(now);
+    if (yes) remove(now, server);
+  };
+  const otherRow = (o, p) =>
+    h(
+      'div.row.dl-row',
+      null,
+      h(
+        'a.row-link',
+        { href: `#${phonePlaylistPath(o.server, p.id)}` },
+        art(phonePicture(p.cover, o.server), { size: 52, fallback: 'list' }),
+        h('div.row-main', null, h('div.row-title', null, p.title), h('div.row-sub', null, playlistLine(p))),
+      ),
+      iconButton('trash', `Remove ${p.title} from this phone`, () => askRemove(p, o.server), { cls: 'dl-remove' }),
+    );
+  const paintElsewhere = () => {
+    const all = otherDownloads();
+    const key = JSON.stringify(all.map((o) => [o.server, o.name, o.playlists.map((p) => [p.id, p.title, p.cover, p.saved, p.tracks, p.bytes])]));
+    if (key === elsewhereKey) return;
+    elsewhereKey = key;
+    elsewhere.replaceChildren(
+      ...all.map((o) =>
+        h(
+          'section.dl-server',
+          null,
+          h('div.section-head', null, h('h2', null, fromName(o))),
+          h('p.dl-server-note', null, 'Updated when you’re back on that server.'),
+          h('div.rows', null, o.playlists.map((p) => otherRow(o, p))),
+        ),
+      ),
+    );
   };
 
   let checking = false;
@@ -316,6 +382,7 @@ export async function downloadsView({ el, onDispose }) {
     // (In the app's order: as they were added.)
     order.forEach((r, i) => list.children[i] !== r && list.insertBefore(r, list.children[i] || null));
     none.hidden = playlists.length > 0;
+    paintElsewhere();
   }
   paint();
   downloads.addEventListener('change', paint);
@@ -424,30 +491,66 @@ function againOnline(el, path, onDispose) {
   });
 }
 
+// A playlist's cards: this server's (`server` null), or another's, which
+// open and play as that server's, from the phone.
+function playlistCards(playlists, server = null) {
+  return grid(
+    playlists.map((p) => {
+      const c = card({
+        href: server ? phonePlaylistPath(server, p.id) : `/playlist/${p.id}`,
+        image: server ? phonePicture(p.cover, server) : p.cover,
+        title: p.title,
+        subtitle: fmt.count(p.saved, 'track', 'tracks'),
+        fallback: 'list',
+        onPlay: () => (server ? playFromPhone(server, p) : playPlaylist(asPlaylist(p))),
+        onShuffle: () => (server ? playFromPhone(server, p, { shuffle: true }) : playPlaylist(asPlaylist(p), { shuffle: true })),
+      });
+      c.querySelector('.card-art')?.append(downloadedMark(p.id, server));
+      return c;
+    }),
+    { centered: true, cls: 'grid-playlists' },
+  );
+}
+
+// Another server's downloaded playlists, each server's under its name: for
+// Library › Playlists, online or not. Kept as they change; nothing where
+// there are none.
+export function elsewhereSections(onDispose) {
+  const box = h('div.dl-elsewhere-cards');
+  let key = '';
+  const paint = () => {
+    const all = otherDownloads()
+      .map((o) => ({ ...o, playlists: o.playlists.filter((p) => p.saved > 0) }))
+      .filter((o) => o.playlists.length);
+    const now = JSON.stringify(all.map((o) => [o.server, o.name, o.playlists.map((p) => [p.id, p.title, p.cover, p.saved])]));
+    if (now === key) return;
+    key = now;
+    box.replaceChildren(...all.map((o) => h('section.block', null, sectionHeader(fromName(o)), playlistCards(o.playlists, o.server))));
+  };
+  paint();
+  downloads.addEventListener('change', paint);
+  onDispose(() => downloads.removeEventListener('change', paint));
+  return box;
+}
+
 // Library › Playlists, offline: the playlists on the phone (the rest need
-// the server).
+// the server), and another server's, apart.
 export function offlinePlaylistsView({ el, onDispose }) {
   againOnline(el, '/playlists', onDispose);
   const list = (downloadState()?.playlists || []).filter((p) => p.saved > 0);
   el.append(pageHeader('Playlists', { subtitle: 'On this phone' }));
-  el.append(
-    grid(
-      list.map((p) => {
-        const c = card({
-          href: `/playlist/${p.id}`,
-          image: p.cover,
-          title: p.title,
-          subtitle: fmt.count(p.saved, 'track', 'tracks'),
-          fallback: 'list',
-          onPlay: () => playPlaylist(asPlaylist(p)),
-          onShuffle: () => playPlaylist(asPlaylist(p), { shuffle: true }),
-        });
-        c.querySelector('.card-art')?.append(downloadedMark(p.id));
-        return c;
-      }),
-      { centered: true, cls: 'grid-playlists' },
-    ),
-  );
+  if (list.length) el.append(playlistCards(list));
+  el.append(elsewhereSections(onDispose));
+}
+
+// Where another server's downloaded playlist is shown.
+export const phonePlaylistPath = (server, id) => `/downloads/${encodeURIComponent(server)}/${encodeURIComponent(id)}`;
+
+// Another server's downloaded playlist, played: its tracks on the phone.
+async function playFromPhone(server, p, { shuffle = false } = {}) {
+  const kept = await downloadedPlaylist(p.id, server);
+  const tracks = phoneTracks(kept, server).filter(playableHere);
+  playList(tracks, 0, { title: kept?.playlist?.title || p.title, href: phonePlaylistPath(server, p.id) }, { shuffle });
 }
 
 // A playlist's page, offline: its tracks on the phone, as it was downloaded.
@@ -462,26 +565,78 @@ export async function offlinePlaylistView({ el, id, onDispose }) {
     .map(normTrack)
     .filter(playableHere);
   const pl = asPlaylist(p);
+  keptPlaylistPage(el, onDispose, {
+    title: kept.playlist?.title || p.title,
+    href: `/playlist/${id}`,
+    picture: p.cover,
+    tracks,
+    line: h('div.hero-meta.dl-line.on', null, icon('downloaded', 18), h('span', null, 'Downloaded')),
+    shuffle: () => playPlaylist(pl, { shuffle: true }),
+  });
+}
+
+// Another server's downloaded playlist (#/downloads/<server>/<id>): its
+// tracks on the phone, played from there, wherever you are. A tap on where
+// it's from offers to remove it.
+export async function phonePlaylistView({ el, params, onDispose }) {
+  const { server, id } = params;
+  // (The player's on that server again: its own page.)
+  if (server === app.source?.serverId) return navigate(`/playlist/${id}`, { replace: true });
+  const o = otherServer(server);
+  const p = o?.playlists.find((x) => x.id === String(id));
+  const kept = p ? await downloadedPlaylist(id, server) : null;
+  if (!kept) {
+    el.append(backHeader('Playlist', { fallback: '/playlists' }), emptyState('That playlist isn’t on this phone any more.'));
+    return;
+  }
+  const tracks = phoneTracks(kept, server).filter(playableHere);
   const title = kept.playlist?.title || p.title;
-  const context = { title, href: `/playlist/${id}` };
+  const ask = () =>
+    sheet({
+      title,
+      subtitle: playlistLine(p),
+      actions: [
+        {
+          icon: 'trash',
+          label: 'Remove download',
+          description: 'From this phone, not your server',
+          danger: true,
+          onSelect: () => remove(p, server).then((gone) => gone && el.isConnected && navigate('/playlists', { replace: true })),
+        },
+      ],
+    });
+  keptPlaylistPage(el, onDispose, {
+    title,
+    href: phonePlaylistPath(server, id),
+    picture: phonePicture(p.cover, server),
+    tracks,
+    line: h('button.hero-meta.dl-line.on.link-btn', { type: 'button', onclick: ask }, icon('downloaded', 18), h('span', null, fromName(o))),
+    shuffle: () => playList(tracks, 0, { title, href: phonePlaylistPath(server, id) }, { shuffle: true }),
+  });
+}
+
+// A downloaded playlist's page: its picture, title and length, a line of
+// what it is (`line`), Play and Shuffle, and its tracks.
+function keptPlaylistPage(el, onDispose, { title, href, picture, tracks, line, shuffle }) {
+  const context = { title, href };
   const duration = tracks.reduce((n, t) => n + (t.duration || 0), 0);
   el.append(
     backHeader(title, { fallback: '/playlists' }),
     h(
       'section.hero.hero-album',
       null,
-      h('div.hero-art-box', null, art(p.cover, { size: 480, cls: 'hero-art', fallback: 'list' })),
+      h('div.hero-art-box', null, art(picture, { size: 480, cls: 'hero-art', fallback: 'list' })),
       h(
         'div.hero-info',
         null,
         h('h1.hero-title', null, title),
         h('div.hero-meta', null, fmt.count(tracks.length, 'track', 'tracks'), duration ? `, ${fmt.long(duration)}` : ''),
-        h('div.hero-meta.dl-line.on', null, icon('downloaded', 18), h('span', null, 'Downloaded')),
+        line,
         h(
           'div.hero-actions',
           null,
           h('button.btn.btn-primary', { type: 'button', onclick: () => playList(tracks, 0, context) }, icon('play', 20), h('span', null, 'Play')),
-          h('button.btn.btn-secondary', { type: 'button', onclick: () => playPlaylist(pl, { shuffle: true }) }, icon('shuffle', 20), h('span', null, 'Shuffle')),
+          h('button.btn.btn-secondary', { type: 'button', onclick: shuffle }, icon('shuffle', 20), h('span', null, 'Shuffle')),
         ),
       ),
     ),

@@ -4,6 +4,7 @@
 import { app, on } from './state.js';
 import { ultraBlurOf, cleanColors } from './plex.js';
 import { unreachable } from './connection.js';
+import { phoneOnly, phoneThumbUrl } from './downloads.js';
 
 const DEFAULT = { topLeft: '1c2233', topRight: '2b3752', bottomRight: '1e2638', bottomLeft: '131722' };
 // Albums' colours, the most recently used last: COLORS_KEPT of them at most
@@ -72,7 +73,8 @@ function gradient(c) {
 function apply(colors, artPath) {
   const c = app.settings.tintBackground && colors ? colors : DEFAULT;
   const style = app.settings.backgroundStyle || 'gradient';
-  const art = style === 'artwork' && artPath && app.server ? app.server.art(artPath, 480) : '';
+  // (Another server's cover, kept on the phone: from there.)
+  const art = style === 'artwork' && artPath && app.server ? (phoneThumbUrl(artPath) ?? app.server.art(artPath, 480)) : '';
   const key = [style, art, c.topLeft, c.topRight, c.bottomRight, c.bottomLeft].join();
   if (key === lastKey) return;
   lastKey = key;
@@ -114,7 +116,8 @@ async function colorsFor(track) {
   } catch (err) {
     offline = unreachable(err);
   }
-  if (!colors && track.thumb && !offline) {
+  // (Not another server's, which this one hasn't got.)
+  if (!colors && track.thumb && !offline && !phoneOnly(track)) {
     try {
       colors = await s.ultraBlur(track.thumb);
     } catch (err) {

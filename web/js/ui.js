@@ -3,7 +3,7 @@
 import { app } from './state.js';
 import { store } from './plex.js';
 import { pushOverlay, popOverlay, back as goBack } from './router.js';
-import { phoneCover, offlineNow } from './downloads.js';
+import { phoneCover, phoneThumbUrl, offlineNow } from './downloads.js';
 
 // ---------- element builder ----------
 
@@ -244,6 +244,9 @@ function artPixels(css, most = 960) {
 }
 
 export function artUrl(path, css = 160, most) {
+  // (Another server's cover, kept on the phone: from there, never asked of this server.)
+  const phone = phoneThumbUrl(path);
+  if (phone !== null) return phone;
   return path && app.server ? app.server.art(path, artPixels(css, most)) : '';
 }
 

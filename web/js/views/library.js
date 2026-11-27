@@ -12,7 +12,7 @@ import { sharingOn, sharesSoon, invitations } from '../sharing.js';
 import { invitationRows } from './share.js';
 import { unreachable } from '../connection.js';
 import { hasDownloads, offlineNow } from '../downloads.js';
-import { offlinePlaylistsView } from './downloads.js';
+import { offlinePlaylistsView, elsewhereSections } from './downloads.js';
 
 // ---------- Browsing the library (in Search) ----------
 
@@ -531,11 +531,13 @@ export async function playlistsView({ el, onDispose }) {
         h('button.btn.btn-secondary', { type: 'button', onclick: () => importPicker() }, 'Import playlists…'),
       ),
     );
-    return;
+  } else {
+    // ❤️ Tracks first, as in Plexamp.
+    const sorted = [...pls.filter((p) => isLovedTitle(p.title)), ...pls.filter((p) => !isLovedTitle(p.title))];
+    el.append(grid(sorted.map((m) => playlistCard(m)), { centered: true, cls: 'grid-playlists' }));
   }
-  // ❤️ Tracks first, as in Plexamp.
-  const sorted = [...pls.filter((p) => isLovedTitle(p.title)), ...pls.filter((p) => !isLovedTitle(p.title))];
-  el.append(grid(sorted.map((m) => playlistCard(m)), { centered: true, cls: 'grid-playlists' }));
+  // Downloaded from another server, in the Android app: under its name.
+  el.append(elsewhereSections(onDispose));
 }
 
 // ---------- Collections ----------
