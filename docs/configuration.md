@@ -202,6 +202,8 @@ New music, playlist changes and ratings from other Plex apps show up without rel
 
 Nothing needs setting where WebSockets are blocked: each device uses whatever gets through, and remembers it for six hours. Only live updates use WebSockets: playback, Play Together and everything else work without them.
 
+While Plex scans your library, what it finds shows up once a minute and as soon as the scan's done. Home stays as it is meanwhile, changing only where something has.
+
 - `WEBSOCKETS=on`: WebSockets only, never anything else.
 - `WEBSOCKETS=off`: never WebSockets.
 - **Settings › Connection › Live updates** shows what this device uses, and why.

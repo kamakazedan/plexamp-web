@@ -114,6 +114,14 @@ testing, these endpoints need no token:
                                   adds an album and announces it (untyped:
                                   without a Format or Subformat, as an album
                                   Plex hasn't matched)
+    /__mock/scan?step=start|add|metadata|progress|metadata-end|end[&title=...][&busy=0|1]
+                                  a long scan, a step at a time: started,
+                                  an album found (still scanning), Plex
+                                  updating metadata alongside it (and
+                                  ending that), both saying how far
+                                  they've got, and the scan's end; busy=1:
+                                  album listings answer 503 meanwhile
+                                  (busy=0 again), as a busy server can
     /__mock/edits[?reset=1]       the album edits made (year, date, genres)
     /__mock/seen[?reset=1]        the server's last 200 requests: path, the
                                   value of a pwtest= in it (to find one), where
@@ -1216,7 +1224,7 @@ def hls_playlist(seconds):
 
 MOCK = {'ws': True, 'sse': 'on', 'ping': 10.0, 'open': '--open' in sys.argv, 'honour': '--honour' in sys.argv, 'tv': 'down' if '--tv-down' in sys.argv else 'up',
         'delay': 0, 'nearest': 0, 'copy': False, 'quiet': [], 'hidden': [], 'stall': None, 'hubs': 'on', 'types': 'on', 'children': 'albums', 'mbsearch': 'on', 'mbslow': '', 'mbmerged': False,
-        'behind': False}
+        'behind': False, 'busy': False}
 EDITS = []  # albums' years, dates and genres changed (PUT /library/sections/.../all?type=9)
 MERGES = []  # artists merged (PUT /library/metadata/ID/merge?ids=...)
 MERGED = {}  # ratingKey -> an artist merged into another, gone from the library (for undo_merges)
@@ -1287,11 +1295,11 @@ def timeline(item_id, typ, state, section=SECTION):
     }])
 
 
-def activity(event, title):
+def activity(event, title, uuid='mock-scan', typ='library.update.section', progress=None):
     broadcast('activity', 'ActivityNotification', [{
-        'event': event, 'uuid': 'mock-scan',
-        'Activity': {'uuid': 'mock-scan', 'type': 'library.update.section', 'cancellable': False, 'userID': 1,
-                     'title': title, 'subtitle': '', 'progress': 0 if event == 'started' else 100,
+        'event': event, 'uuid': uuid,
+        'Activity': {'uuid': uuid, 'type': typ, 'cancellable': False, 'userID': 1,
+                     'title': title, 'subtitle': '', 'progress': progress if progress is not None else 0 if event == 'started' else 100,
                      'Context': {'librarySectionID': SECTION}},
     }])
 
@@ -1331,6 +1339,18 @@ def set_copy(on):
 def add_album(title, untyped=False):
     """Add an album to the library the way a scan would, with notifications
     (untyped: without a Format or Subformat, as one Plex hasn't matched)."""
+    LIBRARY_STATE['refreshing'] = True
+    activity('started', 'Scanning Music [Hi-Res]')
+    al = put_album(title, untyped)
+    LIBRARY_STATE['contentChangedAt'] = int(time.time())
+    LIBRARY_STATE['refreshing'] = False
+    activity('ended', 'Scanning Music [Hi-Res]')
+    return al
+
+
+def put_album(title, untyped=False):
+    """An album and its tracks put in the library, with the notifications
+    a scan sends for them (see add_album, and /__mock/scan)."""
     artist = artists[0]
     k = key()
     year = 2025
@@ -1345,8 +1365,6 @@ def add_album(title, untyped=False):
         al['Subformat'] = []
     items[k] = al
     albums.append(al)
-    LIBRARY_STATE['refreshing'] = True
-    activity('started', 'Scanning Music [Hi-Res]')
     timeline(k, 9, 0)
     for i in range(4):
         tk = key()
@@ -1360,10 +1378,33 @@ def add_album(title, untyped=False):
         tracks.append(t)
         timeline(tk, 10, 0)
     timeline(k, 9, 5)
-    LIBRARY_STATE['contentChangedAt'] = int(time.time())
-    LIBRARY_STATE['refreshing'] = False
-    activity('ended', 'Scanning Music [Hi-Res]')
     return al
+
+
+def scan(step, title=''):
+    """A long scan, a step at a time (/__mock/scan): start, add (an album
+    found, the scan still going), metadata (Plex starts updating metadata
+    too, alongside), progress (both say how far they've got), metadata-end,
+    end. While busy=1, the library's album listings answer 503, as a server
+    too busy mid-scan can."""
+    if step == 'start':
+        LIBRARY_STATE['refreshing'] = True
+        activity('started', 'Scanning Music', uuid='mock-long-scan')
+    elif step == 'add':
+        put_album(title or 'Found Mid-Scan')
+        LIBRARY_STATE['contentChangedAt'] = int(time.time())
+    elif step == 'metadata':
+        activity('started', 'Updating Metadata', uuid='mock-metadata', typ='library.refresh.items')
+    elif step == 'progress':
+        activity('updated', 'Scanning Music', uuid='mock-long-scan', progress=50)
+        activity('updated', 'Updating Metadata', uuid='mock-metadata', typ='library.refresh.items', progress=50)
+    elif step == 'metadata-end':
+        activity('ended', 'Updating Metadata', uuid='mock-metadata', typ='library.refresh.items')
+    elif step == 'end':
+        LIBRARY_STATE['contentChangedAt'] = int(time.time())
+        LIBRARY_STATE['refreshing'] = False
+        activity('ended', 'Scanning Music', uuid='mock-long-scan')
+    return {'step': step, 'refreshing': LIBRARY_STATE['refreshing'], 'busy': MOCK['busy']}
 
 
 # ---------------------------------------------------------------- plex.tv
@@ -2273,6 +2314,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/__mock/add-album':
             al = add_album(q.get('title', ['Fresh Arrival'])[0], untyped=q.get('untyped', ['0'])[0] == '1')
             return self.send_json({'size': 1, 'Metadata': [public(al)]})
+        if p == '/__mock/scan':  # step=start|add|metadata|progress|metadata-end|end [&title=...] [&busy=0|1]: see scan()
+            if 'busy' in q:
+                MOCK['busy'] = q['busy'][0] in ('1', 'on', 'true')
+            return self.send_json(scan(q.get('step', [''])[0], q.get('title', [''])[0]))
         if p == '/__mock/add-artist':  # name=...: an artist with an album of their own; remove=ID: gone again
             rid = q.get('remove', [''])[0]
             gone = items.get(rid) or (MERGED.pop(rid)[0] if rid in MERGED else None)
@@ -2517,6 +2562,8 @@ class Handler(BaseHTTPRequestHandler):
             if sub == 'all':
                 if MOCK['delay']:
                     time.sleep(MOCK['delay'] / 1000)
+                if MOCK['busy'] and typ == 9:  # (see scan: a server too busy mid-scan)
+                    return self.send_json({'error': 'Service Unavailable'}, 503)
                 pool = {8: artists, 9: albums, 10: tracks}.get(typ, albums)
                 res = pool
                 for f, vals in q.items():

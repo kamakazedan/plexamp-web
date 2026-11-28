@@ -39,8 +39,8 @@ Plex Home (plexhome sends the browser's plex.tv calls to the mock too).
 
 Sections: core ws ai dj djs nows blocked poll wsonly custom desktop nav library edit
 lists pictures missing files sharing routes privacy np stream signal cast ratings
-devices fades together settings downloads home formats select spotify debug sync
-plexhome missingsync mb offline memory (default: all).
+devices fades together settings downloads home scan formats select spotify debug
+sync plexhome missingsync mb offline memory (default: all).
 """
 
 import json
@@ -7035,6 +7035,159 @@ with sync_playwright() as pw:
         order = sections_on_home(page)
         check('home: reset brings the defaults back', order[:3] == ['mixes', 'recentPlays', 'recentPlaylists'] and 'decade2020' not in order, str(order))
         ctx.close()
+
+    # ---------- scan: Home stays put while Plex scans the library ----------
+    # A long scan, a step at a time (/__mock/scan). Home is brought up to
+    # date in place: what's on it stays on screen meanwhile (no placeholders,
+    # no section going and coming back), even when the server's too busy to
+    # answer, and only what's changed changes. What the scan finds is passed
+    # on once a minute while it goes on, and as soon as it's done.
+    if run('scan'):
+        ctx = browser.new_context(viewport={'width': 1280, 'height': 900})
+        page = ctx.new_page()
+        attach(page, 'scan', expected=('503', 'Service Unavailable'))
+        # What happens on Home from here: the page made again, placeholders,
+        # sections taken away, the scan's line going off, and what it says.
+        watch = """() => {
+            const main = document.getElementById('main');
+            const s = window.__scan = { view: main.querySelector('.view'), skeletons: 0, gone: [], lineOff: 0, said: [] };
+            for (const c of s.view.querySelectorAll('section.block .card, section.block .wide-card')) c.__was = true;
+            new MutationObserver((ms) => {
+                for (const m of ms) {
+                    for (const n of m.addedNodes) if (n.nodeType === 1 && (n.matches('.skeleton') || n.querySelector('.skeleton'))) s.skeletons++;
+                    for (const n of m.removedNodes) if (n.nodeType === 1 && n.matches('section.block')) s.gone.push(n.dataset.section);
+                }
+            }).observe(main, { childList: true, subtree: true });
+            let on = document.body.classList.contains('scanning');
+            new MutationObserver(() => {
+                const now = document.body.classList.contains('scanning');
+                if (on && !now) s.lineOff++;
+                on = now;
+            }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+            const text = s.view.querySelector('.scan-text');
+            new MutationObserver(() => {
+                const t = text.textContent;
+                if (t && s.said[s.said.length - 1] !== t) s.said.push(t);
+            }).observe(text, { childList: true, characterData: true, subtree: true });
+            return true; }"""
+        state = """() => {
+            const s = window.__scan;
+            const v = document.querySelector('#main .view');
+            const added = [...v.querySelectorAll('section[data-section=recentlyAdded] .card')];
+            return { same: v === s.view, skeletons: s.skeletons, gone: s.gone.slice(), lineOff: s.lineOff, said: s.said.slice(),
+                     kept: added.filter((c) => c.__was).length, titles: added.map((c) => c.querySelector('.card-title').textContent),
+                     order: [...v.querySelectorAll('section.block[data-section]')].map((b) => b.dataset.section) }; }"""
+        scanning = "() => document.body.classList.contains('scanning')"
+        minute_up = "() => import('./js/live.js').then(({ live }) => live.emit('library', {}))"
+        try:
+            login(page, APP)
+            page.goto(APP + '#/')
+            page.wait_for_selector('section[data-section=recentlyAdded] .card')
+            page.wait_for_timeout(1500)
+            page.evaluate(watch)
+            first = page.evaluate(state)
+            top = "() => Math.round(document.querySelector('section[data-section=mixes]').getBoundingClientRect().top)"
+            was_at = js(page, top)
+
+            mock('/__mock/scan?step=start')
+            check('scan: Plex scanning shows under the heading', wait_for(lambda: js(page, scanning), 10)
+                  and page.locator('.view .scan-text').is_visible() and page.locator('.view .scan-text').inner_text() == 'Scanning Music')
+            check('scan: ...taking no room of its own: the page doesn\'t move', js(page, top) == was_at, f'{was_at} -> {js(page, top)}')
+            mock('/__mock/scan?step=add&title=Found%20Mid-Scan&busy=1')
+            page.wait_for_timeout(1500)
+            due = js(page, "() => import('./js/live.js').then(({ live }) => live.flushTimers.library ? live.flushTimers.library.due - Date.now() : null)")
+            st = page.evaluate(state)
+            check('scan: while Plex scans, what it finds waits a minute (or till the scan\'s done), not passed on album by album',
+                  due is not None and due > 40000 and st['same'] and st['skeletons'] == 0 and 'Found Mid-Scan' not in st['titles'], f'{due} {st}')
+            # Plex updating metadata alongside, both saying how far they've
+            # got, then that ending: the line stays on, saying the same.
+            for step in ('metadata', 'progress', 'progress', 'metadata-end'):
+                mock(f'/__mock/scan?step={step}')
+                page.wait_for_timeout(300)
+            page.wait_for_timeout(1200)
+            st = page.evaluate(state)
+            check('scan: the scan\'s line stays on through it, saying the same, while Plex does something else alongside',
+                  st['lineOff'] == 0 and st['said'] == ['Scanning Music'] and js(page, scanning), str(st))
+            # The minute's up, and the server's too busy to list albums.
+            js(page, minute_up)
+            page.wait_for_timeout(3000)
+            st = page.evaluate(state)
+            check('scan: brought up to date with the server too busy to answer, Home stays as it was (no placeholders, no section gone)',
+                  st['same'] and st['skeletons'] == 0 and not st['gone'] and st['order'] == first['order'] and st['titles'] == first['titles']
+                  and st['kept'] == len(first['titles']), str(st))
+            shot(page, 'scan-01-busy')
+
+            # The scan's done: what it found is on Home within seconds, in
+            # its place, the rest as it was.
+            mock('/__mock/scan?step=end&busy=0')
+            t0 = time.time()
+            got = wait_for(lambda: has_card(page, 'Found Mid-Scan'), 20, 0.25)
+            took = time.time() - t0
+            st = page.evaluate(state)
+            check('scan: once it\'s done, what it found is on Home within seconds', got and took < 15, f'{took:.1f} s')
+            check('scan: ...put in its place, the page and every other cover as they were (no placeholders, no section gone)',
+                  st['same'] and st['skeletons'] == 0 and not st['gone'] and st['order'] == first['order'] and st['titles'][:1] == ['Found Mid-Scan']
+                  and st['titles'][1:] == first['titles'][:len(st['titles']) - 1] and st['kept'] == len(st['titles']) - 1, str(st))
+            check('scan: ...and the scan\'s line goes a few seconds after, the page staying put', wait_for(lambda: not js(page, scanning), 15)
+                  and not page.locator('.view .scan-text').is_visible() and js(page, top) == was_at, f'{was_at} -> {js(page, top)}')
+            shot(page, 'scan-02-done')
+
+            # New music while Home's put aside: gone back to, it's there at
+            # once, as it was, and brought up to date in place.
+            page.locator('section[data-section=recentlyAdded] .card').first.click()
+            page.wait_for_selector('.hero-album')
+            mock('/__mock/add-album?title=While%20Away')
+            page.wait_for_timeout(6500)  # (passed on 4 seconds after Plex says)
+            page.go_back()
+            page.wait_for_selector('section[data-section=recentlyAdded] .card')
+            got = wait_for(lambda: has_card(page, 'While Away'), 10, 0.25)
+            st = page.evaluate(state)
+            check('scan: Home gone back to after new music is there at once, then brought up to date in place',
+                  got and st['same'] and st['skeletons'] == 0 and not st['gone'] and st['titles'][:2] == ['While Away', 'Found Mid-Scan'], str(st))
+
+            # A card whose words change ("2 hours ago" become "just now",
+            # played again in another app) keeps its cover as it is, rather
+            # than it fading in again.
+            plays = 'section[data-section=recentPlays] .wide-card'
+            albums = {a['title']: a for a in mock('/library/sections/1/all?type=9&X-Plex-Token=t')['MediaContainer']['Metadata']}
+            listed = page.locator(plays).evaluate_all("cs => cs.map((c) => [c.querySelector('.wide-title').textContent, c.querySelector('.wide-sub')?.textContent || ''])")
+            name = next((t for t, sub in listed[1:] if t in albums and sub != 'just now'), None)
+            mark = """(name) => { for (const c of document.querySelectorAll('section[data-section=recentPlays] .wide-card'))
+                if (c.querySelector('.wide-title').textContent === name) { c.__card = true; c.querySelector('.art').__cover = true; } return true; }"""
+            said = f"() => [...document.querySelectorAll('{plays}')].filter((c) => c.querySelector('.wide-title').textContent === {json.dumps(name)}).map((c) => c.querySelector('.wide-sub').textContent)[0]"
+            if name:
+                page.evaluate('window.scrollTo(0, 0)')  # (Home's only brought up to date near its top)
+                page.wait_for_timeout(300)
+                page.evaluate(mark, name)
+                before = js(page, said)
+                mock(f"/__mock/age?id={albums[name]['ratingKey']}&days=0")
+                js(page, minute_up)
+                changed = wait_for(lambda: js(page, said) not in (before, None), 10, 0.25)
+                kept = page.evaluate("""(name) => [...document.querySelectorAll('section[data-section=recentPlays] .wide-card')]
+                    .filter((c) => c.querySelector('.wide-title').textContent === name).map((c) => [!!c.__card, !!c.querySelector('.art').__cover, c.querySelector('.art').classList.contains('loaded')])[0]""", name)
+                st = page.evaluate(state)
+                check('scan: a card whose words change keeps its cover as it was (it doesn\'t fade in again)',
+                      changed and kept == [False, True, True] and st['same'] and st['skeletons'] == 0, f'{name}: {before} -> {js(page, said)}, {kept}, {st}')
+            else:
+                check('scan: a card whose words change keeps its cover as it was (it doesn\'t fade in again)', False, 'no album in Recent plays after the first')
+
+            # A section the server was too busy for when Home opened comes
+            # back in its place once it answers.
+            mock('/__mock/scan?busy=1')
+            page.reload()
+            page.wait_for_selector('section[data-section=mixes] .card')
+            page.wait_for_timeout(2500)
+            missing = page.locator('section.block[data-section]').evaluate_all('els => els.map(e => e.dataset.section)')
+            mock('/__mock/scan?busy=0')
+            js(page, minute_up)
+            back = wait_for(lambda: page.locator('section[data-section=recentlyAdded] .card').count() > 0, 10, 0.25)
+            page.wait_for_timeout(500)
+            order = page.locator('section.block[data-section]').evaluate_all('els => els.map(e => e.dataset.section)')
+            check('scan: a section the server was too busy for when Home opened comes back in its place once it answers',
+                  'recentlyAdded' not in missing and 'mixes' in missing and back and order == first['order'], f'{missing} -> {order}')
+        finally:
+            mock('/__mock/scan?busy=0')
+            ctx.close()
 
     # ---------- formats: albums' formats over their covers, and the player's ----------
     # The mock's tracks are FLAC: 24/96 those with an odd id, 16/44.1 the

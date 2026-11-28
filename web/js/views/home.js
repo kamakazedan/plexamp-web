@@ -1,6 +1,6 @@
 import { app, playlistScope } from '../state.js';
 import { normTrack } from '../plex.js';
-import { h, icon, card, pageHeader, backHeader, sectionHeader, shelf, grid, wideCard, skeletonShelf, emptyState, fmt } from '../ui.js';
+import { h, icon, card, pageHeader, backHeader, sectionHeader, shelfChanged, shelf, grid, wideCard, skeletonShelf, emptyState, fmt } from '../ui.js';
 import { albumCard, playlistCard, collectionCard, trackRow, playlistArt } from '../components.js';
 import { artistRadio, playArtist, playList, shuffleLibrary, deepCutsRadio, timeTravelRadio, randomAlbum, favouritesRadio } from '../actions.js';
 import { openSourceSheet } from './settings.js';
@@ -12,7 +12,7 @@ const lastPlayed = (m) => m.lastViewedAt || 0;
 const recency = (m) => lastPlayed(m) || m.updatedAt || m.addedAt || 0;
 const q = (params) => new URLSearchParams(params).toString();
 
-// Data more than one section uses, fetched once per visit.
+// Data more than one section uses, fetched once each time they're loaded.
 function shared(s, sec) {
   const cache = new Map();
   const once = (key, fn) => {
@@ -25,7 +25,7 @@ function shared(s, sec) {
   };
 }
 
-export async function homeView({ el }) {
+export async function homeView({ el, onUpdate, onDispose }) {
   const s = app.server;
   const src = app.source;
   const sec = src.sectionKey;
@@ -35,45 +35,198 @@ export async function homeView({ el }) {
   );
 
   const layout = homeLayout();
-  const data = shared(s, sec);
   const blocks = layout.order
     .filter((id) => !layout.hidden.has(id))
-    .map((id) => SECTION_VIEWS[id] && block(id, SECTION_VIEWS[id], { s, sec, src, data, options: layout.options[id] || {} }))
+    .map((id) => SECTION_VIEWS[id] && block(id, SECTION_VIEWS[id], { s, sec, src, options: layout.options[id] || {} }))
     .filter(Boolean);
   el.append(...blocks.map((b) => b.el));
+  // A section that had nothing to show goes back in its place once it has.
+  for (const b of blocks) {
+    b.place = () => {
+      if (b.el.parentNode === el) return;
+      const next = blocks.slice(blocks.indexOf(b) + 1).find((x) => x.el.parentNode === el);
+      el.insertBefore(b.el, next?.el || null);
+    };
+  }
 
-  const results = await Promise.allSettled(blocks.map((b) => b.load()));
+  const empty = emptyState(
+    blocks.length
+      ? 'Nothing here yet. Play some music and it’ll show up here.'
+      : 'All Home sections are off. Turn some on in Settings › Experience › Home screen.',
+    h('a.btn.btn-secondary', { href: blocks.length ? '#/search' : '#/settings/home' }, blocks.length ? 'Browse library' : 'Choose sections'),
+  );
+  // (Once the server's answered, what said it couldn't be reached goes.)
+  const paintEmpty = (results) => {
+    if (results.some((r) => r.status === 'fulfilled')) el.querySelector(':scope > .error-state')?.remove();
+    if (blocks.some((b) => b.el.parentNode === el)) empty.remove();
+    else if (!empty.parentNode && !el.querySelector(':scope > .error-state')) el.append(empty);
+  };
+
+  // Every section loaded, with what they share asked for once. `again`:
+  // brought up to date (new music, a playlist changed), in place: see block.
+  const loadAll = async (again) => {
+    const data = shared(s, sec);
+    const results = await Promise.allSettled(blocks.map((b) => b.load(data, again)));
+    if (again) paintEmpty(results);
+    return results;
+  };
+  // One at a time: asked again meanwhile, once more after.
+  let running = null;
+  let more = false;
+  let gone = false;
+  const run = (again) => {
+    if (gone) return null;
+    if (running) {
+      more = true;
+      return running;
+    }
+    running = loadAll(again).finally(() => {
+      running = null;
+      if (more) {
+        more = false;
+        run(true);
+      }
+    });
+    return running;
+  };
+  onUpdate?.(() => run(true));
+  onDispose?.(() => (gone = true));
+
+  const results = await run(false);
   const failed = results.filter((r) => r.status === 'rejected');
   if (blocks.length && failed.length === results.length) throw failed[0].reason;
-  if (!el.querySelector('.block')) {
-    el.append(
-      emptyState(
-        blocks.length
-          ? 'Nothing here yet. Play some music and it’ll show up here.'
-          : 'All Home sections are off. Turn some on in Settings › Experience › Home screen.',
-        h('a.btn.btn-secondary', { href: blocks.length ? '#/search' : '#/settings/home' }, blocks.length ? 'Browse library' : 'Choose sections'),
-      ),
-    );
-  }
+  paintEmpty(results);
 }
 
 // A section on screen: a heading and a placeholder until its content loads
-// (or it removes itself when there's nothing to show).
+// (or it takes itself away when there's nothing to show).
+//
+// Loaded again (`again`), what's on screen stays until what's to replace it
+// is in, and only what's changed is replaced: the same cards stay as they
+// are (covers and all), new ones come in where they go. A section a request
+// fails for keeps what it had (a busy server can fail one mid-scan), and so
+// does one that comes back empty while Plex is scanning (it's looked at
+// again when the scan's done). So nothing jumps about while it scans.
 function block(id, view, ctx) {
-  const el = h('section.block', { dataset: { section: id } }, sectionHeader(view.title?.(ctx) || sectionById(id).title), skeletonShelf(4, view.wide));
-  const load = async () => {
+  const titleOf = () => view.title?.(ctx) || sectionById(id).title;
+  const el = h('section.block', { dataset: { section: id } }, sectionHeader(titleOf()), skeletonShelf(4, view.wide));
+  let shown = null; // what's on screen: { sig, title, href, head, content }
+  const b = { el, place: () => {} };
+  b.load = async (data, again = false) => {
     let result;
     try {
-      result = await view.load(ctx);
+      result = await view.load({ ...ctx, data });
     } catch (err) {
-      el.remove();
+      if (!shown) el.remove();
       throw err;
     }
-    if (!result || !result.content) return el.remove();
-    const scrolls = result.content.classList?.contains('shelf') ? result.content : null;
-    el.replaceChildren(sectionHeader(result.title || view.title?.(ctx) || sectionById(id).title, result.href || null, null, scrolls), result.content);
+    if (!result || !result.content) {
+      if (shown && again && live.isScanning()) return;
+      shown = null;
+      el.remove();
+      return;
+    }
+    const title = result.title || titleOf();
+    const href = result.href || null;
+    const content = result.content;
+    const sig = `${title}\n${href}\n${madeOf(content)}`;
+    if (shown?.sig === sig) return;
+    const scrolls = (c) => (c.classList.contains('shelf') ? c : null);
+    if (shown && !view.together && content.tagName === shown.content.tagName && content.className === shown.content.className) {
+      updateItems(itemsOf(shown.content), itemsOf(content));
+      if (title !== shown.title || href !== shown.href) {
+        const head = sectionHeader(title, href, null, scrolls(shown.content));
+        shown.head.replaceWith(head);
+        shown.head = head;
+      } else shelfChanged(shown.head);
+      Object.assign(shown, { sig, title, href });
+    } else {
+      const was = shown?.content;
+      const left = was && scrolls(was) && scrolls(content) ? was.scrollLeft : 0;
+      if (was) keepCovers([was], [content]);
+      remember(content);
+      const head = sectionHeader(title, href, null, scrolls(content));
+      el.replaceChildren(head, content);
+      // (A shelf made again stays scrolled where it was.)
+      if (left) content.scrollLeft = left;
+      shown = { sig, title, href, head, content };
+    }
+    b.place();
   };
-  return { el, load };
+  return b;
+}
+
+// ---------- a section brought up to date ----------
+
+// Each item as it was made (before the page changed it: its cover loaded,
+// say), to know one made again the same.
+const made = new WeakMap();
+// (Without its format's badge, which comes later, once it's known.)
+const madeOf = (node) => node.outerHTML.replace(/<span class="cover-badge[^"]*"[^>]*>[^<]*<\/span>/g, '');
+// The element a section's cards (or rows) are in.
+const itemsOf = (content) => (content.classList.contains('shelf') ? content.firstElementChild : content);
+const remember = (content) => {
+  for (const item of itemsOf(content).children) made.set(item, madeOf(item));
+};
+
+// The items on screen (`list`) become those just made (`fresh`'s): one the
+// same as one there already stays, as it is, where it is (or moves along);
+// only what's new or changed comes in.
+function updateItems(list, fresh) {
+  const same = new Map();
+  for (const item of list.children) {
+    const k = made.get(item);
+    if (k === undefined) continue;
+    if (!same.has(k)) same.set(k, []);
+    same.get(k).push(item);
+  }
+  const coming = [];
+  const items = [...fresh.children].map((item) => {
+    const k = madeOf(item);
+    const kept = same.get(k)?.shift();
+    if (kept) return kept;
+    made.set(item, k);
+    coming.push(item);
+    return item;
+  });
+  const keep = new Set(items);
+  const going = [...list.children].filter((item) => !keep.has(item));
+  keepCovers(going, coming);
+  for (const item of going) item.remove();
+  items.forEach((item, i) => {
+    const at = list.children[i];
+    if (at !== item) list.insertBefore(item, at || null);
+  });
+}
+
+// The picture an .art shows (a page put aside lets its pictures go, and
+// keeps their addresses: see the router).
+function artSrc(a) {
+  const img = a.querySelector(':scope > img');
+  return img ? img.getAttribute('src') || img.dataset.keptSrc || '' : '';
+}
+
+// Covers on screen go to what's replacing them, where it's the same picture:
+// a card whose words changed ("5 minutes ago" become 6) keeps its cover
+// rather than it fading in again.
+function keepCovers(going, coming) {
+  const covers = new Map();
+  for (const node of going) {
+    for (const a of node.querySelectorAll('.art.loaded')) {
+      const src = artSrc(a);
+      if (src && !covers.has(src)) covers.set(src, a);
+    }
+  }
+  if (!covers.size) return;
+  for (const node of coming) {
+    for (const a of node.querySelectorAll('.art')) {
+      const src = artSrc(a);
+      const old = covers.get(src);
+      if (!old) continue;
+      covers.delete(src);
+      a.replaceWith(old);
+    }
+  }
 }
 
 function trackCard(t, onPlay) {
@@ -198,7 +351,10 @@ const SECTION_VIEWS = {
     },
   },
 
+  // (together: its tracks play as one list, each from its place in it, so
+  // when one changes they're all made again.)
   mostPlayed: {
+    together: true,
     title: ({ options }) => `Most played in ${(PERIODS[options.period] || PERIODS.month).label}`,
     async load({ s, sec, options }) {
       const p = PERIODS[options.period] || PERIODS.month;
@@ -226,6 +382,7 @@ const SECTION_VIEWS = {
 
   history: {
     wide: true,
+    together: true,
     async load({ s, sec }) {
       const { items } = await s.list(sec, 10, { sort: 'lastViewedAt:desc', size: 30 });
       const played = items.filter(lastPlayed);

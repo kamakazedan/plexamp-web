@@ -3701,25 +3701,44 @@ textarea.notes:focus {
 
 /* ---------- live updates ---------- */
 
+/* Plex scanning the library, under Home's heading: in the space above the
+   first section, taking none of its own, so nothing moves as a scan starts
+   and ends. */
 .scan-status {
-  display: none;
-  align-items: center;
+  position: relative;
+  top: 2px;
+  display: flex;
+  align-items: flex-start;
   gap: 8px;
-  margin: 2px var(--gutter) 0;
+  height: 0;
+  margin: 0 var(--gutter);
   font-size: calc(14px * var(--fs, 1));
   color: var(--muted);
+  visibility: hidden;
 }
 
 body.scanning .scan-status {
-  display: flex;
+  visibility: visible;
 }
 
 .scan-dot {
+  flex: none;
   width: 8px;
   height: 8px;
+  margin-top: calc(0.675em - 4px);
   border-radius: 50%;
   background: var(--tint-hi);
+}
+
+body.scanning .scan-dot {
   animation: pulse 1.2s ease-in-out infinite;
+}
+
+.scan-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- Guest DJ in Now Playing ---------- */

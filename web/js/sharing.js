@@ -10,7 +10,7 @@
 import { app, on, emit, plexAccount } from './state.js';
 import { store } from './plex.js';
 import { live } from './live.js';
-import { parseHash, refresh, dropCached } from './router.js';
+import { parseHash, refreshQuietly, outdateCached } from './router.js';
 import { toast, icon } from './ui.js';
 import { playlistEntries, changePlaylist } from './playlistio.js';
 import { serviceFetch } from './service.js';
@@ -305,8 +305,8 @@ async function copyGone(share, token, key) {
 function shownChanged(copyId) {
   app.server?.forgetPlaylists();
   const page = (p) => p === '/' || p === '/playlists' || p === `/playlist/${copyId}`;
-  dropCached(page);
-  if (page(parseHash().path) && !document.querySelector('.view.is-editing, .view.is-sorting, .sheet.open') && !document.body.classList.contains('selecting')) refresh();
+  outdateCached(page);
+  if (page(parseHash().path) && !document.querySelector('.view.is-editing, .view.is-sorting, .sheet.open') && !document.body.classList.contains('selecting')) refreshQuietly();
 }
 
 function tell(share, r) {
